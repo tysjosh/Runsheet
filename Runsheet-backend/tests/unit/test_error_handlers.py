@@ -246,3 +246,29 @@ class TestRegisterExceptionHandlers:
         
         assert AppException in exception_types
         assert Exception in exception_types
+
+
+class TestAppExceptionHeaders:
+    """Staging finding F5: a throttled 429 must carry Retry-After."""
+
+    def test_app_exception_headers_are_sent(self):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+
+        from errors import exceptions
+
+        app = FastAPI()
+        register_exception_handlers(app)
+
+        @app.get("/throttled")
+        async def throttled():
+            raise exceptions.too_many_attempts(7)
+
+        resp = TestClient(app).get("/throttled")
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "7"
+        body = resp.json()
+        assert body["error_code"] == "RATE_LIMITED"
+        assert body["message"] == "Too many attempts, try again in 7 seconds"
+        assert body["details"] == {"retry_after_seconds": 7}
+        assert body["request_id"]

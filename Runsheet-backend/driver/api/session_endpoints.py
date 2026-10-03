@@ -54,6 +54,7 @@ from supertokens_python.recipe.session.exceptions import (
     TryRefreshTokenError,
 )
 
+from auth.signin_throttle import get_signin_throttle
 from auth.supertokens_init import (
     _lookup_auth_user_claims,
     configured_session_lifetime_seconds,
@@ -63,8 +64,10 @@ from errors.exceptions import (
     insufficient_role,
     internal_error,
     session_expired,
+    too_many_attempts,
     unauthorized,
 )
+from middleware.rate_limiter import get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -296,28 +299,42 @@ def _session_response(
 @router.post("/session", response_model=DriverSessionResponse)
 async def create_driver_session(
     body: DriverSignInRequest,
+    request: Request,
     response: Response,
 ) -> DriverSessionResponse:
     """Sign a driver in and return both Mobile_Session tokens.
 
-    Four outcomes, in order: bad credential → 401 ``UNAUTHORIZED``; no
-    ``driver`` role → 403 ``INSUFFICIENT_ROLE``; no ``drivers_current`` record
-    → 403 ``DRIVER_RECORD_NOT_PROVISIONED``; success → both tokens in the body
-    **and** in the ``st-*`` headers.
+    Five outcomes, in order: too many attempts → 429 ``RATE_LIMITED`` with
+    ``Retry-After`` (staging finding F5); bad credential → 401 ``UNAUTHORIZED``;
+    no ``driver`` role → 403 ``INSUFFICIENT_ROLE``; no ``drivers_current``
+    record → 403 ``DRIVER_RECORD_NOT_PROVISIONED``; success → both tokens in
+    the body **and** in the ``st-*`` headers.
 
     Validates: Requirements 1.1, 1.15, 15.10
     """
+    # 0. F5 throttle. The recipe-level sign_in below bypasses the SDK APIs
+    #    override, so this route checks the same per-IP / per-email buckets as
+    #    /auth/signin itself.
+    throttle = get_signin_throttle()
+    retry = await throttle.check_sign_in(get_client_ip(request), body.email)
+    if retry is not None:
+        raise too_many_attempts(retry)
+
     # 1. Verify the credential through the EmailPassword recipe.
     result = await emailpassword_sign_in(
         _SUPERTOKENS_TENANT_ID, body.email, body.password
     )
     if not isinstance(result, SignInOkResult):
+        await throttle.record_sign_in_failure(body.email)
         # Uniform rejection: never distinguish "unknown email" from "wrong
         # password", and never echo the submitted credential.
         raise unauthorized(
             message="Invalid credentials",
             details={"reason": "credential_verification_failed"},
         )
+    # The credential was correct, so its failure count resets even if the
+    # role or provisioning checks below refuse the session.
+    await throttle.clear_sign_in_failures(body.email)
 
     # 2. Resolve the server-set claims from the auth_users row bound to the
     #    signed-in SuperTokens user — the same read the create_new_session

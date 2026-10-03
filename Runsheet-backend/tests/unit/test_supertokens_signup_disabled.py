@@ -41,6 +41,16 @@ def test_override_disables_only_signup_and_email_exists():
     assert api.disable_password_reset_post is False
 
 
+def test_override_wraps_signin_and_reset_token_for_throttling():
+    """Staging finding F5: the same override throttles sign-in and reset-token."""
+    original = APIImplementation()
+    original_sign_in = original.sign_in_post
+    original_reset = original.generate_password_reset_token_post
+    api = st_init._override_emailpassword_apis(original)
+    assert api.sign_in_post != original_sign_in
+    assert api.generate_password_reset_token_post != original_reset
+
+
 def test_initialized_recipe_marks_signup_and_email_exists_disabled(
     initialized_supertokens,
 ):

@@ -10,7 +10,9 @@ FastAPI app is created, wiring the three recipes the migration uses:
   created only by :mod:`auth.provisioner`, which calls the recipe-level
   ``sign_up`` function and is unaffected. The sign-up form-field validator
   still enforces the configurable minimum password length (Req 1.7), because
-  the password-reset form validates against it.
+  the password-reset form validates against it. Sign-in and password-reset
+  are throttled per IP and per email (staging finding F5,
+  :mod:`auth.signin_throttle`).
 * **Session** — SuperTokens-issued session tokens delivered as ``HttpOnly`` /
   ``Secure`` cookies with anti-CSRF protection (Req 2.1, 2.2, 2.3, 2.5, 2.7).
   A ``create_new_session`` override reads the ``auth_users`` row bound to the
@@ -43,7 +45,7 @@ duplicated as a literal.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from supertokens_python import InputAppInfo, SupertokensConfig, init
 from supertokens_python.recipe import emailpassword, session, userroles
@@ -53,12 +55,22 @@ from supertokens_python.recipe.emailpassword import (
 )
 from supertokens_python.recipe.emailpassword.interfaces import (
     APIInterface as EmailPasswordAPIInterface,
+    SignInPostOkResult,
+    WrongCredentialsError,
 )
+from supertokens_python.recipe.emailpassword.types import FormField
 from supertokens_python.recipe.session.interfaces import (
     RecipeInterface as SessionRecipeInterface,
 )
+from supertokens_python.types.response import GeneralErrorResponse
 
+from auth.signin_throttle import (
+    configure_signin_throttle,
+    get_signin_throttle,
+    throttled_envelope,
+)
 from config.settings import Settings
+from middleware.rate_limiter import get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -337,21 +349,105 @@ async def _lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
     return claims
 
 
+def _form_field_value(form_fields: List[FormField], field_id: str) -> Any:
+    for field in form_fields or []:
+        if getattr(field, "id", None) == field_id:
+            return field.value
+    return None
+
+
+def _send_throttled(api_options: Any, retry_after: int) -> GeneralErrorResponse:
+    """Write the F5 429 onto the SDK response and return a placeholder result.
+
+    In supertokens-python 0.31.3 ``FastApiResponse.set_status_code`` and
+    ``set_json_content`` are first-write-wins, so the ``send_200_response`` the
+    SDK handler runs after the override returns is a no-op and the client gets
+    this 429. Raising instead would not work: the SDK middleware sits outside
+    FastAPI's exception handlers, so an exception would surface as a 500.
+    """
+    response = api_options.response
+    response.set_status_code(429)
+    response.set_header("Retry-After", str(retry_after))
+    response.set_json_content(throttled_envelope(retry_after))
+    return GeneralErrorResponse("RATE_LIMITED")
+
+
 def _override_emailpassword_apis(
     original_implementation: EmailPasswordAPIInterface,
 ) -> EmailPasswordAPIInterface:
-    """Disable the public sign-up and email-exists HTTP APIs (staging finding F1).
+    """Disable sign-up / email-exists (F1) and throttle sign-in / reset (F5).
 
     ``POST /auth/signup`` let anyone create users in the core, and
     ``GET /auth/signup/email/exists`` was an account-enumeration oracle (F4).
     With the SDK flags set, the middleware no longer matches those routes, so
-    requests fall through to FastAPI and get a 404. Sign-in and the password
-    reset APIs stay enabled. Accounts are created only by
+    requests fall through to FastAPI and get a 404. Accounts are created only by
     :mod:`auth.provisioner` via the recipe-level ``sign_up`` function, which
     these flags do not affect.
+
+    Sign-in and password-reset-token stay served but are throttled per client
+    IP and per email (staging finding F5, :mod:`auth.signin_throttle`). A
+    throttled request gets a 429 error envelope with ``Retry-After``, never
+    ``WRONG_CREDENTIALS_ERROR``. The throttle is looked up per request so tests
+    can inject one.
     """
     original_implementation.disable_sign_up_post = True
     original_implementation.disable_email_exists_get = True
+
+    original_sign_in_post = original_implementation.sign_in_post
+    original_reset_token_post = (
+        original_implementation.generate_password_reset_token_post
+    )
+
+    async def sign_in_post(  # type: ignore[override]
+        form_fields: List[FormField],
+        tenant_id: str,
+        session: Any,
+        should_try_linking_with_session_user: Optional[bool],
+        api_options: Any,
+        user_context: Dict[str, Any],
+    ):
+        throttle = get_signin_throttle()
+        email = _form_field_value(form_fields, "email")
+        retry = await throttle.check_sign_in(
+            get_client_ip(api_options.request.request), email
+        )
+        if retry is not None:
+            return _send_throttled(api_options, retry)
+
+        result = await original_sign_in_post(
+            form_fields,
+            tenant_id,
+            session,
+            should_try_linking_with_session_user,
+            api_options,
+            user_context,
+        )
+        if isinstance(result, WrongCredentialsError):
+            await throttle.record_sign_in_failure(email)
+        elif isinstance(result, SignInPostOkResult):
+            await throttle.clear_sign_in_failures(email)
+        return result
+
+    async def generate_password_reset_token_post(  # type: ignore[override]
+        form_fields: List[FormField],
+        tenant_id: str,
+        api_options: Any,
+        user_context: Dict[str, Any],
+    ):
+        retry = await get_signin_throttle().check_password_reset(
+            get_client_ip(api_options.request.request),
+            _form_field_value(form_fields, "email"),
+        )
+        if retry is not None:
+            return _send_throttled(api_options, retry)
+        return await original_reset_token_post(
+            form_fields, tenant_id, api_options, user_context
+        )
+
+    original_implementation.sign_in_post = sign_in_post
+    original_implementation.generate_password_reset_token_post = (
+        generate_password_reset_token_post
+    )
     return original_implementation
 
 
@@ -477,6 +573,9 @@ def init_supertokens(settings: Settings) -> None:
 
     _session_lifetime_seconds = settings.session_lifetime_seconds
     _initialized = True
+
+    # Shared by the SDK override above and /auth/driver/session (F5).
+    configure_signin_throttle(settings)
 
     logger.info(
         "SuperTokens initialized (api_domain=%s, website_domain=%s, "

@@ -91,6 +91,7 @@ async def handle_app_exception(request: Request, exc: AppException) -> JSONRespo
     return JSONResponse(
         status_code=exc.status_code,
         content=error_response.model_dump(exclude_none=True),
+        headers=getattr(exc, "headers", None),
     )
 
 

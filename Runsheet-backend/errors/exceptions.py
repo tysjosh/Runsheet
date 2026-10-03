@@ -39,7 +39,9 @@ class AppException(Exception):
         error_code: ErrorCode,
         message: str,
         status_code: Optional[int] = None,
-        details: Optional[dict[str, Any]] = None
+        details: Optional[dict[str, Any]] = None,
+        *,
+        headers: Optional[dict[str, str]] = None,
     ):
         """
         Initialize an AppException.
@@ -49,11 +51,13 @@ class AppException(Exception):
             message: A human-readable error message
             status_code: The HTTP status code (defaults to the error code's default)
             details: Optional dictionary with additional error context
+            headers: Optional response headers (e.g. ``Retry-After`` on a 429)
         """
         self.error_code = error_code
         self.message = message
         self.status_code = status_code or get_default_status_code(error_code)
         self.details = details
+        self.headers = headers
         super().__init__(message)
     
     def to_dict(self) -> dict[str, Any]:
@@ -173,6 +177,21 @@ def rate_limited(
         error_code=ErrorCode.RATE_LIMITED,
         message=message,
         details=details
+    )
+
+
+def too_many_attempts(retry_after_seconds: int) -> AppException:
+    """Create the 429 for a throttled sign-in or password-reset (staging finding F5).
+
+    Carries ``Retry-After`` and ``details.retry_after_seconds`` so clients can
+    show how long to wait.
+    """
+    seconds = max(1, int(retry_after_seconds))
+    return AppException(
+        error_code=ErrorCode.RATE_LIMITED,
+        message=f"Too many attempts, try again in {seconds} seconds",
+        details={"retry_after_seconds": seconds},
+        headers={"Retry-After": str(seconds)},
     )
 
 

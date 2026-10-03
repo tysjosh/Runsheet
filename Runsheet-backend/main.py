@@ -183,7 +183,7 @@ app.add_middleware(
     ],
     expose_headers=[
         "X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining",
-        "X-RateLimit-Reset", "X-Idempotent-Replayed",
+        "X-RateLimit-Reset", "X-Idempotent-Replayed", "Retry-After",
         # SuperTokens issues the new session via these response headers; the
         # browser SDK must be able to read them across origins (Req 2.3, 8.4).
         # st-access-token / st-refresh-token carry the session in header-based

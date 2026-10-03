@@ -311,6 +311,68 @@ class Settings(BaseSettings):
             "AWS ALB). Set 2 if CloudFront is put in front of the ALB."
         ),
     )
+
+    # Sign-in / password-reset throttle (staging finding F5). Redis-backed fixed
+    # windows shared by every replica; see auth/signin_throttle.py.
+    auth_signin_throttle_enabled: bool = Field(
+        default=True,
+        description=(
+            "Throttle POST /auth/signin, /auth/driver/session and "
+            "/auth/user/password/reset/token per client IP and per email. Needs "
+            "redis_url; without it (or when Redis errors) attempts are allowed."
+        ),
+    )
+    signin_ip_max_attempts: int = Field(
+        default=20,
+        ge=1,
+        le=10000,
+        description="Sign-in attempts (all outcomes) per client IP per window.",
+    )
+    signin_ip_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=86400,
+        description="Window for signin_ip_max_attempts, in seconds.",
+    )
+    signin_email_max_failures: int = Field(
+        default=10,
+        ge=1,
+        le=10000,
+        description=(
+            "Failed sign-ins per email before that email is blocked until the "
+            "window (opened by the first failure) expires. A success resets it."
+        ),
+    )
+    signin_email_window_seconds: int = Field(
+        default=900,
+        ge=1,
+        le=86400,
+        description="Window for signin_email_max_failures, in seconds.",
+    )
+    password_reset_ip_max_requests: int = Field(
+        default=10,
+        ge=1,
+        le=10000,
+        description="Password-reset token requests per client IP per window.",
+    )
+    password_reset_ip_window_seconds: int = Field(
+        default=900,
+        ge=1,
+        le=86400,
+        description="Window for password_reset_ip_max_requests, in seconds.",
+    )
+    password_reset_email_max_requests: int = Field(
+        default=5,
+        ge=1,
+        le=10000,
+        description="Password-reset token requests per email per window.",
+    )
+    password_reset_email_window_seconds: int = Field(
+        default=3600,
+        ge=1,
+        le=86400,
+        description="Window for password_reset_email_max_requests, in seconds.",
+    )
     
     # Observability Configuration
     log_level: str = Field(
