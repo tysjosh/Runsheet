@@ -3,7 +3,8 @@ Reporting Specialist Agent.
 
 Handles all report generation across domains: operations, performance, incidents,
 SLA, failures, driver productivity, fuel, and dispatch reports.
-Wraps a Strands Agent instance with reporting-specific system prompt and tool set.
+Runs a fresh Strands Agent per request (see ``_base.SpecialistAgent``) with a
+reporting-specific system prompt and tool set.
 
 Validates:
 - Requirement 7.5: Reporting_Agent with tools limited to all report generation tools
@@ -13,9 +14,8 @@ Validates:
 """
 
 import logging
-from strands import Agent
-from strands.models.litellm import LiteLLMModel
 
+from Agents.specialists._base import SpecialistAgent
 from Agents.tools import (
     # General report tools
     generate_operations_report,
@@ -34,12 +34,11 @@ from Agents.tools.summary_tools import (
     get_analytics_overview,
     get_performance_insights,
 )
-from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
 
-class ReportingAgent:
+class ReportingAgent(SpecialistAgent):
     """Specialist agent for cross-domain reporting.
 
     Generates reports across all domains: operations, performance, incidents,
@@ -90,43 +89,3 @@ class ReportingAgent:
         "- Highlight key metrics, trends, and actionable recommendations\n"
         "- If you cannot fulfill a request with your tools, say so clearly"
     )
-
-    def __init__(self, model: LiteLLMModel):
-        """Initialize the Reporting Agent with a shared model.
-
-        Args:
-            model: The LiteLLM model instance (shared across specialists).
-        """
-        self.agent = Agent(
-            model=model,
-            system_prompt=self.SYSTEM_PROMPT,
-            tools=self.TOOLS,
-        )
-        logger.info("✅ ReportingAgent initialized with %d tools", len(self.TOOLS))
-
-    async def handle(self, task: str, context: dict = None) -> str:
-        """Process a reporting subtask.
-
-        Binds the tenant id from ``context`` to the tool ContextVar before
-        dispatching the Strands agent so every ES-reading tool runs
-        tenant-scoped.
-
-        Args:
-            task: The natural language task to process.
-            context: Optional context dict (e.g. tenant_id, session_id).
-
-        Returns:
-            The agent's response as a string.
-        """
-        prompt = task
-        tenant_id = require_tenant_id((context or {}).get("tenant_id"))
-        if context:
-            ctx_parts = []
-            if tenant_id:
-                ctx_parts.append(f"Tenant: {tenant_id}")
-            if ctx_parts:
-                prompt = f"[Context: {', '.join(ctx_parts)}]\n{task}"
-
-        with set_current_tenant(tenant_id):
-            result = await self.agent.invoke_async(prompt)
-        return str(result)

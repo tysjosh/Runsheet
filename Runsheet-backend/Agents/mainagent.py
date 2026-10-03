@@ -341,7 +341,24 @@ class LogisticsAgent:
             self._session_store = None
             return False
     
-    async def _load_conversation_history(self, session_id: str) -> Optional[list]:
+    @staticmethod
+    def _session_key(tenant_id: Optional[str], session_id: Optional[str]) -> Optional[str]:
+        """Session-store key for one conversation, scoped to its tenant.
+
+        The store used to be keyed on the client-supplied ``session_id``
+        alone, so tenant B sending tenant A's session id loaded A's history
+        (staging finding F1). ``tenant_id`` comes from the verified
+        ``TenantContext`` and leads the key, so a client-chosen session id
+        cannot reach another tenant's entry. Returns ``None`` when either
+        part is missing; callers then skip the store entirely.
+        """
+        if not tenant_id or not session_id:
+            return None
+        return f"{tenant_id}:{session_id}"
+
+    async def _load_conversation_history(
+        self, session_id: str, tenant_id: Optional[str] = None
+    ) -> Optional[list]:
         """
         Load conversation history from the session store.
         
@@ -353,16 +370,21 @@ class LogisticsAgent:
         
         Args:
             session_id: Unique identifier for the conversation session.
+            tenant_id: Verified tenant of the caller; scopes the store key.
             
         Returns:
             List of conversation messages if found, None otherwise.
         """
+        key = self._session_key(tenant_id, session_id)
+        if key is None:
+            return None
+
         if not await self._ensure_session_store_connected():
             logger.debug(f"Session store unavailable, starting fresh conversation for session {session_id}")
             return None
         
         try:
-            session_data = await self._session_store.get(session_id)
+            session_data = await self._session_store.get(key)
             if session_data and "messages" in session_data:
                 logger.info(f"📥 Loaded {len(session_data['messages'])} messages for session {session_id}")
                 return session_data["messages"]
@@ -373,7 +395,9 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to load conversation history for session {session_id}: {e}")
             return None
     
-    async def _save_conversation_history(self, session_id: str, messages: list) -> bool:
+    async def _save_conversation_history(
+        self, session_id: str, messages: list, tenant_id: Optional[str] = None
+    ) -> bool:
         """
         Save conversation history to the session store.
         
@@ -386,10 +410,15 @@ class LogisticsAgent:
         Args:
             session_id: Unique identifier for the conversation session.
             messages: List of conversation messages to persist.
+            tenant_id: Verified tenant of the caller; scopes the store key.
             
         Returns:
             True if saved successfully, False otherwise.
         """
+        key = self._session_key(tenant_id, session_id)
+        if key is None:
+            return False
+
         if not await self._ensure_session_store_connected():
             logger.debug(f"Session store unavailable, conversation not persisted for session {session_id}")
             return False
@@ -397,11 +426,12 @@ class LogisticsAgent:
         try:
             session_data = {
                 "session_id": session_id,
+                "tenant_id": tenant_id,
                 "messages": messages,
                 "updated_at": datetime.utcnow().isoformat() + "Z",
                 "message_count": len(messages)
             }
-            await self._session_store.set(session_id, session_data)
+            await self._session_store.set(key, session_data)
             logger.info(f"📤 Saved {len(messages)} messages for session {session_id}")
             return True
         except Exception as e:
@@ -409,21 +439,26 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to save conversation history for session {session_id}: {e}")
             return False
     
-    async def _clear_session(self, session_id: str) -> bool:
+    async def _clear_session(self, session_id: str, tenant_id: Optional[str] = None) -> bool:
         """
         Clear conversation history from the session store.
         
         Args:
             session_id: Unique identifier for the conversation session.
+            tenant_id: Verified tenant of the caller; scopes the store key.
             
         Returns:
             True if cleared successfully, False otherwise.
         """
+        key = self._session_key(tenant_id, session_id)
+        if key is None:
+            return False
+
         if not await self._ensure_session_store_connected():
             return False
         
         try:
-            await self._session_store.delete(session_id)
+            await self._session_store.delete(key)
             logger.info(f"🗑️ Cleared session {session_id}")
             return True
         except Exception as e:
@@ -514,15 +549,24 @@ class LogisticsAgent:
             logger.exception("Failed to setup Gemini credentials")
             os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
 
-    def clear_memory(self, session_id: Optional[str] = None):
+    async def clear_memory(
+        self, session_id: Optional[str] = None, tenant_id: Optional[str] = None
+    ) -> bool:
         """
         Clear the agent's conversation memory.
         
         If a session_id is provided and session store is available,
-        also clears the persisted session data.
+        also clears the persisted session data for (tenant_id, session_id).
+        The store delete is awaited: it used to be fire-and-forget via
+        ``create_task``, so ``/api/chat/clear`` returned before anything was
+        cleared and the next turn could still load the old history (F1).
         
         Args:
             session_id: Optional session identifier to clear from store.
+            tenant_id: Verified tenant of the caller; scopes the store key.
+
+        Returns:
+            True if cleared (or nothing persisted to clear), False otherwise.
         """
         try:
             # Clear Strands agent's message history
@@ -531,17 +575,11 @@ class LogisticsAgent:
             
             # If session_id provided, also clear from session store
             if session_id:
-                import asyncio
-                try:
-                    # Try to get the running event loop
-                    loop = asyncio.get_running_loop()
-                    # Schedule the coroutine to run
-                    asyncio.create_task(self._clear_session(session_id))
-                except RuntimeError:
-                    # No running event loop, create one
-                    asyncio.run(self._clear_session(session_id))
+                return await self._clear_session(session_id, tenant_id)
+            return True
         except Exception:
             logger.exception("Failed to clear agent memory")
+            return False
 
     async def chat_streaming(
         self,
@@ -596,7 +634,7 @@ class LogisticsAgent:
         # Requirement 8.2: Load conversation history using session identifier
         if session_id:
             try:
-                stored_messages = await self._load_conversation_history(session_id)
+                stored_messages = await self._load_conversation_history(session_id, tenant_id)
                 if stored_messages:
                     # Restore conversation history to agent
                     self.agent.messages = stored_messages
@@ -726,7 +764,7 @@ class LogisticsAgent:
                     # Requirement 8.3: Persist updated conversation history
                     if session_id:
                         try:
-                            await self._save_conversation_history(session_id, self.agent.messages)
+                            await self._save_conversation_history(session_id, self.agent.messages, tenant_id)
                         except Exception as e:
                             # Graceful degradation: log but don't fail the response
                             logger.warning(f"⚠️ Could not persist session {session_id}: {e}")
@@ -844,7 +882,7 @@ class LogisticsAgent:
         # Requirement 8.2: Load conversation history using session identifier
         if session_id:
             try:
-                stored_messages = await self._load_conversation_history(session_id)
+                stored_messages = await self._load_conversation_history(session_id, tenant_id)
                 if stored_messages:
                     # Restore conversation history to agent
                     self.agent.messages = stored_messages
@@ -893,7 +931,7 @@ class LogisticsAgent:
             # Requirement 8.3: Persist updated conversation history
             if session_id:
                 try:
-                    await self._save_conversation_history(session_id, self.agent.messages)
+                    await self._save_conversation_history(session_id, self.agent.messages, tenant_id)
                 except Exception as e:
                     # Graceful degradation: log but don't fail the response
                     logger.warning(f"⚠️ Could not persist session {session_id}: {e}")

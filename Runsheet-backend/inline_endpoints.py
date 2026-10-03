@@ -133,12 +133,15 @@ async def clear_chat_endpoint(
     request: ClearChatRequest,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
-    # ``clear_memory`` itself is tenant-agnostic (it wipes the per-session
-    # in-memory agent state), but we still require an authenticated tenant
-    # context on this endpoint so unauthenticated callers can't clear
-    # another tenant's session by ID alone.
+    # The clear is scoped to (caller's verified tenant, session_id) and
+    # awaited, so it removes exactly the history the caller's next turn would
+    # load and never another tenant's entry under the same session id (F1).
+    # Specialists keep no history between requests, so the session store
+    # entry is the caller's whole history.
     from Agents.mainagent import LogisticsAgent
-    LogisticsAgent().clear_memory(session_id=request.session_id)
+    await LogisticsAgent().clear_memory(
+        session_id=request.session_id, tenant_id=tenant.tenant_id
+    )
     return {"message": "Chat memory cleared successfully", "session_id": request.session_id}
 
 

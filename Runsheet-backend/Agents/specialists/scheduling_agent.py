@@ -2,7 +2,8 @@
 Scheduling Operations Specialist Agent.
 
 Handles job scheduling, dispatch, asset assignment, and scheduling mutations.
-Wraps a Strands Agent instance with scheduling-specific system prompt and tool set.
+Runs a fresh Strands Agent per request (see ``_base.SpecialistAgent``) with a
+scheduling-specific system prompt and tool set.
 
 Validates:
 - Requirement 7.2: Scheduling_Agent with tools limited to scheduling search, details,
@@ -12,9 +13,8 @@ Validates:
 """
 
 import logging
-from strands import Agent
-from strands.models.litellm import LiteLLMModel
 
+from Agents.specialists._base import SpecialistAgent
 from Agents.tools import (
     search_jobs,
     get_job_details,
@@ -27,12 +27,11 @@ from Agents.tools import (
     cancel_job,
     create_job,
 )
-from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
 
-class SchedulingAgent:
+class SchedulingAgent(SpecialistAgent):
     """Specialist agent for scheduling and dispatch operations.
 
     Manages logistics jobs, dispatching, asset availability, and scheduling
@@ -78,43 +77,3 @@ class SchedulingAgent:
         "- For mutations, explain the impact and risk level before executing\n"
         "- If you cannot fulfill a request with your tools, say so clearly"
     )
-
-    def __init__(self, model: LiteLLMModel):
-        """Initialize the Scheduling Agent with a shared model.
-
-        Args:
-            model: The LiteLLM model instance (shared across specialists).
-        """
-        self.agent = Agent(
-            model=model,
-            system_prompt=self.SYSTEM_PROMPT,
-            tools=self.TOOLS,
-        )
-        logger.info("✅ SchedulingAgent initialized with %d tools", len(self.TOOLS))
-
-    async def handle(self, task: str, context: dict = None) -> str:
-        """Process a scheduling-related subtask.
-
-        Binds the tenant id from ``context`` to the tool ContextVar before
-        dispatching the Strands agent so every ES-reading tool runs
-        tenant-scoped.
-
-        Args:
-            task: The natural language task to process.
-            context: Optional context dict (e.g. tenant_id, session_id).
-
-        Returns:
-            The agent's response as a string.
-        """
-        prompt = task
-        tenant_id = require_tenant_id((context or {}).get("tenant_id"))
-        if context:
-            ctx_parts = []
-            if tenant_id:
-                ctx_parts.append(f"Tenant: {tenant_id}")
-            if ctx_parts:
-                prompt = f"[Context: {', '.join(ctx_parts)}]\n{task}"
-
-        with set_current_tenant(tenant_id):
-            result = await self.agent.invoke_async(prompt)
-        return str(result)
