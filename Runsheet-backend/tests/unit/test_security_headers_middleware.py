@@ -393,3 +393,61 @@ class TestSecurityHeadersProperty:
             "Content-Security-Policy header missing"
         assert len(response.headers["Content-Security-Policy"]) > 0, \
             "Content-Security-Policy should not be empty"
+
+
+class TestHstsReferrerAndPermissionsPolicy:
+    """Staging finding F6: HSTS, Referrer-Policy and Permissions-Policy."""
+
+    _HSTS = "max-age=31536000; includeSubDomains"
+
+    @staticmethod
+    def _client(**kwargs):
+        from errors.exceptions import AppException, internal_error
+
+        app = FastAPI()
+        app.add_middleware(SecurityHeadersMiddleware, **kwargs)
+
+        @app.exception_handler(AppException)
+        async def _handler(request: Request, exc: AppException):
+            return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
+
+        @app.get("/ok")
+        async def ok():
+            return {"ok": True}
+
+        @app.get("/boom")
+        async def boom():
+            raise internal_error(message="boom")
+
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_hsts_absent_by_default(self):
+        response = self._client().get("/ok")
+        assert "Strict-Transport-Security" not in response.headers
+
+    @pytest.mark.parametrize("path,status", [("/ok", 200), ("/missing", 404), ("/boom", 500)])
+    def test_hsts_present_when_configured(self, path, status):
+        from middleware.security_headers import HSTS_VALUE
+
+        assert HSTS_VALUE == self._HSTS
+        response = self._client(strict_transport_security=HSTS_VALUE).get(path)
+        assert response.status_code == status
+        assert response.headers["Strict-Transport-Security"] == self._HSTS
+
+    def test_referrer_and_permissions_policy_by_default(self):
+        response = self._client().get("/ok")
+        assert response.headers["Referrer-Policy"] == "strict-origin-when-cross-origin"
+        assert response.headers["Permissions-Policy"] == (
+            "camera=(), microphone=(), geolocation=()"
+        )
+
+    def test_setup_passes_hsts_through(self):
+        app = FastAPI()
+
+        @app.get("/ok")
+        async def ok():
+            return {"ok": True}
+
+        setup_security_headers(app, strict_transport_security=self._HSTS)
+        response = TestClient(app).get("/ok")
+        assert response.headers["Strict-Transport-Security"] == self._HSTS

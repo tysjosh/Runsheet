@@ -440,6 +440,12 @@ class Settings(BaseSettings):
         """True when a custom SMTP relay is fully configured for auth email."""
         return bool(self.smtp_host.strip() and self.smtp_from_email.strip())
 
+    @property
+    def is_local_environment(self) -> bool:
+        """True for development and test, the environments that skip HSTS and
+        keep the API docs served (staging findings F6, F7)."""
+        return self.environment in (Environment.DEVELOPMENT, Environment.TEST)
+
     # API-key authentication
     #
     # Comma-separated list of valid API keys for routes that declare the

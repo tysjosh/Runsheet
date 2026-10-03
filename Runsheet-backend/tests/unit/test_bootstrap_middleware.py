@@ -61,12 +61,35 @@ class TestRegisterAtImport:
         from middleware.request_id import RequestIDMiddleware
 
         mock_app.add_middleware.assert_called_once_with(RequestIDMiddleware)
-        mock_security.assert_called_once_with(mock_app)
+        # MagicMock settings are treated as local: no HSTS.
+        mock_security.assert_called_once_with(
+            mock_app, strict_transport_security=None
+        )
         mock_rate.assert_called_once()
         # The configured limits must be passed through, not defaulted: a silent
         # fallback to slowapi's 100/min would ignore RATE_LIMIT_REQUESTS_PER_MINUTE.
         assert mock_rate.call_args.kwargs["api_rate_limit"] == 100
         assert mock_rate.call_args.kwargs["ai_rate_limit"] == 10
+
+    @pytest.mark.parametrize(
+        "is_local,expected",
+        [(False, "max-age=31536000; includeSubDomains"), (True, None)],
+        ids=["staging-or-production", "development-or-test"],
+    )
+    def test_hsts_only_outside_local_environments(
+        self, mock_app, settings, is_local, expected
+    ):
+        """Staging finding F6: HSTS is sent outside development/test."""
+        from bootstrap.middleware import register_at_import
+
+        settings.is_local_environment = is_local
+        with patch("middleware.rate_limiter.setup_rate_limiting"), \
+             patch("middleware.security_headers.setup_security_headers") as mock_security:
+            register_at_import(mock_app, settings)
+
+        mock_security.assert_called_once_with(
+            mock_app, strict_transport_security=expected
+        )
 
     def test_does_not_register_cors(self, mock_app, settings):
         """

@@ -71,7 +71,7 @@ def register_at_import(app, settings) -> None:
     """
     from middleware.request_id import RequestIDMiddleware
     from middleware.rate_limiter import setup_rate_limiting
-    from middleware.security_headers import setup_security_headers
+    from middleware.security_headers import HSTS_VALUE, setup_security_headers
 
     # Added first, so it ends up INSIDE the security headers and CORS layers but
     # outside the auth gate: a 401 still comes back with a correlation id.
@@ -86,7 +86,17 @@ def register_at_import(app, settings) -> None:
         ai_rate_limit=settings.rate_limit_ai_requests_per_minute,
     )
 
-    setup_security_headers(app)
+    # HSTS outside development/test (staging finding F6). Gated on the
+    # environment, not X-Forwarded-Proto: uvicorn runs without --proxy-headers,
+    # so the scheme behind the TLS-terminating ALB always reads as http, and a
+    # client-supplied header is not a deterministic gate. Browsers ignore HSTS
+    # on plain-HTTP responses (RFC 6797 §8.1), so sending it on the ALB-to-task
+    # hop is harmless. Only an explicit ``False`` enables it, so MagicMock
+    # settings in tests stay local.
+    remote = getattr(settings, "is_local_environment", True) is False
+    setup_security_headers(
+        app, strict_transport_security=HSTS_VALUE if remote else None
+    )
 
     logger.info(
         "Middleware registered at import time "

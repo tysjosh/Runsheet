@@ -290,6 +290,26 @@ class TestSuperTokensSettings:
                 Settings()
             assert "auth_provider" in str(exc_info.value).lower()
 
+    def test_is_local_environment_for_development_and_test(self, valid_env_vars):
+        """Development and test are local (no HSTS, docs served; F6, F7)."""
+        for env in ("development", "test"):
+            env_vars = {
+                **valid_env_vars,
+                "ENVIRONMENT": env,
+                "REDIS_URL": "redis://localhost:6379",
+            }
+            with patch.dict(os.environ, env_vars, clear=True):
+                assert Settings().is_local_environment is True
+
+    def test_is_local_environment_false_for_staging(self, non_dev_env_vars):
+        env_vars = {
+            **non_dev_env_vars,
+            "SUPERTOKENS_CONNECTION_URI": "https://core.example.com",
+            "SUPERTOKENS_API_KEY": "test-st-key",
+        }
+        with patch.dict(os.environ, env_vars, clear=True):
+            assert Settings().is_local_environment is False
+
     def test_session_check_database_defaults_true(self, valid_env_vars):
         """Revocation is enforced by default (staging finding F3)."""
         with patch.dict(os.environ, valid_env_vars, clear=True):
