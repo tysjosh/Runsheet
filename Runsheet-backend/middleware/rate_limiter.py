@@ -137,12 +137,21 @@ def _rate_limit_storage_uri(
     return "memory://"
 
 
+#: Socket timeouts for the slowapi Redis client, in seconds (F5 review). slowapi
+#: checks limits synchronously on the event loop, and redis-py defaults to no
+#: timeout, so a black-holed Redis would stall the whole worker (``/health/live``
+#: included) for TCP-retry durations. Matches the sign-in throttle's client.
+_REDIS_STORAGE_OPTIONS = {"socket_timeout": 0.5, "socket_connect_timeout": 0.5}
+
+
 def _build_limiter() -> Limiter:
     """Build a Limiter keyed on the client IP, backed by Redis when configured.
 
     ``in_memory_fallback_enabled`` keeps decorated routes limited (per process)
     when Redis is unreachable, and slowapi re-probes it periodically. That is
     also what keeps development working with REDIS_URL set but Redis down.
+    The Redis client gets short socket timeouts so a hang fails over as fast
+    as a refused connection does.
 
     ``headers_enabled`` stays off: with it on, slowapi raises "parameter
     'response' must be an instance of starlette.responses.Response" on every
@@ -150,9 +159,13 @@ def _build_limiter() -> Limiter:
     parameter, turning those routes into 500s. 429s still carry Retry-After
     from :func:`_custom_rate_limit_handler`.
     """
+    storage_uri = _rate_limit_storage_uri()
     return Limiter(
         key_func=get_client_ip,
-        storage_uri=_rate_limit_storage_uri(),
+        storage_uri=storage_uri,
+        storage_options=(
+            dict(_REDIS_STORAGE_OPTIONS) if storage_uri.startswith("redis") else {}
+        ),
         in_memory_fallback_enabled=True,
     )
 
