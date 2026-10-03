@@ -110,7 +110,18 @@ async def lifespan(app: FastAPI):
     await shutdown_all(app, container)
 
 
-app = FastAPI(title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan)
+from config.settings import api_docs_kwargs as _api_docs_kwargs
+from config.settings import get_settings as _get_auth_settings
+
+# Loaded before the app is created because the docs URLs depend on it; the
+# auth wiring below uses the same object.
+_auth_settings = _get_auth_settings()
+
+# /docs, /redoc and /openapi.json only in development and test (F7).
+app = FastAPI(
+    title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan,
+    **_api_docs_kwargs(_auth_settings),
+)
 
 # Register structured error handlers (AppException → proper JSON, not 500)
 register_exception_handlers(app)
@@ -127,14 +138,13 @@ register_exception_handlers(app)
 # auth gate returns. Under auth_provider="legacy" (the default, incl. tests)
 # the gate self-gates to a no-op, preserving the pre-migration per-handler
 # auth so the existing suite and legacy clients are unaffected (Req 9.2).
+# ``_auth_settings`` is loaded above, before ``app = FastAPI(...)``.
 # ---------------------------------------------------------------------------
-from config.settings import get_settings as _get_auth_settings
 from middleware.auth_enforcement import (
     provider_enforces as _provider_enforces,
     register_auth_enforcement as _register_auth_enforcement,
 )
 
-_auth_settings = _get_auth_settings()
 if _provider_enforces(getattr(_auth_settings, "auth_provider", "legacy")):
     # Initialize the SDK before registering enforcement so the fail-closed
     # check in register_auth_enforcement passes (Req 6.7). A missing managed

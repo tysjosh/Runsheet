@@ -1094,6 +1094,19 @@ class Settings(BaseSettings):
         return self
 
 
+def api_docs_kwargs(settings: Settings) -> dict:
+    """``FastAPI(...)`` kwargs for the OpenAPI schema, Swagger UI and ReDoc.
+
+    Served only in development and test (staging finding F7: the full schema
+    and both doc UIs were public on staging). Elsewhere all three URLs are
+    ``None``, so the routes are not mounted. ``app.openapi()`` still works
+    for in-process tooling such as ``scripts/check_api_types.py``.
+    """
+    if settings.is_local_environment:
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
 class ConfigurationError(Exception):
     """Exception raised when configuration validation fails."""
     
