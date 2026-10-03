@@ -377,6 +377,19 @@ class Settings(BaseSettings):
         ge=60,
         description="Access-token / session lifetime in seconds (Req 2.7).",
     )
+    session_check_database: bool = Field(
+        default=True,
+        description=(
+            "Env SESSION_CHECK_DATABASE. When True, every protected REST "
+            "request and WebSocket handshake asks the SuperTokens core whether "
+            "the session is still alive (access-token blacklisting), so "
+            "sign-out and revocation take effect immediately (staging finding "
+            "F3). Costs one core round trip per protected request (REST "
+            "verifications are memoized per request). False falls back to "
+            "stateless JWT checks, where a revoked access token keeps working "
+            "until it expires (~1 h)."
+        ),
+    )
     password_min_length: int = Field(
         default=8,
         ge=8,

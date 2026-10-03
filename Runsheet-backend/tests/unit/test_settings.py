@@ -290,6 +290,16 @@ class TestSuperTokensSettings:
                 Settings()
             assert "auth_provider" in str(exc_info.value).lower()
 
+    def test_session_check_database_defaults_true(self, valid_env_vars):
+        """Revocation is enforced by default (staging finding F3)."""
+        with patch.dict(os.environ, valid_env_vars, clear=True):
+            assert Settings().session_check_database is True
+
+    def test_session_check_database_env_override(self, valid_env_vars):
+        env_vars = {**valid_env_vars, "SESSION_CHECK_DATABASE": "false"}
+        with patch.dict(os.environ, env_vars, clear=True):
+            assert Settings().session_check_database is False
+
     def test_session_lifetime_seconds_rejects_below_minimum(self, valid_env_vars):
         """Test that session_lifetime_seconds enforces the ge=60 bound."""
         env_vars = {**valid_env_vars, "SESSION_LIFETIME_SECONDS": "30"}

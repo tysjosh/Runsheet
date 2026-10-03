@@ -172,6 +172,8 @@ async def _default_ws_verify(
         get_session_without_request_response,
     )
 
+    from ops.middleware.tenant_guard import session_check_database_enabled
+
     try:
         # anti_csrf_check stays False: a browser cannot set an ``anti-csrf``
         # header on a WebSocket handshake, so requiring it would break the
@@ -182,6 +184,9 @@ async def _default_ws_verify(
             anti_csrf_token,
             anti_csrf_check=False,
             session_required=False,
+            # Ask the core whether the session is still alive so a signed-out
+            # or revoked session cannot open a socket (F3).
+            check_database=session_check_database_enabled(),
         )
     except Exception as exc:  # noqa: BLE001 — any verification failure → reject
         # Never log the credential value (Req 7.4); log only the failure reason.
