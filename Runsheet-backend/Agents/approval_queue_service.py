@@ -247,6 +247,15 @@ class ApprovalQueueService:
 
         A pending plan that moves before it can be expired is a conflict too:
         the caller retries rather than racing another reviewer.
+
+        Known dead end (review R5): ``ConfirmationProtocol`` has no executor
+        for ``apply_loading_plan`` yet, so an approved plan is recorded
+        ``executed`` while its orders stay placed/confirmed/scheduled. Later
+        loading runs propose those orders again, and approving any such plan
+        is refused here because the first plan still holds them. Once the
+        executor dispatches the orders, they leave the loadable statuses and
+        the refusal stops arising. Until then, a dispatcher sees the refusal
+        on every re-proposed order.
         """
         order_ids = self._loading_plan_order_ids(entry.get("parameters"))
         if not order_ids:
