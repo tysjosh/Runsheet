@@ -23,6 +23,7 @@ from persistence.document_query import (
     apply_source_filter,
     build_order_by,
     build_predicate,
+    collect_query_fields,
     parse_date_math,
     resolve_source_filter,
 )
@@ -205,7 +206,6 @@ class TestRefusals:
         "query,expected",
         [
             ({"geo_distance": {"distance": "1km"}}, "geo_distance"),
-            ({"nested": {"path": "a"}}, "nested"),
             ({"query_string": {"query": "a AND b"}}, "query_string"),
             ({"script": {"script": "true"}}, "script"),
             ({"function_score": {}}, "function_score"),
@@ -271,6 +271,22 @@ class TestRefusals:
                 column, {"range": {"a": {"between": 1}}}, id_column=id_column
             )
 
+    @pytest.mark.parametrize(
+        "body,expected",
+        [
+            ({"path": "a"}, "without a query"),
+            ({"path": "a", "query": {}}, "without a query"),
+            ({"query": {"term": {"a.b": 1}}}, "without a path"),
+            ({"path": "a", "query": {"term": {"a.b": 1}}, "boost": 2}, "nested options"),
+        ],
+    )
+    def test_a_malformed_nested_clause_raises(self, body, expected):
+        """A nested clause without a query must not become match_all."""
+        column, id_column = _column()
+        with pytest.raises(UnsupportedQueryError) as exc:
+            build_predicate(column, {"nested": body}, id_column=id_column)
+        assert expected in str(exc.value)
+
     def test_an_empty_query_compiles_to_a_true_predicate(self):
         """An absent ``query`` matches everything in ES, and must here too —
         the opposite default would make every unfiltered list come back empty."""
@@ -278,3 +294,113 @@ class TestRefusals:
         for query in (None, {}):
             predicate = build_predicate(column, query, id_column=id_column)
             assert str(predicate.compile(compile_kwargs={"literal_binds": True})) == "true"
+
+
+class TestNested:
+    """``nested`` compiles to an EXISTS over the path's array elements.
+
+    Before F11 it raised ``UnsupportedQueryError``, which turned
+    ``/api/fuel/mvp/priorities?safe_to_delay_bucket=`` and cargo search into
+    500s on staging. Whether it selects the right rows is checked against real
+    PostgreSQL in ``tests/postgres/test_document_store.py``.
+    """
+
+    # The exact shape fuel_ops_endpoints.list_priorities builds.
+    PRIORITIES_QUERY = {
+        "bool": {
+            "must": [
+                {"term": {"tenant_id": "t"}},
+                {
+                    "nested": {
+                        "path": "priorities",
+                        "query": {
+                            "term": {"priorities.safe_to_delay_bucket": "short"}
+                        },
+                    }
+                },
+            ]
+        }
+    }
+
+    # The exact shape cargo_service.search_cargo builds.
+    CARGO_QUERY = {
+        "bool": {
+            "must": [
+                {"term": {"tenant_id": "t"}},
+                {
+                    "nested": {
+                        "path": "cargo_manifest",
+                        "query": {
+                            "bool": {
+                                "must": [
+                                    {"term": {"cargo_manifest.container_number": "C1"}},
+                                    {"match": {"cargo_manifest.description": "drum"}},
+                                ]
+                            }
+                        },
+                        "inner_hits": {"size": 100},
+                    }
+                },
+            ]
+        }
+    }
+
+    @pytest.mark.parametrize("query", [PRIORITIES_QUERY, CARGO_QUERY])
+    def test_compiles_on_the_postgresql_dialect(self, query):
+        from sqlalchemy import select
+        from sqlalchemy.dialects import postgresql
+
+        from persistence.models import EsDocumentORM
+
+        column, id_column = _column()
+        predicate = build_predicate(column, query, id_column=id_column)
+        sql = str(
+            select(EsDocumentORM.doc_id)
+            .where(predicate)
+            .compile(dialect=postgresql.dialect())
+        )
+        assert "EXISTS" in sql
+        assert "jsonb_array_elements" in sql
+        assert "jsonb_build_object" in sql
+
+    def test_scoring_and_response_options_are_accepted(self):
+        column, id_column = _column()
+        build_predicate(
+            column,
+            {
+                "nested": {
+                    "path": "a",
+                    "query": {"term": {"a.b": 1}},
+                    "score_mode": "max",
+                    "ignore_unmapped": True,
+                    "inner_hits": {},
+                }
+            },
+            id_column=id_column,
+        )
+
+    def test_a_nested_clause_inside_a_nested_clause_compiles(self):
+        column, id_column = _column()
+        build_predicate(
+            column,
+            {
+                "nested": {
+                    "path": "a",
+                    "query": {"nested": {"path": "a.b", "query": {"term": {"a.b.c": 1}}}},
+                }
+            },
+            id_column=id_column,
+        )
+
+    def test_collect_query_fields_returns_the_inner_fields(self):
+        """The field policy must see inside a nested clause, or an unsearchable
+        sub-field could be filtered on by wrapping it in ``nested``."""
+        assert collect_query_fields(self.CARGO_QUERY) == [
+            "tenant_id",
+            "cargo_manifest.container_number",
+            "cargo_manifest.description",
+        ]
+        assert collect_query_fields(self.PRIORITIES_QUERY) == [
+            "tenant_id",
+            "priorities.safe_to_delay_bucket",
+        ]

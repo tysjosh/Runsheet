@@ -457,6 +457,197 @@ async def test_cardinality_counts_distinct_values(store, index_name):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# nested (F11): every inner condition on ONE array element
+# ---------------------------------------------------------------------------
+
+
+class _IndexRedirect:
+    """An ``ElasticsearchService`` stand-in that sends every call to one test index.
+
+    Lets the production callers build their own query against the real store, so
+    the test exercises the query they actually send rather than a copy of it.
+    """
+
+    def __init__(self, store, index):
+        self._store = store
+        self._index = index
+        self.queries = []
+
+    async def search_documents(self, _index, query, size=100, **kwargs):
+        self.queries.append(query)
+        return await self._store.search_documents(self._index, query, size, **kwargs)
+
+
+_PRIORITY_DOCS = {
+    # Matches: one entry in the "short" bucket.
+    "pl-short": {
+        "tenant_id": TENANT, "run_id": "run_1", "timestamp": "2026-10-02T10:00:00+00:00",
+        "priorities": [
+            {"safe_to_delay_bucket": "long", "cluster_id": "a"},
+            {"safe_to_delay_bucket": "short", "cluster_id": "b"},
+        ],
+    },
+    # No "short" entry anywhere.
+    "pl-long": {
+        "tenant_id": TENANT, "run_id": "run_2", "timestamp": "2026-10-02T11:00:00+00:00",
+        "priorities": [{"safe_to_delay_bucket": "long", "cluster_id": "a"}],
+    },
+    # "short" but another tenant's list.
+    "pl-other": {
+        "tenant_id": "other-tenant", "run_id": "run_3",
+        "timestamp": "2026-10-02T12:00:00+00:00",
+        "priorities": [{"safe_to_delay_bucket": "short", "cluster_id": "a"}],
+    },
+}
+
+
+async def test_list_priorities_bucket_filter_returns_only_matching_lists(
+    store, index_name, monkeypatch
+):
+    """``/api/fuel/mvp/priorities?safe_to_delay_bucket=short`` raised
+    ``UnsupportedQueryError('nested')`` (a 500) on staging before F11."""
+    import fuel.api.fuel_ops_endpoints as endpoints
+    from ops.middleware.tenant_guard import TenantContext
+
+    await _seed(store, index_name, _PRIORITY_DOCS)
+    redirect = _IndexRedirect(store, index_name)
+    monkeypatch.setattr(endpoints, "_es_service", redirect)
+
+    response = await endpoints.list_priorities(
+        request=None,
+        tenant=TenantContext(tenant_id=TENANT, user_id="u", has_pii_access=False),
+        safe_to_delay_bucket="short",
+        run_id=None,
+        page=1,
+        size=20,
+    )
+
+    assert "nested" in str(redirect.queries[0])
+    assert [item["run_id"] for item in response["items"]] == ["run_1"]
+    assert response["total"] == 1
+
+
+async def test_nested_conditions_must_hold_on_the_same_element(store, index_name):
+    await _seed(store, index_name, _PRIORITY_DOCS)
+
+    def nested(*must):
+        return {
+            "query": {
+                "nested": {
+                    "path": "priorities",
+                    "query": {"bool": {"must": list(must)}},
+                }
+            }
+        }
+
+    cross = await store.search_documents(
+        index_name,
+        nested(
+            {"term": {"priorities.safe_to_delay_bucket": "short"}},
+            {"term": {"priorities.cluster_id": "a"}},
+        ),
+    )
+    # pl-short has "short" on b and "a" on a long entry: no single element
+    # satisfies both. pl-other's single element does.
+    assert sorted(h["_id"] for h in cross["hits"]["hits"]) == ["pl-other"]
+
+    same = await store.search_documents(
+        index_name,
+        nested(
+            {"term": {"priorities.safe_to_delay_bucket": "short"}},
+            {"term": {"priorities.cluster_id": "b"}},
+        ),
+    )
+    assert [h["_id"] for h in same["hits"]["hits"]] == ["pl-short"]
+
+
+async def test_nested_sql_and_matcher_agree(store, index_name):
+    """Parity with the in-memory matcher across the shapes ``nested`` can meet."""
+    from persistence.document_matcher import matches
+
+    docs = {
+        **_PRIORITY_DOCS,
+        "no-path": {"tenant_id": TENANT},
+        "empty": {"tenant_id": TENANT, "priorities": []},
+        "scalar": {"tenant_id": TENANT, "priorities": "short"},
+        "null": {"tenant_id": TENANT, "priorities": None},
+        "object": {"tenant_id": TENANT, "priorities": {"safe_to_delay_bucket": "short"}},
+        "null-element": {"tenant_id": TENANT, "priorities": [None]},
+        "deep": {"tenant_id": TENANT, "priorities": [
+            {"cluster_id": "c", "stops": [{"id": "x", "n": 1}, {"id": "y", "n": 2}]},
+        ]},
+    }
+
+    def deep(*must):
+        return {"nested": {"path": "priorities", "query": {"nested": {
+            "path": "priorities.stops",
+            "query": {"bool": {"must": list(must)}},
+        }}}}
+    await _seed(store, index_name, docs)
+    stored = {doc_id: await store.get_document(index_name, doc_id) for doc_id in docs}
+
+    queries = [
+        {"nested": {"path": "priorities", "query": {"match_all": {}}}},
+        {"nested": {"path": "priorities", "query": {
+            "term": {"priorities.safe_to_delay_bucket": "short"}}}},
+        {"nested": {"path": "priorities", "query": {"bool": {
+            "must_not": [{"term": {"priorities.cluster_id": "a"}}]}}}},
+        {"nested": {"path": "priorities", "query": {
+            "exists": {"field": "priorities.cluster_id"}}}},
+        {"bool": {"must_not": [{"nested": {"path": "priorities", "query": {
+            "term": {"priorities.safe_to_delay_bucket": "short"}}}}]}},
+        {"nested": {"path": "priorities", "query": {
+            "match": {"priorities.cluster_id": "B"}}}},
+        deep({"term": {"priorities.stops.id": "x"}},
+             {"range": {"priorities.stops.n": {"gte": 2}}}),
+        deep({"term": {"priorities.stops.id": "y"}},
+             {"range": {"priorities.stops.n": {"gte": 2}}}),
+    ]
+    results = {}
+    for query in queries:
+        response = await store.search_documents(index_name, {"query": query, "size": 50})
+        sql_ids = sorted(h["_id"] for h in response["hits"]["hits"])
+        py_ids = sorted(d for d, doc in stored.items() if matches(doc, query))
+        assert sql_ids == py_ids, query
+        results[str(query)] = sql_ids
+
+    # The deep cases are not vacuous: cross-element misses, same-element hits.
+    assert results[str(queries[-2])] == []
+    assert results[str(queries[-1])] == ["deep"]
+
+
+async def test_cargo_search_query_shape_returns_only_matching_jobs(store, index_name):
+    """``cargo_service.search_cargo``'s query (nested + inner_hits) must compile
+    and select by element. The store does not produce ``inner_hits``, so the
+    flattened item list is empty; the job match and total are what this pins."""
+    from scheduling.services.cargo_service import CargoService
+
+    await _seed(store, index_name, {
+        "job-1": {"tenant_id": TENANT, "job_id": "job-1", "cargo_manifest": [
+            {"container_number": "C1", "item_status": "loaded"},
+            {"container_number": "C2", "item_status": "pending"},
+        ]},
+        # C1 and pending exist, but on different elements.
+        "job-2": {"tenant_id": TENANT, "job_id": "job-2", "cargo_manifest": [
+            {"container_number": "C1", "item_status": "loaded"},
+            {"container_number": "C3", "item_status": "pending"},
+        ]},
+        "job-3": {"tenant_id": TENANT, "job_id": "job-3", "cargo_manifest": [
+            {"container_number": "C1", "item_status": "pending"},
+        ]},
+    })
+    redirect = _IndexRedirect(store, index_name)
+    result = await CargoService(redirect).search_cargo(
+        TENANT, container_number="C1", item_status="pending"
+    )
+
+    assert "inner_hits" in str(redirect.queries[0])
+    assert result["pagination"]["total"] == 1
+    response = await store.search_documents(index_name, redirect.queries[0])
+    assert [h["_id"] for h in response["hits"]["hits"]] == ["job-3"]
+
+
 async def test_an_unsupported_query_clause_raises(store, index_name):
     """The central design decision: never silently drop a clause.
 

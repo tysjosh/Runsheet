@@ -27,6 +27,7 @@ that are easy to get wrong:
 * a missing field never matches ``term`` / ``range`` / a text clause, and is not
   an error.
 * ``should`` is required only when no ``must``/``filter`` is present.
+* ``nested`` requires every inner condition to hold on the SAME array element.
 * an unsupported clause raises, never silently passes or fails.
 """
 
@@ -35,7 +36,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 
-from persistence.document_query import UnsupportedQueryError, parse_date_math
+from persistence.document_query import (
+    UnsupportedQueryError,
+    _nested_parts,
+    parse_date_math,
+)
 
 __all__ = ["matches", "extract_values", "extract_value"]
 
@@ -200,6 +205,8 @@ def matches(
             document, body.get("filter"), doc_id=doc_id, now=now,
             context="constant_score.filter",
         )
+    if name == "nested":
+        return _nested(document, query[name], doc_id=doc_id, now=now)
     if name == "term":
         field, raw = _single_field(body, "term")
         wanted = raw.get("value") if isinstance(raw, dict) else raw
@@ -342,6 +349,38 @@ def _bool(
         if satisfied < required:
             return False
     return True
+
+
+def _nested(
+    document: Dict[str, Any],
+    body: Any,
+    *,
+    doc_id: Optional[str],
+    now: Optional[datetime],
+) -> bool:
+    """Whether ONE element of the array at ``path`` satisfies the inner query.
+
+    Each element is re-rooted under its path (``{"priorities": element}``) so the
+    inner query's ``priorities.x`` field names resolve unchanged, exactly as the
+    SQL translation does. A lone object counts as one element; any other value
+    (absent, scalar, null) has none.
+    """
+    path, inner = _nested_parts(body)
+    stored = _resolve(document, path)
+    if isinstance(stored, list):
+        elements = stored
+    elif isinstance(stored, dict):
+        elements = [stored]
+    else:
+        return False
+    segments = (path[: -len(".keyword")] if path.endswith(".keyword") else path).split(".")
+    for element in elements:
+        wrapper: Any = element
+        for segment in reversed(segments):
+            wrapper = {segment: wrapper}
+        if matches(wrapper, inner, doc_id=doc_id, now=now, context="nested.query"):
+            return True
+    return False
 
 
 def _as_list(raw: Any, context: str) -> Sequence[Dict[str, Any]]:

@@ -17,9 +17,10 @@ Clause               Uses   Handling
 ``multi_match``         6   substring across fields, ORed
 ``wildcard``            4   ``*``/``?`` translated to ``LIKE`` metacharacters
 ``prefix``              –   left-anchored substring
+``nested``              2   ``EXISTS`` over the array's elements (see below)
 ===================  =====  ==================================================
 
-Everything else — ``script``, ``nested``, ``query_string``, ``geo_*``,
+Everything else — ``script``, ``query_string``, ``geo_*``,
 ``function_score``, ``more_like_this`` — raises
 :class:`UnsupportedQueryError`. That is the single most important decision in this
 module. A translator that silently ignores a clause it does not understand
@@ -50,6 +51,21 @@ present, Elasticsearch requires at least one ``should`` clause to match; with a
 do not score, so ``should`` is translated as a required OR in the first case and
 dropped in the second. ``minimum_should_match`` is honoured when given.
 
+**``nested`` holds every inner condition on ONE array element.** ``{"nested":
+{"path": "priorities", "query": {"bool": {"must": [A, B]}}}}`` matches a document
+only when a single element of ``priorities`` satisfies both A and B; an element
+satisfying A and a sibling satisfying B is not a match. That is
+``EXISTS (SELECT 1 FROM jsonb_array_elements(<path>) AS elem(value) WHERE ...)``.
+Inner field names keep their ``path.`` prefix, as they do in Elasticsearch, so
+the inner query is evaluated against the element re-rooted under that path
+(``{"priorities": <element>}``) and the ordinary leaf handlers resolve
+``priorities.safe_to_delay_bucket`` unchanged. A single object stored at the path
+counts as one element, as Elasticsearch indexes it; any other value (absent,
+scalar, null) has no elements and matches nothing. ``score_mode``,
+``ignore_unmapped`` and ``inner_hits`` are accepted and ignored — they shape
+scoring and the response, not which documents match — so a caller reading
+``inner_hits`` off a hit gets none.
+
 Text matching (``match`` / ``multi_match`` / ``wildcard`` / ``prefix``) is
 case-insensitive substring, i.e. ``ILIKE '%term%'``. It is NOT tokenised, so it
 does not reproduce stemming, ``fuzziness``, or per-term scoring. The four call
@@ -77,7 +93,7 @@ from sqlalchemy import (
     type_coerce,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.elements import ColumnElement, Grouping
 
 __all__ = [
     "UnsupportedQueryError",
@@ -493,6 +509,74 @@ def _bool(column, body: Dict[str, Any], id_column, *, now) -> ColumnElement:
     return and_(*required)
 
 
+#: ``nested`` options that only shape scoring or the response, never the match.
+_NESTED_IGNORED_OPTIONS = frozenset({"score_mode", "ignore_unmapped", "inner_hits"})
+
+
+def _nested_parts(body: Any) -> Tuple[str, Dict[str, Any]]:
+    """Validate a ``nested`` body and return ``(path, inner_query)``.
+
+    Shared with :mod:`persistence.document_matcher` so the two backends refuse
+    exactly the same malformed shapes.
+    """
+    if not isinstance(body, dict):
+        raise UnsupportedQueryError(
+            f"nested of type {type(body).__name__}", "nested"
+        )
+    unsupported = set(body) - {"path", "query"} - _NESTED_IGNORED_OPTIONS
+    if unsupported:
+        raise UnsupportedQueryError(f"nested options {sorted(unsupported)}", "nested")
+    path = body.get("path")
+    if not isinstance(path, str) or not path:
+        raise UnsupportedQueryError("nested without a path", "nested")
+    inner = body.get("query")
+    if not isinstance(inner, dict) or not inner:
+        # ES rejects a nested clause without a query. Treating it as match_all
+        # would widen the result set to every document.
+        raise UnsupportedQueryError("nested without a query", "nested")
+    return path, inner
+
+
+def _nested(column, body: Any, id_column, *, now) -> ColumnElement:
+    """``EXISTS`` an element of the array at ``path`` satisfying the inner query."""
+    from sqlalchemy import Text, case, column as sql_column, literal, select
+
+    path, inner = _nested_parts(body)
+    segments = _path(path)
+
+    stored = _json_value(column, path)
+    kind = func.jsonb_typeof(stored)
+    # ``jsonb_array_elements`` raises on a non-array, so anything else is turned
+    # into an array first: an object is one element (ES indexes a lone object as
+    # one nested document), everything else is no elements.
+    elements_of = case(
+        (kind == "array", stored),
+        (kind == "object", func.jsonb_build_array(stored)),
+        else_=cast(literal("[]"), JSONB),
+    )
+    elem = (
+        func.jsonb_array_elements(elements_of)
+        .table_valued(sql_column("value", JSONB))
+        # Anonymous alias, so a nested clause inside a nested clause gets its
+        # own name instead of shadowing the outer element.
+        .render_derived(with_types=False)
+    )
+
+    # Re-root the element under its path so ``priorities.x`` resolves through the
+    # ordinary leaf handlers: {"priorities": <element>}.
+    rerooted: Any = elem.c.value
+    for segment in reversed(segments):
+        rerooted = func.jsonb_build_object(cast(literal(segment), Text), rerooted)
+    # Parenthesised: PostgreSQL only allows a subscript (``x['a']``) on a column
+    # or a parenthesised expression, not directly on a function call.
+    rerooted = type_coerce(Grouping(rerooted), JSONB)
+
+    predicate = build_predicate(
+        rerooted, inner, id_column=id_column, now=now, context="nested.query"
+    )
+    return select(literal(1)).select_from(elem).where(predicate).exists()
+
+
 def _as_int(clause: ColumnElement):
     """A boolean predicate as 0/1, so ``should`` clauses can be counted."""
     from sqlalchemy import Integer, case
@@ -576,6 +660,8 @@ def build_predicate(
         return build_predicate(
             column, inner, id_column=id_column, now=now, context="constant_score.filter"
         )
+    if name == "nested":
+        return _nested(column, body, id_column, now=now)
     handler = _LEAF_HANDLERS.get(name)
     if handler is None:
         raise UnsupportedQueryError(name, context)
@@ -933,6 +1019,11 @@ def _collect(query: Any, found: List[str]) -> None:
                     _collect(clause, found)
         elif name == "constant_score":
             _collect((body or {}).get("filter"), found)
+        elif name == "nested":
+            # Inner field names carry the ``path.`` prefix, so they are already
+            # the dotted paths the field policy is expressed in.
+            if isinstance(body, dict):
+                _collect(body.get("query"), found)
         elif name in ("exists",):
             field = (body or {}).get("field")
             if field:

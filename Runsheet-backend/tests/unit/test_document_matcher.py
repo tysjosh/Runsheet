@@ -224,7 +224,6 @@ class TestUnsupportedClausesRaise:
         "query",
         [
             {"geo_distance": {"distance": "1km"}},
-            {"nested": {"path": "a", "query": {}}},
             {"query_string": {"query": "a AND b"}},
             {"script": {"script": "true"}},
             {"function_score": {}},
@@ -262,3 +261,87 @@ class TestMatchAllAndNone:
     def test_no_query_matches_everything(self):
         assert matches({"a": 1}, None)
         assert matches({"a": 1}, {})
+
+
+class TestNested:
+    """Every inner condition must hold on the SAME array element."""
+
+    DOC = {
+        "priorities": [
+            {"safe_to_delay_bucket": "short", "cluster_id": "a"},
+            {"safe_to_delay_bucket": "long", "cluster_id": "b"},
+        ]
+    }
+
+    @staticmethod
+    def _nested(*must):
+        return {"nested": {"path": "priorities", "query": {"bool": {"must": list(must)}}}}
+
+    def test_conditions_split_across_elements_do_not_match(self):
+        """The whole reason ``nested`` exists: a flat bool would match this."""
+        query = self._nested(
+            {"term": {"priorities.safe_to_delay_bucket": "short"}},
+            {"term": {"priorities.cluster_id": "b"}},
+        )
+        assert not matches(self.DOC, query)
+
+    def test_conditions_on_one_element_match(self):
+        query = self._nested(
+            {"term": {"priorities.safe_to_delay_bucket": "short"}},
+            {"term": {"priorities.cluster_id": "a"}},
+        )
+        assert matches(self.DOC, query)
+
+    def test_a_missing_path_matches_nothing(self):
+        query = {"nested": {"path": "absent", "query": {"term": {"absent.x": 1}}}}
+        assert not matches(self.DOC, query)
+        assert not matches({}, self._nested({"term": {"priorities.cluster_id": "a"}}))
+
+    def test_an_empty_array_or_scalar_has_no_elements(self):
+        query = {"nested": {"path": "priorities", "query": {"match_all": {}}}}
+        assert not matches({"priorities": []}, query)
+        assert not matches({"priorities": "x"}, query)
+        assert not matches({"priorities": None}, query)
+
+    def test_a_lone_object_is_one_element(self):
+        query = self._nested({"term": {"priorities.cluster_id": "a"}})
+        assert matches({"priorities": {"cluster_id": "a"}}, query)
+
+    def test_must_not_inside_nested_is_per_element(self):
+        """``nested`` + inner must_not means "some element lacks X", not "no
+        element has X" — the two differ on a mixed array."""
+        query = {
+            "nested": {
+                "path": "priorities",
+                "query": {
+                    "bool": {"must_not": [{"term": {"priorities.cluster_id": "a"}}]}
+                },
+            }
+        }
+        assert matches(self.DOC, query)
+        assert not matches({"priorities": [{"cluster_id": "a"}]}, query)
+
+    def test_inner_hits_and_score_mode_are_ignored(self):
+        query = {
+            "nested": {
+                "path": "priorities",
+                "query": {"term": {"priorities.cluster_id": "b"}},
+                "inner_hits": {"size": 100},
+                "score_mode": "avg",
+            }
+        }
+        assert matches(self.DOC, query)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"path": "a"},
+            {"path": "a", "query": {}},
+            {"query": {"term": {"a.b": 1}}},
+            {"path": "a", "query": {"term": {"a.b": 1}}, "boost": 2},
+            None,
+        ],
+    )
+    def test_a_malformed_nested_clause_raises(self, body):
+        with pytest.raises(UnsupportedQueryError):
+            matches(self.DOC, {"nested": body})
