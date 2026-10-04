@@ -29,6 +29,12 @@ VALID_TRANSITIONS = {
     "approved": {"executed"},
 }
 
+#: Per-truck loading-plan proposals from CompartmentLoadingAgent.
+LOADING_PLAN_TOOL = "apply_loading_plan"
+#: Statuses in which an approval may still dispatch (pending) or already has.
+_LIVE_STATUSES = ("pending", "approved", "executed")
+_COMMITTED_STATUSES = frozenset({"approved", "executed"})
+
 
 class ApprovalQueueService:
     """Manages the lifecycle of pending agent actions requiring human approval.
@@ -137,6 +143,10 @@ class ApprovalQueueService:
                 f"current status is '{entry['status']}', expected 'pending'"
             )
 
+        if entry.get("tool_name") == LOADING_PLAN_TOOL:
+            # Raises ValueError (entry stays pending) on a conflict.
+            await self._supersede_overlapping_loading_plans(entry, action_id)
+
         now = datetime.now(timezone.utc)
         update_fields = {
             "status": "approved",
@@ -203,6 +213,125 @@ class ApprovalQueueService:
             f"Approved action {action_id} by {reviewer_id}"
         )
         return entry
+
+    @staticmethod
+    def _loading_plan_order_ids(parameters) -> set:
+        """Order ids an ``apply_loading_plan`` approval would dispatch."""
+        if not isinstance(parameters, dict):
+            return set()
+        order_ids = parameters.get("order_ids")
+        if not order_ids:
+            order_ids = [
+                a.get("order_id")
+                for a in parameters.get("assignments") or []
+                if isinstance(a, dict)
+            ]
+        return {o for o in order_ids if isinstance(o, str) and o}
+
+    async def _supersede_overlapping_loading_plans(
+        self, entry: dict, action_id: str
+    ) -> None:
+        """Make room for approving one loading plan (F10).
+
+        Plans from one loading run are order-disjoint, so each truck's plan
+        can be approved. Across runs they are not: a re-run while older plans
+        are still pending proposes the same orders again. Approving one plan
+        therefore:
+
+        * refuses (``ValueError``, this entry stays pending) if another plan
+          already approved or executed shares an order with it;
+        * otherwise expires every pending plan sharing an order, recording
+          ``execution_result.superseded_by``. ``expired`` is reused because the
+          approval index is ``dynamic: strict`` and a system supersede must not
+          look like a reviewer's rejection (no feedback signal).
+
+        A pending plan that moves before it can be expired is a conflict too:
+        the caller retries rather than racing another reviewer.
+        """
+        order_ids = self._loading_plan_order_ids(entry.get("parameters"))
+        if not order_ids:
+            return
+
+        query = {
+            "query": {
+                "bool": {
+                    "filter": [
+                        {"term": {"tenant_id": entry.get("tenant_id")}},
+                        {"term": {"tool_name": LOADING_PLAN_TOOL}},
+                        {"terms": {"status": list(_LIVE_STATUSES)}},
+                    ]
+                }
+            },
+            "size": 500,
+        }
+        result = await self._es.search_documents(self.INDEX, query)
+        overlapping = []
+        for hit in result.get("hits", {}).get("hits", []):
+            other = hit.get("_source") or {}
+            other_id = other.get("action_id")
+            if not other_id or other_id == action_id:
+                continue
+            # Overlap is computed here rather than queried: ``parameters`` is a
+            # dynamic object, not a nested field the store can filter on.
+            shared = order_ids & self._loading_plan_order_ids(other.get("parameters"))
+            if shared:
+                overlapping.append((other, shared))
+
+        for other, shared in overlapping:
+            if other.get("status") in _COMMITTED_STATUSES:
+                raise ValueError(
+                    f"Cannot approve action {action_id}: conflicts with "
+                    f"approved loading plan {other['action_id']} for order(s) "
+                    f"{', '.join(sorted(shared))}"
+                )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for other, shared in overlapping:
+            other_id = other["action_id"]
+            fields = {
+                "status": "expired",
+                "reviewed_at": now_iso,
+                "execution_result": {
+                    "superseded_by": action_id,
+                    "reason": "conflicting_loading_plan",
+                },
+            }
+            try:
+                await self._update_with_concurrency(
+                    other_id, fields, expected_status="pending"
+                )
+            except RuntimeError as exc:
+                raise ValueError(
+                    f"Cannot approve action {action_id}: overlapping loading "
+                    f"plan {other_id} changed while approving; retry"
+                ) from exc
+            other.update(fields)
+            await self._broadcast("approval_expired", other)
+            if self._activity_log:
+                try:
+                    await self._activity_log.log({
+                        "agent_id": other.get("proposed_by", "unknown"),
+                        "action_type": "approval_superseded",
+                        "tool_name": other.get("tool_name"),
+                        "parameters": other.get("parameters"),
+                        "risk_level": other.get("risk_level"),
+                        "outcome": "expired",
+                        "duration_ms": 0,
+                        "tenant_id": other.get("tenant_id"),
+                        "details": {
+                            "action_id": other_id,
+                            "superseded_by": action_id,
+                            "order_ids": sorted(shared),
+                        },
+                    })
+                except Exception:
+                    logger.warning(
+                        "Failed to log supersede of %s", other_id, exc_info=True
+                    )
+            logger.info(
+                "Approval %s superseded loading plan %s (orders %s)",
+                action_id, other_id, ", ".join(sorted(shared)),
+            )
 
     async def _log_approved(
         self, entry: dict, action_id: str, reviewer_id: str, executed: bool
