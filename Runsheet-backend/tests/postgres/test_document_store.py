@@ -648,6 +648,51 @@ async def test_cargo_search_query_shape_returns_only_matching_jobs(store, index_
     assert [h["_id"] for h in response["hits"]["hits"]] == ["job-3"]
 
 
+# ---------------------------------------------------------------------------
+# Retention sweep through the store (F14)
+# ---------------------------------------------------------------------------
+
+
+async def test_breadcrumb_retention_deletes_only_samples_older_than_the_cutoff(
+    store, index_name
+):
+    """``DriverRetentionJob`` used the removed cluster's client and deleted
+    nothing; through the facade it deletes exactly the expired sample."""
+    from dataclasses import replace
+    from datetime import datetime, timedelta, timezone
+
+    from driver.services.driver_retention_job import (
+        RETENTION_CLASSES,
+        DriverRetentionJob,
+    )
+    from services.elasticsearch_service import ElasticsearchService
+
+    now = datetime(2026, 10, 2, 12, 0, 0, tzinfo=timezone.utc)
+    old = now - timedelta(days=90, seconds=1)
+    fresh = now - timedelta(days=89, hours=23)
+    await _seed(store, index_name, {
+        "old": {"tenant_id": TENANT, "driver_id": "drv_1",
+                "sample_timestamp": old.isoformat(),
+                # Received inside the window: the sweep must not anchor on it.
+                "server_received_at": (now - timedelta(days=1)).isoformat()},
+        "fresh": {"tenant_id": TENANT, "driver_id": "drv_1",
+                  "sample_timestamp": fresh.isoformat(),
+                  "server_received_at": fresh.isoformat()},
+    })
+
+    service = ElasticsearchService()
+    service._document_store = store
+    spec = next(s for s in RETENTION_CLASSES if s.data_class == "breadcrumb_sample")
+
+    deleted = await DriverRetentionJob(es_service=service).run_class(
+        replace(spec, index=index_name), now
+    )
+
+    assert deleted == 1
+    assert await store.get_document(index_name, "old") is None
+    assert await store.get_document(index_name, "fresh") is not None
+
+
 async def test_an_unsupported_query_clause_raises(store, index_name):
     """The central design decision: never silently drop a clause.
 

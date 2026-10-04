@@ -25,6 +25,7 @@ from driver.services.driver_retention_job import (
     DriverRetentionJob,
     run_retention_cycle,
 )
+from services.no_cluster import ClusterRemovedError, NoClusterClient
 
 RETENTION_LOGGER = "driver.services.driver_retention_job"
 
@@ -33,31 +34,48 @@ RETENTION_LOGGER = "driver.services.driver_retention_job"
 NOW = datetime(2026, 3, 31, 12, 30, 45, tzinfo=timezone.utc)
 
 
-class FakeESClient:
-    """Records every ``delete_by_query`` and returns a canned deleted count."""
+class UntouchableClient:
+    """The removed cluster's client, recording any attempt to use it.
+
+    Production's ``ElasticsearchService.client`` is a
+    :class:`services.no_cluster.NoClusterClient`, whose data-plane methods raise
+    :class:`ClusterRemovedError`. The sweep used to call
+    ``client.delete_by_query`` and so failed every class, every day (F14).
+    """
+
+    def __init__(self) -> None:
+        self.touched: List[str] = []
+        self._inner = NoClusterClient()
+
+    def __getattr__(self, name: str) -> Any:
+        self.touched.append(name)
+        return getattr(self._inner, name)
+
+
+class FakeESService:
+    """The service-level async ``delete_by_query`` the sweep must use.
+
+    Records every call and returns a canned deleted count per index.
+    """
 
     def __init__(self, deleted_by_index: Dict[str, int] | None = None) -> None:
         self.calls: List[Dict[str, Any]] = []
         self._deleted = deleted_by_index or {}
+        self.client = UntouchableClient()
 
-    def delete_by_query(self, *, index: str, body: Dict[str, Any], **kwargs: Any):
-        self.calls.append({"index": index, "body": body, "kwargs": kwargs})
-        return {"deleted": self._deleted.get(index, 0)}
-
-
-class FakeESService:
-    def __init__(self, client: FakeESClient) -> None:
-        self.client = client
+    async def delete_by_query(self, index: str, query: Dict[str, Any]) -> int:
+        self.calls.append({"index": index, "query": query})
+        return self._deleted.get(index, 0)
 
 
 @pytest.fixture
-def es_client() -> FakeESClient:
-    return FakeESClient()
+def es_service() -> FakeESService:
+    return FakeESService()
 
 
 @pytest.fixture
-def job(es_client: FakeESClient) -> DriverRetentionJob:
-    return DriverRetentionJob(es_service=FakeESService(es_client))
+def job(es_service: FakeESService) -> DriverRetentionJob:
+    return DriverRetentionJob(es_service=es_service)
 
 
 def _records(caplog) -> List[str]:
@@ -209,13 +227,36 @@ class TestRunCycle:
             assert "tenant_scope=all" in record
 
     @pytest.mark.asyncio
+    async def test_the_sweep_uses_the_store_and_never_the_removed_cluster(
+        self, job, es_service
+    ):
+        """F14: every class failed daily with ``ClusterRemovedError`` because the
+        sweep called ``es.client.delete_by_query``."""
+        results = await job.run_cycle(now=NOW)
+
+        assert results == {
+            "duty_status_event": 0,
+            "breadcrumb_sample": 0,
+            "driver_presence": 0,
+            "inspection_report": 0,
+            "idempotency_key": 0,
+        }
+        assert es_service.client.touched == []
+        assert len(es_service.calls) == 4
+
+    def test_the_double_really_is_the_removed_cluster(self, es_service):
+        """Guards the test above: touching the client would have raised."""
+        with pytest.raises(ClusterRemovedError):
+            es_service.client.delete_by_query(index="x", body={})
+
+    @pytest.mark.asyncio
     async def test_no_query_is_issued_for_driver_presence(
-        self, job, es_client, caplog
+        self, job, es_service, caplog
     ):
         with caplog.at_level(logging.INFO, logger=RETENTION_LOGGER):
             await job.run_cycle(now=NOW)
 
-        swept = [call["index"] for call in es_client.calls]
+        swept = [call["index"] for call in es_service.calls]
         assert "driver_presence" not in swept
         assert swept == [
             "duty_status_events",
@@ -229,17 +270,17 @@ class TestRunCycle:
 
     @pytest.mark.asyncio
     async def test_each_query_ranges_on_the_declared_anchor_and_cutoff(
-        self, job, es_client, caplog
+        self, job, es_service, caplog
     ):
         with caplog.at_level(logging.INFO, logger=RETENTION_LOGGER):
             await job.run_cycle(now=NOW)
 
-        by_index = {call["index"]: call["body"] for call in es_client.calls}
+        by_index = {call["index"]: call["query"] for call in es_service.calls}
         for spec in RETENTION_CLASSES:
             if not spec.has_retention_period:
                 continue
-            body = by_index[spec.index]
-            range_clause = body["query"]["range"]
+            # The clause itself, not an ES ``{"query": ...}`` body.
+            range_clause = by_index[spec.index]["range"]
             assert list(range_clause) == [spec.anchor_field]
             logged_cutoff = _cutoff_of(_record_for(caplog, spec.data_class))
             # The queried cutoff and the logged cutoff are the same instant.
@@ -248,8 +289,9 @@ class TestRunCycle:
 
     @pytest.mark.asyncio
     async def test_deleted_count_is_reported_per_class(self, caplog):
-        client = FakeESClient({"idempotency_keys": 1204})
-        job = DriverRetentionJob(es_service=FakeESService(client))
+        job = DriverRetentionJob(
+            es_service=FakeESService({"idempotency_keys": 1204})
+        )
 
         with caplog.at_level(logging.INFO, logger=RETENTION_LOGGER):
             results = await job.run_cycle(now=NOW)
@@ -261,8 +303,9 @@ class TestRunCycle:
     @pytest.mark.asyncio
     async def test_a_breadcrumb_deleted_count_is_reported_and_named(self, caplog):
         """The class deletes for real now that the index carries documents."""
-        client = FakeESClient({"driver_breadcrumbs": 8412})
-        job = DriverRetentionJob(es_service=FakeESService(client))
+        job = DriverRetentionJob(
+            es_service=FakeESService({"driver_breadcrumbs": 8412})
+        )
 
         with caplog.at_level(logging.INFO, logger=RETENTION_LOGGER):
             results = await job.run_cycle(now=NOW)
@@ -274,30 +317,30 @@ class TestRunCycle:
 
     @pytest.mark.asyncio
     async def test_a_failing_class_does_not_stop_the_others(self, caplog):
-        class FailingClient(FakeESClient):
-            def delete_by_query(self, *, index: str, body, **kwargs):
+        class FailingService(FakeESService):
+            async def delete_by_query(self, index: str, query):
                 if index == "duty_status_events":
-                    raise RuntimeError("shard failure")
-                return super().delete_by_query(index=index, body=body, **kwargs)
+                    raise RuntimeError("statement timeout")
+                return await super().delete_by_query(index, query)
 
-        client = FailingClient()
-        job = DriverRetentionJob(es_service=FakeESService(client))
+        service = FailingService()
+        job = DriverRetentionJob(es_service=service)
 
         with caplog.at_level(logging.INFO, logger=RETENTION_LOGGER):
             results = await job.run_cycle(now=NOW)
 
         assert results["duty_status_event"] is None
         assert results["idempotency_key"] == 0
-        assert [call["index"] for call in client.calls] == [
+        assert [call["index"] for call in service.calls] == [
             "driver_breadcrumbs",
             "vehicle_inspections",
             "idempotency_keys",
         ]
 
     @pytest.mark.asyncio
-    async def test_run_retention_cycle_seam_sweeps_every_class(self, job, es_client):
+    async def test_run_retention_cycle_seam_sweeps_every_class(self, job, es_service):
         await run_retention_cycle(job)
-        assert len(es_client.calls) == 4
+        assert len(es_service.calls) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -328,39 +371,30 @@ def _breadcrumb_doc(
     }
 
 
-class MatchingESClient(FakeESClient):
-    """Applies the sweep's range clause to an in-memory document set.
+class MatchingESService(FakeESService):
+    """Applies the sweep's query to an in-memory document set.
 
-    Only the one query shape this job builds is honoured — a single ``range``
-    over one field with ``lt`` — which is enough to answer *which documents would
-    this sweep actually delete*, the question the anchor choice decides.
+    Uses :func:`persistence.document_matcher.matches`, the in-memory twin of the
+    Postgres translation, so a string ``lt`` bound compares as text exactly as
+    the store does. Answers *which documents would this sweep actually delete*,
+    the question the anchor choice decides. The real-Postgres twin is in
+    ``tests/postgres/test_document_store.py``.
     """
 
     def __init__(self, documents_by_index: Dict[str, List[Dict[str, Any]]]) -> None:
         super().__init__()
-        self.documents = documents_by_index
         self.remaining: Dict[str, List[Dict[str, Any]]] = {
             index: list(docs) for index, docs in documents_by_index.items()
         }
 
-    def delete_by_query(self, *, index: str, body: Dict[str, Any], **kwargs: Any):
-        self.calls.append({"index": index, "body": body, "kwargs": kwargs})
-        range_clause = body["query"]["range"]
-        (field,) = list(range_clause)
-        cutoff = datetime.strptime(
-            range_clause[field]["lt"], "%Y-%m-%dT%H:%M:%SZ"
-        ).replace(tzinfo=timezone.utc)
+    async def delete_by_query(self, index: str, query: Dict[str, Any]) -> int:
+        from persistence.document_matcher import matches
 
-        kept: List[Dict[str, Any]] = []
-        deleted = 0
-        for document in self.remaining.get(index, []):
-            value = document.get(field)
-            if value is not None and datetime.fromisoformat(value) < cutoff:
-                deleted += 1
-            else:
-                kept.append(document)
+        self.calls.append({"index": index, "query": query})
+        documents = self.remaining.get(index, [])
+        kept = [document for document in documents if not matches(document, query)]
         self.remaining[index] = kept
-        return {"deleted": deleted}
+        return len(documents) - len(kept)
 
 
 class TestBreadcrumbSweep:
@@ -371,7 +405,7 @@ class TestBreadcrumbSweep:
         just_inside = NOW - timedelta(days=89, hours=23)
         just_outside = NOW - timedelta(days=90, seconds=1)
         long_gone = NOW - timedelta(days=400)
-        client = MatchingESClient(
+        service = MatchingESService(
             {
                 "driver_breadcrumbs": [
                     _breadcrumb_doc(just_inside, just_inside),
@@ -380,14 +414,14 @@ class TestBreadcrumbSweep:
                 ]
             }
         )
-        job = DriverRetentionJob(es_service=FakeESService(client))
+        job = DriverRetentionJob(es_service=service)
 
         results = await job.run_cycle(now=NOW)
 
         assert results["breadcrumb_sample"] == 2
         survivors = [
             document["sample_timestamp"]
-            for document in client.remaining["driver_breadcrumbs"]
+            for document in service.remaining["driver_breadcrumbs"]
         ]
         assert survivors == [just_inside.isoformat()]
 
@@ -402,31 +436,29 @@ class TestBreadcrumbSweep:
         """
         taken_at = NOW - timedelta(days=90, minutes=1)
         received_at = taken_at + timedelta(hours=23)
-        client = MatchingESClient(
+        service = MatchingESService(
             {"driver_breadcrumbs": [_breadcrumb_doc(taken_at, received_at)]}
         )
-        job = DriverRetentionJob(es_service=FakeESService(client))
+        job = DriverRetentionJob(es_service=service)
 
         results = await job.run_cycle(now=NOW)
 
         assert results["breadcrumb_sample"] == 1
-        assert client.remaining["driver_breadcrumbs"] == []
+        assert service.remaining["driver_breadcrumbs"] == []
 
     @pytest.mark.asyncio
-    async def test_the_sweep_never_ranges_on_server_received_at(self, job, es_client):
+    async def test_the_sweep_never_ranges_on_server_received_at(self, job, es_service):
         await job.run_cycle(now=NOW)
         breadcrumb_call = next(
-            call for call in es_client.calls if call["index"] == "driver_breadcrumbs"
+            call for call in es_service.calls if call["index"] == "driver_breadcrumbs"
         )
-        assert list(breadcrumb_call["body"]["query"]["range"]) == [
-            "sample_timestamp"
-        ]
+        assert list(breadcrumb_call["query"]["range"]) == ["sample_timestamp"]
 
     @pytest.mark.asyncio
-    async def test_one_delete_by_query_per_cycle_for_the_class(self, job, es_client):
+    async def test_one_delete_by_query_per_cycle_for_the_class(self, job, es_service):
         """R10.13 — one sweep per class per cycle, and the cycle is 24 hours."""
         await job.run_cycle(now=NOW)
         breadcrumb_calls = [
-            call for call in es_client.calls if call["index"] == "driver_breadcrumbs"
+            call for call in es_service.calls if call["index"] == "driver_breadcrumbs"
         ]
         assert len(breadcrumb_calls) == 1

@@ -44,6 +44,8 @@ _DELEGATING_METHODS = (
     "multi_search",
     "get_document",
     "delete_document",
+    "update_by_query",
+    "delete_by_query",
 )
 
 
@@ -114,6 +116,10 @@ class _RecordingStore:
         self.calls.append(("delete_document", index, doc_id))
         return True
 
+    async def delete_by_query(self, index, query):
+        self.calls.append(("delete_by_query", index, query))
+        return 3
+
 
 @pytest.fixture
 def service_with_stub_store(monkeypatch):
@@ -164,6 +170,22 @@ async def test_get_and_delete_are_served_by_the_store(service_with_stub_store):
     assert await service.get_document("i", "a") is None
     assert await service.delete_document("i", "a") is True
     assert store.calls == [("get_document", "i", "a"), ("delete_document", "i", "a")]
+
+
+async def test_delete_by_query_is_served_by_the_store(service_with_stub_store):
+    """F14: the retention sweep had no facade method and used the raw client,
+    which is the removed cluster."""
+    service, store = service_with_stub_store
+    query = {"range": {"sample_timestamp": {"lt": "2026-01-01T00:00:00Z"}}}
+    assert await service.delete_by_query("driver_breadcrumbs", query) == 3
+    assert store.calls == [("delete_by_query", "driver_breadcrumbs", query)]
+
+
+async def test_delete_by_query_skips_a_retired_index(service_with_stub_store, monkeypatch):
+    service, store = service_with_stub_store
+    monkeypatch.setattr(service, "_is_retired_index", lambda index: True)
+    assert await service.delete_by_query("gone", {"match_all": {}}) == 0
+    assert store.calls == []
 
 
 async def test_semantic_search_reaches_the_store_through_search_documents(

@@ -420,6 +420,21 @@ class ElasticsearchService:
         store = self._pg_store()
         return await store.update_by_query(index, query, transform)
 
+    async def delete_by_query(self, index: str, query: Dict[str, Any]) -> int:
+        """Delete every document in ``index`` matching ``query``; return the count.
+
+        The facade equivalent of ``_delete_by_query``. ``query`` is the clause
+        itself (``{"range": {...}}``), not a ``{"query": ...}`` body. Like
+        :meth:`update_by_query` it skips a retired index and delegates to the
+        Postgres document store, which deletes the whole match in one statement
+        with no page limit.
+        """
+        if self._is_retired_index(index):
+            return 0
+
+        store = self._pg_store()
+        return await store.delete_by_query(index, query)
+
     async def bulk_index_documents(self, index: str, documents: List[Dict[Any, Any]]) -> Dict[str, Any]:
         """
         Bulk index multiple documents with circuit breaker protection and partial failure handling.
