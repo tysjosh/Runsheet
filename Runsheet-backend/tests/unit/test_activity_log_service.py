@@ -281,6 +281,23 @@ class TestLogMonitoringCycle:
 
         service._ws.broadcast_activity.assert_called_once()
 
+    async def test_log_monitoring_cycle_writes_tenant_id(self):
+        # Staging F9: every monitoring_cycle entry carried tenant_id None.
+        service = _make_service()
+        await service.log_monitoring_cycle(
+            "driver_expiry_cron_agent", 2, 0, 12.0, tenant_id="t1"
+        )
+
+        doc = service._es.index_document.call_args[0][2]
+        assert doc["tenant_id"] == "t1"
+
+    async def test_log_monitoring_cycle_tenant_defaults_to_none(self):
+        service = _make_service()
+        await service.log_monitoring_cycle("fuel_agent", 1, 0, 10.0)
+
+        doc = service._es.index_document.call_args[0][2]
+        assert doc["tenant_id"] is None
+
 
 # ---------------------------------------------------------------------------
 # Tests: log_tool_invocation

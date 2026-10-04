@@ -58,6 +58,31 @@ class AutonomousAgentBase(ABC):
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
         self.logger = logging.getLogger(f"agent.{agent_id}")
+        # Per-cycle {tenant_id: [detections, actions]} noted by subclasses so
+        # the monitoring-cycle entry can be written per tenant (F9).
+        self._tenant_activity: Dict[Optional[str], List[int]] = {}
+        self._warned_no_activity_log = False
+
+    def set_activity_log_service(self, activity_log_service) -> None:
+        """Late-bind the activity log.
+
+        The compliance crons are built before the agents bootstrap creates
+        the ActivityLogService, so they start with ``None`` and are handed
+        the real service once it exists.
+        """
+        self._activity_log = activity_log_service
+
+    def _note_tenant_activity(
+        self, tenant_id: Optional[str], detections: int = 0, actions: int = 0
+    ) -> None:
+        """Record this cycle's detections/actions for one tenant.
+
+        Subclasses call this inside their per-tenant loop; the cycle is then
+        logged once per noted tenant with that tenant's id.
+        """
+        counts = self._tenant_activity.setdefault(tenant_id, [0, 0])
+        counts[0] += detections
+        counts[1] += actions
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -115,6 +140,7 @@ class AutonomousAgentBase(ABC):
                 continue
 
             cycle_start = datetime.now(timezone.utc)
+            self._tenant_activity = {}
             try:
                 detections, actions = await self.monitor_cycle()
                 duration_ms = (
@@ -123,15 +149,64 @@ class AutonomousAgentBase(ABC):
                 # Only log to ES when something was detected or acted on
                 # Reduces write volume by ~90% for idle cycles
                 if len(detections) > 0 or len(actions) > 0:
-                    await self._activity_log.log_monitoring_cycle(
-                        self.agent_id,
-                        len(detections),
-                        len(actions),
-                        duration_ms,
-                    )
+                    await self._log_cycle(detections, actions, duration_ms)
             except Exception:
                 self.logger.exception("Monitor cycle error")
             await asyncio.sleep(self.poll_interval)
+
+    async def _log_cycle(
+        self, detections: List[Any], actions: List[Any], duration_ms: float
+    ) -> None:
+        """Write one ``monitoring_cycle`` entry per tenant for this cycle."""
+        if self._activity_log is None:
+            # Built before the activity log existed and never adopted: skip
+            # the write rather than raise AttributeError every cycle.
+            if not self._warned_no_activity_log:
+                self.logger.warning(
+                    "Agent %s has no activity log service; monitoring "
+                    "cycles are not being logged",
+                    self.agent_id,
+                )
+                self._warned_no_activity_log = True
+            return
+
+        per_tenant = {
+            tenant_id: counts
+            for tenant_id, counts in self._tenant_activity.items()
+            if counts[0] or counts[1]
+        } or self._group_by_tenant(detections, actions)
+
+        for tenant_id, (detection_count, action_count) in per_tenant.items():
+            await self._activity_log.log_monitoring_cycle(
+                self.agent_id,
+                detection_count,
+                action_count,
+                duration_ms,
+                tenant_id=tenant_id,
+            )
+
+    @staticmethod
+    def _group_by_tenant(
+        detections: List[Any], actions: List[Any]
+    ) -> Dict[Optional[str], List[int]]:
+        """Group cycle results by the ``tenant_id`` each item carries.
+
+        Dicts and objects with a string ``tenant_id`` group under it; bare
+        ids and anything else group under ``None``.
+        """
+        def _tenant_of(item: Any) -> Optional[str]:
+            if isinstance(item, dict):
+                value = item.get("tenant_id")
+            else:
+                value = getattr(item, "tenant_id", None)
+            return value if isinstance(value, str) else None
+
+        grouped: Dict[Optional[str], List[int]] = {}
+        for item in detections:
+            grouped.setdefault(_tenant_of(item), [0, 0])[0] += 1
+        for item in actions:
+            grouped.setdefault(_tenant_of(item), [0, 0])[1] += 1
+        return grouped
 
     # ------------------------------------------------------------------
     # Cooldown management

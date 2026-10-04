@@ -42,6 +42,25 @@ _meter_calibration_cron_agent = None
 _dyed_diesel_cert_expiry_cron_agent = None
 
 
+def compliance_cron_agents() -> list:
+    """The compliance cron agents this module built (skipping any that failed).
+
+    ``compliance`` boots before ``agents``, so these crons are constructed
+    with ``activity_log_service=None``; ``bootstrap.agents`` adopts them once
+    the activity log exists (late-binds it and lists them in agent health).
+    """
+    return [
+        agent
+        for agent in (
+            _driver_expiry_cron_agent,
+            _asset_cert_expiry_cron_agent,
+            _meter_calibration_cron_agent,
+            _dyed_diesel_cert_expiry_cron_agent,
+        )
+        if agent is not None
+    ]
+
+
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register fuel-compliance domain services.
 

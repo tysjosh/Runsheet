@@ -115,6 +115,7 @@ class MeterCalibrationCronAgent(AutonomousAgentBase):
                 alerts = await svc.check_calibration_alerts(tenant_id)
                 if alerts:
                     detections.extend(alerts)
+                    self._note_tenant_activity(tenant_id, detections=len(alerts))
                     self.logger.info(
                         "Tenant %s: %d meter calibration alert(s) generated",
                         tenant_id,

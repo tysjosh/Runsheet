@@ -126,6 +126,7 @@ class DyedDieselCertExpiryCronAgent(AutonomousAgentBase):
                 )
                 if expiring:
                     detections.extend(expiring)
+                    self._note_tenant_activity(tenant_id, detections=len(expiring))
                     self.logger.info(
                         "Tenant %s: %d dyed-diesel certificate(s) expiring "
                         "within %d days",

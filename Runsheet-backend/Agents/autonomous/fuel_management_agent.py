@@ -141,6 +141,7 @@ class FuelManagementAgent(AutonomousAgentBase):
                 continue
 
             detections.append(station_id)
+            self._note_tenant_activity(tenant_id, detections=1)
 
             # Respect cooldown (Req 4.4) — unless the approval it was waiting
             # on expired unanswered: the 2 h cooldown outlives the 1 h expiry,
@@ -210,6 +211,7 @@ class FuelManagementAgent(AutonomousAgentBase):
                 "priority": priority.value,
                 "result": result,
             })
+            self._note_tenant_activity(tenant_id, actions=1)
 
             # Set cooldown regardless of outcome (Req 4.4)
             self._set_cooldown(station_id)

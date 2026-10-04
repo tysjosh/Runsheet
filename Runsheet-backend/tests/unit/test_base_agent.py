@@ -367,3 +367,126 @@ class TestAbstractMethod:
                 ws_manager=ws_manager,
                 confirmation_protocol=cp,
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests: missing activity log and per-tenant cycle logging (F9)
+# ---------------------------------------------------------------------------
+
+
+class _ScriptedAgent(AutonomousAgentBase):
+    """Runs a fixed list of cycles, then stops its own loop."""
+
+    def __init__(self, cycles, **kwargs):
+        kwargs.setdefault("agent_id", "scripted_agent")
+        kwargs.setdefault("poll_interval_seconds", 0)
+        kwargs.setdefault("cooldown_minutes", 0)
+        kwargs.setdefault("ws_manager", None)
+        kwargs.setdefault("confirmation_protocol", None)
+        super().__init__(**kwargs)
+        self._cycles = list(cycles)
+
+    async def monitor_cycle(self):
+        cycle = self._cycles.pop(0)
+        if not self._cycles:
+            self._running = False
+        return cycle(self) if callable(cycle) else cycle
+
+
+async def _run(agent):
+    """Drive ``_run_loop`` to completion as the sweep leader."""
+    agent._running = True
+    with patch("persistence.leader_election.is_sweep_leader", return_value=True):
+        await agent._run_loop()
+
+
+def _spy_log():
+    log = MagicMock()
+    log.log_monitoring_cycle = AsyncMock()
+    return log
+
+
+def _cycle_calls(log):
+    """``(tenant_id, detections, actions)`` per logged cycle, None first."""
+    return sorted(
+        (
+            (c.kwargs["tenant_id"], c.args[1], c.args[2])
+            for c in log.log_monitoring_cycle.call_args_list
+        ),
+        key=lambda c: (c[0] is not None, c[0] or ""),
+    )
+
+
+class TestMissingActivityLog:
+    """Staging F9: crons built before the activity log raised every cycle."""
+
+    async def test_none_activity_log_warns_once_and_never_errors(self, caplog):
+        agent = _ScriptedAgent(
+            [(["d1"], []), (["d2"], [])], activity_log_service=None
+        )
+        with caplog.at_level("WARNING", logger="agent.scripted_agent"):
+            await _run(agent)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("Monitor cycle error" in m for m in messages), messages
+        warnings = [
+            r for r in caplog.records
+            if r.levelname == "WARNING" and "no activity log" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+
+    async def test_set_activity_log_service_late_binds(self):
+        agent = _ScriptedAgent([(["d1"], [])], activity_log_service=None)
+        log = _spy_log()
+
+        agent.set_activity_log_service(log)
+        await _run(agent)
+
+        log.log_monitoring_cycle.assert_awaited_once()
+
+
+class TestPerTenantCycleLogging:
+    """Staging F9: every monitoring_cycle entry carried tenant_id None."""
+
+    async def test_noted_tenants_get_one_entry_each(self):
+        def cycle(agent):
+            agent._note_tenant_activity("t1", detections=2)
+            agent._note_tenant_activity("t2", detections=1, actions=1)
+            return (["a", "b", "c"], ["x"])
+
+        log = _spy_log()
+        await _run(_ScriptedAgent([cycle], activity_log_service=log))
+
+        assert _cycle_calls(log) == [("t1", 2, 0), ("t2", 1, 1)]
+
+    async def test_noted_tenant_activity_resets_between_cycles(self):
+        def first(agent):
+            agent._note_tenant_activity("t1", detections=1)
+            return (["a"], [])
+
+        def second(agent):
+            agent._note_tenant_activity("t2", detections=1)
+            return (["b"], [])
+
+        log = _spy_log()
+        await _run(_ScriptedAgent([first, second], activity_log_service=log))
+
+        assert _cycle_calls(log) == [("t1", 1, 0), ("t2", 1, 0)]
+
+    async def test_unnoted_results_group_by_item_tenant(self):
+        class _Alert:
+            def __init__(self, tenant_id):
+                self.tenant_id = tenant_id
+
+        detections = [{"tenant_id": "t1"}, _Alert("t2"), "bare-id"]
+        actions = [{"tenant_id": "t1"}]
+        log = _spy_log()
+        await _run(_ScriptedAgent([(detections, actions)], activity_log_service=log))
+
+        assert _cycle_calls(log) == [(None, 1, 0), ("t1", 1, 1), ("t2", 1, 0)]
+
+    async def test_idle_cycle_writes_nothing(self):
+        log = _spy_log()
+        await _run(_ScriptedAgent([([], [])], activity_log_service=log))
+
+        log.log_monitoring_cycle.assert_not_called()

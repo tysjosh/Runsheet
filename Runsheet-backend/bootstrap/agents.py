@@ -51,6 +51,38 @@ _outcome_tracking_task = None
 OUTCOME_TRACKING_INTERVAL_SECONDS = 300
 
 
+def adopt_compliance_cron_agents(
+    app, activity_log_service, ws_manager, confirmation_protocol
+) -> list:
+    """Hand the compliance crons the services that did not exist when they were built.
+
+    ``compliance`` boots before ``agents`` (``_BOOT_ORDER``), so its four
+    cron agents were constructed with ``activity_log_service=None`` and every
+    cycle with detections died on ``None.log_monitoring_cycle`` (F9). This
+    late-binds the activity log, fills ``_ws`` / ``_confirmation_protocol``
+    only where they are still ``None``, and registers each cron in
+    ``app.state.autonomous_agents`` so ``/api/agent/health`` lists it. The
+    crons are already running; they are not restarted.
+    """
+    from bootstrap.compliance import compliance_cron_agents
+
+    adopted = compliance_cron_agents()
+    for cron in adopted:
+        cron.set_activity_log_service(activity_log_service)
+        if cron._ws is None:
+            cron._ws = ws_manager
+        if cron._confirmation_protocol is None:
+            cron._confirmation_protocol = confirmation_protocol
+        app.state.autonomous_agents[cron.agent_id] = cron
+    if adopted:
+        logger.info(
+            "Adopted %d compliance cron agent(s): %s",
+            len(adopted),
+            ", ".join(c.agent_id for c in adopted),
+        )
+    return adopted
+
+
 # ---------------------------------------------------------------------------
 # Fuel-Ops Hardening helpers (Task 12.1)
 # ---------------------------------------------------------------------------
@@ -816,6 +848,15 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Wire Layer 0 agents to publish RiskSignals (Req 2.2)
     for agent_name, agent in app.state.autonomous_agents.items():
         agent._signal_bus = signal_bus
+
+    # Adopt the compliance crons (F9). Done after the RiskSignal loop above so
+    # the crons keep the signal bus they were built with.
+    try:
+        adopt_compliance_cron_agents(
+            app, activity_log_service, agent_ws_manager, confirmation_protocol
+        )
+    except Exception:
+        logger.exception("Compliance cron adoption failed")
 
     # Set up overlay ES indices
     logger.info("Overlay ES indices ready")
