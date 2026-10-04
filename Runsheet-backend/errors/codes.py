@@ -50,6 +50,9 @@ class ErrorCode(str, Enum):
     
     AI_SERVICE_UNAVAILABLE = "AI_SERVICE_UNAVAILABLE"
     """Gemini API unavailable (HTTP 503)"""
+
+    AI_RATE_LIMITED = "AI_RATE_LIMITED"
+    """The LLM provider rate-limited or exhausted its quota (HTTP 429)"""
     
     SESSION_STORE_UNAVAILABLE = "SESSION_STORE_UNAVAILABLE"
     """Redis/DynamoDB unavailable (HTTP 503)"""
@@ -314,6 +317,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.ELASTICSEARCH_UNAVAILABLE: 503,
     ErrorCode.AI_SERVICE_UNAVAILABLE: 503,
+    ErrorCode.AI_RATE_LIMITED: 429,
     ErrorCode.SESSION_STORE_UNAVAILABLE: 503,
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.CIRCUIT_OPEN: 503,

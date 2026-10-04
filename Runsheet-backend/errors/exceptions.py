@@ -219,6 +219,29 @@ def ai_service_unavailable(
     )
 
 
+def ai_rate_limited(
+    message: str = "AI service is rate limited",
+    retry_after_seconds: Optional[int] = None,
+) -> AppException:
+    """Create the 429 for an LLM provider rate limit or exhausted quota (F3).
+
+    Carries ``Retry-After`` and ``details.retry_after_seconds`` when the
+    provider said how long to wait.
+    """
+    headers = None
+    details = None
+    if retry_after_seconds is not None:
+        seconds = max(1, int(retry_after_seconds))
+        headers = {"Retry-After": str(seconds)}
+        details = {"retry_after_seconds": seconds}
+    return AppException(
+        error_code=ErrorCode.AI_RATE_LIMITED,
+        message=message,
+        details=details,
+        headers=headers,
+    )
+
+
 def session_store_unavailable(
     message: str = "Session store unavailable",
     details: Optional[dict[str, Any]] = None

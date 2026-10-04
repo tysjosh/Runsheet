@@ -80,35 +80,78 @@ async def chat_endpoint(
     http_request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
+    from Agents.llm_errors import (
+        AI_SERVICE_UNAVAILABLE,
+        ChatEvent,
+        done_event,
+        error_event,
+        safe_message_for,
+    )
     from Agents.mainagent import LogisticsAgent
+    from middleware.request_id import get_request_id
+
+    # Captured here: the request-id ContextVar is not guaranteed to be set
+    # while the StreamingResponse body is iterated.
+    request_id = get_request_id() or None
     agent = LogisticsAgent()
+
+    def _sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, default=str)}\n\n"
+
     async def generate_response():
+        done_sent = False
         try:
             async for event in agent.chat_streaming(
                 request.message,
                 request.mode,
                 session_id=request.session_id,
                 tenant_id=tenant.tenant_id,
+                request_id=request_id,
             ):
-                if isinstance(event, dict):
+                if isinstance(event, ChatEvent):
+                    # Already normalized (orchestrator path and legacy
+                    # status/error events): forward verbatim.
+                    # Not a ``break`` on done: draining lets chat_streaming
+                    # finish (it records telemetry after the last event).
+                    if event.get("type") == "done":
+                        if done_sent:
+                            continue
+                        done_sent = True
+                    yield _sse(event)
+                elif isinstance(event, dict):
+                    # Raw Strands events from the legacy direct-agent path.
                     if "error" in event:
-                        yield f"data: {json.dumps({'error': event['error']})}\n\n"
+                        logger.error("Raw error event in chat stream (request_id=%s)", request_id)
+                        yield _sse(error_event(
+                            AI_SERVICE_UNAVAILABLE,
+                            safe_message_for(AI_SERVICE_UNAVAILABLE),
+                            request_id,
+                        ))
                     elif "data" in event:
                         text = event["data"]
                         if text:
-                            yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
+                            yield _sse({'type': 'text', 'content': text})
                     elif "current_tool_use" in event:
                         tool_info = event["current_tool_use"]
-                        yield f"data: {json.dumps({'type': 'tool', 'tool_name': tool_info.get('name', ''), 'tool_input': tool_info.get('input', {})})}\n\n"
+                        yield _sse({'type': 'tool', 'tool_name': tool_info.get('name', ''), 'tool_input': tool_info.get('input', {})})
                     elif "current_tool_result" in event:
                         tool_result = event["current_tool_result"]
-                        yield f"data: {json.dumps({'type': 'tool_result', 'tool_name': tool_result.get('name', ''), 'tool_output': tool_result.get('output', '')})}\n\n"
+                        yield _sse({'type': 'tool_result', 'tool_name': tool_result.get('name', ''), 'tool_output': tool_result.get('output', '')})
                     elif event.get('event') == 'messageStop' or 'result' in event:
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        break
-        except Exception as e:
-            logger.error("Error in chat streaming: %s", e)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                        if not done_sent:
+                            yield _sse(done_event())
+                            done_sent = True
+        except Exception:
+            # Full detail stays in the server log; the client gets a code, a
+            # safe message and the request id to quote (F3).
+            logger.exception("Error in chat streaming (request_id=%s)", request_id)
+            yield _sse(error_event(
+                AI_SERVICE_UNAVAILABLE,
+                safe_message_for(AI_SERVICE_UNAVAILABLE),
+                request_id,
+            ))
+        if not done_sent:
+            yield _sse(done_event())
     return StreamingResponse(generate_response(), media_type="text/plain",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "Content-Type": "text/plain; charset=utf-8"})
 
@@ -118,14 +161,29 @@ async def chat_fallback_endpoint(
     http_request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
+    from Agents.llm_errors import AI_RATE_LIMITED, AgentServiceError
     from Agents.mainagent import LogisticsAgent
+    from errors.exceptions import ai_rate_limited, ai_service_unavailable
+
     agent = LogisticsAgent()
-    response = await agent.chat_fallback(
-        request.message,
-        request.mode,
-        session_id=request.session_id,
-        tenant_id=tenant.tenant_id,
-    )
+    try:
+        response = await agent.chat_fallback(
+            request.message,
+            request.mode,
+            session_id=request.session_id,
+            tenant_id=tenant.tenant_id,
+        )
+    except AgentServiceError as err:
+        # An AI failure is an error response, not a 200 whose text is the
+        # provider's error (F3). Only the safe message leaves the server.
+        if err.code == AI_RATE_LIMITED:
+            raise ai_rate_limited(err.safe_message, err.retry_after_seconds) from err
+        details = (
+            {"retry_after_seconds": err.retry_after_seconds}
+            if err.retry_after_seconds is not None
+            else None
+        )
+        raise ai_service_unavailable(err.safe_message, details) from err
     return {"response": response, "mode": request.mode, "session_id": request.session_id, "timestamp": utcnow().isoformat()}
 
 @router.post("/api/chat/clear")

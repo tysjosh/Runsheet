@@ -29,6 +29,14 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+#: Shown for a failed step when the exception carries no vetted message.
+STEP_FAILED_MESSAGE = "This step could not be completed."
+
+
+def _safe_step_error(exc: BaseException) -> str:
+    """User-facing text for a failed step: never the raw exception (F3)."""
+    return getattr(exc, "safe_message", None) or STEP_FAILED_MESSAGE
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -438,12 +446,23 @@ class ExecutionPlanner:
             except Exception as e:
                 step.recovery_attempts += 1
                 logger.warning(
-                    f"Step {step.step_id} failed (attempt "
-                    f"{step.recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS}): {e}"
+                    "Step %s failed (attempt %s/%s)",
+                    step.step_id,
+                    step.recovery_attempts,
+                    self.MAX_RECOVERY_ATTEMPTS,
+                    exc_info=e,
                 )
-                if step.recovery_attempts > self.MAX_RECOVERY_ATTEMPTS:
+                # ``recoverable is False`` (AgentServiceError) means the step
+                # already ran its own bounded LLM retry; re-running it would
+                # multiply model calls against an exhausted quota (F3).
+                if (
+                    getattr(e, "recoverable", True) is False
+                    or step.recovery_attempts > self.MAX_RECOVERY_ATTEMPTS
+                ):
                     step.status = StepStatus.FAILED
-                    step.result = f"Failed after {self.MAX_RECOVERY_ATTEMPTS} recovery attempts: {e}"
+                    # Never interpolate the exception: plan results are shown
+                    # to the user and provider errors carry raw JSON (F3).
+                    step.result = _safe_step_error(e)
                     return False
 
         # Should not reach here, but guard against it
@@ -621,9 +640,9 @@ class ExecutionPlanner:
                     step.result = f"Rolled back via {step.rollback_tool}"
                 except Exception as e:
                     logger.error(
-                        f"Rollback failed for step {step.step_id}: {e}"
+                        "Rollback failed for step %s", step.step_id, exc_info=e
                     )
-                    step.result = f"Rollback failed: {e}"
+                    step.result = f"Rollback failed: {_safe_step_error(e)}"
             else:
                 # No rollback tool defined — mark as rolled back anyway
                 step.status = StepStatus.ROLLED_BACK

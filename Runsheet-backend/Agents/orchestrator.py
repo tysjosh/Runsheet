@@ -12,18 +12,61 @@ Key behaviours:
     table to identify target specialist domains.
   - ``_is_complex_request`` detects multi-step or cross-domain requests
     that benefit from structured planning.
-  - ``route`` orchestrates the full flow: classify → delegate → synthesize.
+  - ``route_stream`` orchestrates the full flow (classify → delegate →
+    stream normalized ``ChatEvent``s); ``route`` collects it into a string.
+  - LLM failures are retried per ``Agents.llm_errors`` and surface as one
+    typed error event with a safe message, never as answer text (F3).
   - No-match requests fall back to the reporting agent.
   - Complex requests are delegated to the ExecutionPlanner.
 
 Requirements: 7.6, 7.7, 7.8
 """
 
+import asyncio
 import logging
+import random
 import time
-from typing import Any, Dict, List, Optional
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Dict, List, Optional
+
+from Agents.llm_errors import (
+    AI_RATE_LIMITED,
+    AI_SERVICE_UNAVAILABLE,
+    MAX_ATTEMPTS,
+    AgentServiceError,
+    ChatEvent,
+    call_with_llm_retry,
+    classify_llm_exception,
+    done_event,
+    error_event,
+    retry_delay,
+    safe_message_for,
+    status_event,
+    text_event,
+)
 
 logger = logging.getLogger(__name__)
+
+NO_RESULTS_MESSAGE = "I wasn't able to find relevant information for your request."
+
+
+@dataclass
+class _PlanRun:
+    """Per-request state the planner's read-step callback reports into."""
+
+    request_id: Optional[str]
+    failures: List[AgentServiceError] = field(default_factory=list)
+
+
+#: Set by ``route_stream`` around plan execution. The planner calls
+#: ``_execute_read_step`` with a fixed signature, so this is how a read step's
+#: ``AgentServiceError`` reaches the request that ran the plan.
+_plan_run: ContextVar[Optional[_PlanRun]] = ContextVar("orchestrator_plan_run", default=None)
+
+
+def _failed_note(domain: str) -> str:
+    return f"_The {domain} assistant couldn't answer this part right now._"
 
 
 class AgentOrchestrator:
@@ -73,6 +116,9 @@ class AgentOrchestrator:
         specialists: Dict[str, object],
         execution_planner: object,
         activity_log_service: object,
+        *,
+        sleep=None,
+        rand=None,
     ):
         """Initialise the orchestrator with its dependencies.
 
@@ -85,10 +131,15 @@ class AgentOrchestrator:
                 handling complex multi-step requests.
             activity_log_service: An ``ActivityLogService`` instance for
                 logging orchestration decisions and outcomes.
+            sleep: Optional ``async (seconds)`` used between LLM retries
+                (tests inject a no-op).
+            rand: Optional ``(lo, hi) -> float`` jitter source.
         """
         self._specialists = specialists
         self._planner = execution_planner
         self._activity_log = activity_log_service
+        self._sleep = sleep or asyncio.sleep
+        self._rand = rand or random.uniform
 
         # Let the planner answer read-only steps through the specialists.
         # Without this a plan's read steps went through the mutation path,
@@ -108,9 +159,13 @@ class AgentOrchestrator:
         """Answer one read-only plan step with its specialist.
 
         Raises when the step names a domain this orchestrator has no
-        specialist for, so ``execute_plan`` records a step failure and
-        ``_execute_complex_request`` falls back to simple execution instead of
+        specialist for, so ``execute_plan`` records a step failure instead of
         reporting a success that never happened.
+
+        The specialist call gets the same bounded LLM retry as a chat turn.
+        A final failure raises ``AgentServiceError`` (``recoverable=False``,
+        so the planner does not re-run it) and is recorded for the request
+        that is running the plan.
         """
         agent = self._specialists.get(step.agent)
         if agent is None:
@@ -118,31 +173,71 @@ class AgentOrchestrator:
                 f"No specialist registered for domain '{step.agent}'"
             )
         request = resolved_params.get("request") or step.description
-        return await agent.handle(request, {"tenant_id": tenant_id})
+        run = _plan_run.get()
+        try:
+            return await call_with_llm_retry(
+                lambda: agent.handle(request, {"tenant_id": tenant_id}),
+                describe=f"Plan step {step.step_id} ({step.agent})",
+                domain=step.agent,
+                request_id=run.request_id if run else None,
+                sleep=self._sleep,
+                rand=self._rand,
+            )
+        except AgentServiceError as err:
+            if run is not None:
+                run.failures.append(err)
+            raise
 
     async def route(
         self,
         user_message: str,
         tenant_id: str,
         session_id: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> str:
-        """Classify intent and delegate to appropriate specialist(s).
+        """Collect :meth:`route_stream` into one string.
 
-        Flow:
-          1. Classify the message to identify target domains.
-          2. Fall back to ``"reporting"`` if no domains matched.
-          3. If the request is complex (multi-step), delegate to the
-             ExecutionPlanner for structured plan execution.
-          4. Otherwise, invoke each matched specialist sequentially and
-             synthesize their results.
+        Returns the joined text. Raises ``AgentServiceError`` (safe message
+        only) when the stream ended in an error event. The stream is drained
+        first so its ``routing_completed`` entry is always written.
+        """
+        parts: List[str] = []
+        error: Optional[ChatEvent] = None
+        async for event in self.route_stream(
+            user_message, tenant_id, session_id=session_id, request_id=request_id
+        ):
+            if event["type"] == "text":
+                parts.append(event["content"])
+            elif event["type"] == "error":
+                error = event
+        if error is not None:
+            raise AgentServiceError(
+                error["code"],
+                error["message"],
+                retry_after_seconds=error.get("retry_after_seconds"),
+            )
+        return "".join(parts)
 
-        Args:
-            user_message: The user's natural language request.
-            tenant_id: Tenant scope for the request.
-            session_id: Optional session identifier for context.
+    async def route_stream(
+        self,
+        user_message: str,
+        tenant_id: str,
+        session_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> AsyncIterator[ChatEvent]:
+        """Classify intent, delegate, and yield normalized chat events.
 
-        Returns:
-            A synthesized response string combining specialist outputs.
+        Event order: ``status(routing)``, then per specialist
+        ``status(specialist_start)`` and its ``text`` (with ``tool`` /
+        ``tool_result`` when the specialist streams), then ``done``. Complex
+        requests emit ``status(planning)`` and one ``text`` block.
+
+        Provider failures are retried per :mod:`Agents.llm_errors`. When every
+        target fails the stream carries one ``error`` event (code, safe
+        message, ``request_id``) and no text; when some fail, the answered
+        text plus a short note per failed domain. Exception text never
+        reaches an event (F3). ``routing_completed`` records ``outcome``
+        ``success`` / ``partial`` / ``failure`` (F4).
         """
         start_time = time.monotonic()
 
@@ -151,6 +246,8 @@ class AgentOrchestrator:
         # Fallback to reporting when no domain matches
         if len(targets) == 0:
             targets = ["reporting"]
+
+        is_complex = self._is_complex_request(user_message)
 
         # Log the routing decision
         await self._activity_log.log({
@@ -167,19 +264,37 @@ class AgentOrchestrator:
             "details": {
                 "event": "intent_classified",
                 "targets": targets,
-                "is_complex": self._is_complex_request(user_message),
+                "is_complex": is_complex,
             },
         })
 
-        # Complex requests go through the execution planner
-        if self._is_complex_request(user_message):
-            result = await self._execute_complex_request(
-                user_message, targets, tenant_id, session_id,
+        yield status_event("routing", targets=targets)
+
+        failures: Dict[str, Optional[AgentServiceError]] = {}
+        response_length = 0
+        errored = False
+
+        if is_complex:
+            events = self._stream_complex_request(
+                user_message, targets, tenant_id, session_id, request_id, failures,
             )
         else:
-            result = await self._execute_simple_request(
-                user_message, targets, tenant_id, session_id,
+            events = self._stream_simple_request(
+                user_message, targets, tenant_id, session_id, request_id, failures,
             )
+        async for event in events:
+            if event["type"] == "text":
+                response_length += len(event["content"])
+            elif event["type"] == "error":
+                errored = True
+            yield event
+
+        if errored:
+            outcome = "failure"
+        elif failures:
+            outcome = "partial"
+        else:
+            outcome = "success"
 
         duration_ms = (time.monotonic() - start_time) * 1000
 
@@ -190,7 +305,7 @@ class AgentOrchestrator:
             "tool_name": None,
             "parameters": None,
             "risk_level": None,
-            "outcome": "success",
+            "outcome": outcome,
             "duration_ms": duration_ms,
             "tenant_id": tenant_id,
             "user_id": None,
@@ -198,11 +313,13 @@ class AgentOrchestrator:
             "details": {
                 "event": "routing_completed",
                 "targets": targets,
-                "response_length": len(result),
+                "response_length": response_length,
+                "failed_targets": list(failures),
+                "error_codes": sorted({e.code for e in failures.values() if e is not None}),
             },
         })
 
-        return result
+        yield done_event()
 
     # ------------------------------------------------------------------
     # Intent classification
@@ -315,79 +432,180 @@ class AgentOrchestrator:
     # Execution helpers
     # ------------------------------------------------------------------
 
-    async def _execute_simple_request(
+    async def _specialist_events(
+        self, agent, task: str, context: dict
+    ) -> AsyncIterator[ChatEvent]:
+        """One specialist attempt as chat events: its answer as one text event."""
+        yield text_event(await agent.handle(task, context))
+
+    async def _run_specialist(
+        self,
+        target: str,
+        agent,
+        task: str,
+        context: dict,
+        request_id: Optional[str],
+    ) -> AsyncIterator[ChatEvent]:
+        """Run one specialist with the bounded LLM retry policy.
+
+        Retries only while the current attempt has emitted no text: once text
+        reached the client a retry would repeat it. Each wait is announced as
+        ``status(retrying)``. Full exception detail is logged here, server
+        side; the caller only ever sees ``AgentServiceError``'s safe message.
+        """
+        attempt = 0
+        while True:
+            attempt += 1
+            emitted_text = False
+            try:
+                async for event in self._specialist_events(agent, task, context):
+                    if event["type"] == "text":
+                        emitted_text = True
+                    yield event
+                return
+            except AgentServiceError:
+                raise
+            except Exception as exc:
+                failure = classify_llm_exception(exc)
+                logger.warning(
+                    "Specialist '%s' failed (attempt %d/%d, code=%s, request_id=%s)",
+                    target, attempt, MAX_ATTEMPTS, failure.code, request_id,
+                    exc_info=exc,
+                )
+                delay = None if emitted_text else retry_delay(failure, attempt, self._rand)
+                if delay is None:
+                    raise AgentServiceError(
+                        failure.code,
+                        retry_after_seconds=failure.retry_after_seconds,
+                        domain=target,
+                    ) from exc
+                yield status_event("retrying", specialist=target, attempt=attempt + 1)
+                await self._sleep(delay)
+
+    @staticmethod
+    def _combined_error(
+        errors: List[AgentServiceError], request_id: Optional[str]
+    ) -> ChatEvent:
+        """One error event for a request whose every target failed."""
+        code = (
+            AI_RATE_LIMITED
+            if any(e.code == AI_RATE_LIMITED for e in errors)
+            else AI_SERVICE_UNAVAILABLE
+        )
+        known = [e.retry_after_seconds for e in errors if e.retry_after_seconds is not None]
+        retry_after = max(known) if known else None
+        return error_event(code, safe_message_for(code, retry_after), request_id, retry_after)
+
+    async def _stream_simple_request(
         self,
         user_message: str,
         targets: List[str],
         tenant_id: str,
         session_id: Optional[str],
-    ) -> str:
-        """Execute a simple (non-complex) request by delegating to specialists.
+        request_id: Optional[str],
+        failures: Dict[str, Optional[AgentServiceError]],
+    ) -> AsyncIterator[ChatEvent]:
+        """Run each matched specialist in turn and stream its events.
 
-        Invokes each matched specialist sequentially and synthesizes
-        their results.
-
-        Args:
-            user_message: The user's request.
-            targets: List of specialist domain names to invoke.
-            tenant_id: Tenant scope.
-            session_id: Optional session identifier.
-
-        Returns:
-            Synthesized response string.
+        Failed targets are recorded in ``failures``. Answers from several
+        specialists are separated by a blank line, as ``_synthesize`` did.
         """
         context = {"tenant_id": tenant_id}
         if session_id:
             context["session_id"] = session_id
 
-        results: List[str] = []
+        attempted = 0
+        any_text = False
         for target in targets:
             agent = self._specialists.get(target)
-            if agent:
-                try:
-                    result = await agent.handle(user_message, context)
-                    results.append(result)
-                except Exception as e:
-                    logger.error(
-                        f"Specialist '{target}' failed for message: {e}"
-                    )
-                    results.append(
-                        f"[{target}] Error processing request: {e}"
-                    )
+            if not agent:
+                continue
+            attempted += 1
+            yield status_event("specialist_start", specialist=target)
+            started_text = False
+            try:
+                async for event in self._run_specialist(
+                    target, agent, user_message, context, request_id
+                ):
+                    if event["type"] == "text" and not started_text:
+                        started_text = True
+                        if any_text:
+                            yield text_event("\n\n")
+                        any_text = True
+                    yield event
+            except AgentServiceError as err:
+                failures[target] = err
 
-        return self._synthesize(results)
+        if attempted and len(failures) == attempted and not any_text:
+            yield self._combined_error(
+                [e for e in failures.values() if e is not None], request_id
+            )
+            return
 
-    async def _execute_complex_request(
+        for target in failures:
+            yield text_event(("\n\n" if any_text else "") + _failed_note(target))
+            any_text = True
+
+        if not any_text:
+            yield text_event(NO_RESULTS_MESSAGE)
+
+    async def _stream_complex_request(
         self,
         user_message: str,
         targets: List[str],
         tenant_id: str,
         session_id: Optional[str],
-    ) -> str:
-        """Execute a complex request through the ExecutionPlanner.
+        request_id: Optional[str],
+        failures: Dict[str, Optional[AgentServiceError]],
+    ) -> AsyncIterator[ChatEvent]:
+        """Run a complex request through the ExecutionPlanner.
 
-        Creates a plan from the request and target domains, then
-        executes it. The plan results are formatted into a summary.
-
-        Args:
-            user_message: The user's request.
-            targets: List of specialist domain names.
-            tenant_id: Tenant scope.
-            session_id: Optional session identifier.
-
-        Returns:
-            Formatted plan execution summary.
+        The plan runs to completion and is reported as one text block. When
+        every read step failed and at least one failure was an AI-service
+        error, the request reports that error instead of a plan of failures.
+        A planner exception falls back to simple sequential execution.
         """
+        yield status_event("planning")
+
+        run = _PlanRun(request_id=request_id)
+        # No ``yield`` between set and reset: the token must be reset in the
+        # context that created it.
+        token = _plan_run.set(run)
         try:
-            plan = await self._planner.create_plan(user_message, targets)
-            executed_plan = await self._planner.execute_plan(plan, tenant_id)
-            return self._format_plan_result(executed_plan)
-        except Exception:
-            logger.exception("Complex request execution failed")
+            try:
+                plan = await self._planner.create_plan(user_message, targets)
+                executed_plan = await self._planner.execute_plan(plan, tenant_id)
+            except Exception:
+                logger.exception(
+                    "Complex request execution failed (request_id=%s)", request_id
+                )
+                executed_plan = None
+        finally:
+            _plan_run.reset(token)
+
+        if executed_plan is None:
             # Fall back to simple sequential execution
-            return await self._execute_simple_request(
-                user_message, targets, tenant_id, session_id,
-            )
+            async for event in self._stream_simple_request(
+                user_message, targets, tenant_id, session_id, request_id, failures,
+            ):
+                yield event
+            return
+
+        by_domain = {e.domain: e for e in run.failures}
+        for step in executed_plan.steps:
+            status = getattr(step.status, "value", step.status)
+            if status == "failed":
+                failures[step.agent] = by_domain.get(step.agent)
+
+        read_steps = [s for s in executed_plan.steps if getattr(s, "read_only", False)]
+        all_reads_failed = bool(read_steps) and all(
+            getattr(s.status, "value", s.status) == "failed" for s in read_steps
+        )
+        if all_reads_failed and run.failures:
+            yield self._combined_error(run.failures, request_id)
+            return
+
+        yield text_event(self._format_plan_result(executed_plan))
 
     # ------------------------------------------------------------------
     # Result synthesis
@@ -406,7 +624,7 @@ class AgentOrchestrator:
             Combined response string, or a fallback message if empty.
         """
         if not results:
-            return "I wasn't able to find relevant information for your request."
+            return NO_RESULTS_MESSAGE
 
         if len(results) == 1:
             return results[0]

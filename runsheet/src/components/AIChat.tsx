@@ -5,17 +5,15 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import {
+  applyChatStreamEvent,
+  type ChatStreamMessage,
+  parseSseChunk,
+} from "../services/chatStream";
 import ReportViewer from "./ReportViewer";
 
-interface ChatMessage {
-  id: string;
+interface ChatMessage extends ChatStreamMessage {
   role: "user" | "assistant" | "tool-indicator";
-  content: string;
-  timestamp: Date;
-  isStreaming?: boolean;
-  toolName?: string;
-  toolStatus?: "in-progress" | "done";
-  isContinuation?: boolean;
 }
 
 interface AIChatProps {
@@ -182,108 +180,30 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
 
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        buffer += chunk;
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+        const parsed = parseSseChunk(
+          buffer + decoder.decode(value, { stream: true }),
+        );
+        buffer = parsed.rest;
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const jsonStr = line.slice(6).trim();
-              if (!jsonStr) continue;
+        for (const event of parsed.events) {
+          setMessages((prev) => applyChatStreamEvent(prev, event));
 
-              const data = JSON.parse(jsonStr);
+          if (event.type === "tool_result") {
+            // Remove finished tool indicators after a short delay
+            setTimeout(() => {
+              setMessages((prev) =>
+                prev.filter(
+                  (msg) =>
+                    !(
+                      msg.role === "tool-indicator" && msg.toolStatus === "done"
+                    ),
+                ),
+              );
+            }, 500);
+          }
 
-              if (data.error) {
-                throw new Error(data.error);
-              }
-
-              if (data.type === "text" && data.content) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  // Find the last streaming assistant message
-                  const lastStreamingAssistantIndex = updated.findLastIndex(
-                    (msg) => msg.role === "assistant" && msg.isStreaming,
-                  );
-                  if (lastStreamingAssistantIndex !== -1) {
-                    updated[lastStreamingAssistantIndex].content +=
-                      data.content;
-                  }
-                  return updated;
-                });
-              }
-
-              if (data.type === "tool" && data.tool_name) {
-                // Tool is being used - split the assistant message and add tool indicator
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const lastAssistantIndex = updated.findLastIndex(
-                    (msg) => msg.role === "assistant",
-                  );
-
-                  if (
-                    lastAssistantIndex !== -1 &&
-                    updated[lastAssistantIndex].isStreaming
-                  ) {
-                    // Stop streaming on the current assistant message
-                    updated[lastAssistantIndex].isStreaming = false;
-
-                    // Add tool indicator
-                    updated.push({
-                      id: `tool-${Date.now()}`,
-                      role: "tool-indicator",
-                      content: "",
-                      timestamp: new Date(),
-                      toolName: data.tool_name,
-                      toolStatus: "in-progress",
-                    });
-
-                    // Add a new assistant message for post-tool content
-                    updated.push({
-                      id: `assistant-${Date.now()}`,
-                      role: "assistant",
-                      content: "",
-                      timestamp: new Date(),
-                      isStreaming: true,
-                      isContinuation: true,
-                    });
-                  }
-                  return updated;
-                });
-              }
-
-              if (data.type === "tool_result") {
-                // Tool finished - update the indicator
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const toolIndicatorIndex = updated.findIndex(
-                    (msg) =>
-                      msg.role === "tool-indicator" &&
-                      msg.toolStatus === "in-progress",
-                  );
-
-                  if (toolIndicatorIndex !== -1) {
-                    updated[toolIndicatorIndex].toolStatus = "done";
-                    // Remove the tool indicator after a short delay
-                    setTimeout(() => {
-                      setMessages((prevMsgs) =>
-                        prevMsgs.filter(
-                          (msg) => msg.id !== updated[toolIndicatorIndex].id,
-                        ),
-                      );
-                    }, 500);
-                  }
-                  return updated;
-                });
-              }
-
-              if (data.type === "done") {
-                return;
-              }
-            } catch (parseError) {
-              console.warn("Failed to parse streaming data:", parseError);
-            }
+          if (event.type === "done" || event.type === "error") {
+            return;
           }
         }
       }
@@ -492,6 +412,15 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                   >
                     {getToolIcon(msg.toolName)} {msg.toolName || "tool"}
                   </span>
+                </div>
+              ) : msg.role === "assistant" && msg.isError ? (
+                <div className="max-w-[85%]">
+                  <div
+                    role="alert"
+                    className="text-sm leading-relaxed whitespace-pre-wrap rounded-lg border border-error bg-error-light text-error px-3 py-2"
+                  >
+                    {msg.content}
+                  </div>
                 </div>
               ) : msg.role === "assistant" ? (
                 <div className="max-w-[85%]">

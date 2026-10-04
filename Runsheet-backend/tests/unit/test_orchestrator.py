@@ -10,6 +10,7 @@ Requirements: 7.6, 7.7, 7.8
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from Agents.llm_errors import AgentServiceError
 from Agents.orchestrator import AgentOrchestrator
 from Agents.execution_planner import ExecutionPlan, PlanStep, StepStatus
 
@@ -378,9 +379,20 @@ class TestRouteSimple:
             specialists={"fleet": fleet_agent, "reporting": _make_specialist()}
         )
 
-        result = await orch.route("Show trucks", "tenant-1")
+        activity_log = orch._activity_log
 
-        assert "Error" in result
+        # The failure surfaces as a typed error with a safe message; the raw
+        # exception text used to be returned as the answer (F3).
+        with pytest.raises(AgentServiceError) as excinfo:
+            await orch.route("Show trucks", "tenant-1")
+
+        assert "Agent crashed" not in str(excinfo.value)
+        assert "Error processing request" not in str(excinfo.value)
+        assert excinfo.value.code == "AI_SERVICE_UNAVAILABLE"
+        completed = activity_log.log.call_args_list[-1][0][0]
+        assert completed["details"]["event"] == "routing_completed"
+        assert completed["outcome"] == "failure"
+        assert completed["details"]["failed_targets"] == ["fleet"]
 
     async def test_missing_specialist_skipped(self):
         # Only reporting agent available, but message matches fleet

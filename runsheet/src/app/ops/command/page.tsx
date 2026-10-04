@@ -28,18 +28,15 @@ import AgentHealth from "../../../components/ops/AgentHealth";
 import AgentToast from "../../../components/ops/AgentToast";
 import ApprovalQueue from "../../../components/ops/ApprovalQueue";
 import ReportViewer from "../../../components/ReportViewer";
+import {
+  applyChatStreamEvent,
+  type ChatStreamMessage,
+  parseSseChunk,
+} from "../../../services/chatStream";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-interface ChatMessage {
-  id: string;
-  role: "user" | "assistant" | "tool-indicator" | "confirmation";
-  content: string;
-  timestamp: Date;
-  isStreaming?: boolean;
-  toolName?: string;
-  toolStatus?: "in-progress" | "done";
-  isContinuation?: boolean;
+interface ChatMessage extends ChatStreamMessage {
   /** For inline confirmation messages */
   confirmationData?: {
     actionId: string;
@@ -206,109 +203,50 @@ export default function CommandInterfacePage() {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = decoder.decode(value, { stream: true });
-        buffer += chunk;
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
+        const parsed = parseSseChunk(
+          buffer + decoder.decode(value, { stream: true }),
+        );
+        buffer = parsed.rest;
 
-        for (const line of lines) {
-          if (line.startsWith("data: ")) {
-            try {
-              const jsonStr = line.slice(6).trim();
-              if (!jsonStr) continue;
-              const data = JSON.parse(jsonStr);
-
-              if (data.error) throw new Error(data.error);
-
-              if (data.type === "text" && data.content) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const lastIdx = updated.findLastIndex(
-                    (msg) => msg.role === "assistant" && msg.isStreaming,
-                  );
-                  if (lastIdx !== -1) {
-                    updated[lastIdx].content += data.content;
-                  }
-                  return updated;
-                });
-              }
-
-              if (data.type === "tool" && data.tool_name) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const lastIdx = updated.findLastIndex(
-                    (msg) => msg.role === "assistant",
-                  );
-                  if (lastIdx !== -1 && updated[lastIdx].isStreaming) {
-                    updated[lastIdx].isStreaming = false;
-                    updated.push({
-                      id: `tool-${Date.now()}`,
-                      role: "tool-indicator",
-                      content: "",
-                      timestamp: new Date(),
-                      toolName: data.tool_name,
-                      toolStatus: "in-progress",
-                    });
-                    updated.push({
-                      id: `assistant-${Date.now()}`,
-                      role: "assistant",
-                      content: "",
-                      timestamp: new Date(),
-                      isStreaming: true,
-                      isContinuation: true,
-                    });
-                  }
-                  return updated;
-                });
-              }
-
-              // Inline confirmation for medium-risk actions (Requirement 9.4)
-              if (data.type === "confirmation" && data.action) {
-                setMessages((prev) => [
-                  ...prev,
-                  {
-                    id: `confirm-${Date.now()}`,
-                    role: "confirmation",
-                    content: "",
-                    timestamp: new Date(),
-                    confirmationData: {
-                      actionId: data.action.action_id || "",
-                      toolName: data.action.tool_name || "",
-                      riskLevel: data.action.risk_level || "medium",
-                      summary:
-                        data.action.summary || data.action.impact_summary || "",
-                    },
-                  },
-                ]);
-              }
-
-              if (data.type === "tool_result") {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const toolIdx = updated.findIndex(
-                    (msg) =>
-                      msg.role === "tool-indicator" &&
-                      msg.toolStatus === "in-progress",
-                  );
-                  if (toolIdx !== -1) {
-                    updated[toolIdx].toolStatus = "done";
-                    setTimeout(() => {
-                      setMessages((prevMsgs) =>
-                        prevMsgs.filter(
-                          (msg) => msg.id !== updated[toolIdx].id,
-                        ),
-                      );
-                    }, 500);
-                  }
-                  return updated;
-                });
-              }
-
-              if (data.type === "done") return;
-            } catch (parseError) {
-              console.warn("Failed to parse streaming data:", parseError);
-            }
+        for (const event of parsed.events) {
+          // Inline confirmation for medium-risk actions (Requirement 9.4)
+          if (event.type === "confirmation") {
+            if (!event.action) continue;
+            const action = event.action;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `confirm-${Date.now()}`,
+                role: "confirmation",
+                content: "",
+                timestamp: new Date(),
+                confirmationData: {
+                  actionId: action.action_id || "",
+                  toolName: action.tool_name || "",
+                  riskLevel: action.risk_level || "medium",
+                  summary: action.summary || action.impact_summary || "",
+                },
+              },
+            ]);
+            continue;
           }
+
+          setMessages((prev) => applyChatStreamEvent(prev, event));
+
+          if (event.type === "tool_result") {
+            setTimeout(() => {
+              setMessages((prev) =>
+                prev.filter(
+                  (msg) =>
+                    !(
+                      msg.role === "tool-indicator" && msg.toolStatus === "done"
+                    ),
+                ),
+              );
+            }, 500);
+          }
+
+          if (event.type === "done" || event.type === "error") return;
         }
       }
     } catch (error) {
@@ -545,6 +483,15 @@ export default function CommandInterfacePage() {
                             : "✕ Rejected"}
                         </p>
                       )}
+                    </div>
+                  </div>
+                ) : msg.role === "assistant" && msg.isError ? (
+                  <div className="max-w-[85%]">
+                    <div
+                      role="alert"
+                      className="text-sm leading-relaxed whitespace-pre-wrap rounded-lg border border-error bg-error-light text-error px-3 py-2"
+                    >
+                      {msg.content}
                     </div>
                   </div>
                 ) : msg.role === "assistant" ? (

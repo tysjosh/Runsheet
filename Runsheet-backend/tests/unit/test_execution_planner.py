@@ -425,6 +425,42 @@ class TestExecutePlan:
         assert steps[0].recovery_attempts == 3
         assert steps[0].status == StepStatus.FAILED
 
+    async def test_failed_step_result_never_contains_exception_text(self):
+        """Plan results are shown to the user; provider errors carry raw
+        JSON and traceback text (staging finding F3)."""
+        cp = _make_confirmation_protocol()
+        cp.process_mutation = AsyncMock(
+            side_effect=RuntimeError('VertexAIException {"quotaId": "x"} /opt/venv')
+        )
+        planner = ExecutionPlanner(
+            activity_log_service=_make_activity_log(),
+            confirmation_protocol=cp,
+        )
+        steps = [_step(1)]
+
+        await planner.execute_plan(ExecutionPlan(plan_id="p1", goal="Test", steps=steps), "t1")
+
+        assert steps[0].result == "This step could not be completed."
+
+    async def test_unrecoverable_error_is_not_rerun(self):
+        from Agents.llm_errors import AgentServiceError
+
+        cp = _make_confirmation_protocol()
+        cp.process_mutation = AsyncMock(
+            side_effect=AgentServiceError("AI_RATE_LIMITED", retry_after_seconds=60)
+        )
+        planner = ExecutionPlanner(
+            activity_log_service=_make_activity_log(),
+            confirmation_protocol=cp,
+        )
+        steps = [_step(1)]
+
+        await planner.execute_plan(ExecutionPlan(plan_id="p1", goal="Test", steps=steps), "t1")
+
+        assert cp.process_mutation.call_count == 1
+        assert steps[0].status == StepStatus.FAILED
+        assert "too many requests" in steps[0].result
+
     async def test_partial_failure_status(self):
         cp = _make_confirmation_protocol()
         call_count = 0

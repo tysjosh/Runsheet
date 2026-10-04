@@ -13,6 +13,7 @@ Validates:
 - Requirement 8.6: Gracefully degrade when Session_Store is unavailable
 """
 
+import asyncio
 import os
 import logging
 import time
@@ -26,8 +27,21 @@ from .tools import ALL_TOOLS
 from .tools._tenant_context import set_current_tenant
 from config.settings import get_settings
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
-from errors.codes import ErrorCode
 from errors.exceptions import ai_service_unavailable, circuit_open
+from .llm_errors import (
+    AI_SERVICE_UNAVAILABLE,
+    MAX_ATTEMPTS,
+    AgentServiceError,
+    ChatEvent,
+    call_with_llm_retry,
+    classify_llm_exception,
+    error_event,
+    error_event_for,
+    retry_delay,
+    safe_message_for,
+    status_event,
+    to_agent_service_error,
+)
 
 # Load environment variables
 load_dotenv()
@@ -468,9 +482,17 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to clear session {session_id}: {e}")
             return False
     
-    def _handle_circuit_breaker_exception(self, exc: CircuitOpenException) -> dict:
+    @staticmethod
+    def _circuit_retry_after(exc: CircuitOpenException) -> Optional[int]:
+        if exc.time_until_retry:
+            return max(1, int(exc.time_until_retry.total_seconds()))
+        return None
+
+    def _handle_circuit_breaker_exception(
+        self, exc: CircuitOpenException, request_id: Optional[str] = None
+    ) -> ChatEvent:
         """
-        Handle a circuit breaker exception by returning an appropriate error response.
+        Error event for an open circuit breaker.
         
         Validates:
         - Requirement 2.5: Return specific error code indicating AI service unavailability
@@ -478,52 +500,43 @@ class LogisticsAgent:
         
         Args:
             exc: The CircuitOpenException that was raised
+            request_id: Correlates the event with server logs.
             
         Returns:
-            dict: Error response with type "error" and appropriate message
+            ChatEvent: ``error`` event with ``AI_SERVICE_UNAVAILABLE`` and
+            ``retry_after_seconds`` when known.
         """
-        time_until_retry = None
-        if exc.time_until_retry:
-            time_until_retry = int(exc.time_until_retry.total_seconds())
-        
-        error_message = f"❌ AI service temporarily unavailable. Circuit breaker '{exc.circuit_name}' is open."
-        if time_until_retry:
-            error_message += f" Please retry in {time_until_retry} seconds."
-        
-        return {
-            "type": "error",
-            "content": error_message,
-            "error_code": ErrorCode.CIRCUIT_OPEN.value,
-            "details": {
-                "circuit_name": exc.circuit_name,
-                "time_until_retry_seconds": time_until_retry,
-                "service": "gemini_api"
-            }
-        }
+        logger.warning(
+            "AI circuit '%s' open (request_id=%s)", exc.circuit_name, request_id
+        )
+        retry_after = self._circuit_retry_after(exc)
+        return error_event(
+            AI_SERVICE_UNAVAILABLE,
+            safe_message_for(AI_SERVICE_UNAVAILABLE, retry_after),
+            request_id,
+            retry_after,
+        )
     
-    def _handle_gemini_api_error(self, error: Exception) -> dict:
+    def _handle_gemini_api_error(
+        self, error: Exception, request_id: Optional[str] = None
+    ) -> ChatEvent:
         """
-        Handle a Gemini API error by returning an appropriate error response.
+        Error event for a failed LLM call. Full detail is logged server-side;
+        the event carries only the code and a safe message (F3), never
+        ``str(error)``.
         
         Validates:
         - Requirement 2.5: Return specific error code indicating AI service unavailability
         
         Args:
             error: The exception that was raised
+            request_id: Correlates the event with server logs.
             
         Returns:
-            dict: Error response with type "error" and appropriate message
+            ChatEvent: ``error`` event
         """
-        logger.error("Gemini API error: %s", error)
-        return {
-            "type": "error",
-            "content": f"❌ AI service error: {str(error)}",
-            "error_code": ErrorCode.AI_SERVICE_UNAVAILABLE.value,
-            "details": {
-                "error": str(error),
-                "service": "gemini_api"
-            }
-        }
+        logger.error("AI service error (request_id=%s)", request_id, exc_info=error)
+        return error_event_for(to_agent_service_error(error), request_id)
 
     def setup_gemini_credentials(self):
         """Setup Gemini credentials. Skips Vertex AI setup when GEMINI_API_KEY is set."""
@@ -590,6 +603,7 @@ class LogisticsAgent:
         mode: str = "chat",
         session_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        request_id: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Asynchronous streaming chat method with circuit breaker protection,
@@ -597,16 +611,20 @@ class LogisticsAgent:
         routing.
 
         When an ``AgentOrchestrator`` has been configured via
-        ``configure_orchestrator``, requests are routed through the
-        multi-agent orchestrator which delegates to specialist agents.
-        The orchestrator returns a complete string response that is
-        yielded as a single streaming event for backward compatibility.
+        ``configure_orchestrator``, requests are routed through
+        ``route_stream`` and its normalized ``ChatEvent``s are yielded as
+        they arrive (status, tool, text, error, done).
 
         When no orchestrator is available the method falls back to the
         legacy direct Strands agent invocation with full circuit breaker
-        and retry support. In that fallback, the tenant ContextVar is
-        bound for the duration of the streaming generator so every
-        ES-reading tool runs tenant-scoped.
+        and retry support. That path yields raw Strands event dicts plus
+        ``ChatEvent`` status/error events. The tenant ContextVar is bound for
+        the duration of the streaming generator so every ES-reading tool runs
+        tenant-scoped.
+
+        Provider failures never reach the client as text: they are retried
+        per ``Agents.llm_errors`` and reported as one ``error`` event with a
+        safe message and ``request_id`` (F3).
         
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
@@ -628,9 +646,9 @@ class LogisticsAgent:
                 it is bound to the tool ContextVar so every ES-reading tool in
                 the legacy fallback runs tenant-scoped. The orchestrator path
                 passes tenant_id through its own API.
+            request_id: The HTTP request id, echoed in error events so a user
+                can quote it and operators can find the server-side log.
         """
-        max_retries = 3
-        retry_count = 0
         start_time = time.time()
         
         # Load conversation history from session store if session_id provided
@@ -648,52 +666,58 @@ class LogisticsAgent:
         
         # ------------------------------------------------------------------
         # Orchestrator routing (Requirements 7.6, 7.7)
-        # When the orchestrator is configured, route through it for
-        # multi-agent specialist delegation. The orchestrator returns a
-        # complete string which we yield as a streaming text event to
-        # maintain backward compatibility with the SSE interface.
+        # ``route_stream`` yields normalized ChatEvents incrementally. Fall
+        # back to the legacy agent only when it fails unexpectedly before
+        # yielding anything; an AgentServiceError is already a user-safe
+        # outcome and falling back would just spend more model calls.
         # ------------------------------------------------------------------
         if _orchestrator is not None:
+            yielded_any = False
+            saw_error = False
             try:
                 logger.info("🔀 Routing request through AgentOrchestrator")
                 # Tenant id comes from the caller (injected by the /api/chat
                 # handler from the authenticated ``TenantContext``).
                 effective_tenant_id = _require_tenant_id(tenant_id)
-                orchestrator_response = await _orchestrator.route(
+                async for event in _orchestrator.route_stream(
                     user_message=message,
                     tenant_id=effective_tenant_id,
                     session_id=session_id,
-                )
-
-                # Record AI response time metrics (Requirement 5.4)
-                telemetry = _get_telemetry_service()
-                if telemetry:
-                    total_duration_ms = (time.time() - start_time) * 1000
-                    telemetry.record_metric(
-                        name="ai_response_time_ms",
-                        value=total_duration_ms,
-                        tags={"mode": mode, "success": "true", "method": "orchestrator"},
-                    )
-
-                # Yield the orchestrator response as a streaming text event
-                yield {"data": orchestrator_response}
-                yield {"result": orchestrator_response}
-                return
-
+                    request_id=request_id,
+                ):
+                    yielded_any = True
+                    if event.get("type") == "error":
+                        saw_error = True
+                    yield event
             except Exception as e:
-                logger.warning(
-                    f"⚠️ Orchestrator routing failed, falling back to direct agent: {e}"
-                )
-                # Record failure metrics before falling through
-                telemetry = _get_telemetry_service()
-                if telemetry:
-                    total_duration_ms = (time.time() - start_time) * 1000
-                    telemetry.record_metric(
-                        name="ai_response_time_ms",
-                        value=total_duration_ms,
-                        tags={"mode": mode, "success": "false", "method": "orchestrator"},
+                if yielded_any or isinstance(e, AgentServiceError):
+                    logger.error(
+                        "Orchestrator stream failed (request_id=%s)",
+                        request_id,
+                        exc_info=e,
                     )
+                    self._record_response_metric(
+                        start_time, mode, success=False, method="orchestrator"
+                    )
+                    if not saw_error:
+                        yield error_event_for(to_agent_service_error(e), request_id)
+                    return
+                logger.warning(
+                    "⚠️ Orchestrator routing failed, falling back to direct agent "
+                    "(request_id=%s)",
+                    request_id,
+                    exc_info=e,
+                )
+                self._record_response_metric(
+                    start_time, mode, success=False, method="orchestrator"
+                )
                 # Fall through to direct agent invocation below
+            else:
+                # Record AI response time metrics (Requirement 5.4)
+                self._record_response_metric(
+                    start_time, mode, success=not saw_error, method="orchestrator"
+                )
+                return
         
         # ------------------------------------------------------------------
         # Direct agent invocation (legacy fallback)
@@ -707,23 +731,24 @@ class LogisticsAgent:
         if self._circuit_breaker.state.value == "open":
             if not self._circuit_breaker._should_attempt_reset():
                 # Circuit is open and not ready to retry
-                error_response = self._handle_circuit_breaker_exception(
+                yield self._handle_circuit_breaker_exception(
                     CircuitOpenException(
                         self._circuit_breaker.name,
                         self._circuit_breaker._get_time_until_retry()
-                    )
+                    ),
+                    request_id,
                 )
-                yield error_response
                 return
         
-        while retry_count < max_retries:
+        attempt = 0
+        while True:
+            attempt += 1
+            # Track if we got any response
+            got_response = False
+            first_token_time = None
             try:
                 # Send message to agent (mode prefix removed — single unified mode)
                 message_to_send = message
-                
-                # Track if we got any response
-                got_response = False
-                first_token_time = None
                 
                 # Wrap the streaming call with circuit breaker tracking and
                 # with the tenant ContextVar bound so tools see the caller's
@@ -747,21 +772,15 @@ class LogisticsAgent:
                     self._circuit_breaker._on_success()
                     
                     # Record AI response time metrics (Requirement 5.4)
+                    self._record_response_metric(start_time, mode, success=True)
                     telemetry = _get_telemetry_service()
-                    if telemetry:
-                        total_duration_ms = (time.time() - start_time) * 1000
+                    if telemetry and first_token_time:
+                        time_to_first_token_ms = (first_token_time - start_time) * 1000
                         telemetry.record_metric(
-                            name="ai_response_time_ms",
-                            value=total_duration_ms,
-                            tags={"mode": mode, "success": "true"}
+                            name="ai_time_to_first_token_ms",
+                            value=time_to_first_token_ms,
+                            tags={"mode": mode}
                         )
-                        if first_token_time:
-                            time_to_first_token_ms = (first_token_time - start_time) * 1000
-                            telemetry.record_metric(
-                                name="ai_time_to_first_token_ms",
-                                value=time_to_first_token_ms,
-                                tags={"mode": mode}
-                            )
                     
                     # Persist updated conversation history to session store
                     # Requirement 8.3: Persist updated conversation history
@@ -776,81 +795,65 @@ class LogisticsAgent:
                 
             except CircuitOpenException as e:
                 # Circuit breaker is open
-                error_response = self._handle_circuit_breaker_exception(e)
-                yield error_response
+                yield self._handle_circuit_breaker_exception(e, request_id)
                 return
                 
             except Exception as e:
-                retry_count += 1
-                error_msg = str(e)
-                
-                # Check if it's a connection error (retryable)
-                is_connection_error = any(keyword in error_msg.lower() for keyword in [
-                    'connection closed', 'connection error', 'timeout', 'unavailable',
-                    'service unavailable', 'rate limit', 'quota'
-                ])
-                
-                if is_connection_error:
-                    # Record failure in circuit breaker
-                    self._circuit_breaker._on_failure()
-                    
-                    # Check if circuit is now open
-                    if self._circuit_breaker.state.value == "open":
-                        error_response = self._handle_circuit_breaker_exception(
-                            CircuitOpenException(
-                                self._circuit_breaker.name,
-                                self._circuit_breaker._get_time_until_retry()
-                            )
-                        )
-                        yield error_response
-                        return
-                    
-                    if retry_count < max_retries:
-                        logger.warning(f"Connection error (attempt {retry_count}/{max_retries}): {error_msg}")
-                        yield {
-                            "type": "status",
-                            "content": f"🔄 Connection interrupted, retrying... (attempt {retry_count}/{max_retries})"
-                        }
-                        
-                        # Wait a bit before retrying (exponential backoff)
-                        import asyncio
-                        await asyncio.sleep(1 * retry_count)
-                        continue
-                    else:
-                        # Max retries reached - record failure metrics
-                        telemetry = _get_telemetry_service()
-                        if telemetry:
-                            total_duration_ms = (time.time() - start_time) * 1000
-                            telemetry.record_metric(
-                                name="ai_response_time_ms",
-                                value=total_duration_ms,
-                                tags={"mode": mode, "success": "false", "error_type": "connection"}
-                            )
-                        
-                        logger.exception("Error in streaming chat (final)")
-                        yield {
-                            "type": "error", 
-                            "content": f"❌ Connection failed after {max_retries} attempts. The AI service is having connectivity issues. Please try again in a moment.",
-                            "error_code": ErrorCode.AI_SERVICE_UNAVAILABLE.value
-                        }
-                        return
-                else:
-                    # Non-connection error - don't retry, but record failure
-                    self._circuit_breaker._on_failure()
-                    
-                    # Record failure metrics
-                    telemetry = _get_telemetry_service()
-                    if telemetry:
-                        total_duration_ms = (time.time() - start_time) * 1000
-                        telemetry.record_metric(
-                            name="ai_response_time_ms",
-                            value=total_duration_ms,
-                            tags={"mode": mode, "success": "false", "error_type": "other"}
-                        )
-                    
-                    logger.exception("Error in streaming chat")
-                    yield self._handle_gemini_api_error(e)
+                failure = classify_llm_exception(e)
+                self._circuit_breaker._on_failure()
+                logger.warning(
+                    "Legacy chat failed (attempt %d/%d, code=%s, request_id=%s)",
+                    attempt, MAX_ATTEMPTS, failure.code, request_id,
+                    exc_info=e,
+                )
+
+                # Check if circuit is now open
+                if self._circuit_breaker.state.value == "open":
+                    yield self._handle_circuit_breaker_exception(
+                        CircuitOpenException(
+                            self._circuit_breaker.name,
+                            self._circuit_breaker._get_time_until_retry()
+                        ),
+                        request_id,
+                    )
                     return
+
+                # Retrying after streamed output would repeat it.
+                delay = None if got_response else retry_delay(failure, attempt)
+                if delay is not None:
+                    yield status_event("retrying", attempt=attempt + 1)
+                    await asyncio.sleep(delay)
+                    continue
+
+                self._record_response_metric(
+                    start_time, mode, success=False, error_type=failure.code
+                )
+                yield self._handle_gemini_api_error(e, request_id)
+                return
+
+    def _record_response_metric(
+        self,
+        start_time: float,
+        mode: str,
+        *,
+        success: bool,
+        method: Optional[str] = None,
+        error_type: Optional[str] = None,
+    ) -> None:
+        """Record ``ai_response_time_ms`` (Requirement 5.4)."""
+        telemetry = _get_telemetry_service()
+        if not telemetry:
+            return
+        tags = {"mode": mode, "success": "true" if success else "false"}
+        if method:
+            tags["method"] = method
+        if error_type:
+            tags["error_type"] = error_type
+        telemetry.record_metric(
+            name="ai_response_time_ms",
+            value=(time.time() - start_time) * 1000,
+            tags=tags,
+        )
 
     async def chat_fallback(
         self,
@@ -862,6 +865,11 @@ class LogisticsAgent:
         """
         Non-streaming fallback method with circuit breaker protection, session
         persistence, and tenant scoping.
+
+        The LLM call gets the bounded retry from ``Agents.llm_errors``. A
+        final failure, or an open circuit, raises ``AgentServiceError`` (safe
+        message only) so the endpoint can answer 429/503 instead of a 200
+        whose text is an error (F3).
 
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
@@ -878,6 +886,10 @@ class LogisticsAgent:
             session_id: Optional session identifier for conversation persistence.
             tenant_id: Optional tenant identifier for data scoping. Bound to the
                 tool ContextVar for the duration of the run.
+
+        Raises:
+            AgentServiceError: the AI service failed after retries, or its
+                circuit breaker is open.
         """
         start_time = time.time()
         
@@ -899,11 +911,10 @@ class LogisticsAgent:
             if self._circuit_breaker.state.value == "open":
                 if not self._circuit_breaker._should_attempt_reset():
                     # Circuit is open and not ready to retry
-                    time_until_retry = self._circuit_breaker._get_time_until_retry()
-                    retry_msg = ""
-                    if time_until_retry:
-                        retry_msg = f" Please retry in {int(time_until_retry.total_seconds())} seconds."
-                    return f"❌ AI service temporarily unavailable. Circuit breaker is open.{retry_msg}"
+                    raise CircuitOpenException(
+                        self._circuit_breaker.name,
+                        self._circuit_breaker._get_time_until_retry(),
+                    )
             
             logger.info("🔄 Using non-streaming fallback mode")
             
@@ -913,22 +924,21 @@ class LogisticsAgent:
             # ``run_async``) for a single non-streaming turn; it returns an
             # ``AgentResult`` whose ``__str__`` yields the concatenated text.
             effective_tenant_id = _require_tenant_id(tenant_id)
-            with set_current_tenant(effective_tenant_id):
-                agent_result = await self.agent.invoke_async(message)
+
+            async def _invoke():
+                with set_current_tenant(effective_tenant_id):
+                    return await self.agent.invoke_async(message)
+
+            agent_result = await call_with_llm_retry(
+                _invoke, describe="Fallback chat"
+            )
             response = str(agent_result)
             
             # Record success in circuit breaker
             self._circuit_breaker._on_success()
             
             # Record AI response time metrics (Requirement 5.4)
-            telemetry = _get_telemetry_service()
-            if telemetry:
-                total_duration_ms = (time.time() - start_time) * 1000
-                telemetry.record_metric(
-                    name="ai_response_time_ms",
-                    value=total_duration_ms,
-                    tags={"mode": mode, "success": "true", "method": "fallback"}
-                )
+            self._record_response_metric(start_time, mode, success=True, method="fallback")
             
             # Persist updated conversation history to session store
             # Requirement 8.3: Persist updated conversation history
@@ -942,24 +952,15 @@ class LogisticsAgent:
             return response
             
         except CircuitOpenException as e:
-            time_until_retry = ""
-            if e.time_until_retry:
-                time_until_retry = f" Please retry in {int(e.time_until_retry.total_seconds())} seconds."
-            return f"❌ AI service temporarily unavailable. Circuit breaker '{e.circuit_name}' is open.{time_until_retry}"
+            logger.warning("AI circuit '%s' open on fallback chat", e.circuit_name)
+            retry_after = self._circuit_retry_after(e)
+            raise AgentServiceError(
+                AI_SERVICE_UNAVAILABLE, retry_after_seconds=retry_after
+            ) from e
             
-        except Exception as e:
-            # Record failure in circuit breaker
+        except AgentServiceError:
+            # Already logged with full detail by call_with_llm_retry. One
+            # failed request counts once toward the circuit, as before.
             self._circuit_breaker._on_failure()
-            
-            # Record failure metrics
-            telemetry = _get_telemetry_service()
-            if telemetry:
-                total_duration_ms = (time.time() - start_time) * 1000
-                telemetry.record_metric(
-                    name="ai_response_time_ms",
-                    value=total_duration_ms,
-                    tags={"mode": mode, "success": "false", "method": "fallback"}
-                )
-            
-            logger.exception("Error in fallback chat")
-            return f"❌ I'm having trouble connecting to the AI service right now. However, all the data tools are working fine. Please try again in a moment."
+            self._record_response_metric(start_time, mode, success=False, method="fallback")
+            raise
