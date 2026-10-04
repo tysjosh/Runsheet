@@ -21,9 +21,12 @@ The split below follows the boundary the agent design already implies, and which
 ``OperationsControlView`` states outright ("the supervisor needs this state
 visible alongside the live activity feed and pause controls in the right rail"):
 
-* **Policy and lifecycle are the tenant admin's.** How much autonomy the agents
-  may exercise, whether an agent runs at all, and what long-lived memory they
-  retain are tenant-wide settings that outlive any one shift.
+* **Policy is the tenant admin's.** How much autonomy the agents may exercise
+  and what long-lived memory they retain are tenant-wide settings that outlive
+  any one shift.
+* **Whether an autonomous agent runs at all is the platform operator's.** The
+  polling agents are process-wide, so pause/resume affects every tenant and
+  needs ``platform_admin`` (:data:`AGENT_PLATFORM_ROLES`).
 * **The approval queue is the dispatcher's.** Agents *propose* work — delivery
   prioritisation, route planning, delay response. The human-in-the-loop who
   accepts or rejects those proposals is the dispatcher running the shift. Making
@@ -65,8 +68,17 @@ AGENT_OPS_ROLES: tuple[str, ...] = ("admin", "dispatcher")
 #: handful of routes that change how the agents behave for everyone.
 AGENT_ADMIN_ROLES: tuple[str, ...] = ("admin",)
 
+#: Platform-wide agent lifecycle. The autonomous agents are process-wide: one
+#: polling loop serves every tenant, so pausing one stops it for all of them.
+#: A tenant admin must not be able to do that (staging F8); only the platform
+#: operator may. Staff accounts hold both ``admin`` and ``platform_admin``.
+AGENT_PLATFORM_ROLES: tuple[str, ...] = ("platform_admin",)
+
 #: Router-level dependency: reads and the approval queue.
 agent_ops_dependency = roles_dependency(*AGENT_OPS_ROLES)
 
-#: Per-route dependency: autonomy level, agent pause/resume, memory deletion.
+#: Per-route dependency: autonomy level, memory deletion.
 agent_admin_dependency = roles_dependency(*AGENT_ADMIN_ROLES)
+
+#: Per-route dependency: pause/resume of the process-wide autonomous agents.
+agent_platform_admin_dependency = roles_dependency(*AGENT_PLATFORM_ROLES)

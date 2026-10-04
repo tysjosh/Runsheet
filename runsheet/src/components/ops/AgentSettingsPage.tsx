@@ -369,7 +369,12 @@ function AutonomySection({ isAdmin }: AutonomySectionProps) {
 
 // ─── Agent Health & Control Section ──────────────────────────────────────────
 
-function AgentHealthSection() {
+interface AgentHealthSectionProps {
+  /** Pause/resume act on the process-wide agents, so they need `platform_admin`. */
+  canControlAgents: boolean;
+}
+
+function AgentHealthSection({ canControlAgents }: AgentHealthSectionProps) {
   const [agents, setAgents] = useState<AgentHealthEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -511,7 +516,7 @@ function AgentHealthSection() {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                {agent.status === "running" && (
+                {canControlAgents && agent.status === "running" && (
                   <button
                     onClick={() => handlePause(agent.agent_id)}
                     disabled={actionLoading === agent.agent_id}
@@ -526,7 +531,7 @@ function AgentHealthSection() {
                     Pause
                   </button>
                 )}
-                {agent.status === "stopped" && (
+                {canControlAgents && agent.status === "stopped" && (
                   <button
                     onClick={() => handleResume(agent.agent_id)}
                     disabled={actionLoading === agent.agent_id}
@@ -1075,6 +1080,10 @@ export default function AgentSettingsPage() {
   // otherwise — see Requirement 3.4/3.5). Defaults to read-only until roles
   // resolve so a non-admin never briefly sees editable controls.
   const [isAdmin, setIsAdmin] = useState(false);
+  // Pause/resume stop or start the autonomous agents for every tenant, so the
+  // backend requires `platform_admin` (`agent_platform_admin_dependency`);
+  // autonomy and memory stay tenant-admin policy.
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -1082,6 +1091,7 @@ export default function AgentSettingsPage() {
       const roles = await getCurrentUserRoles();
       if (!cancelled) {
         setIsAdmin(roles.includes("admin"));
+        setIsPlatformAdmin(roles.includes("platform_admin"));
       }
     })();
     return () => {
@@ -1119,7 +1129,7 @@ export default function AgentSettingsPage() {
 
           {/* Agent Health & Control */}
           <div className="bg-white border border-gray-200 rounded-lg p-6">
-            <AgentHealthSection />
+            <AgentHealthSection canControlAgents={isPlatformAdmin} />
           </div>
 
           {/* Memory Management */}

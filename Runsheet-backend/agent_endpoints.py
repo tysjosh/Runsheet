@@ -27,7 +27,11 @@ from errors.exceptions import (
 )
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
-from Agents.api_authz import agent_admin_dependency, agent_ops_dependency
+from Agents.api_authz import (
+    agent_admin_dependency,
+    agent_ops_dependency,
+    agent_platform_admin_dependency,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -658,12 +662,18 @@ async def get_agent_health(request: Request):
     return {"agents": health}
 
 
-@router.post("/{agent_id}/pause", dependencies=[Depends(agent_admin_dependency)])
-async def pause_agent(agent_id: str, request: Request):
+@router.post("/{agent_id}/pause", dependencies=[Depends(agent_platform_admin_dependency)])
+async def pause_agent(
+    agent_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
     """
     Pause an autonomous agent.
 
-    Stops the agent's polling loop. The agent can be resumed later.
+    Stops the agent's polling loop for every tenant (the agents are
+    process-wide), so it needs ``platform_admin``. The agent can be resumed
+    later. The audit entry carries the verified session identity.
 
     Validates: Requirement 9.6
     """
@@ -690,24 +700,29 @@ async def pause_agent(agent_id: str, request: Request):
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": None,
-            "user_id": request.headers.get("x-user-id", "system"),
+            "tenant_id": tenant.tenant_id,
+            "user_id": tenant.user_id,
             "session_id": None,
-            "details": {"action": "pause"},
+            "details": {"action": "pause", "scope": "platform"},
         })
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to pause agent %s", agent_id)
-        raise internal_error(message="Failed to pause agent", details={"agent_id": agent_id, "error": str(e)})
+        raise internal_error(message="Failed to pause agent", details={"agent_id": agent_id})
 
     return {"agent_id": agent_id, "status": "stopped"}
 
 
-@router.post("/{agent_id}/resume", dependencies=[Depends(agent_admin_dependency)])
-async def resume_agent(agent_id: str, request: Request):
+@router.post("/{agent_id}/resume", dependencies=[Depends(agent_platform_admin_dependency)])
+async def resume_agent(
+    agent_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
     """
     Resume a paused autonomous agent.
 
-    Restarts the agent's polling loop.
+    Restarts the agent's polling loop for every tenant, so it needs
+    ``platform_admin``. The audit entry carries the verified session identity.
 
     Validates: Requirement 9.6
     """
@@ -734,13 +749,13 @@ async def resume_agent(agent_id: str, request: Request):
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": None,
-            "user_id": request.headers.get("x-user-id", "system"),
+            "tenant_id": tenant.tenant_id,
+            "user_id": tenant.user_id,
             "session_id": None,
-            "details": {"action": "resume"},
+            "details": {"action": "resume", "scope": "platform"},
         })
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to resume agent %s", agent_id)
-        raise internal_error(message="Failed to resume agent", details={"agent_id": agent_id, "error": str(e)})
+        raise internal_error(message="Failed to resume agent", details={"agent_id": agent_id})
 
     return {"agent_id": agent_id, "status": "running"}

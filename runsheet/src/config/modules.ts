@@ -227,8 +227,9 @@ const MODULES: readonly ModuleDescriptor[] = [
   // It emptied out one piece at a time: password change moved to
   // `/dashboard/profile`, Support was deleted, and Data Import moved to
   // AdminHub. That left a top-level nav item holding a single tab, Agent
-  // Settings — which is admin policy (autonomy level, agent pause/resume,
-  // memory deletion, all gated to `admin` by `Agents/api_authz.py`). AdminHub
+  // Settings — which is admin policy (autonomy level and memory deletion gated
+  // to `admin`, agent pause/resume to `platform_admin`, by
+  // `Agents/api_authz.py`). AdminHub
   // already owns `agents` (Agent Monitoring), so Agent Settings now lives
   // beside it as an AdminHub tab and the nav entry is gone.
   //
@@ -358,8 +359,11 @@ const MODULES: readonly ModuleDescriptor[] = [
 
   // ── SettingsPage tabs ─────────────────────────────────────────────────────
   // AdminHub tab. Admin-only, matching the backend: `PATCH /agent/config/`
-  // `autonomy`, `POST /agent/{id}/pause|resume` and `DELETE /agent/memory/{id}`
-  // all require `admin` via `agent_admin_dependency`. The previous note here
+  // `autonomy` and `DELETE /agent/memory/{id}` require `admin` via
+  // `agent_admin_dependency`. `POST /agent/{id}/pause|resume` act on the
+  // process-wide agents (every tenant), so they require `platform_admin` via
+  // `agent_platform_admin_dependency` and the page shows those controls to
+  // `platform_admin` only. The previous note here
   // claimed "read-only for non-admins already", which overstated it — the
   // read-only treatment covered the autonomy radios only, while pause/resume
   // and memory deletion were ungated in both the UI and the API.
@@ -367,7 +371,7 @@ const MODULES: readonly ModuleDescriptor[] = [
     id: "agent-settings",
     tier: 2,
     requiredRoles: ["admin"],
-    note: "Agent policy: autonomy level, pause/resume, memory. Admin-only.",
+    note: "Agent policy: autonomy level, memory. Admin-only; pause/resume needs platform_admin.",
   },
   // There is deliberately no `security` entry. That tab rendered
   // `<ChangePassword />`, the same component `ProfilePage` renders, so it was a

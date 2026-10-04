@@ -213,9 +213,10 @@ describe("the Settings nav item is gone", () => {
   });
 
   it("makes Agent Settings admin-only, matching the backend", () => {
-    // `Agents/api_authz.py`: PATCH /agent/config/autonomy, POST
-    // /agent/{id}/pause|resume and DELETE /agent/memory/{id} all require
-    // `admin` via agent_admin_dependency. The old note claimed the tab was
+    // `Agents/api_authz.py`: PATCH /agent/config/autonomy and DELETE
+    // /agent/memory/{id} require `admin` via agent_admin_dependency; POST
+    // /agent/{id}/pause|resume additionally require `platform_admin` (the
+    // page hides those controls otherwise). The old note claimed the tab was
     // "read-only for non-admins already", which covered the autonomy radios
     // only — pause/resume and memory deletion were ungated in UI and API both.
     expect(moduleDescriptor("agent-settings")?.requiredRoles).toEqual([

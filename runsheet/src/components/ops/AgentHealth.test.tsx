@@ -1,12 +1,13 @@
 /**
  * Tests for <AgentHealth> — the agent status panel and its pause/resume control.
  *
- * The behaviour being pinned: pausing an agent is a tenant-wide lifecycle change,
- * so the backend restricts it to `admin` via `agent_admin_dependency`
- * (`Agents/api_authz.py`). This panel renders inside `OperationsControlView` and
- * `/ops/command`, which are both `admin` + `dispatcher` surfaces — so a
- * dispatcher sees the panel. They must not see a pause button that can only
- * return 403.
+ * The behaviour being pinned: the autonomous agents are process-wide, so pausing
+ * one stops it for every tenant, and the backend restricts it to
+ * `platform_admin` via `agent_platform_admin_dependency` (`Agents/api_authz.py`,
+ * staging F8). This panel renders inside `OperationsControlView` and
+ * `/ops/command`, which are both `admin` + `dispatcher` surfaces — so tenant
+ * admins and dispatchers see the panel. They must not see a pause button that
+ * can only return 403.
  *
  * The status list stays visible to dispatchers; only the control is gated. This
  * is presentation, not enforcement — the backend re-checks regardless — but a
@@ -58,9 +59,9 @@ beforeEach(() => {
   mockGetAgentHealth.mockResolvedValue(healthFixture());
 });
 
-describe("AgentHealth — pause/resume is admin-only", () => {
-  it("offers pause and resume to an admin", async () => {
-    mockGetCurrentUserRoles.mockResolvedValue(["admin"]);
+describe("AgentHealth — pause/resume is platform_admin-only", () => {
+  it("offers pause and resume to staff (admin + platform_admin)", async () => {
+    mockGetCurrentUserRoles.mockResolvedValue(["admin", "platform_admin"]);
 
     render(<AgentHealth />);
 
@@ -70,6 +71,21 @@ describe("AgentHealth — pause/resume is admin-only", () => {
     expect(
       await screen.findByRole("button", { name: /resume sla guardian/i }),
     ).toBeInTheDocument();
+  });
+
+  it("hides the control from a tenant admin", async () => {
+    // A tenant admin pausing a process-wide agent stopped it for every tenant.
+    mockGetCurrentUserRoles.mockResolvedValue(["admin"]);
+
+    render(<AgentHealth />);
+
+    expect(await screen.findByText("Delay Response")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /pause/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /resume/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("hides the control from a dispatcher but still shows agent status", async () => {
@@ -103,8 +119,8 @@ describe("AgentHealth — pause/resume is admin-only", () => {
   });
 
   it("does not flash the control before roles resolve", async () => {
-    // `getCurrentUserRoles` is async. If the component defaulted to admin, a
-    // dispatcher would briefly see an actionable button on every mount.
+    // `getCurrentUserRoles` is async. If the component defaulted to allowed,
+    // a dispatcher would briefly see an actionable button on every mount.
     let release: (roles: string[]) => void = () => {};
     mockGetCurrentUserRoles.mockReturnValue(
       new Promise<string[]>((resolve) => {
@@ -120,7 +136,7 @@ describe("AgentHealth — pause/resume is admin-only", () => {
       screen.queryByRole("button", { name: /pause/i }),
     ).not.toBeInTheDocument();
 
-    release(["admin"]);
+    release(["admin", "platform_admin"]);
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: /pause delay response/i }),
@@ -128,9 +144,12 @@ describe("AgentHealth — pause/resume is admin-only", () => {
     );
   });
 
-  it("treats a role whose name merely contains admin as non-admin", async () => {
+  it("treats a role whose name merely contains platform_admin as not allowed", async () => {
     // Mirrors the backend's exact-match rule: no substring promotion.
-    mockGetCurrentUserRoles.mockResolvedValue(["admin_readonly"]);
+    mockGetCurrentUserRoles.mockResolvedValue([
+      "admin",
+      "platform_admin_readonly",
+    ]);
 
     render(<AgentHealth />);
 

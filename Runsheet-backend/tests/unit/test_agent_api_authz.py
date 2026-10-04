@@ -16,8 +16,11 @@ Two audiences, one router, and the split is the thing worth pinning:
   ``/dashboard``, ``NotificationBell`` in the header, ``OperationsControlView`` on
   ``/ops/control``), and both owning nav items carry
   ``["admin", "dispatcher"]``.
-* **Policy and lifecycle: admin.** Autonomy level, agent pause/resume, and memory
-  deletion are tenant-wide and outlive a shift.
+* **Policy: admin.** Autonomy level and memory deletion are tenant-wide and
+  outlive a shift.
+* **Lifecycle: platform_admin.** The autonomous agents are process-wide, so
+  pause/resume stops or starts them for every tenant (staging F8: a tenant admin
+  could pause them for everyone).
 
 Making approve/reject admin-only would leave dispatchers holding a queue they
 cannot action, which defeats the human-in-the-loop design instead of securing it.
@@ -38,20 +41,27 @@ import agent_endpoints
 from Agents.api_authz import (
     AGENT_ADMIN_ROLES,
     AGENT_OPS_ROLES,
+    AGENT_PLATFORM_ROLES,
     agent_admin_dependency,
     agent_ops_dependency,
+    agent_platform_admin_dependency,
 )
 from errors.handlers import register_exception_handlers
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 OPS_GATE = "require_roles_admin_or_dispatcher"
 ADMIN_GATE = "require_roles_admin"
+PLATFORM_GATE = "require_roles_platform_admin"
 
-#: Routes that change tenant-wide agent policy or lifecycle. Pinned as data so
-#: adding a privileged route without deciding its audience fails here.
+#: Routes that change tenant-wide agent policy. Pinned as data so adding a
+#: privileged route without deciding its audience fails here.
 EXPECTED_ADMIN_ONLY: set[tuple[str, str]] = {
     ("PATCH", "/api/agent/config/autonomy"),
     ("DELETE", "/api/agent/memory/{memory_id}"),
+}
+
+#: Routes that act on the process-wide autonomous agents (every tenant).
+EXPECTED_PLATFORM_ONLY: set[tuple[str, str]] = {
     ("POST", "/api/agent/{agent_id}/pause"),
     ("POST", "/api/agent/{agent_id}/resume"),
 }
@@ -104,6 +114,10 @@ class TestAgentPolicy:
     def test_driver_is_in_neither_audience(self) -> None:
         assert "driver" not in AGENT_OPS_ROLES
         assert "driver" not in AGENT_ADMIN_ROLES
+        assert "driver" not in AGENT_PLATFORM_ROLES
+
+    def test_lifecycle_audience_is_platform_admin_only(self) -> None:
+        assert AGENT_PLATFORM_ROLES == ("platform_admin",)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +192,23 @@ class TestAdminGateBehaviour:
         )
 
 
+class TestPlatformGateBehaviour:
+    def test_platform_admin_allowed(self) -> None:
+        assert (
+            _app_with(agent_platform_admin_dependency, "admin", "platform_admin")
+            .get("/probe").status_code
+            == 200
+        )
+
+    @pytest.mark.parametrize("role", ["admin", "dispatcher", "driver"])
+    def test_tenant_roles_are_refused(self, role: str) -> None:
+        # A tenant admin must not stop process-wide agents for every tenant.
+        assert (
+            _app_with(agent_platform_admin_dependency, role).get("/probe").status_code
+            == 403
+        )
+
+
 # ---------------------------------------------------------------------------
 # Drift guard — derived from the router, not a hand-maintained list
 # ---------------------------------------------------------------------------
@@ -223,6 +254,19 @@ class TestNoAgentRouteIsUngated:
             "it to EXPECTED_ADMIN_ONLY. Widened one to dispatchers? Removing it "
             f"here is the decision.\n  gained: {sorted(actual - EXPECTED_ADMIN_ONLY)}"
             f"\n  lost:   {sorted(EXPECTED_ADMIN_ONLY - actual)}"
+        )
+
+    def test_platform_only_routes_are_exactly_pause_and_resume(self) -> None:
+        actual = {
+            (method, r.path)
+            for r in _routes()
+            for method in r.methods
+            if PLATFORM_GATE in _gate_names(r.dependant)
+        }
+        assert actual == EXPECTED_PLATFORM_ONLY, (
+            "the platform_admin-only set drifted."
+            f"\n  gained: {sorted(actual - EXPECTED_PLATFORM_ONLY)}"
+            f"\n  lost:   {sorted(EXPECTED_PLATFORM_ONLY - actual)}"
         )
 
     def test_approval_queue_is_not_admin_only(self) -> None:
