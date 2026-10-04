@@ -19,6 +19,7 @@ import type {
   JobStatus,
   SchedulingCargoItem,
 } from "../../../../../types/api";
+import { formatStatus } from "../../../../../utils/formatStatus";
 
 /**
  * Job status badge color-coding (matches Job Board pattern).
@@ -40,13 +41,6 @@ function getJobStatusBadge(status: JobStatus): string {
     default:
       return "text-gray-700 bg-gray-100";
   }
-}
-
-function formatStatus(status: string): string {
-  return status
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
 }
 
 /**

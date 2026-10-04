@@ -19,7 +19,13 @@
  */
 
 import { ApiError } from "./api";
-import { acceptJob, ackJob, rejectJob, rerouteJob } from "./schedulingApi";
+import {
+  acceptJob,
+  ackJob,
+  getJob,
+  rejectJob,
+  rerouteJob,
+} from "./schedulingApi";
 
 const API_BASE_URL = "http://localhost:8080/api";
 
@@ -108,6 +114,50 @@ describe("rejectJob", () => {
     });
 
     await expect(rejectJob("job-3", "nope")).rejects.toThrow(ApiError);
+  });
+});
+
+// ─── getJob ──────────────────────────────────────────────────────────────────
+
+describe("getJob", () => {
+  const job = {
+    job_id: "JOB_6",
+    status: "scheduled",
+    job_type: "fuel_delivery",
+  };
+
+  it("flattens the backend { job, events, links } envelope (R-1)", async () => {
+    const events = [{ event_id: "E-1" }];
+    const links = { order: { status: "empty" } };
+    mockFetchOnce({
+      ok: true,
+      body: { data: { job, events, links }, request_id: "r" },
+    });
+
+    const result = await getJob("JOB_6", { expand: ["order"] });
+
+    expect(result.data).toEqual({ ...job, events, links });
+    expect(result.data.status).toBe("scheduled");
+    expect(result.request_id).toBe("r");
+    const [url] = (global.fetch as jest.Mock).mock.calls[0];
+    expect(url).toBe(`${API_BASE_URL}/scheduling/jobs/JOB_6?expand=order`);
+  });
+
+  it("defaults events to [] and omits links when absent", async () => {
+    mockFetchOnce({ ok: true, body: { data: { job }, request_id: "r" } });
+
+    const result = await getJob("JOB_6");
+
+    expect(result.data).toEqual({ ...job, events: [] });
+    expect("links" in result.data).toBe(false);
+  });
+
+  it("passes an already-flat job through unchanged", async () => {
+    mockFetchOnce({ ok: true, body: { data: job, request_id: "r" } });
+
+    const result = await getJob("JOB_6");
+
+    expect(result.data).toEqual(job);
   });
 });
 

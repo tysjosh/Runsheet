@@ -212,7 +212,21 @@ export async function getJobs(
   return schedulingRequest<PaginatedResponse<Job>>(`/scheduling/jobs${qs}`);
 }
 
-/** GET /scheduling/jobs/:id — single job with event history */
+/** Wire shape of GET /scheduling/jobs/:id: ``{ job, events, links? }``. */
+interface JobDetailEnvelope {
+  job: Job;
+  events?: JobEvent[];
+  links?: JobLinks;
+}
+
+/**
+ * GET /scheduling/jobs/:id — single job with event history.
+ *
+ * The backend nests the job (``data: { job, events, links? }``); this getter
+ * flattens it to ``Job & { events, links }`` so every caller can read
+ * ``data.status`` etc. directly. A response that is already flat is passed
+ * through unchanged.
+ */
 export async function getJob(
   jobId: string,
   options?: { expand?: JobExpand[] },
@@ -220,9 +234,23 @@ export async function getJob(
   const expand = options?.expand?.length
     ? `?expand=${options.expand.join(",")}`
     : "";
-  return schedulingRequest<
-    SingleResponse<Job & { events?: JobEvent[]; links?: JobLinks }>
+  const res = await schedulingRequest<
+    SingleResponse<
+      JobDetailEnvelope | (Job & { events?: JobEvent[]; links?: JobLinks })
+    >
   >(`/scheduling/jobs/${encodeURIComponent(jobId)}${expand}`);
+  const data = res.data;
+  if (data && "job" in data && data.job) {
+    return {
+      ...res,
+      data: {
+        ...data.job,
+        events: data.events ?? [],
+        ...(data.links ? { links: data.links } : {}),
+      },
+    };
+  }
+  return res as SingleResponse<Job & { events?: JobEvent[]; links?: JobLinks }>;
 }
 
 /** GET /scheduling/jobs/active — active jobs (scheduled, assigned, in_progress) */
