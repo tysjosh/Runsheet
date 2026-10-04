@@ -152,8 +152,10 @@ async def chat_endpoint(
             ))
         if not done_sent:
             yield _sse(done_event())
-    return StreamingResponse(generate_response(), media_type="text/plain",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "Content-Type": "text/plain; charset=utf-8"})
+    # Server-Sent Events, flushed per event: ``X-Accel-Buffering: no`` stops
+    # nginx-style proxies from holding the stream until it ends (F6).
+    return StreamingResponse(generate_response(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @router.post("/api/chat/fallback")
 async def chat_fallback_endpoint(

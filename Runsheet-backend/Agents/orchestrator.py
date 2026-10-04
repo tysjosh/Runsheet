@@ -23,6 +23,7 @@ Requirements: 7.6, 7.7, 7.8
 """
 
 import asyncio
+import inspect
 import logging
 import random
 import time
@@ -435,7 +436,18 @@ class AgentOrchestrator:
     async def _specialist_events(
         self, agent, task: str, context: dict
     ) -> AsyncIterator[ChatEvent]:
-        """One specialist attempt as chat events: its answer as one text event."""
+        """One specialist attempt as chat events.
+
+        Specialists that stream (``SpecialistAgent.stream``) forward text
+        deltas and tool progress as they happen (F6). Anything else, e.g. a
+        mock with only ``handle``, yields its whole answer as one text event.
+        The check is on the class so a ``MagicMock``'s auto-attributes do not
+        count as a stream.
+        """
+        if inspect.isasyncgenfunction(getattr(type(agent), "stream", None)):
+            async for event in agent.stream(task, context):
+                yield event
+            return
         yield text_event(await agent.handle(task, context))
 
     async def _run_specialist(
