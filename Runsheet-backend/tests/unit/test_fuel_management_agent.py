@@ -278,7 +278,9 @@ class TestMonitorCycleWithRefill:
     @pytest.mark.asyncio
     async def test_calculates_correct_priority_high(self):
         agent = _make_agent()
-        station = _fuel_station(days_until_empty=2.0)
+        # status "normal" isolates the days rule (a critical status floors
+        # the priority at critical, F12).
+        station = _fuel_station(status="normal", days_until_empty=2.0)
 
         agent._es.search_documents = AsyncMock(return_value=_es_response([station]))
 
@@ -288,7 +290,9 @@ class TestMonitorCycleWithRefill:
     @pytest.mark.asyncio
     async def test_calculates_correct_priority_medium(self):
         agent = _make_agent()
-        station = _fuel_station(days_until_empty=4.0)
+        # status "normal" isolates the days rule (a critical status floors
+        # the priority at critical, F12).
+        station = _fuel_station(status="normal", days_until_empty=4.0)
 
         agent._es.search_documents = AsyncMock(return_value=_es_response([station]))
 
@@ -311,7 +315,8 @@ class TestMonitorCycleWithRefill:
         assert request.tool_name == "request_fuel_refill"
         assert request.parameters["station_id"] == "STN-001"
         assert request.parameters["quantity_liters"] == 7000.0
-        assert request.parameters["priority"] == "high"
+        # The default station is status "critical" -> critical floor (F12)
+        assert request.parameters["priority"] == "critical"
         assert request.agent_id == "fuel_management_agent"
 
     @pytest.mark.asyncio
@@ -334,7 +339,7 @@ class TestMonitorCycleWithRefill:
         assert payload["capacity_liters"] == 10000
         assert payload["days_until_empty"] == 2.0
         assert payload["refill_quantity"] == 7000.0
-        assert payload["priority"] == "high"
+        assert payload["priority"] == "critical"  # critical status floor (F12)
         assert payload["tenant_id"] == "default"
 
     @pytest.mark.asyncio
@@ -578,3 +583,157 @@ class TestMonitorCycleEdgeCases:
 
         detections, actions = await agent.monitor_cycle()
         assert actions[0]["result"] is expected_result
+
+
+# ---------------------------------------------------------------------------
+# Tests: F12 — status floor on priority, cooldown lifts on approval expiry
+# ---------------------------------------------------------------------------
+
+
+def _queued(approval_id="approval-1", method="approval_queue"):
+    return MutationResult(
+        executed=False,
+        approval_id=approval_id,
+        risk_level="medium",
+        confirmation_method=method,
+    )
+
+
+class TestRefillPriorityStatusFloor:
+    """Staging F12: a critical station with no consumption history got 'normal'."""
+
+    @pytest.mark.asyncio
+    async def test_critical_station_without_history_is_critical(self):
+        agent = _make_agent()
+        station = _fuel_station(status="critical", days_until_empty=99999)
+        agent._es.search_documents = AsyncMock(return_value=_es_response([station]))
+
+        _, actions = await agent.monitor_cycle()
+
+        assert actions[0]["priority"] == "critical"
+        request = agent._confirmation_protocol.process_mutation.call_args[0][0]
+        assert request.parameters["priority"] == "critical"
+
+    @pytest.mark.asyncio
+    async def test_low_station_is_at_least_high(self):
+        agent = _make_agent()
+        station = _fuel_station(status="low", days_until_empty=4.0)
+        agent._es.search_documents = AsyncMock(return_value=_es_response([station]))
+
+        _, actions = await agent.monitor_cycle()
+
+        assert actions[0]["priority"] == "high"
+
+    def test_calculate_refill_priority_status_floor(self):
+        from Agents.autonomous.fuel_calculations import (
+            FuelPriority,
+            calculate_refill_priority,
+        )
+
+        assert calculate_refill_priority(99999, "critical") == FuelPriority.CRITICAL
+        assert calculate_refill_priority(99999, "empty") == FuelPriority.CRITICAL
+        assert calculate_refill_priority(99999, "low") == FuelPriority.HIGH
+        assert calculate_refill_priority(0.5, "low") == FuelPriority.CRITICAL
+        assert calculate_refill_priority(99999, "normal") == FuelPriority.NORMAL
+        assert calculate_refill_priority(4.0, None) == FuelPriority.MEDIUM
+
+
+class TestCooldownLiftsOnApprovalExpiry:
+    """Staging F12: the 2 h cooldown outlived the 1 h approval expiry."""
+
+    async def _queue_once(self, agent, station):
+        agent._confirmation_protocol.process_mutation = AsyncMock(
+            return_value=_queued()
+        )
+        agent._es.search_documents = AsyncMock(return_value=_es_response([station]))
+        await agent.monitor_cycle()
+        assert agent._approval_by_station == {"STN-001": "approval-1"}
+        assert agent._is_on_cooldown("STN-001")
+        agent._confirmation_protocol.process_mutation.reset_mock()
+
+    @pytest.mark.asyncio
+    async def test_expired_approval_lifts_cooldown(self):
+        agent = _make_agent()
+        station = _fuel_station()
+        await self._queue_once(agent, station)
+        agent._es.get_document = AsyncMock(
+            return_value={"action_id": "approval-1", "status": "expired"}
+        )
+
+        _, actions = await agent.monitor_cycle()
+
+        agent._es.get_document.assert_awaited_once_with(
+            "agent_approval_queue", "approval-1"
+        )
+        agent._confirmation_protocol.process_mutation.assert_awaited_once()
+        request = agent._confirmation_protocol.process_mutation.call_args[0][0]
+        assert request.tool_name == "request_fuel_refill"
+        assert len(actions) == 1
+        assert agent._is_on_cooldown("STN-001")
+
+    @pytest.mark.asyncio
+    async def test_missing_approval_lifts_cooldown(self):
+        agent = _make_agent()
+        station = _fuel_station()
+        await self._queue_once(agent, station)
+        agent._es.get_document = AsyncMock(return_value=None)
+
+        _, actions = await agent.monitor_cycle()
+
+        assert len(actions) == 1
+
+    @pytest.mark.parametrize("status", ["pending", "approved", "executed", "rejected"])
+    @pytest.mark.asyncio
+    async def test_live_or_decided_approval_keeps_cooldown(self, status):
+        agent = _make_agent()
+        station = _fuel_station()
+        await self._queue_once(agent, station)
+        agent._es.get_document = AsyncMock(
+            return_value={"action_id": "approval-1", "status": status}
+        )
+
+        _, actions = await agent.monitor_cycle()
+
+        agent._confirmation_protocol.process_mutation.assert_not_called()
+        assert actions == []
+
+    @pytest.mark.asyncio
+    async def test_approval_read_failure_keeps_cooldown(self):
+        agent = _make_agent()
+        station = _fuel_station()
+        await self._queue_once(agent, station)
+        agent._es.get_document = AsyncMock(side_effect=RuntimeError("store down"))
+
+        _, actions = await agent.monitor_cycle()
+
+        assert actions == []
+
+    @pytest.mark.asyncio
+    async def test_already_queued_is_tracked(self):
+        agent = _make_agent()
+        agent._confirmation_protocol.process_mutation = AsyncMock(
+            return_value=_queued("approval-9", "already_queued")
+        )
+        agent._es.search_documents = AsyncMock(
+            return_value=_es_response([_fuel_station()])
+        )
+
+        await agent.monitor_cycle()
+
+        assert agent._approval_by_station == {"STN-001": "approval-9"}
+
+    @pytest.mark.asyncio
+    async def test_immediate_execution_is_not_tracked(self):
+        agent = _make_agent()
+        agent._es.search_documents = AsyncMock(
+            return_value=_es_response([_fuel_station()])
+        )
+        agent._es.get_document = AsyncMock()
+
+        await agent.monitor_cycle()
+        await agent.monitor_cycle()
+
+        assert agent._approval_by_station == {}
+        # On cooldown with nothing tracked: no approval read, no new request.
+        agent._es.get_document.assert_not_called()
+        assert agent._confirmation_protocol.process_mutation.await_count == 1

@@ -33,6 +33,11 @@ FUEL_STATIONS_INDEX = "fuel_stations"
 # Default threshold for days_until_empty below which a station is flagged
 DEFAULT_DAYS_THRESHOLD = 5
 
+APPROVAL_QUEUE_INDEX = "agent_approval_queue"
+
+# Confirmation methods that leave the refill waiting on a human approval
+_QUEUED_METHODS = ("approval_queue", "already_queued")
+
 
 class FuelManagementAgent(AutonomousAgentBase):
     """Monitors fuel stations and creates refill requests for critical stations.
@@ -43,7 +48,8 @@ class FuelManagementAgent(AutonomousAgentBase):
 
     1. Checks per-station cooldown — skips recently processed stations.
     2. Calculates the refill quantity to restore stock to 80% capacity.
-    3. Calculates the refill priority based on ``days_until_empty``.
+    3. Calculates the refill priority from ``days_until_empty`` and the
+       station ``status`` (critical/empty -> critical, low -> at least high).
     4. Creates a refill request via the Confirmation Protocol
        (``request_fuel_refill`` mutation tool).
     5. Broadcasts a ``fuel_alert`` via WebSocket with station details and
@@ -84,6 +90,8 @@ class FuelManagementAgent(AutonomousAgentBase):
         )
         self._es = es_service
         self._days_threshold = days_threshold
+        # station_id -> approval_id of the refill request it is waiting on
+        self._approval_by_station: Dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Core monitoring cycle
@@ -134,9 +142,14 @@ class FuelManagementAgent(AutonomousAgentBase):
 
             detections.append(station_id)
 
-            # Respect cooldown (Req 4.4)
+            # Respect cooldown (Req 4.4) — unless the approval it was waiting
+            # on expired unanswered: the 2 h cooldown outlives the 1 h expiry,
+            # which left a critical station with no open request for an hour.
             if self._is_on_cooldown(station_id):
-                continue
+                if not await self._tracked_approval_lapsed(station_id):
+                    continue
+                self._cooldown_tracker.pop(station_id, None)
+                self._approval_by_station.pop(station_id, None)
 
             # Calculate refill quantity and priority (Req 4.3, 4.7)
             capacity = station.get("capacity_liters", 0)
@@ -144,7 +157,9 @@ class FuelManagementAgent(AutonomousAgentBase):
             days_until_empty = station.get("days_until_empty", 0)
 
             refill_quantity = calculate_refill_quantity(capacity, current_stock)
-            priority = calculate_refill_priority(days_until_empty)
+            priority = calculate_refill_priority(
+                days_until_empty, station.get("status")
+            )
 
             # Skip if no refill needed (station already above 80%)
             if refill_quantity <= 0:
@@ -162,6 +177,17 @@ class FuelManagementAgent(AutonomousAgentBase):
                 agent_id=self.agent_id,
             )
             result = await self._confirmation_protocol.process_mutation(request)
+
+            # Remember which approval this station now waits on, so the
+            # cooldown can lift if that approval expires.
+            approval_id = getattr(result, "approval_id", None)
+            if (
+                getattr(result, "confirmation_method", None) in _QUEUED_METHODS
+                and isinstance(approval_id, str)
+            ):
+                self._approval_by_station[station_id] = approval_id
+            else:
+                self._approval_by_station.pop(station_id, None)
 
             # Broadcast fuel_alert via WebSocket (Req 4.5)
             await self._ws.broadcast_event("fuel_alert", {
@@ -189,3 +215,23 @@ class FuelManagementAgent(AutonomousAgentBase):
             self._set_cooldown(station_id)
 
         return detections, actions
+
+    async def _tracked_approval_lapsed(self, station_id: str) -> bool:
+        """Whether the approval a cooled-down station waits on expired or vanished.
+
+        ``approved`` / ``executed`` / ``rejected`` (a human decided) and
+        ``pending`` keep the cooldown, as does a station with no tracked
+        approval or a failed read.
+        """
+        approval_id = self._approval_by_station.get(station_id)
+        if not approval_id:
+            return False
+        try:
+            entry = await self._es.get_document(APPROVAL_QUEUE_INDEX, approval_id)
+        except Exception:
+            self.logger.warning(
+                "FuelManagementAgent: could not read approval %s for station %s",
+                approval_id, station_id, exc_info=True,
+            )
+            return False
+        return entry is None or entry.get("status") == "expired"
