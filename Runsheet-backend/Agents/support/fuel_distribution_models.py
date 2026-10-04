@@ -122,6 +122,14 @@ class TankForecast(BaseModel):
             "``{delivery_id, scheduled_eta, planned_gallons}`` (Req 1.4.3)."
         ),
     )
+    product_code: Optional[str] = Field(
+        default=None,
+        description=(
+            "Canonical US product code of the customer tank. When set it is "
+            "persisted as ``fuel_grade``: the legacy enum above cannot name "
+            "heating oil, so it used to persist as KEROSENE."
+        ),
+    )
 
 
 class DeliveryPriority(BaseModel):
@@ -141,6 +149,14 @@ class DeliveryPriority(BaseModel):
     priority_score: float = Field(ge=0.0, le=1.0)
     priority_bucket: PriorityBucket
     reasons: List[str] = Field(default_factory=list)
+    #: The Fuel_Order this entry scores. ``station_id`` is
+    #: ``customer_tank_id or order_id``, so without this the loading agent
+    #: cannot tell which order a tank-keyed entry belongs to.
+    order_id: Optional[str] = None
+    #: Canonical US product code of the order (``fuel_grade`` above is the
+    #: legacy family, which labels heating oil as AGO). Persisted as the
+    #: entry's ``fuel_grade``.
+    product_code: Optional[str] = None
 
     # --- Phase 5 extensions (fuel-ops hardening Capability 3) -----------
     # Safe-to-delay tolerance (Req 3.1.3): populated from

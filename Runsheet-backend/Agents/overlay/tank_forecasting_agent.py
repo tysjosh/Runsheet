@@ -68,6 +68,7 @@ from Agents.overlay.data_contracts import (
     RiskSignal,
 )
 from Agents.overlay.signal_bus import SignalBus
+from Agents.support.compartment_solver import legacy_grade_for_product
 from Agents.support.fuel_distribution_models import FuelGrade, TankForecast
 from Agents.support.mvp_es_mappings import MVP_TANK_FORECASTS_INDEX
 from fuel.customer_tank_models import CustomerTank, CustomerTankRepository
@@ -80,7 +81,11 @@ from fuel.services.consumption_models import (
 )
 from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
 from fuel.services.fuel_planning_ws_manager import FuelPlanningWSManager
-from fuel.services.fuel_product_catalog import canonicalize_or_warn
+from fuel.services.fuel_product_catalog import (
+    UnknownFuelProductError,
+    canonicalize,
+    canonicalize_or_warn,
+)
 from fuel.services.weather_provider import DailyWeather, WeatherProvider
 
 logger = logging.getLogger(__name__)
@@ -1106,6 +1111,7 @@ class TankForecastingAgent(OverlayAgentBase):
             baseline_source=baseline_source,
             weather_fallback=weather_fallback,
             scheduled_deliveries=scheduled_serialized,
+            product_code=self._canonical_tank_product(tank),
         )
 
     def _select_consumption_model(
@@ -1190,27 +1196,24 @@ class TankForecastingAgent(OverlayAgentBase):
 
     @staticmethod
     def _fuel_grade_for_tank(tank: CustomerTank) -> FuelGrade:
-        """Return a best-effort :class:`FuelGrade` for a Customer_Tank.
+        """Return the legacy :class:`FuelGrade` family for a Customer_Tank.
 
-        The legacy NG-flavoured FuelGrade enum only carries four values,
-        so we map the US catalog product codes to their closest NG alias
-        for the compatibility field on the persisted TankForecast.
-        Future-proofing the full US catalog is tracked by fuel-ops
-        hardening Capability 6; until then we stamp the most reasonable
-        grade so downstream queries keyed on this field keep working.
+        The four-value enum is a required field on TankForecast, so it holds
+        the product's family from ``LEGACY_GRADE_CATEGORIES`` (HEATING_OIL ->
+        AGO). It no longer names the product: the persisted ``fuel_grade``
+        comes from ``TankForecast.product_code``. The hand table this replaces
+        mapped HEATING_OIL to ATK, which persisted as KEROSENE.
         """
-        mapping = {
-            "DIESEL_2": FuelGrade.AGO,
-            "OFF_ROAD_DIESEL": FuelGrade.AGO,
-            "GASOLINE_REG": FuelGrade.PMS,
-            "GASOLINE_PREM": FuelGrade.PMS,
-            "ETHANOL_E85": FuelGrade.PMS,
-            "KEROSENE": FuelGrade.ATK,
-            "HEATING_OIL": FuelGrade.ATK,
-            "PROPANE": FuelGrade.LPG,
-            "DEF": FuelGrade.AGO,
-        }
-        return mapping.get(tank.fuel_product_code, FuelGrade.AGO)
+        family = legacy_grade_for_product(tank.fuel_product_code)
+        return FuelGrade(family) if family else FuelGrade.AGO
+
+    @staticmethod
+    def _canonical_tank_product(tank: CustomerTank) -> Optional[str]:
+        """Canonical US product code of ``tank``, or ``None`` if unknown."""
+        try:
+            return canonicalize(tank.fuel_product_code)
+        except (UnknownFuelProductError, TypeError):
+            return None
 
     # ------------------------------------------------------------------
     # Hours-to-runout math with scheduled-delivery folding (Req 1.4.2)
@@ -1569,7 +1572,11 @@ class TankForecastingAgent(OverlayAgentBase):
         try:
             doc = forecast.model_dump(mode="json")
             raw_grade = doc.get("fuel_grade")
-            if raw_grade is not None:
+            if forecast.product_code:
+                # Customer tanks carry the exact product; the legacy family
+                # in ``fuel_grade`` would label heating oil as diesel.
+                doc["fuel_grade"] = forecast.product_code
+            elif raw_grade is not None:
                 doc["fuel_grade"] = canonicalize_or_warn(
                     raw_grade,
                     context="mvp_tank_forecasts.fuel_grade",

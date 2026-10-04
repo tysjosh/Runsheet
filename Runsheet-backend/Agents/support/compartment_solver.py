@@ -5,11 +5,13 @@ Pure functions. No side effects.
 
 Validates: Requirements 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
 """
+import math
 from typing import Dict, List, Optional, Tuple
 
 from Agents.support.compartment_models import (
     Compartment, CompartmentAssignment, ConstraintViolation,
-    DeliveryRequest, FeasibilityResult, FuelGrade, LoadingPlan,
+    DeliveryRequest, FeasibilityResult, FleetAllocation, FuelGrade,
+    LoadingPlan, TruckSpec, UnservedOrder,
 )
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -70,6 +72,52 @@ FUEL_DENSITY: Dict[str, float] = {
 }
 
 DEFAULT_UNCERTAINTY_BUFFER_PCT = 10.0
+
+#: Shortfalls below this are floor-rounding residue (assignments are rounded
+#: down to 0.01 L), not unserved demand.
+ROUNDING_TOLERANCE_LITERS = 0.01
+
+
+def floor_liters(value: float) -> float:
+    """Round down to 0.01 L so a rounded assignment never exceeds a cap.
+
+    The ``1e-6`` (of a centilitre) absorbs binary noise such as
+    ``454.25 * 100 == 45424.999…`` without ever adding a visible amount.
+    """
+    return math.floor(value * 100.0 + 1e-6) / 100.0
+
+
+def output_fuel_grade(req: DeliveryRequest) -> str:
+    """The ``fuel_grade`` written on an assignment: always a canonical US code.
+
+    ``req.product_code`` when set, else the canonical form of the legacy
+    family grade (``AGO`` -> ``DIESEL_2``). The legacy grade used to be
+    written verbatim, which put ``AGO`` in approval payloads and labelled
+    heating oil as diesel once the plan was persisted.
+    """
+    if isinstance(req.product_code, str) and req.product_code.strip():
+        try:
+            return canonicalize(req.product_code)
+        except (UnknownFuelProductError, TypeError):
+            return req.product_code.strip().upper()
+    return canonicalize(req.fuel_grade.value)
+
+
+def planned_liters(
+    req: DeliveryRequest, buffer_mult: float, *, buffer_orders: bool
+) -> float:
+    """Litres the solver tries to load for ``req``.
+
+    The uncertainty buffer (MVP Req 3.6) exists for legacy station demand,
+    which is an estimate. A customer order states its own volume, so the
+    allocator passes ``buffer_orders=False`` and order-backed requests are
+    planned at face value. ``hard_cap_liters`` (tank ullage) always wins.
+    """
+    mult = buffer_mult if (buffer_orders or req.order_id is None) else 1.0
+    planned = req.quantity_liters * mult
+    if req.hard_cap_liters is not None:
+        planned = min(planned, req.hard_cap_liters)
+    return planned
 
 
 #: Which catalog categories each legacy Nigerian grade was used to mean.
@@ -334,6 +382,7 @@ def optimize_loading_plan(
 
     compartment_state = {c.compartment_id: (None, c.capacity_liters) for c in compartments}
     assignments = []
+    unserved = 0.0
 
     for key, reqs in product_demands.items():
         compatible = sorted(
@@ -341,7 +390,7 @@ def optimize_loading_plan(
             key=lambda c: c.capacity_liters, reverse=True,
         )
         for req in reqs:
-            remaining = req.quantity_liters * buffer_mult
+            remaining = planned_liters(req, buffer_mult, buffer_orders=True)
             for comp in compatible:
                 cid = comp.compartment_id
                 assigned_key, cap_remaining = compartment_state[cid]
@@ -351,28 +400,29 @@ def optimize_loading_plan(
                     continue
                 if cap_remaining <= 0:
                     continue
-                assign_qty = min(remaining, cap_remaining)
+                # Floor, not round: rounding up could exceed hard_cap_liters.
+                assign_qty = floor_liters(min(remaining, cap_remaining))
                 if assign_qty <= 0:
                     continue
                 assignments.append(CompartmentAssignment(
                     compartment_id=cid,
                     station_id=req.station_id,
                     order_id=req.order_id,
-                    fuel_grade=req.fuel_grade.value,
+                    fuel_grade=output_fuel_grade(req),
                     product_code=req.product_code,
-                    quantity_liters=round(assign_qty, 2),
+                    quantity_liters=assign_qty,
                     compartment_capacity_liters=comp.capacity_liters,
                 ))
                 compartment_state[cid] = (key, cap_remaining - assign_qty)
                 remaining -= assign_qty
-                if remaining <= 0:
+                if remaining < ROUNDING_TOLERANCE_LITERS:
                     break
             # remaining > 0 means partial fulfillment — tracked as unserved
+            if remaining >= ROUNDING_TOLERANCE_LITERS:
+                unserved += remaining
 
     total_loaded = sum(a.quantity_liters for a in assignments)
     total_capacity = sum(c.capacity_liters for c in compartments)
-    total_requested = sum(r.quantity_liters * buffer_mult for r in requests)
-    unserved = max(0, total_requested - total_loaded)
     utilization = round((total_loaded / total_capacity) * 100, 2) if total_capacity > 0 else 0.0
 
     # Compute weight
@@ -392,3 +442,203 @@ def optimize_loading_plan(
         total_weight_kg=round(total_weight, 2),
         tenant_id=tenant_id,
     )
+
+
+def request_key(req: DeliveryRequest) -> str:
+    """Identity of a request within one allocation run.
+
+    The order id when there is one; legacy station demand has no order, so it
+    is keyed by station and product.
+    """
+    if req.order_id:
+        return req.order_id
+    key = segregation_key(
+        product_code=req.product_code, fuel_grade=req.fuel_grade.value
+    )
+    return f"{req.station_id}:{key}"
+
+
+class _TruckState:
+    """Mutable per-truck bookkeeping for :func:`allocate_across_trucks`."""
+
+    def __init__(self, truck: TruckSpec):
+        self.truck = truck
+        # compartment_id -> [segregation key or None, remaining litres]
+        self.slots: Dict[str, list] = {
+            c.compartment_id: [None, c.capacity_liters]
+            for c in truck.compartments
+        }
+        self.loaded_weight_kg = 0.0
+        self.assignments: List[CompartmentAssignment] = []
+        self.unserved_liters = 0.0
+
+    def open_compartments(self, key: str) -> List[Compartment]:
+        """Compartments that may take ``key`` now: eligible, empty or same key."""
+        out = []
+        for comp in self.truck.compartments:
+            slot_key, remaining = self.slots[comp.compartment_id]
+            if remaining <= 0:
+                continue
+            if slot_key is not None and slot_key != key:
+                continue
+            if not compartment_accepts(comp, key):
+                continue
+            out.append(comp)
+        return out
+
+    def weight_headroom_liters(self, density: float) -> float:
+        if self.truck.max_weight_kg is None:
+            return math.inf
+        headroom_kg = (
+            self.truck.max_weight_kg
+            - self.truck.tare_weight_kg
+            - self.loaded_weight_kg
+        )
+        return max(0.0, headroom_kg / density)
+
+    def fit(self, key: str, density: float) -> float:
+        volume = sum(
+            self.slots[c.compartment_id][1] for c in self.open_compartments(key)
+        )
+        return min(volume, self.weight_headroom_liters(density))
+
+    def place(self, req: DeliveryRequest, key: str, density: float, liters: float) -> float:
+        """Load up to ``liters`` of ``req``; return the litres actually placed.
+
+        Same-product compartments that are already part-filled go first so a
+        product is not spread over more compartments than it needs, then empty
+        ones by remaining capacity, largest first.
+        """
+        candidates = self.open_compartments(key)
+        candidates.sort(
+            key=lambda c: (
+                0 if self.slots[c.compartment_id][0] == key else 1,
+                -self.slots[c.compartment_id][1],
+                c.position_index,
+                c.compartment_id,
+            )
+        )
+        to_place = min(liters, self.weight_headroom_liters(density))
+        placed = 0.0
+        grade = output_fuel_grade(req)
+        for comp in candidates:
+            if to_place - placed < ROUNDING_TOLERANCE_LITERS:
+                break
+            slot = self.slots[comp.compartment_id]
+            qty = floor_liters(min(to_place - placed, slot[1]))
+            if qty <= 0:
+                continue
+            self.assignments.append(CompartmentAssignment(
+                compartment_id=comp.compartment_id,
+                station_id=req.station_id,
+                order_id=req.order_id,
+                fuel_grade=grade,
+                product_code=req.product_code,
+                quantity_liters=qty,
+                compartment_capacity_liters=comp.capacity_liters,
+            ))
+            slot[0] = key
+            slot[1] -= qty
+            self.loaded_weight_kg += qty * density
+            placed += qty
+        return placed
+
+    def to_plan(self, tenant_id: str) -> LoadingPlan:
+        total_loaded = sum(a.quantity_liters for a in self.assignments)
+        total_capacity = sum(c.capacity_liters for c in self.truck.compartments)
+        utilization = (
+            round((total_loaded / total_capacity) * 100, 2)
+            if total_capacity > 0 else 0.0
+        )
+        total_weight = sum(
+            a.quantity_liters * fuel_density_kg_per_liter(
+                product_code=a.product_code, fuel_grade=a.fuel_grade,
+            )
+            for a in self.assignments
+        )
+        return LoadingPlan(
+            truck_id=self.truck.truck_id,
+            assignments=self.assignments,
+            total_utilization_pct=min(100.0, utilization),
+            unserved_demand_liters=round(self.unserved_liters, 2),
+            total_weight_kg=round(total_weight, 2),
+            tenant_id=tenant_id,
+        )
+
+
+def allocate_across_trucks(
+    trucks: List[TruckSpec],
+    requests: List[DeliveryRequest],
+    uncertainty_buffer_pct: float = DEFAULT_UNCERTAINTY_BUFFER_PCT,
+) -> FleetAllocation:
+    """Allocate one run's requests across the fleet, each to at most one truck.
+
+    The per-truck loop this replaces handed every truck the full request
+    list, so the same order appeared in several plans and each was queued as
+    its own approval.
+
+    * ``requests`` arrive in priority order; ties keep input order.
+    * Trucks are tried largest total capacity first, then by ``truck_id``.
+    * Each request is planned at :func:`planned_liters` (buffer only for
+      legacy demand without an ``order_id``; ``hard_cap_liters`` always
+      wins), placed on the first truck that fits it whole, else on the truck
+      with the most room for it, else reported in ``unassigned``.
+    * A request is placed on one truck only and never offered to another, so
+      no order can appear in two plans.
+
+    Pure function. Plans carry the tenant of their truck's compartments and
+    an empty ``run_id`` (the caller stamps it).
+    """
+    buffer_mult = 1.0 + (uncertainty_buffer_pct / 100.0)
+    ordered = sorted(
+        (t for t in trucks if t.compartments),
+        key=lambda t: (-sum(c.capacity_liters for c in t.compartments), t.truck_id),
+    )
+    states = [_TruckState(t) for t in ordered]
+    allocation = FleetAllocation()
+
+    for req in requests:
+        key = segregation_key(
+            product_code=req.product_code, fuel_grade=req.fuel_grade.value
+        )
+        density = fuel_density_kg_per_liter(
+            product_code=req.product_code, fuel_grade=req.fuel_grade.value,
+        )
+        planned = planned_liters(req, buffer_mult, buffer_orders=False)
+        order_key = request_key(req)
+
+        fits = [(state, state.fit(key, density)) for state in states]
+        chosen = next(
+            (s for s, f in fits if f >= planned - ROUNDING_TOLERANCE_LITERS),
+            None,
+        )
+        if chosen is None:
+            best_fit = max((f for _, f in fits), default=0.0)
+            if best_fit >= ROUNDING_TOLERANCE_LITERS:
+                chosen = next(s for s, f in fits if f == best_fit)
+
+        placed = (
+            chosen.place(req, key, density, planned) if chosen is not None else 0.0
+        )
+        if placed <= 0:
+            allocation.unassigned.append(UnservedOrder(
+                order_key=order_key,
+                station_id=req.station_id,
+                order_id=req.order_id,
+                product_code=req.product_code,
+                planned_liters=round(planned, 2),
+            ))
+            continue
+
+        shortfall = planned - placed
+        if shortfall >= ROUNDING_TOLERANCE_LITERS:
+            chosen.unserved_liters += shortfall
+            allocation.partial[order_key] = (
+                allocation.partial.get(order_key, 0.0) + shortfall
+            )
+
+    for state in states:
+        if state.assignments:
+            tenant_id = state.truck.compartments[0].tenant_id
+            allocation.plans[state.truck.truck_id] = state.to_plan(tenant_id)
+    return allocation

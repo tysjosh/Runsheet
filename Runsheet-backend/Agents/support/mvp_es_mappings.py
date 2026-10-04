@@ -58,6 +58,8 @@ MVP_TANK_FORECASTS_MAPPING = {
             "customer_type_multiplier":  {"type": "float"},
             "baseline_source":           {"type": "keyword"},
             "weather_fallback":          {"type": "boolean"},
+            # Canonical product code of the customer tank (F10).
+            "product_code":              {"type": "keyword"},
             # Scheduled_Delivery entries folded into the projected level
             # (Req 1.4.3). Nested so individual fields remain queryable.
             "scheduled_deliveries": {
@@ -89,6 +91,9 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
                     "priority_score":  {"type": "float"},
                     "priority_bucket": {"type": "keyword"},
                     "reasons":         {"type": "keyword"},
+                    # Scored order and its canonical product (F10).
+                    "order_id":        {"type": "keyword"},
+                    "product_code":    {"type": "keyword"},
                     # --- Phase 5 extensions (fuel-ops hardening Capability 3) ---
                     # Safe-to-delay tolerance (Req 3.1.3).
                     "safe_to_delay_days":    {"type": "integer"},
@@ -611,6 +616,26 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
             # already-created index is rejected in full — the operator loses
             # the whole compartment record, not just the new field.
             "allowed_product_codes": {"type": "keyword"},
+        }
+    },
+    # F10: canonical product codes on forecasts and priority entries, and the
+    # order each priority entry scores. Both indices are dynamic:strict, so a
+    # field declared only in the create-time mapping would reject every write
+    # on an existing cluster.
+    MVP_TANK_FORECASTS_INDEX: {
+        "properties": {
+            "product_code": {"type": "keyword"},
+        }
+    },
+    MVP_DELIVERY_PRIORITIES_INDEX: {
+        "properties": {
+            "priorities": {
+                "type": "nested",
+                "properties": {
+                    "order_id": {"type": "keyword"},
+                    "product_code": {"type": "keyword"},
+                },
+            },
         }
     },
 }

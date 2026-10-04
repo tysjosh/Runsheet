@@ -93,6 +93,21 @@ def _bucket_from_score(score: float) -> PriorityBucket:
         return PriorityBucket.LOW
 
 
+def _canonical_product_code(product_code: Optional[str]) -> Optional[str]:
+    """Canonical US code for an order's product, or ``None`` if unknown."""
+    from fuel.services.fuel_product_catalog import (
+        UnknownFuelProductError,
+        canonicalize,
+    )
+
+    if not product_code:
+        return None
+    try:
+        return canonicalize(product_code)
+    except (UnknownFuelProductError, TypeError):
+        return None
+
+
 class DeliveryPrioritizationAgent(OverlayAgentBase):
     """Scores and ranks fuel orders for delivery prioritization.
 
@@ -609,6 +624,8 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             priority_score=round(score, 4),
             priority_bucket=bucket,
             reasons=reasons,
+            order_id=order.get("order_id"),
+            product_code=_canonical_product_code(order.get("product_code")),
         )
 
     def _score_forecast_based(
@@ -804,7 +821,11 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
                     # JSON mode: the document store writes jsonb, so enums
                     # must already be their values.
                     **p.model_dump(mode="json"),
-                    "fuel_grade": canonicalize_or_warn(p.fuel_grade.value),
+                    # The order's own product, not its legacy family
+                    # (HEATING_OIL used to persist as DIESEL_2 via AGO).
+                    "fuel_grade": (
+                        p.product_code or canonicalize_or_warn(p.fuel_grade.value)
+                    ),
                 }
                 for p in priority_list.priorities
             ],

@@ -87,6 +87,12 @@ class DeliveryRequest(BaseModel):
     product_code: Optional[str] = None
     quantity_liters: float = Field(gt=0)
     min_drop_liters: float = Field(default=500.0, ge=0)
+    #: Absolute ceiling on what may be loaded for this request — for an order
+    #: with a linked customer tank, the tank's ullage in litres. The solver
+    #: never plans more than this, uncertainty buffer included. ``None``
+    #: means no ceiling beyond ``quantity_liters`` (plus buffer, where the
+    #: buffer applies).
+    hard_cap_liters: Optional[float] = Field(default=None, gt=0)
 
 
 class CompartmentAssignment(BaseModel):
@@ -128,6 +134,36 @@ class LoadingPlan(BaseModel):
         default_factory=lambda: datetime.now(timezone.utc)
     )
     status: str = "proposed"
+
+
+class TruckSpec(BaseModel):
+    """One truck offered to :func:`allocate_across_trucks`."""
+    truck_id: str
+    compartments: List[Compartment]
+    max_weight_kg: Optional[float] = None
+    tare_weight_kg: float = 0.0
+
+
+class UnservedOrder(BaseModel):
+    """A request no truck had any room for in this run."""
+    order_key: str
+    station_id: str
+    order_id: Optional[str] = None
+    product_code: Optional[str] = None
+    planned_liters: float = Field(ge=0.0)
+    reason: str = "no_truck_capacity"
+
+
+class FleetAllocation(BaseModel):
+    """Result of allocating one run's requests across the fleet.
+
+    Every request lands in at most one plan. ``partial`` maps an order key
+    (``order_id``, or ``station_id:product`` for legacy requests) to the
+    litres its chosen truck could not take.
+    """
+    plans: Dict[str, LoadingPlan] = Field(default_factory=dict)
+    unassigned: List[UnservedOrder] = Field(default_factory=list)
+    partial: Dict[str, float] = Field(default_factory=dict)
 
 
 class ConstraintViolation(BaseModel):
