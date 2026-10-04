@@ -2,11 +2,16 @@
 
 import { ArrowLeft, Package } from "lucide-react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import LoadingSpinner from "../../../../../components/LoadingSpinner";
 import CargoManifestEditor from "../../../../../components/ops/CargoManifestEditor";
+import { LoadErrorState } from "../../../../../components/ui";
 import { useSchedulingWebSocket } from "../../../../../hooks/useSchedulingWebSocket";
+import {
+  classifyLoadError,
+  type LoadFailure,
+} from "../../../../../services/apiErrors";
 import { getCargo, getJob } from "../../../../../services/schedulingApi";
 import type {
   CargoItemStatus,
@@ -56,14 +61,19 @@ function formatStatus(status: string): string {
 export default function CargoTrackingPage() {
   const params = useParams<{ id: string }>();
   const jobId = params.id;
+  const router = useRouter();
 
   const [job, setJob] = useState<Job | null>(null);
   const [cargoItems, setCargoItems] = useState<SchedulingCargoItem[]>([]);
   const [loading, setLoading] = useState(true);
+  // Set when the job or its cargo can't be loaded. A 404 from either call
+  // means the job doesn't exist, so the manifest editor is not shown.
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
 
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadFailure(null);
       const [jobRes, cargoRes] = await Promise.all([
         getJob(jobId),
         getCargo(jobId),
@@ -72,6 +82,7 @@ export default function CargoTrackingPage() {
       setCargoItems(cargoRes.data);
     } catch (error) {
       console.error("Failed to load cargo data:", error);
+      setLoadFailure(classifyLoadError(error, "Failed to load cargo data"));
     } finally {
       setLoading(false);
     }
@@ -203,11 +214,24 @@ export default function CargoTrackingPage() {
 
       {/* Cargo Manifest */}
       <div className="flex-1 overflow-y-auto">
-        <CargoManifestEditor
-          jobId={jobId}
-          items={cargoItems}
-          onItemsChange={handleItemsChange}
-        />
+        {loadFailure ? (
+          <LoadErrorState
+            failure={loadFailure}
+            entityLabel="Job"
+            entityId={jobId}
+            onBack={() => router.push("/ops/scheduling")}
+            backLabel="Back to Job Board"
+            onRetry={loadData}
+          />
+        ) : (
+          job && (
+            <CargoManifestEditor
+              jobId={jobId}
+              items={cargoItems}
+              onItemsChange={handleItemsChange}
+            />
+          )
+        )}
       </div>
     </div>
   );

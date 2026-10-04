@@ -1,6 +1,7 @@
 "use client";
 
 import { Gauge, X } from "lucide-react";
+import { useRouter } from "next/navigation";
 import {
   lazy,
   Suspense,
@@ -14,11 +15,13 @@ import {
   Button,
   EmptyState,
   FilterBar,
+  LoadErrorState,
   PageHeader,
   Pagination,
   Table,
 } from "@/components/ui";
 import { useDialogA11y } from "../../hooks/useDialogA11y";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   type Customer,
   type CustomerFilters,
@@ -42,9 +45,13 @@ interface CustomersListPageProps {
 export default function CustomersListPage({
   onSelectCustomer,
 }: CustomersListPageProps) {
+  const router = useRouter();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [moduleDisabled, setModuleDisabled] = useState<LoadFailure | null>(
+    null,
+  );
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
@@ -63,6 +70,7 @@ export default function CustomersListPage({
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setModuleDisabled(null);
     try {
       const filters: CustomerFilters = { page, size: 20 };
       if (searchQuery) filters.search = searchQuery;
@@ -77,7 +85,12 @@ export default function CustomersListPage({
           (response.has_more ? page + 1 : Math.max(page, 1)),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load customers");
+      const failure = classifyLoadError(err, "Failed to load customers");
+      if (failure.kind === "module_disabled") {
+        setModuleDisabled(failure);
+      } else {
+        setError(failure.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -106,6 +119,23 @@ export default function CustomersListPage({
           onBack={() => setSelectedCustomerId(null)}
         />
       </Suspense>
+    );
+  }
+
+  if (moduleDisabled) {
+    return (
+      <div className="p-6">
+        <PageHeader
+          title="Customers"
+          subtitle="Manage customer records and view account projections."
+        />
+        <LoadErrorState
+          failure={moduleDisabled}
+          entityLabel="Customers"
+          onBack={() => router.push("/dashboard")}
+          backLabel="Back to Today"
+        />
+      </div>
     );
   }
 

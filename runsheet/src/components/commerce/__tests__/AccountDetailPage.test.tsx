@@ -13,6 +13,12 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+const mockPush = jest.fn();
+const mockBack = jest.fn();
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush, back: mockBack }),
+}));
+
 jest.mock("../../../services/commerceApi", () => ({
   getAccount: jest.fn(),
   getAccountAging: jest.fn(),
@@ -20,6 +26,7 @@ jest.mock("../../../services/commerceApi", () => ({
   deleteCreditOverride: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import {
   applyCreditOverride,
   deleteCreditOverride,
@@ -133,6 +140,52 @@ describe("AccountDetailPage", () => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(screen.getByText(/Server error/)).toBeInTheDocument();
     });
+  });
+
+  it("shows the account header and a staff-access state on 403", async () => {
+    const forbidden = new ApiError(
+      "Caller lacks a required role for this operation",
+      403,
+      "INSUFFICIENT_ROLE",
+    );
+    mockGetAccount.mockRejectedValue(forbidden);
+    mockGetAccountAging.mockRejectedValue(forbidden);
+
+    render(<AccountDetailPage accountId="acc_001" />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Runsheet staff access required",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Account" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("acc_001")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Go back/ }));
+    expect(mockBack).toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Go to Billing" })).toHaveAttribute(
+      "href",
+      "/dashboard/billing",
+    );
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("shows a not-found state on 404", async () => {
+    const onBack = jest.fn();
+    mockGetAccount.mockRejectedValue(new ApiError("Account not found", 404));
+    mockGetAccountAging.mockRejectedValue(
+      new ApiError("Account not found", 404),
+    );
+
+    render(<AccountDetailPage accountId="acc_missing" onBack={onBack} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Account not found" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Go back/ }));
+    expect(onBack).toHaveBeenCalled();
   });
 
   it("opens credit override drawer when button is clicked", async () => {

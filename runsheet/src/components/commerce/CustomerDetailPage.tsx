@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, LoadErrorState } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   type CustomerWithProjections,
   getCustomer,
@@ -27,18 +28,16 @@ export default function CustomerDetailPage({
     null,
   );
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
 
   const fetchCustomer = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLoadFailure(null);
     try {
       const response = await getCustomer(customerId);
       setCustomer(response.data);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load customer details",
-      );
+      setLoadFailure(classifyLoadError(err, "Failed to load customer details"));
     } finally {
       setLoading(false);
     }
@@ -76,13 +75,18 @@ export default function CustomerDetailPage({
     );
   }
 
-  if (error) {
+  if (loadFailure) {
     return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
-      </div>
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Customer"
+        entityId={customerId}
+        onBack={() => (onBack ? onBack() : router.push("/commerce/customers"))}
+        backLabel="Back to Customers"
+        homeHref="/dashboard/customers"
+        homeLabel="Go to Customers"
+        onRetry={fetchCustomer}
+      />
     );
   }
 

@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button } from "@/components/ui";
+import { Badge, Button, LoadErrorState } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   getTerminal,
   getTerminalWaitSummary,
@@ -24,11 +25,11 @@ export default function TerminalDetailPage({
   const [terminal, setTerminal] = useState<Terminal | null>(null);
   const [wait, setWait] = useState<TerminalWaitSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
 
   const fetchTerminal = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLoadFailure(null);
     try {
       const data = await getTerminal(terminalId);
       setTerminal(data);
@@ -39,9 +40,7 @@ export default function TerminalDetailPage({
         setWait(null);
       }
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load terminal details",
-      );
+      setLoadFailure(classifyLoadError(err, "Failed to load terminal details"));
     } finally {
       setLoading(false);
     }
@@ -66,13 +65,17 @@ export default function TerminalDetailPage({
     );
   }
 
-  if (error) {
+  if (loadFailure) {
     return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
-      </div>
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Terminal"
+        entityId={terminalId}
+        onBack={() => (onBack ? onBack() : router.back())}
+        homeHref="/dashboard/compliance"
+        homeLabel="Go to Compliance"
+        onRetry={fetchTerminal}
+      />
     );
   }
 

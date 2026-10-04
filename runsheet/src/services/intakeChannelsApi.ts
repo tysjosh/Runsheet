@@ -16,6 +16,7 @@
  */
 
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import { fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -121,11 +122,7 @@ async function intakeChannelsRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     // 204 No Content has no body

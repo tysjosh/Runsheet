@@ -18,6 +18,7 @@ jest.mock("../../../services/commerceApi", () => ({
   getCustomer: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import { getCustomer, getCustomers } from "../../../services/commerceApi";
 import CustomersListPage from "../CustomersListPage";
 
@@ -100,6 +101,29 @@ describe("CustomersListPage", () => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(screen.getByText(/Network error/)).toBeInTheDocument();
     });
+  });
+
+  it("shows the module-disabled state for CUSTOMERS_DISABLED", async () => {
+    mockGetCustomers.mockRejectedValue(
+      new ApiError(
+        "Commerce customers module is not enabled for this tenant",
+        404,
+        "CUSTOMERS_DISABLED",
+      ),
+    );
+    render(<CustomersListPage />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Customers isn't enabled for your account",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByLabelText("Status")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Back to Today/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
   });
 
   it("shows empty state when no customers found", async () => {

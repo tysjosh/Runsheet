@@ -1,7 +1,9 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Button, PageHeader, Table } from "@/components/ui";
+import { Button, LoadErrorState, PageHeader, Table } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import type {
   AgingSnapshot,
   TenantAgingResponse,
@@ -15,14 +17,20 @@ interface ARAgingDashboardProps {
 export default function ARAgingDashboard({
   onViewAccount,
 }: ARAgingDashboardProps) {
+  const router = useRouter();
   const [aging, setAging] = useState<TenantAgingResponse | null>(null);
   const [history, setHistory] = useState<AgingSnapshot[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Set only when the API refuses access (403): this dashboard is
+  // platform_admin-only by design, so it gets a staff-access state rather
+  // than an error banner.
+  const [forbidden, setForbidden] = useState<LoadFailure | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setForbidden(null);
     try {
       const [agingRes, historyRes] = await Promise.all([
         getArAging(),
@@ -31,9 +39,12 @@ export default function ARAgingDashboard({
       setAging(agingRes.data);
       setHistory(historyRes.data);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load AR aging data",
-      );
+      const failure = classifyLoadError(err, "Failed to load AR aging data");
+      if (failure.kind === "forbidden") {
+        setForbidden(failure);
+      } else {
+        setError(failure.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -51,6 +62,25 @@ export default function ARAgingDashboard({
       <div role="status" className="flex justify-center py-12">
         <span className="sr-only">Loading AR aging data...</span>
         <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      </div>
+    );
+  }
+
+  if (forbidden) {
+    return (
+      <div className="p-6">
+        <PageHeader
+          title="AR Aging Dashboard"
+          subtitle="Accounts receivable aging overview with top outstanding accounts."
+        />
+        <LoadErrorState
+          failure={forbidden}
+          entityLabel="AR aging"
+          onBack={() => router.push("/dashboard")}
+          backLabel="Back to Today"
+          homeHref="/dashboard/billing"
+          homeLabel="Go to Billing"
+        />
       </div>
     );
   }

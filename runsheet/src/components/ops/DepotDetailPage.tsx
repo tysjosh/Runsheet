@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EntityLink } from "@/components/ui";
+import { Badge, Button, EntityLink, LoadErrorState } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import { type DepotReadResponse, getDepot } from "../../services/fuelApi";
 
 interface DepotDetailPageProps {
@@ -18,18 +19,16 @@ export default function DepotDetailPage({
   const router = useRouter();
   const [data, setData] = useState<DepotReadResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
 
   const fetchDepot = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLoadFailure(null);
     try {
       const res = await getDepot(depotId, { expand: ["assets"] });
       setData(res);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load depot details",
-      );
+      setLoadFailure(classifyLoadError(err, "Failed to load depot details"));
     } finally {
       setLoading(false);
     }
@@ -57,13 +56,17 @@ export default function DepotDetailPage({
     );
   }
 
-  if (error) {
+  if (loadFailure) {
     return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
-      </div>
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Depot"
+        entityId={depotId}
+        onBack={() => (onBack ? onBack() : router.back())}
+        homeHref="/dashboard/setup"
+        homeLabel="Go to Setup"
+        onRetry={fetchDepot}
+      />
     );
   }
 

@@ -19,6 +19,7 @@
  */
 
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import { buildQueryString, fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -74,15 +75,7 @@ async function opsRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      const detail = body.detail;
-      const message =
-        typeof detail === "string"
-          ? detail
-          : detail?.message ||
-            body.message ||
-            `HTTP error! status: ${response.status}`;
-      throw new ApiError(message, response.status);
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();

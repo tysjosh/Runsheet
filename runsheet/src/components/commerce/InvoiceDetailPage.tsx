@@ -1,5 +1,6 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import type React from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -7,9 +8,11 @@ import {
   Button,
   EmptyState,
   EntityLink,
+  LoadErrorState,
   StatsBar,
   Table,
 } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import type {
   Invoice,
   InvoiceEvent,
@@ -34,10 +37,12 @@ export default function InvoiceDetailPage({
   onBack,
   onViewAccount,
 }: InvoiceDetailPageProps) {
+  const router = useRouter();
   const [invoice, setInvoice] = useState<Invoice | null>(null);
   const [events, setEvents] = useState<InvoiceEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
   const [voidDialogOpen, setVoidDialogOpen] = useState(false);
   const [voidReason, setVoidReason] = useState("");
   const [voidForce, setVoidForce] = useState(false);
@@ -48,6 +53,7 @@ export default function InvoiceDetailPage({
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setLoadFailure(null);
     try {
       const [invoiceRes, eventsRes] = await Promise.all([
         getInvoice(invoiceId),
@@ -56,9 +62,7 @@ export default function InvoiceDetailPage({
       setInvoice(invoiceRes.data);
       setEvents(eventsRes.data);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load invoice details",
-      );
+      setLoadFailure(classifyLoadError(err, "Failed to load invoice details"));
     } finally {
       setLoading(false);
     }
@@ -189,6 +193,21 @@ export default function InvoiceDetailPage({
         <span className="sr-only">Loading invoice details...</span>
         <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
       </div>
+    );
+  }
+
+  if (loadFailure) {
+    return (
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Invoice"
+        entityId={invoiceId}
+        onBack={() => (onBack ? onBack() : router.back())}
+        backLabel="Back to Invoices"
+        homeHref="/dashboard/billing"
+        homeLabel="Go to Billing"
+        onRetry={fetchData}
+      />
     );
   }
 

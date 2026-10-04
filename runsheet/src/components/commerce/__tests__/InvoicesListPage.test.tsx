@@ -12,6 +12,7 @@ jest.mock("../../../services/commerceApi", () => ({
   getCustomers: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import { getCustomers, getInvoices } from "../../../services/commerceApi";
 import InvoicesListPage from "../InvoicesListPage";
 
@@ -67,5 +68,38 @@ describe("InvoicesListPage", () => {
         expect.objectContaining({ customer_id: "CUST-2" }),
       ),
     );
+  });
+
+  it("shows the module-disabled state for INVOICING_DISABLED", async () => {
+    mockGetInvoices.mockRejectedValue(
+      new ApiError(
+        "Commerce invoicing module is not enabled for this tenant",
+        404,
+        "INVOICING_DISABLED",
+      ),
+    );
+
+    render(<InvoicesListPage />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Invoicing isn't enabled for your account",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Invoices")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByLabelText("Status")).toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Back to Today/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("keeps the error banner for other failures", async () => {
+    mockGetInvoices.mockRejectedValue(new ApiError("boom", 500));
+
+    render(<InvoicesListPage />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
   });
 });

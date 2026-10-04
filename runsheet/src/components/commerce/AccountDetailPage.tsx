@@ -1,8 +1,10 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EntityLink } from "@/components/ui";
+import { Badge, Button, EntityLink, LoadErrorState } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import type {
   Account,
   AgingBuckets,
@@ -26,10 +28,14 @@ export default function AccountDetailPage({
   onBack,
   onViewCustomer,
 }: AccountDetailPageProps) {
+  const router = useRouter();
   const [account, setAccount] = useState<Account | null>(null);
   const [aging, setAging] = useState<AgingBuckets | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Initial-fetch failures that get a dedicated state: 403 (accounts are
+  // platform_admin-only by design) and 404. Action errors keep using `error`.
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [overrideReason, setOverrideReason] = useState("");
   const [overrideExpiry, setOverrideExpiry] = useState("");
@@ -38,6 +44,7 @@ export default function AccountDetailPage({
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setLoadFailure(null);
     try {
       const [accountRes, agingRes] = await Promise.all([
         getAccount(accountId),
@@ -46,9 +53,12 @@ export default function AccountDetailPage({
       setAccount(accountRes.data);
       setAging(agingRes.data);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load account details",
-      );
+      const failure = classifyLoadError(err, "Failed to load account details");
+      if (failure.kind === "forbidden" || failure.kind === "not_found") {
+        setLoadFailure(failure);
+      } else {
+        setError(failure.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -107,6 +117,29 @@ export default function AccountDetailPage({
       <div role="status" className="flex justify-center py-12">
         <span className="sr-only">Loading account details...</span>
         <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      </div>
+    );
+  }
+
+  if (loadFailure) {
+    const state = (
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Account"
+        entityId={accountId}
+        onBack={() => (onBack ? onBack() : router.back())}
+        homeHref="/dashboard/billing"
+        homeLabel="Go to Billing"
+      />
+    );
+    if (loadFailure.kind !== "forbidden") return state;
+    return (
+      <div>
+        <header className="px-6 pt-6">
+          <h1 className="text-2xl font-bold">Account</h1>
+          <p className="font-mono text-sm text-gray-500">{accountId}</p>
+        </header>
+        {state}
       </div>
     );
   }

@@ -2,7 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EntityLink } from "@/components/ui";
+import { Badge, Button, EntityLink, LoadErrorState } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   type CustomerTankWithLinks,
   getCustomerTankWithLinks,
@@ -24,18 +25,16 @@ export default function CustomerTankDetailPage({
   const router = useRouter();
   const [tank, setTank] = useState<CustomerTankWithLinks | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
 
   const fetchTank = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLoadFailure(null);
     try {
       const data = await getCustomerTankWithLinks(customerTankId);
       setTank(data);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load tank details",
-      );
+      setLoadFailure(classifyLoadError(err, "Failed to load tank details"));
     } finally {
       setLoading(false);
     }
@@ -69,13 +68,17 @@ export default function CustomerTankDetailPage({
     );
   }
 
-  if (error) {
+  if (loadFailure) {
     return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
-      </div>
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Customer tank"
+        entityId={customerTankId}
+        onBack={() => (onBack ? onBack() : router.back())}
+        homeHref="/dashboard/fuel-ops"
+        homeLabel="Go to Fuel Ops"
+        onRetry={fetchTank}
+      />
     );
   }
 

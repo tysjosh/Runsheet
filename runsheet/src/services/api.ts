@@ -156,11 +156,14 @@ export class ApiTimeoutError extends Error {
 // Custom error class for API errors
 export class ApiError extends Error {
   status: number;
+  /** Machine-readable error code from the response body (e.g. `CUSTOMERS_DISABLED`). */
+  code?: string;
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
   }
 }
 

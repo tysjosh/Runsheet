@@ -13,11 +13,18 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+const mockPush = jest.fn();
+const mockBack = jest.fn();
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush, back: mockBack }),
+}));
+
 jest.mock("../../../services/commerceApi", () => ({
   getArAging: jest.fn(),
   getArAgingHistory: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import { getArAging, getArAgingHistory } from "../../../services/commerceApi";
 import ARAgingDashboard from "../ARAgingDashboard";
 
@@ -137,6 +144,35 @@ describe("ARAgingDashboard", () => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(screen.getByText(/Service unavailable/)).toBeInTheDocument();
     });
+  });
+
+  it("shows the page header and a staff-access state on 403", async () => {
+    const forbidden = new ApiError(
+      "Caller lacks a required role for this operation",
+      403,
+      "INSUFFICIENT_ROLE",
+    );
+    mockGetArAging.mockRejectedValue(forbidden);
+    mockGetArAgingHistory.mockRejectedValue(forbidden);
+
+    render(<ARAgingDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Runsheet staff access required",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "AR Aging Dashboard" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Back to Today/ }));
+    expect(mockPush).toHaveBeenCalledWith("/dashboard");
+    expect(screen.getByRole("link", { name: "Go to Billing" })).toHaveAttribute(
+      "href",
+      "/dashboard/billing",
+    );
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
   });
 
   it("renders bucket chart with correct aria label", async () => {

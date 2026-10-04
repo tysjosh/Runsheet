@@ -124,3 +124,52 @@ describe("Sidebar role filtering", () => {
     expect(navItem("Dispatch")).not.toBeInTheDocument();
   });
 });
+
+// F-4: at 1280x720 the absolutely-positioned user card covered "Admin". jsdom
+// has no layout, so these assert the structure that rules the overlap out: a
+// flex column whose nav is the scrolling region and whose footer is in normal
+// flow after it.
+describe("Sidebar layout", () => {
+  function renderWith(isCollapsed: boolean) {
+    return render(
+      <Sidebar
+        activeItem="today"
+        isCollapsed={isCollapsed}
+        onToggle={() => {}}
+        onNavigate={() => {}}
+      />,
+    );
+  }
+
+  it("makes the nav the scrollable flex region", async () => {
+    rolesMock.mockResolvedValue(["admin"]);
+    renderWith(false);
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toHaveClass("flex-1", "min-h-0", "overflow-y-auto");
+    expect(nav.closest("aside")).toHaveClass("flex", "flex-col");
+    await waitFor(() => expect(navItem("Admin")).toBeInTheDocument());
+    expect(nav).toContainElement(navItem("Admin"));
+  });
+
+  it.each([false, true])(
+    "puts the Logout control in a non-absolute footer after the nav (collapsed=%s)",
+    async (isCollapsed) => {
+      rolesMock.mockResolvedValue(["admin"]);
+      renderWith(isCollapsed);
+      await waitFor(() => expect(navItem("Admin")).toBeInTheDocument());
+      const nav = screen.getByRole("navigation", { name: "Primary" });
+      const logouts = screen.getAllByTitle("Logout");
+      expect(logouts).toHaveLength(1);
+      const logout = logouts[0];
+      expect(nav).not.toContainElement(logout);
+      expect(
+        nav.compareDocumentPosition(logout) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+      let el: HTMLElement | null = logout.parentElement;
+      while (el && el.tagName !== "ASIDE") {
+        expect(el).not.toHaveClass("absolute");
+        el = el.parentElement;
+      }
+    },
+  );
+});

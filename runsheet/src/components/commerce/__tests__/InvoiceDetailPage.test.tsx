@@ -53,6 +53,7 @@ jest.mock("../../../services/commerceApi", () => ({
   finalizeInvoice: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import {
   finalizeInvoice,
   getInvoice,
@@ -186,6 +187,77 @@ describe("InvoiceDetailPage", () => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(screen.getByText(/Not found/)).toBeInTheDocument();
     });
+  });
+
+  it("shows a not-found state with a back link on 404", async () => {
+    const onBack = jest.fn();
+    mockGetInvoice.mockRejectedValue(
+      new ApiError("Invoice not found", 404, "invoice_not_found"),
+    );
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_missing" onBack={onBack} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Invoice not found" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/invoice "inv_missing"/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Back to Invoices/ }));
+    expect(onBack).toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Go to Billing" })).toHaveAttribute(
+      "href",
+      "/dashboard/billing",
+    );
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("shows the module-disabled state for INVOICING_DISABLED", async () => {
+    mockGetInvoice.mockRejectedValue(
+      new ApiError(
+        "Commerce invoicing module is not enabled for this tenant",
+        404,
+        "INVOICING_DISABLED",
+      ),
+    );
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Invoicing isn't enabled for your account",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("shows the error banner with a working retry on 500", async () => {
+    mockGetInvoice.mockRejectedValue(new ApiError("boom", 500));
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByText("Invoice INV-2024-0001"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
   });
 
   it("opens void dialog and submits void request", async () => {

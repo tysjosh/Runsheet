@@ -1,14 +1,17 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
   Badge,
   Button,
   EmptyState,
   FilterBar,
+  LoadErrorState,
   PageHeader,
   Table,
 } from "@/components/ui";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import type {
   CursorPaginatedResponse,
   Invoice,
@@ -23,9 +26,13 @@ interface InvoicesListPageProps {
 export default function InvoicesListPage({
   onSelectInvoice,
 }: InvoicesListPageProps) {
+  const router = useRouter();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [moduleDisabled, setModuleDisabled] = useState<LoadFailure | null>(
+    null,
+  );
   const [cursor, setCursor] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("");
@@ -35,6 +42,7 @@ export default function InvoicesListPage({
     async (nextCursor?: string | null) => {
       setLoading(true);
       setError(null);
+      setModuleDisabled(null);
       try {
         const filters: InvoiceFilters = { limit: 20 };
         if (statusFilter)
@@ -48,9 +56,12 @@ export default function InvoicesListPage({
         setCursor(response.cursor);
         setHasMore(response.has_more);
       } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to load invoices",
-        );
+        const failure = classifyLoadError(err, "Failed to load invoices");
+        if (failure.kind === "module_disabled") {
+          setModuleDisabled(failure);
+        } else {
+          setError(failure.message);
+        }
       } finally {
         setLoading(false);
       }
@@ -93,6 +104,23 @@ export default function InvoicesListPage({
     if (state === "dead_letter") return "error";
     return "default";
   };
+
+  if (moduleDisabled) {
+    return (
+      <div className="p-6">
+        <PageHeader
+          title="Invoices"
+          subtitle="View and manage invoices across all accounts."
+        />
+        <LoadErrorState
+          failure={moduleDisabled}
+          entityLabel="Invoices"
+          onBack={() => router.push("/dashboard")}
+          backLabel="Back to Today"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="p-6">

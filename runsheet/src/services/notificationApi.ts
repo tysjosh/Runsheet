@@ -1,4 +1,5 @@
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import {
   buildQueryString,
   fetchWithTimeout,
@@ -157,11 +158,7 @@ async function notificationRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();

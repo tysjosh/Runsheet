@@ -23,6 +23,8 @@ export type { FilterBarProps, FilterSelectProps } from "./FilterBar";
 export { FilterBar, FilterSelect } from "./FilterBar";
 export type { InShellNav } from "./InShellNav";
 export { InShellNavProvider, useInShellNav } from "./InShellNav";
+export type { LoadErrorStateProps } from "./LoadErrorState";
+export { LoadErrorState } from "./LoadErrorState";
 export type { ModalFooterProps, ModalProps } from "./Modal";
 export { Modal, ModalFooter } from "./Modal";
 export type { PageHeaderProps } from "./PageHeader";

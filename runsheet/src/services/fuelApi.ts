@@ -1,4 +1,5 @@
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import {
   buildQueryString,
   fetchWithTimeout,
@@ -365,11 +366,7 @@ async function fuelRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();
@@ -1675,11 +1672,7 @@ export async function deleteDepot(depotId: string): Promise<void> {
     );
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(
-      body.detail || body.message || `HTTP error! status: ${response.status}`,
-      response.status,
-    );
+    throw await apiErrorFromResponse(response);
   }
 }
 
@@ -2457,11 +2450,7 @@ export async function deleteSupplierContract(
     );
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(
-      body.detail || body.message || `HTTP error! status: ${response.status}`,
-      response.status,
-    );
+    throw await apiErrorFromResponse(response);
   }
 }
 

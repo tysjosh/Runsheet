@@ -218,7 +218,7 @@ export default function Sidebar({
         ref={asideRef}
         tabIndex={-1}
         aria-label="Sidebar navigation"
-        className={`h-full transition-all duration-300 ease-in-out flex-shrink-0 fixed inset-y-0 left-0 z-40 md:relative md:z-auto md:translate-x-0 focus:outline-none w-60 ${isCollapsed ? "md:w-[72px]" : "md:w-60"} ${isMobileOpen ? "translate-x-0" : "-translate-x-full"}`}
+        className={`h-full flex flex-col transition-all duration-300 ease-in-out flex-shrink-0 fixed inset-y-0 left-0 z-40 md:relative md:z-auto md:translate-x-0 focus:outline-none w-60 ${isCollapsed ? "md:w-[72px]" : "md:w-60"} ${isMobileOpen ? "translate-x-0" : "-translate-x-full"}`}
         style={{
           backgroundColor: "var(--color-surface-muted)",
           borderRight:
@@ -247,7 +247,7 @@ export default function Sidebar({
 
         <nav
           aria-label="Primary"
-          className="h-full overflow-y-auto p-4 pt-6 pb-28"
+          className="flex-1 min-h-0 overflow-y-auto p-4 pt-6 pb-4"
         >
           {visibleSections.map((section, i) => (
             <div key={section.label} className={i > 0 ? "mt-6" : ""}>
@@ -274,68 +274,64 @@ export default function Sidebar({
           ))}
         </nav>
 
-        {/* User Profile - Expanded */}
-        <div
-          className={`absolute bottom-4 left-4 right-4 transition-all duration-300 ${collapsed ? "opacity-0 pointer-events-none" : "opacity-100"}`}
-        >
-          <div
-            className="flex items-center space-x-3 p-3 rounded-lg"
-            style={{
-              backgroundColor:
-                "color-mix(in srgb, var(--color-surface) 60%, transparent)",
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => navigateTo("profile")}
-              title="View profile"
-              className="flex items-center space-x-3 flex-1 min-w-0 text-left rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-primary)]"
-            >
-              <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-primary">
+        {/* User profile footer. It sits in normal flow below the scrollable
+            nav (not absolutely positioned over it), so it stays visible and
+            can never cover a nav item at any viewport height. */}
+        <div className="shrink-0 p-4 pt-2">
+          {collapsed ? (
+            <div className="flex flex-col items-center gap-2">
+              <button
+                type="button"
+                onClick={() => navigateTo("profile")}
+                className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 bg-primary hover:bg-primary-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
+                title="View profile"
+              >
                 <User className="w-5 h-5 text-white" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p
-                  className="text-sm font-medium truncate"
-                  style={{ color: "var(--color-primary)" }}
-                >
-                  {email || "My Account"}
-                </p>
-              </div>
-            </button>
-            <button
-              type="button"
-              onClick={handleLogout}
-              className="flex-shrink-0 p-1.5 rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--color-error)_10%,transparent)] hover:text-[color:var(--color-error)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-error)]"
-              style={{ color: "var(--color-gray-500)" }}
-              title="Logout"
+              </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="p-1.5 rounded-md transition-colors hover:text-[color:var(--color-error)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-error)]"
+                style={{ color: "var(--color-gray-500)" }}
+                title="Logout"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          ) : (
+            <div
+              className="flex items-center space-x-3 p-3 rounded-lg"
+              style={{ backgroundColor: "var(--color-surface)" }}
             >
-              <LogOut className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-
-        {/* User Profile - Collapsed */}
-        <div
-          className={`absolute bottom-4 left-1/2 transform -translate-x-1/2 transition-all duration-300 flex flex-col items-center gap-2 ${collapsed ? "opacity-100" : "opacity-0 pointer-events-none"}`}
-        >
-          <button
-            type="button"
-            onClick={() => navigateTo("profile")}
-            className="w-10 h-10 rounded-full flex items-center justify-center transition-all duration-200 bg-primary hover:bg-primary-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-[color:var(--color-primary)]"
-            title="View profile"
-          >
-            <User className="w-5 h-5 text-white" />
-          </button>
-          <button
-            type="button"
-            onClick={handleLogout}
-            className="p-1.5 rounded-md transition-colors hover:text-[color:var(--color-error)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-error)]"
-            style={{ color: "var(--color-gray-500)" }}
-            title="Logout"
-          >
-            <LogOut className="w-4 h-4" />
-          </button>
+              <button
+                type="button"
+                onClick={() => navigateTo("profile")}
+                title="View profile"
+                className="flex items-center space-x-3 flex-1 min-w-0 text-left rounded-md focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-primary)]"
+              >
+                <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 bg-primary">
+                  <User className="w-5 h-5 text-white" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p
+                    className="text-sm font-medium truncate"
+                    style={{ color: "var(--color-primary)" }}
+                  >
+                    {email || "My Account"}
+                  </p>
+                </div>
+              </button>
+              <button
+                type="button"
+                onClick={handleLogout}
+                className="flex-shrink-0 p-1.5 rounded-md transition-colors hover:bg-[color-mix(in_srgb,var(--color-error)_10%,transparent)] hover:text-[color:var(--color-error)] focus:outline-none focus-visible:ring-2 focus-visible:ring-[color:var(--color-error)]"
+                style={{ color: "var(--color-gray-500)" }}
+                title="Logout"
+              >
+                <LogOut className="w-4 h-4" />
+              </button>
+            </div>
+          )}
         </div>
       </aside>
     </>

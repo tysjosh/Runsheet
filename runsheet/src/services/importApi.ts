@@ -6,6 +6,7 @@ import type {
   ValidationResult,
 } from "../types/import";
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 // `importApi` previously declared a narrower `buildQueryString`
 // (`Record<string, string | undefined>`); the shared signature is a superset,
 // so it adopts the shared helper with no behavior change (Req 2.5/4.3).
@@ -38,11 +39,7 @@ async function importRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();
@@ -78,13 +75,7 @@ export const importApi = {
       });
 
       if (!response.ok) {
-        const body = await response.json().catch(() => ({}));
-        throw new ApiError(
-          body.detail ||
-            body.message ||
-            `HTTP error! status: ${response.status}`,
-          response.status,
-        );
+        throw await apiErrorFromResponse(response);
       }
 
       return await response.json();
