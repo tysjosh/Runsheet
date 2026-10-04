@@ -200,9 +200,10 @@ async def list_approvals(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
+        # Detail stays in the log: str(exc) never goes to the client (F3).
         logger.exception("Failed to list approvals")
-        raise internal_error(message="Failed to list approvals", details={"error": str(e)})
+        raise internal_error(message="Failed to list approvals")
 
 
 @router.post("/approvals/{action_id}/approve")
@@ -233,9 +234,9 @@ async def approve_action(
     except RuntimeError as e:
         # Concurrency conflict
         raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to approve action %s", action_id)
-        raise internal_error(message="Failed to approve action", details={"action_id": action_id, "error": str(e)})
+        raise internal_error(message="Failed to approve action", details={"action_id": action_id})
 
 
 @router.post("/approvals/{action_id}/reject")
@@ -268,9 +269,9 @@ async def reject_action(
         raise validation_error(message=str(e))
     except RuntimeError as e:
         raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to reject action %s", action_id)
-        raise internal_error(message="Failed to reject action", details={"action_id": action_id, "error": str(e)})
+        raise internal_error(message="Failed to reject action", details={"action_id": action_id})
 
 
 # ===================================================================
@@ -335,9 +336,9 @@ async def list_activity(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to query activity log")
-        raise internal_error(message="Failed to query activity log", details={"error": str(e)})
+        raise internal_error(message="Failed to query activity log")
 
 
 @router.get("/activity/stats")
@@ -357,9 +358,9 @@ async def get_activity_stats(
     try:
         result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to get activity stats")
-        raise internal_error(message="Failed to get activity stats", details={"error": str(e)})
+        raise internal_error(message="Failed to get activity stats")
 
 
 # ===================================================================
@@ -418,9 +419,9 @@ async def update_autonomy_level(
         previous_level = await svc.set_level(tenant_id=tenant.tenant_id, level=body.level)
     except ValueError as e:
         raise validation_error(message=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to update autonomy level")
-        raise internal_error(message="Failed to update autonomy level", details={"error": str(e)})
+        raise internal_error(message="Failed to update autonomy level")
 
     # Log the change to the activity log (Requirement 10.5)
     try:
@@ -505,9 +506,9 @@ async def list_memories(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to list memories")
-        raise internal_error(message="Failed to list memories", details={"error": str(e)})
+        raise internal_error(message="Failed to list memories")
 
 
 @router.delete("/memory/{memory_id}", dependencies=[Depends(agent_admin_dependency)])
@@ -534,9 +535,9 @@ async def delete_memory(
         return {"deleted": True, "memory_id": memory_id}
     except AppException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to delete memory %s", memory_id)
-        raise internal_error(message="Failed to delete memory", details={"memory_id": memory_id, "error": str(e)})
+        raise internal_error(message="Failed to delete memory", details={"memory_id": memory_id})
 
 
 # ===================================================================
@@ -599,9 +600,9 @@ async def list_feedback(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to list feedback")
-        raise internal_error(message="Failed to list feedback", details={"error": str(e)})
+        raise internal_error(message="Failed to list feedback")
 
 
 @router.get("/feedback/stats")
@@ -621,9 +622,9 @@ async def get_feedback_stats(
     try:
         result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to get feedback stats")
-        raise internal_error(message="Failed to get feedback stats", details={"error": str(e)})
+        raise internal_error(message="Failed to get feedback stats")
 
 
 # ===================================================================
