@@ -27,7 +27,10 @@ from strands.models import Model
 
 from Agents.llm_errors import ChatEvent, text_event
 from Agents.orchestrator import AgentOrchestrator
-from Agents.specialists._base import TOOL_OUTPUT_LIMIT, SpecialistAgent
+from Agents.specialists._base import SpecialistAgent
+
+#: Stands in for internal detail a failing tool's exception carries.
+SECRET = "psycopg.OperationalError: connection to server at 10.0.3.17 failed SECRET-7f3a"
 
 
 @tool
@@ -37,9 +40,15 @@ def probe_tool() -> str:
 
 
 @tool
-def big_tool() -> str:
-    """Return more output than the client is sent."""
-    return "x" * (TOOL_OUTPUT_LIMIT + 500)
+def boom_tool() -> str:
+    """Raise, so Strands turns the exception into an error tool result."""
+    raise RuntimeError(SECRET)
+
+
+@tool
+def caught_error_tool() -> str:
+    """Return its own error text, as the ``f"Error ...: {e}"`` tools do."""
+    return f"Error searching fleet: {SECRET}"
 
 
 class ScriptedModel(Model):
@@ -79,9 +88,14 @@ class _ProbeSpecialist(SpecialistAgent):
     SYSTEM_PROMPT = "probe"
 
 
-class _BigSpecialist(SpecialistAgent):
-    TOOLS = [big_tool]
-    SYSTEM_PROMPT = "big"
+class _BoomSpecialist(SpecialistAgent):
+    TOOLS = [boom_tool]
+    SYSTEM_PROMPT = "boom"
+
+
+class _CaughtErrorSpecialist(SpecialistAgent):
+    TOOLS = [caught_error_tool]
+    SYSTEM_PROMPT = "caught"
 
 
 def _activity_log() -> MagicMock:
@@ -98,18 +112,19 @@ async def test_specialist_stream_yields_tool_progress_then_text_deltas():
     assert all(isinstance(e, ChatEvent) for e in events)
     assert [e["type"] for e in events] == ["tool", "tool_result", "text", "text"]
     assert events[0]["tool_name"] == "probe_tool"
-    assert events[1]["tool_name"] == "probe_tool"
-    assert "probe-ok" in events[1]["tool_output"]
+    assert events[1] == {"type": "tool_result", "tool_name": "probe_tool", "status": "success"}
     assert [e["content"] for e in events[2:]] == ["Hel", "lo"]
 
 
-async def test_tool_output_sent_to_the_client_is_truncated():
-    specialist = _BigSpecialist(model=ScriptedModel("big_tool"))
+async def test_tool_result_event_carries_status_not_output():
+    """Tool output stays server-side; a raising tool reports ``error`` only."""
+    specialist = _BoomSpecialist(model=ScriptedModel("boom_tool"))
 
     events = [e async for e in specialist.stream("go", {"tenant_id": "tenant-1"})]
 
     (result,) = [e for e in events if e["type"] == "tool_result"]
-    assert len(result["tool_output"]) == TOOL_OUTPUT_LIMIT
+    assert result == {"type": "tool_result", "tool_name": "boom_tool", "status": "error"}
+    assert "SECRET-7f3a" not in json.dumps(events)
 
 
 async def test_stream_builds_a_fresh_agent_per_call():
@@ -163,7 +178,8 @@ async def test_route_stream_delivers_events_before_the_specialist_finishes():
     assert rest == [{"type": "text", "content": " second"}, {"type": "done"}]
 
 
-def test_chat_endpoint_streams_server_sent_events(monkeypatch):
+def _chat_client(monkeypatch, specialist: SpecialistAgent) -> TestClient:
+    """A TestClient for ``/api/chat`` whose orchestrator routes to ``specialist``."""
     import inline_endpoints
     from errors.handlers import register_exception_handlers
     from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -177,7 +193,7 @@ def test_chat_endpoint_streams_server_sent_events(monkeypatch):
         mainagent,
         "_orchestrator",
         AgentOrchestrator(
-            specialists={"fleet": _ProbeSpecialist(model=ScriptedModel())},
+            specialists={"fleet": specialist},
             execution_planner=MagicMock(),
             activity_log_service=_activity_log(),
         ),
@@ -192,7 +208,11 @@ def test_chat_endpoint_streams_server_sent_events(monkeypatch):
     app.include_router(inline_endpoints.router)
     register_exception_handlers(app)
     app.dependency_overrides[get_tenant_context] = _tenant
-    client = TestClient(app)
+    return TestClient(app)
+
+
+def test_chat_endpoint_streams_server_sent_events(monkeypatch):
+    client = _chat_client(monkeypatch, _ProbeSpecialist(model=ScriptedModel()))
 
     with client.stream("POST", "/api/chat", json={"message": "Show trucks"}) as resp:
         assert resp.headers["content-type"].startswith("text/event-stream")
@@ -207,3 +227,37 @@ def test_chat_endpoint_streams_server_sent_events(monkeypatch):
     assert types == ["status", "status", "tool", "tool_result", "text", "text", "done"]
     assert types.count("done") == 1
     assert "".join(p["content"] for p in payloads if p["type"] == "text") == "Hello"
+
+
+def _sse_payloads(body: str) -> list:
+    return [
+        json.loads(line[len("data: "):]) for line in body.splitlines() if line.startswith("data: ")
+    ]
+
+
+def test_raising_tool_exception_text_is_absent_from_the_chat_stream(monkeypatch):
+    """Review R1: a raising tool's ``str(exc)`` must not reach the SSE body (F3)."""
+    client = _chat_client(monkeypatch, _BoomSpecialist(model=ScriptedModel("boom_tool")))
+
+    with client.stream("POST", "/api/chat", json={"message": "Show trucks"}) as resp:
+        body = "".join(resp.iter_text())
+
+    assert "SECRET-7f3a" not in body
+    assert "10.0.3.17" not in body
+    assert "RuntimeError" not in body
+    (result,) = [p for p in _sse_payloads(body) if p["type"] == "tool_result"]
+    assert result == {"type": "tool_result", "tool_name": "boom_tool", "status": "error"}
+
+
+def test_tool_returned_error_text_is_absent_from_the_chat_stream(monkeypatch):
+    """Tools that return ``f"Error ...: {e}"`` must not leak it either."""
+    client = _chat_client(
+        monkeypatch, _CaughtErrorSpecialist(model=ScriptedModel("caught_error_tool"))
+    )
+
+    with client.stream("POST", "/api/chat", json={"message": "Show trucks"}) as resp:
+        body = "".join(resp.iter_text())
+
+    assert "SECRET-7f3a" not in body
+    assert "tool_output" not in body
+    assert [p["type"] for p in _sse_payloads(body)].count("tool_result") == 1

@@ -86,6 +86,7 @@ async def chat_endpoint(
         done_event,
         error_event,
         safe_message_for,
+        tool_result_event,
     )
     from Agents.mainagent import LogisticsAgent
     from middleware.request_id import get_request_id
@@ -135,8 +136,13 @@ async def chat_endpoint(
                         tool_info = event["current_tool_use"]
                         yield _sse({'type': 'tool', 'tool_name': tool_info.get('name', ''), 'tool_input': tool_info.get('input', {})})
                     elif "current_tool_result" in event:
+                        # Name and status only: tool output can carry
+                        # str(exc) from a failing tool (F3).
                         tool_result = event["current_tool_result"]
-                        yield _sse({'type': 'tool_result', 'tool_name': tool_result.get('name', ''), 'tool_output': tool_result.get('output', '')})
+                        yield _sse(tool_result_event(
+                            tool_result.get('name', ''),
+                            tool_result.get('status', 'success'),
+                        ))
                     elif event.get('event') == 'messageStop' or 'result' in event:
                         if not done_sent:
                             yield _sse(done_event())

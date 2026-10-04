@@ -18,7 +18,6 @@ Validates:
 - Requirements 9.2, 9.4: Tenant scoping on every ES read via ContextVar
 """
 
-import json
 import logging
 from typing import AsyncIterator, Dict, Optional, Tuple
 
@@ -29,10 +28,6 @@ from Agents.llm_errors import ChatEvent, text_event, tool_event, tool_result_eve
 from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
-
-#: Tool output forwarded to the chat client is capped; the model still sees
-#: the full result.
-TOOL_OUTPUT_LIMIT = 2000
 
 
 class SpecialistAgent:
@@ -108,8 +103,9 @@ class SpecialistAgent:
         * the assistant ``message`` -> one ``tool`` event per new ``toolUse``
           block;
         * the user ``message`` carrying ``toolResult`` blocks -> one
-          ``tool_result`` event each, output truncated to
-          :data:`TOOL_OUTPUT_LIMIT` characters.
+          ``tool_result`` event each, with the tool's name and
+          ``success``/``error`` status only. The tool output stays with the
+          model: it can hold ``str(exc)`` from a failing tool (F3).
 
         Everything else is ignored: per-delta ``current_tool_use`` events, and
         any event with a ``"type"`` key (Strands 1.24 typed events). Exceptions
@@ -144,7 +140,7 @@ class SpecialistAgent:
                         result = block["toolResult"] or {}
                         yield tool_result_event(
                             tool_names.get(result.get("toolUseId"), ""),
-                            _tool_output(result)[:TOOL_OUTPUT_LIMIT],
+                            result.get("status", "success"),
                         )
 
     @staticmethod
@@ -159,16 +155,3 @@ class SpecialistAgent:
             if ctx_parts:
                 prompt = f"[Context: {', '.join(ctx_parts)}]\n{task}"
         return prompt, tenant_id
-
-
-def _tool_output(result: dict) -> str:
-    """Join a ``toolResult``'s text/json content blocks into one string."""
-    parts = []
-    for item in result.get("content") or []:
-        if not isinstance(item, dict):
-            continue
-        if "text" in item:
-            parts.append(str(item["text"]))
-        elif "json" in item:
-            parts.append(json.dumps(item["json"], default=str))
-    return "\n".join(parts)

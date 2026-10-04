@@ -33,7 +33,7 @@ export interface ChatStreamMessage {
 export type ChatStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool"; tool_name: string; tool_input?: unknown }
-  | { type: "tool_result"; tool_name?: string; tool_output?: string }
+  | { type: "tool_result"; tool_name?: string; status?: "success" | "error" }
   | { type: "status"; stage: string; [key: string]: unknown }
   | {
       type: "error";

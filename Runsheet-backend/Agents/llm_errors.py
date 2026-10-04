@@ -312,8 +312,18 @@ def tool_event(tool_name: str, tool_input: Any = None) -> ChatEvent:
     return ChatEvent(type="tool", tool_name=tool_name, tool_input=tool_input or {})
 
 
-def tool_result_event(tool_name: str, tool_output: str) -> ChatEvent:
-    return ChatEvent(type="tool_result", tool_name=tool_name, tool_output=tool_output)
+def tool_result_event(tool_name: str, status: str = "success") -> ChatEvent:
+    """A tool finished. Only its name and ``success``/``error`` status go out.
+
+    The tool's output never reaches the client: it can carry ``str(exc)``
+    from a failing tool (Strands' ``Error: <Type> - <message>``, or a tool's
+    own ``f"Error ...: {e}"``), which F3 keeps server-side.
+    """
+    return ChatEvent(
+        type="tool_result",
+        tool_name=tool_name,
+        status="error" if status == "error" else "success",
+    )
 
 
 def status_event(stage: str, **details: Any) -> ChatEvent:

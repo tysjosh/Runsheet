@@ -135,7 +135,7 @@ describe("applyChatStreamEvent", () => {
     messages = applyChatStreamEvent(messages, {
       type: "tool_result",
       tool_name: "search_fleet_data",
-      tool_output: "ok",
+      status: "success",
     });
     expect(messages[1].toolStatus).toBe("done");
 
