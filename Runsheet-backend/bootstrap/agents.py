@@ -554,11 +554,17 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_tenant_guard(tenant_settings_service)
     logger.info("Tenant settings service wired into tenant guard")
 
+    # Feedback is built before the approval queue so a rejection is
+    # recorded as a feedback signal (F7, Req 12.1).
+    feedback_service = FeedbackService(es_service=es_service)
+    container.feedback_service = feedback_service
+
     # Approval queue
     approval_queue_service = ApprovalQueueService(
         es_service=es_service,
         ws_manager=agent_ws_manager,
         activity_log_service=activity_log_service,
+        feedback_service=feedback_service,
     )
     container.approval_queue_service = approval_queue_service
 
@@ -604,12 +610,9 @@ async def initialize(app, container: ServiceContainer) -> None:
         APPROVAL_EXPIRY_INTERVAL_SECONDS,
     )
 
-    # Memory and Feedback
+    # Memory (feedback is built above, before the approval queue)
     memory_service = MemoryService(es_service=es_service)
     container.memory_service = memory_service
-
-    feedback_service = FeedbackService(es_service=es_service)
-    container.feedback_service = feedback_service
 
     # Wire mutation tools
     configure_mutation_tools(confirmation_protocol, es_service)

@@ -399,6 +399,123 @@ class TestReject:
 
 
 # ---------------------------------------------------------------------------
+# Tests: rejection feedback and approval audit (F7)
+# ---------------------------------------------------------------------------
+
+
+def _feedback_docs(es_service) -> list:
+    """Docs the real FeedbackService wrote through the fake store."""
+    return [
+        c.args[2] for c in es_service.index_document.call_args_list
+        if c.args[0] == "agent_feedback"
+    ]
+
+
+class TestRejectionFeedbackAndApprovalAudit:
+    """Staging F7: a reject stored no feedback and an approve wrote no audit."""
+
+    def _service_with_feedback(self, entry, **kwargs):
+        from Agents.feedback_service import FeedbackService
+
+        service = _make_service(get_response=entry, **kwargs)
+        service._feedback = FeedbackService(es_service=service._es)
+        return service
+
+    async def test_reject_records_rejection_feedback(self):
+        entry = TestReject()._pending_entry()
+        service = self._service_with_feedback(entry)
+
+        await service.reject("action-1", "reviewer-1", reason="Wrong rider")
+
+        docs = _feedback_docs(service._es)
+        assert len(docs) == 1
+        doc = docs[0]
+        assert doc["feedback_type"] == "rejection"
+        assert doc["agent_id"] == "ai_agent"
+        assert doc["action_type"] == "reassign_rider"
+        assert doc["original_proposal"]["action_id"] == "action-1"
+        assert doc["original_proposal"]["tool_name"] == "reassign_rider"
+        assert doc["original_proposal"]["parameters"] == entry["parameters"]
+        assert doc["original_proposal"]["risk_level"] == "high"
+        assert doc["original_proposal"]["impact_summary"] == entry["impact_summary"]
+        assert doc["context"]["rejection_reason"] == "Wrong rider"
+        assert doc["user_action"] == {}
+        assert doc["user_id"] == "reviewer-1"
+        assert doc["tenant_id"] == "t1"
+
+    async def test_feedback_failure_does_not_fail_reject(self):
+        entry = TestReject()._pending_entry()
+        service = _make_service(get_response=entry)
+        service._feedback = MagicMock()
+        service._feedback.record_rejection = AsyncMock(side_effect=RuntimeError("store down"))
+
+        result = await service.reject("action-1", "reviewer-1", reason="x")
+
+        assert result["status"] == "rejected"
+        service._feedback.record_rejection.assert_awaited_once()
+
+    async def test_approve_writes_approval_approved_activity_entry(self):
+        entry = TestApprove()._pending_entry()
+        protocol = MagicMock()
+        protocol._execute_mutation = AsyncMock(return_value="ok")
+        service = self._service_with_feedback(entry, confirmation_protocol=protocol)
+
+        await service.approve("action-1", "reviewer-1")
+
+        logged = [c.args[0] for c in service._activity_log.log.call_args_list]
+        approved = [e for e in logged if e["action_type"] == "approval_approved"]
+        assert len(approved) == 1
+        log_entry = approved[0]
+        assert log_entry["outcome"] == "approved"
+        assert log_entry["user_id"] == "reviewer-1"
+        assert log_entry["tenant_id"] == "t1"
+        assert log_entry["agent_id"] == "ai_agent"
+        assert log_entry["tool_name"] == "cancel_job"
+        assert log_entry["details"] == {
+            "action_id": "action-1",
+            "executed": True,
+            "execution_success": True,
+        }
+
+    async def test_approve_without_protocol_audits_not_executed(self):
+        entry = TestApprove()._pending_entry()
+        service = _make_service(get_response=entry)
+
+        await service.approve("action-1", "reviewer-1")
+
+        log_entry = service._activity_log.log.call_args[0][0]
+        assert log_entry["action_type"] == "approval_approved"
+        assert log_entry["details"]["executed"] is False
+        assert log_entry["details"]["execution_success"] is None
+
+    async def test_approve_audit_failure_does_not_fail_approve(self):
+        entry = TestApprove()._pending_entry()
+        activity_log = MagicMock()
+        activity_log.log = AsyncMock(side_effect=RuntimeError("log down"))
+        service = _make_service(get_response=entry, activity_log=activity_log)
+
+        result = await service.approve("action-1", "reviewer-1")
+
+        assert result["status"] == "approved"
+
+    async def test_approve_writes_no_feedback(self):
+        entry = TestApprove()._pending_entry()
+        service = self._service_with_feedback(entry)
+
+        await service.approve("action-1", "reviewer-1")
+
+        assert _feedback_docs(service._es) == []
+
+    def test_constructor_accepts_feedback_service(self):
+        feedback = object()
+        service = ApprovalQueueService(
+            es_service=MagicMock(), ws_manager=None,
+            activity_log_service=None, feedback_service=feedback,
+        )
+        assert service._feedback is feedback
+
+
+# ---------------------------------------------------------------------------
 # Tests: expire_stale
 # ---------------------------------------------------------------------------
 

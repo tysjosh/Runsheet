@@ -40,7 +40,14 @@ class ApprovalQueueService:
         INDEX: The Elasticsearch index name for approval entries.
     """
 
-    def __init__(self, es_service, ws_manager, activity_log_service, confirmation_protocol=None):
+    def __init__(
+        self,
+        es_service,
+        ws_manager,
+        activity_log_service,
+        confirmation_protocol=None,
+        feedback_service=None,
+    ):
         """Initialise the service with its dependencies.
 
         Args:
@@ -49,11 +56,14 @@ class ApprovalQueueService:
             activity_log_service: Activity log for audit entries.
             confirmation_protocol: Optional back-reference used when
                 executing an approved mutation.
+            feedback_service: Optional FeedbackService; a rejection is
+                recorded as a feedback signal (Req 12.1).
         """
         self._es = es_service
         self._ws = ws_manager
         self._activity_log = activity_log_service
         self._confirmation_protocol = confirmation_protocol
+        self._feedback = feedback_service
         self.INDEX = "agent_approval_queue"
 
     # ------------------------------------------------------------------
@@ -176,10 +186,47 @@ class ApprovalQueueService:
                 )
                 entry.update(exec_update)
 
+        # Audit the approval (F7). No feedback signal: the design defines only
+        # rejection / override / correction signals (Req 12.3).
+        if self._activity_log:
+            executed = entry.get("status") == "executed"
+            try:
+                await self._log_approved(entry, action_id, reviewer_id, executed)
+            except Exception:
+                # The approval (and any execution) already happened; a lost
+                # audit write must not turn it into a 500.
+                logger.warning(
+                    "Failed to log approval of %s", action_id, exc_info=True
+                )
+
         logger.info(
             f"Approved action {action_id} by {reviewer_id}"
         )
         return entry
+
+    async def _log_approved(
+        self, entry: dict, action_id: str, reviewer_id: str, executed: bool
+    ) -> None:
+        """Write the ``approval_approved`` audit entry for a reviewed action."""
+        await self._activity_log.log({
+            "agent_id": entry.get("proposed_by", "unknown"),
+            "action_type": "approval_approved",
+            "tool_name": entry.get("tool_name"),
+            "parameters": entry.get("parameters"),
+            "risk_level": entry.get("risk_level"),
+            "outcome": "approved",
+            "duration_ms": 0,
+            "tenant_id": entry.get("tenant_id"),
+            "user_id": reviewer_id,
+            "details": {
+                "action_id": action_id,
+                "executed": executed,
+                "execution_success": (
+                    entry.get("execution_result", {}).get("success")
+                    if executed else None
+                ),
+            },
+        })
 
     async def reject(self, action_id: str, reviewer_id: str, reason: str = "") -> dict:
         """Reject a pending action and store a feedback signal.
@@ -233,6 +280,31 @@ class ApprovalQueueService:
                 "user_id": reviewer_id,
                 "details": {"reason": reason, "action_id": action_id},
             })
+
+        # Store the rejection as a feedback signal so agents can learn from
+        # it (F7, Req 12.1). A feedback failure never fails the reject.
+        if self._feedback:
+            try:
+                await self._feedback.record_rejection(
+                    agent_id=entry.get("proposed_by", "unknown"),
+                    action_type=entry.get("tool_name"),
+                    original_proposal={
+                        "action_id": action_id,
+                        "tool_name": entry.get("tool_name"),
+                        "parameters": entry.get("parameters"),
+                        "risk_level": entry.get("risk_level"),
+                        "impact_summary": entry.get("impact_summary"),
+                    },
+                    rejection_reason=reason,
+                    user_action={},
+                    tenant_id=entry.get("tenant_id"),
+                    user_id=reviewer_id,
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record rejection feedback for %s",
+                    action_id, exc_info=True,
+                )
 
         logger.info(
             f"Rejected action {action_id} by {reviewer_id}: {reason}"

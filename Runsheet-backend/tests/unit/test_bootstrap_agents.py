@@ -70,7 +70,9 @@ def _mock_external():
         module = sys.modules.get(name)
         if module is None or isinstance(module, MagicMock):
             continue
-        if any(isinstance(value, MagicMock) for value in vars(module).values()):
+        # Snapshot the namespace: an isinstance() check on a lazy proxy can
+        # import and add attributes mid-iteration (flaky teardown error).
+        if any(isinstance(value, MagicMock) for value in list(vars(module).values())):
             sys.modules.pop(name, None)
 
 
@@ -114,6 +116,7 @@ class TestAgentsBootstrap:
     async def test_registers_agent_services(self, mock_app, container):
         """Verify all agent services are registered in the container."""
         mock_redis = MagicMock()
+        approval_queue_cls = MagicMock(return_value=MagicMock())
 
         patches = [
             patch("redis.asyncio.from_url", return_value=mock_redis),
@@ -123,7 +126,7 @@ class TestAgentsBootstrap:
             patch("Agents.business_validator.BusinessValidator", return_value=MagicMock()),
             patch("Agents.activity_log_service.ActivityLogService", return_value=MagicMock()),
             patch("Agents.autonomy_config_service.AutonomyConfigService", return_value=MagicMock()),
-            patch("Agents.approval_queue_service.ApprovalQueueService", return_value=MagicMock()),
+            patch("Agents.approval_queue_service.ApprovalQueueService", approval_queue_cls),
             patch("Agents.confirmation_protocol.ConfirmationProtocol", return_value=MagicMock()),
             patch("Agents.memory_service.MemoryService", return_value=MagicMock()),
             patch("Agents.feedback_service.FeedbackService", return_value=MagicMock()),
@@ -161,6 +164,12 @@ class TestAgentsBootstrap:
             assert container.has("agent_orchestrator")
             assert container.has("redis_client")
             assert container.has("plan_dispatch_service")
+            # F7: the approval queue records rejections through the same
+            # FeedbackService the container exposes.
+            assert (
+                approval_queue_cls.call_args.kwargs["feedback_service"]
+                is container.feedback_service
+            )
         finally:
             for p in patches:
                 p.stop()
