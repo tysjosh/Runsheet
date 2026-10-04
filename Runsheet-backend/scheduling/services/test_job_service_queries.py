@@ -118,6 +118,41 @@ class TestGetJob:
         assert result["events"][0].event_type == "job_created"
 
     @pytest.mark.asyncio
+    async def test_returns_stored_fuel_delivery_type_with_cargo_manifest(self):
+        """R-3/S4: the detail read returns the stored job_type, like the list.
+
+        A fuel_delivery job with a cargo_manifest used to come back as
+        cargo_transport because the legacy-type normalizer remapped it.
+        """
+        es = _make_es_service()
+        job_doc = _make_job_doc(job_type="fuel_delivery")
+        assert job_doc["cargo_manifest"]  # manifest present
+        es.search_documents.side_effect = [
+            _es_search_response([job_doc]),
+            _es_search_response([]),
+        ]
+
+        svc = JobService(es, redis_url=None)
+        result = await svc.get_job("JOB_1", TENANT_ID)
+
+        assert result["job"].job_type == JobType.FUEL_DELIVERY
+        assert result["job"].model_dump(mode="json")["job_type"] == "fuel_delivery"
+
+    @pytest.mark.asyncio
+    async def test_legacy_delivery_type_still_normalized(self):
+        """Legacy seed values that aren't JobType members still map."""
+        es = _make_es_service()
+        es.search_documents.side_effect = [
+            _es_search_response([_make_job_doc(job_type="delivery")]),
+            _es_search_response([]),
+        ]
+
+        svc = JobService(es, redis_url=None)
+        result = await svc.get_job("JOB_1", TENANT_ID)
+
+        assert result["job"].job_type == JobType.CARGO_TRANSPORT
+
+    @pytest.mark.asyncio
     async def test_not_found_raises_404(self):
         es = _make_es_service()
         es.search_documents.return_value = _es_search_response([])

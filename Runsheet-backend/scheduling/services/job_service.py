@@ -886,11 +886,12 @@ class JobService:
         """
         doc = dict(doc)  # shallow copy
 
-        # Map legacy job_type values to valid enum values
+        # Map legacy job_type values to valid enum values. ``fuel_delivery``
+        # is a real JobType, so it is returned as stored (R-3/S4): remapping
+        # it made the detail read disagree with the list.
         job_type_map = {
             "delivery": "cargo_transport",
             "pickup": "cargo_transport",
-            "fuel_delivery": "cargo_transport",
         }
         if doc.get("job_type") in job_type_map:
             doc["job_type"] = job_type_map[doc["job_type"]]
