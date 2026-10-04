@@ -146,7 +146,7 @@ function formatDate(dateStr?: string | null): string {
 // Navigate into the Fleet module. There is no per-asset deep-link route yet —
 // the reusable <EntityLink> + asset detail surface land in task 5 — so for now
 // the truck links to the Fleet module. The dashboard reads `activeMenuItem`
-// from sessionStorage on mount (see app/dashboard/page.tsx), so we set it and
+// from sessionStorage on mount (see app/dashboard/(today)/page.tsx), so we set it and
 // navigate there.
 function navigateToFleet(): void {
   if (typeof window !== "undefined") {

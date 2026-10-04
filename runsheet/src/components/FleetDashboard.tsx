@@ -9,7 +9,7 @@ import LoadingSpinner from "./LoadingSpinner";
 import { type Tab, TabNavigation } from "./ui";
 
 const FleetTracking = lazy(() => import("./FleetTracking"));
-const ShipmentBoardView = lazy(() => import("../app/ops/page"));
+const ShipmentBoardView = lazy(() => import("../app/ops/(overview)/page"));
 const Inventory = lazy(() => import("./Inventory"));
 
 interface FleetDashboardProps {

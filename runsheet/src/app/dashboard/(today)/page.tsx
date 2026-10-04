@@ -2,11 +2,13 @@
 
 import { useRouter } from "next/navigation";
 import { lazy, Suspense } from "react";
-import ErrorBoundary from "../../components/ErrorBoundary";
-import LoadingSpinner from "../../components/LoadingSpinner";
-import { dashboardPathForItem } from "./shell-context";
+import ErrorBoundary from "../../../components/ErrorBoundary";
+import LoadingSpinner from "../../../components/LoadingSpinner";
+import { dashboardPathForItem } from "../shell-context";
 
-const DispatchCockpit = lazy(() => import("../../components/DispatchCockpit"));
+const DispatchCockpit = lazy(
+  () => import("../../../components/DispatchCockpit"),
+);
 
 function Loading() {
   return (

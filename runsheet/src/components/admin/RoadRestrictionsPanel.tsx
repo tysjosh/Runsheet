@@ -540,7 +540,7 @@ export interface RoadRestrictionsPanelProps {
 /**
  * Admin panel for Storm_Mode road restrictions. Lists active polygons
  * and lets dispatchers / admins upload new ones. Mounts as a dashboard
- * case in :file:`app/dashboard/page.tsx`.
+ * case in :file:`app/dashboard/(today)/page.tsx`.
  */
 export default function RoadRestrictionsPanel({
   roles,

@@ -23,16 +23,16 @@ import {
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import AgentActivityFeed from "../../../components/ops/AgentActivityFeed";
-import AgentHealth from "../../../components/ops/AgentHealth";
-import AgentToast from "../../../components/ops/AgentToast";
-import ApprovalQueue from "../../../components/ops/ApprovalQueue";
-import ReportViewer from "../../../components/ReportViewer";
+import AgentActivityFeed from "../../../../components/ops/AgentActivityFeed";
+import AgentHealth from "../../../../components/ops/AgentHealth";
+import AgentToast from "../../../../components/ops/AgentToast";
+import ApprovalQueue from "../../../../components/ops/ApprovalQueue";
+import ReportViewer from "../../../../components/ReportViewer";
 import {
   applyChatStreamEvent,
   type ChatStreamMessage,
   parseSseChunk,
-} from "../../../services/chatStream";
+} from "../../../../services/chatStream";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 

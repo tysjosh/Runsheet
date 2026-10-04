@@ -1329,7 +1329,7 @@ export interface SourcingPageProps {
  * Top-level terminal-sourcing operations page wiring the form, the
  * recommendation list, and the rack-price / contracts side panels.
  * Consumers mount this via the dashboard sidebar (see
- * :file:`app/dashboard/page.tsx`).
+ * :file:`app/dashboard/(today)/page.tsx`).
  */
 export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
   const { toasts, addToast, dismissToast } = useToasts();

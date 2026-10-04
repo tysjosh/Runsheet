@@ -2,8 +2,8 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import CreateOrderModal from "../../components/ops/CreateOrderModal";
-import OrdersPage from "../../components/ops/OrdersPage";
+import CreateOrderModal from "../../../components/ops/CreateOrderModal";
+import OrdersPage from "../../../components/ops/OrdersPage";
 
 /**
  * Operations overview page.
