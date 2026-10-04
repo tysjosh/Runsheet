@@ -465,6 +465,7 @@ class ApprovalQueueService:
                 f"Update fuel threshold for station {p.get('station_id', 'unknown')} "
                 f"to {p.get('threshold_pct', '?')}%"
             ),
+            "apply_loading_plan": self._loading_plan_summary,
         }
 
         formatter = summaries.get(tool)
@@ -476,6 +477,31 @@ class ApprovalQueueService:
 
         # Fallback for unknown tools
         return f"Execute {tool} with parameters: {params}"
+
+    @staticmethod
+    def _loading_plan_summary(params: dict) -> str:
+        """``Load truck T1: 2 order(s), 7571 L, 84% utilization``.
+
+        Orders are counted by ``order_id`` (``station_id`` for plans written
+        before assignments carried one), so a split load counts once.
+        """
+        assignments = params.get("assignments") or []
+        orders = {
+            a.get("order_id") or a.get("station_id")
+            for a in assignments
+            if isinstance(a, dict)
+        }
+        orders.discard(None)
+        liters = sum(
+            float(a.get("quantity_liters") or 0)
+            for a in assignments
+            if isinstance(a, dict)
+        )
+        util = float(params.get("total_utilization_pct") or 0)
+        return (
+            f"Load truck {params.get('truck_id', 'unknown')}: "
+            f"{len(orders)} order(s), {liters:.0f} L, {util:.0f}% utilization"
+        )
 
     async def _get_entry(self, action_id: str) -> dict:
         """Fetch an approval entry.

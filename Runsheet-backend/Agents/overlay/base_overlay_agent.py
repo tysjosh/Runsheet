@@ -26,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 SHADOW_PROPOSALS_INDEX = "agent_shadow_proposals"
 
+#: Overlay actions that change no live state. ``_route_proposal`` publishes their
+#: proposals on the Signal Bus but never sends them to the ConfirmationProtocol:
+#: a delivery ranking is input to loading, and the dispatcher decides on the
+#: loading plan, not on the ranking that fed it.
+NON_MUTATING_OVERLAY_TOOLS = frozenset({"publish_priority_list"})
+
 
 # ---------------------------------------------------------------------------
 # Degradation reporting convention (agent → orchestrator)
@@ -458,8 +464,10 @@ class OverlayAgentBase(AutonomousAgentBase):
 
         For ``InterventionProposal`` instances, creates a ``MutationRequest``
         for each action and submits through the confirmation protocol.
-        All proposals are also published to the Signal Bus for downstream
-        consumers (e.g. LearningPolicyAgent).
+        Actions in :data:`NON_MUTATING_OVERLAY_TOOLS` are not submitted, and
+        an action without a ``tool_name`` or with empty ``parameters`` is
+        logged at ERROR and never submitted. All proposals are also published
+        to the Signal Bus for downstream consumers (e.g. LearningPolicyAgent).
 
         When an OutcomeTracker is wired (:meth:`set_outcome_tracker`), an
         executed ``InterventionProposal`` also has its before-KPIs captured
@@ -476,9 +484,27 @@ class OverlayAgentBase(AutonomousAgentBase):
                 await self._record_outcome_baseline(proposal)
 
             for action in proposal.actions:
+                tool_name = action.get("tool_name") if isinstance(action, dict) else None
+                parameters = action.get("parameters") if isinstance(action, dict) else None
+                if not tool_name or not parameters:
+                    # An action without a tool or parameters used to be queued
+                    # as ``overlay_action`` with ``{}`` — an approval a
+                    # dispatcher can neither read nor execute (F11).
+                    self.logger.error(
+                        "%s: dropping malformed overlay action for proposal=%s; "
+                        "it needs a 'tool_name' and non-empty 'parameters', got "
+                        "keys %s",
+                        self.agent_id,
+                        getattr(proposal, "proposal_id", None),
+                        sorted(action) if isinstance(action, dict) else type(action).__name__,
+                    )
+                    continue
+                if tool_name in NON_MUTATING_OVERLAY_TOOLS:
+                    # Published on the Signal Bus below; nothing to confirm.
+                    continue
                 request = MutationRequest(
-                    tool_name=action.get("tool_name", "overlay_action"),
-                    parameters=action.get("parameters", {}),
+                    tool_name=tool_name,
+                    parameters=parameters,
                     tenant_id=proposal.tenant_id,
                     agent_id=self.agent_id,
                 )

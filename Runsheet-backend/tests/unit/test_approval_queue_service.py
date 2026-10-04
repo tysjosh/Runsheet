@@ -743,6 +743,32 @@ class TestGenerateImpactSummary:
 
         assert "some_unknown_tool" in summary
 
+    def test_apply_loading_plan_summary_names_the_truck(self):
+        """Loading approvals used to read "Execute apply_loading_plan with
+        parameters: {...}" — the whole assignment dump."""
+        service = _make_service()
+        request = _make_request(
+            tool_name="apply_loading_plan",
+            parameters={
+                "plan_id": "plan-1",
+                "truck_id": "TRK-7",
+                "assignments": [
+                    {"compartment_id": "c1", "station_id": "s1", "order_id": "o1",
+                     "quantity_liters": 3000.4},
+                    # A split load: same order across two compartments.
+                    {"compartment_id": "c2", "station_id": "s1", "order_id": "o1",
+                     "quantity_liters": 1000},
+                    {"compartment_id": "c3", "station_id": "s2", "order_id": "o2",
+                     "quantity_liters": 2500},
+                ],
+                "total_utilization_pct": 83.6,
+            },
+        )
+        summary = service._generate_impact_summary(request)
+
+        assert summary == "Load truck TRK-7: 2 order(s), 6500 L, 84% utilization"
+        assert "parameters" not in summary
+
 
 # ---------------------------------------------------------------------------
 # Tests: WebSocket broadcasting

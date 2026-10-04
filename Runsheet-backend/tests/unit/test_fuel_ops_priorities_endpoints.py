@@ -297,6 +297,70 @@ class TestListPrioritiesEndpoint:
         assert data["items"] == []
         assert data["total"] == 0
 
+    async def test_a_pipeline_runs_priorities_are_readable_by_run_id(self):
+        """F11: after a run, ``/priorities?run_id=<run>`` returned nothing —
+        the agent never persisted its list, and stamped a fresh uuid instead
+        of the pipeline's run id."""
+        from datetime import timedelta
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock, MagicMock
+
+        from Agents.overlay.delivery_prioritization_agent import (
+            DeliveryPrioritizationAgent,
+        )
+
+        app, es = _build_app(tenant_id="tenant-A")
+        order = {
+            "order_id": "ord-1",
+            "tenant_id": "tenant-A",
+            "status": "placed",
+            "call_type": "will_call",
+            "customer_tank_id": "tank-1",
+            "product_code": "DIESEL_2",
+            "delivery_window_end": (
+                datetime.now(timezone.utc) + timedelta(hours=2)
+            ).isoformat(),
+        }
+
+        async def agent_search(index, query, *args, **kwargs):
+            if index == "fuel_orders_current" and "aggs" not in query:
+                return {"hits": {"hits": [{"_source": order}]}}
+            return {"hits": {"hits": []}}
+
+        agent_es = MagicMock()
+        agent_es.search_documents = AsyncMock(side_effect=agent_search)
+        # Writes land in the store the endpoint reads.
+        agent_es.index_document = es.index_document
+        signal_bus = MagicMock()
+        signal_bus.publish = AsyncMock(return_value=1)
+        agent = DeliveryPrioritizationAgent(
+            signal_bus=signal_bus,
+            es_service=agent_es,
+            activity_log_service=MagicMock(),
+            ws_manager=MagicMock(),
+            confirmation_protocol=MagicMock(),
+            autonomy_config_service=MagicMock(),
+            feature_flag_service=MagicMock(),
+        )
+        agent._current_run_id = "run_X"
+
+        # Any signal naming the tenant scopes the cycle to it.
+        await agent.evaluate([SimpleNamespace(tenant_id="tenant-A")])
+
+        client = TestClient(app)
+        resp = client.get("/api/fuel/mvp/priorities", params={"run_id": "run_X"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        (item,) = data["items"]
+        assert item["run_id"] == "run_X"
+        assert item["tenant_id"] == "tenant-A"
+        assert item["timestamp"]
+        assert item["priorities"][0]["station_id"] == "tank-1"
+
+        resp = client.get("/api/fuel/mvp/priorities", params={"run_id": "other"})
+        assert resp.json()["total"] == 0
+
 
 # ---------------------------------------------------------------------------
 # GET /api/fuel/mvp/combinable-groups — new endpoint (Req 3.2.4)

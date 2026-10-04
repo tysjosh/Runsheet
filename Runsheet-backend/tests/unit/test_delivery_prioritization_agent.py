@@ -346,6 +346,116 @@ class TestEvaluate:
 
 
 # ---------------------------------------------------------------------------
+# Tests: persistence per pipeline run (F11)
+# ---------------------------------------------------------------------------
+
+
+def _one_tenant_one_order_search():
+    """search_documents side effect: tenant discovery, then one will-call order."""
+    window_end = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+    orders = [_make_order(call_type="will_call", delivery_window_end=window_end)]
+    call_count = [0]
+
+    async def mock_search(index, query, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return _es_response_with_tenants(["tenant-1"])
+        if call_count[0] == 2:
+            return _es_response_with_orders(orders)
+        return {"hits": {"hits": []}}
+
+    return mock_search
+
+
+class TestPersistsPriorityListPerRun:
+    @pytest.mark.asyncio
+    async def test_evaluate_persists_the_list_under_the_pipeline_run_id(self):
+        """Before F11 nothing was written, under a fresh uuid, so
+        ``/priorities?run_id=<pipeline run>`` was always empty."""
+        agent, deps = _make_agent()
+        es = deps["es_service"]
+        es.search_documents = AsyncMock(side_effect=_one_tenant_one_order_search())
+        es.index_document = AsyncMock(return_value={"result": "created"})
+        agent._current_run_id = "run_X"
+
+        await agent.evaluate([])
+
+        es.index_document.assert_awaited_once()
+        index, doc_id, doc = es.index_document.await_args.args
+        assert index == "mvp_delivery_priorities"
+        assert doc["run_id"] == "run_X"
+        assert doc["tenant_id"] == "tenant-1"
+        assert doc_id == doc["priority_list_id"]
+        assert doc["timestamp"] and doc["created_at"]
+        datetime.fromisoformat(doc["timestamp"])
+        # jsonb-ready: enums are already their values.
+        assert doc["priorities"][0]["priority_bucket"] in {b.value for b in PriorityBucket}
+        assert type(doc["priorities"][0]["priority_bucket"]) is str
+
+        published = deps["signal_bus"].publish.await_args.args[0]
+        assert published.run_id == "run_X"
+
+    @pytest.mark.asyncio
+    async def test_persists_before_publishing(self):
+        agent, deps = _make_agent()
+        es = deps["es_service"]
+        es.search_documents = AsyncMock(side_effect=_one_tenant_one_order_search())
+        order: list = []
+        es.index_document = AsyncMock(side_effect=lambda *a, **k: order.append("persist"))
+        deps["signal_bus"].publish = AsyncMock(
+            side_effect=lambda *a, **k: order.append("publish")
+        )
+
+        await agent.evaluate([])
+
+        assert order == ["persist", "publish"]
+
+    @pytest.mark.asyncio
+    async def test_a_persist_failure_is_logged_and_the_list_still_published(self, caplog):
+        agent, deps = _make_agent()
+        es = deps["es_service"]
+        es.search_documents = AsyncMock(side_effect=_one_tenant_one_order_search())
+        es.index_document = AsyncMock(side_effect=RuntimeError("store down"))
+
+        with caplog.at_level("ERROR"):
+            proposals = await agent.evaluate([])
+
+        assert deps["signal_bus"].publish.await_count == 1
+        assert len(proposals) == 1
+        assert any("failed to persist priority list" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_outside_a_pipeline_a_fresh_run_id_is_used(self):
+        agent, deps = _make_agent()
+        es = deps["es_service"]
+        es.search_documents = AsyncMock(side_effect=_one_tenant_one_order_search())
+        es.index_document = AsyncMock()
+
+        await agent.evaluate([])
+
+        assert es.index_document.await_args.args[2]["run_id"]
+
+    @pytest.mark.asyncio
+    async def test_proposal_action_uses_the_routed_keys(self):
+        """``_route_proposal`` reads tool_name/parameters; 'tool'/'params'
+        became an ``overlay_action`` approval with ``{}``."""
+        agent, deps = _make_agent()
+        deps["es_service"].search_documents = AsyncMock(
+            side_effect=_one_tenant_one_order_search()
+        )
+        deps["es_service"].index_document = AsyncMock()
+        agent._current_run_id = "run_X"
+
+        (proposal,) = await agent.evaluate([])
+
+        (action,) = proposal.actions
+        assert action["tool_name"] == "publish_priority_list"
+        assert action["parameters"]["run_id"] == "run_X"
+        assert action["parameters"]["order_count"] == 1
+        assert action["parameters"]["priority_list_id"]
+
+
+# ---------------------------------------------------------------------------
 # Tests: Scoring — keep_full / auto_fill via forecast
 # ---------------------------------------------------------------------------
 

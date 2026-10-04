@@ -653,11 +653,10 @@ class TestPrioritizationProducesOutputEndToEnd:
     genuine ``CompartmentLoadingAgent._priority_buffer``.
 
     Note what this pins about the design: ``evaluate()`` publishes the
-    ``DeliveryPriorityList`` on the SignalBus and does **not** write
-    ``mvp_delivery_priorities`` — ``_persist_priority_list`` is a legacy compat
-    stub with no caller on the production path. The list reaching the loading
-    stage's buffer is therefore the only observable handoff, which is precisely
-    what the stale buffer map used to sever.
+    ``DeliveryPriorityList`` on the SignalBus — the handoff the stale buffer map
+    used to sever — and also writes it to ``mvp_delivery_priorities`` under the
+    pipeline's own run id, so ``/api/fuel/mvp/priorities?run_id=<run>`` can read
+    the ranking back (F11: it used to persist nothing, under a fresh uuid).
 
     Validates: Requirements 1.2, 1.3, 1.5
     """
@@ -777,6 +776,18 @@ class TestPrioritizationProducesOutputEndToEnd:
         )
         assert priority.priority_score > 0.6
         assert "scoring_input_missing" not in priority.reasons
+
+        # The list carries the pipeline's run id and is persisted under it.
+        assert priority_list.run_id == run_id
+        persisted = [
+            c.args[2]
+            for c in deps["es_service"].index_document.await_args_list
+            if c.args[0] == "mvp_delivery_priorities"
+        ]
+        assert len(persisted) == 1
+        assert persisted[0]["run_id"] == run_id
+        assert persisted[0]["priority_list_id"] == priority_list.priority_list_id
+        assert persisted[0]["timestamp"]
 
 
 # ---------------------------------------------------------------------------
