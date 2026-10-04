@@ -13,13 +13,13 @@ run one real loop iteration with detections for tenant ``t1``.
 """
 from __future__ import annotations
 
+import importlib
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-import bootstrap.compliance as compliance_boot
 from Agents.autonomous.asset_cert_expiry_cron_agent import AssetCertExpiryCronAgent
 from Agents.autonomous.driver_expiry_cron_agent import DriverExpiryCronAgent
 from Agents.autonomous.dyed_diesel_cert_expiry_cron_agent import (
@@ -46,8 +46,17 @@ def _build_like_compliance_bootstrap(cls, **extra):
     )
 
 
+def _compliance_boot():
+    # Resolved at call time, not import time: other bootstrap tests evict and
+    # re-import bootstrap modules, and bootstrap.agents imports
+    # bootstrap.compliance lazily, so the globals must be set on whichever
+    # module object is current in sys.modules.
+    return importlib.import_module("bootstrap.compliance")
+
+
 @pytest.fixture
 def crons(monkeypatch):
+    compliance_boot = _compliance_boot()
     built = {
         "_driver_expiry_cron_agent": _build_like_compliance_bootstrap(
             DriverExpiryCronAgent
@@ -82,10 +91,12 @@ def _spy_log():
 
 
 def test_compliance_cron_agents_lists_the_built_crons(crons):
-    assert {a.agent_id for a in compliance_boot.compliance_cron_agents()} == CRON_IDS
+    agents = _compliance_boot().compliance_cron_agents()
+    assert {a.agent_id for a in agents} == CRON_IDS
 
 
 def test_compliance_cron_agents_skips_failed_wiring(crons, monkeypatch):
+    compliance_boot = _compliance_boot()
     monkeypatch.setattr(compliance_boot, "_meter_calibration_cron_agent", None)
     ids = {a.agent_id for a in compliance_boot.compliance_cron_agents()}
     assert ids == CRON_IDS - {"meter_calibration_cron_agent"}
