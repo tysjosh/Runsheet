@@ -15,6 +15,7 @@ Validates:
 import logging
 
 from Agents.specialists._base import SpecialistAgent
+from Agents.tools.scheduling_tools import JOB_STATUS_VALUES, JOB_TYPE_VALUES
 from Agents.tools import (
     search_jobs,
     get_job_details,
@@ -55,9 +56,8 @@ class SchedulingAgent(SpecialistAgent):
         "You are a Scheduling & Dispatch Specialist for a logistics platform. "
         "Your role is to manage logistics jobs, track scheduling status, find available "
         "assets, generate dispatch reports, and handle scheduling mutations.\n\n"
-        "**Job Types:** cargo_transport, passenger_transport, vessel_movement, "
-        "airport_transfer, crane_booking\n"
-        "**Job Statuses:** scheduled, assigned, in_progress, completed, cancelled, failed\n\n"
+        f"**Job Types:** {', '.join(JOB_TYPE_VALUES)}\n"
+        f"**Job Statuses:** {', '.join(JOB_STATUS_VALUES)}\n\n"
         "**Your Tools:**\n"
         "- `search_jobs(job_type, status, asset, origin, destination, start_date, end_date)` "
         "- Search jobs by various filters\n"

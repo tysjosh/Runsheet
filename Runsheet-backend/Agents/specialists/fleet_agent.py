@@ -16,6 +16,7 @@ Validates:
 import logging
 
 from Agents.specialists._base import SpecialistAgent
+from Agents.tools.search_tools import FLEET_ASSET_STATUSES
 from Agents.tools import (
     search_fleet_data,
     get_fleet_summary,
@@ -57,7 +58,8 @@ class FleetAgent(SpecialistAgent):
         "- equipment: crane, forklift\n"
         "- container: cargo_container, ISO_tank\n\n"
         "**Your Tools:**\n"
-        "- `search_fleet_data(query, asset_type)` - Search fleet assets by query and optional type filter\n"
+        "- `search_fleet_data(query, asset_type, status)` - Search fleet assets by query and "
+        f"optional type and status filter (status: {', '.join(FLEET_ASSET_STATUSES)})\n"
         "- `get_fleet_summary()` - Get current fleet status overview with per-type breakdowns\n"
         "- `find_truck_by_id(truck_id)` - Find any asset by ID or plate number\n"
         "- `get_all_locations()` - Get all depots, warehouses, and stations\n"

@@ -25,6 +25,8 @@ from strands import Agent
 from dotenv import load_dotenv
 from .tools import ALL_TOOLS
 from .tools._tenant_context import set_current_tenant
+from .tools.scheduling_tools import JOB_STATUS_VALUES, JOB_TYPE_VALUES
+from .tools.search_tools import FLEET_ASSET_STATUSES
 from config.settings import get_settings
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
 from errors.exceptions import ai_service_unavailable, circuit_open
@@ -183,7 +185,7 @@ class LogisticsAgent:
         # Initialize Strands Agent with the Gemini model
         self.agent = Agent(
             model=gemini_model,
-            system_prompt="""You are a Fuel Distribution Operations AI Assistant. You help dispatchers and operations managers run a fuel delivery business — managing orders, tracking drivers, optimizing routes, and monitoring tank levels.
+            system_prompt=f"""You are a Fuel Distribution Operations AI Assistant. You help dispatchers and operations managers run a fuel delivery business — managing orders, tracking drivers, optimizing routes, and monitoring tank levels.
 
             **YOU HAVE ACCESS TO LIVE DATA!** You can search and analyze real fleet, order, driver, and fuel data using your tools.
 
@@ -216,7 +218,7 @@ class LogisticsAgent:
             - **container**: cargo_container, ISO_tank
 
             **Available Tools:**
-            - `search_fleet_data(query, asset_type=None)` - Search assets using semantic search. Accepts an optional `asset_type` parameter to filter by type (e.g. "vehicle", "vessel", "equipment", "container").
+            - `search_fleet_data(query, asset_type=None, status=None)` - Search assets using semantic search. Accepts an optional `asset_type` parameter to filter by type (e.g. "vehicle", "vessel", "equipment", "container") and an optional `status` ({', '.join(FLEET_ASSET_STATUSES)}).
             - `search_orders(status, customer_id, driver_id, call_type, product_code, start_date, end_date, intake_channel)` - Search fuel orders by status, customer, driver, call type, product, date range, or intake channel
             - `search_drivers(status, availability, hazmat_endorsement)` - Search drivers by status, availability, and qualifications
             - `get_order_events(order_id)` - Get the full event timeline for a specific fuel order
@@ -257,7 +259,7 @@ class LogisticsAgent:
             present the suggestion to the user as a recommendation but do NOT execute it.
 
             **Scheduling & Dispatch Tools (read-only):**
-            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: cargo_transport, passenger_transport, vessel_movement, airport_transfer, crane_booking. Statuses: scheduled, assigned, in_progress, completed, cancelled, failed.
+            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: {', '.join(JOB_TYPE_VALUES)}. Statuses: {', '.join(JOB_STATUS_VALUES)}.
             - `get_job_details(job_id, tenant_id=None)` - Get full details of a job including event history and cargo manifest using the authenticated tenant context.
             - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id=None)` - Find assets not assigned to active jobs within a time window using the authenticated tenant context. Filter by asset_type: vehicle, vessel, equipment, container.
             - `get_scheduling_summary(tenant_id=None)` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs using the authenticated tenant context.

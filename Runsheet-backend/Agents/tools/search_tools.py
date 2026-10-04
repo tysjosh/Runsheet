@@ -8,6 +8,7 @@ Validates:
 """
 
 import logging
+import re
 import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
@@ -45,8 +46,42 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
 
 
 
+# The vehicle template's ``status`` enum (services/schema_templates.py).
+FLEET_ASSET_STATUSES = ("on_time", "delayed", "idle", "maintenance")
+
+# Status words recognised in a free-text fleet query, mapped to the stored value.
+_STATUS_WORD_PATTERNS = (
+    (re.compile(r"\bon[\s_-]time\b", re.IGNORECASE), "on_time"),
+    (re.compile(r"\bdelayed\b", re.IGNORECASE), "delayed"),
+    (re.compile(r"\bidle\b", re.IGNORECASE), "idle"),
+    (re.compile(r"\bmaintenance\b", re.IGNORECASE), "maintenance"),
+)
+
+# Words that describe "the fleet" rather than a field value. Left in the
+# free text they turn "delayed trucks" into a phrase no asset contains (F5).
+_GENERIC_FLEET_WORDS = frozenset({
+    "truck", "trucks", "vehicle", "vehicles", "asset", "assets", "fleet",
+    "show", "me", "all", "list", "find", "the", "and", "or",
+})
+
+
+def _split_fleet_query(query: str) -> tuple[list[str], str]:
+    """Return ``(status values found in query, remaining free text)``."""
+    text = query or ""
+    statuses: list[str] = []
+    for pattern, value in _STATUS_WORD_PATTERNS:
+        if pattern.search(text):
+            statuses.append(value)
+            text = pattern.sub(" ", text)
+    words = [
+        w for w in re.split(r"\s+", text)
+        if w and w.strip(".,;:!?").lower() not in _GENERIC_FLEET_WORDS
+    ]
+    return statuses, " ".join(words).strip(" .,;:!?")
+
+
 @tool
-async def search_fleet_data(query: str, asset_type: str = None) -> str:
+async def search_fleet_data(query: str, asset_type: str = None, status: str = None) -> str:
     """
     Search fleet and asset data using natural language. Supports all asset types
     including vehicles, vessels, equipment, and containers.
@@ -57,10 +92,14 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
     Args:
         query: Natural language search query (e.g., "trucks carrying perishables",
                "delayed vehicles", "search for all vessels", "find idle equipment",
-               "containers in transit", "show me all boats")
+               "containers in transit", "show me all boats"). Status words in the
+               query ("delayed", "idle", "maintenance", "on time") filter on the
+               asset's status.
         asset_type: Optional asset type filter. One of: "vehicle", "vessel",
                     "equipment", "container". When provided, results are limited
                     to the specified asset type.
+        status: Optional asset status filter. One of: "on_time", "delayed",
+                "idle", "maintenance". Overrides status words in the query.
 
     Returns:
         Search results from fleet database
@@ -73,24 +112,47 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
     try:
         logger.info(f"🔍 Searching fleet data for: {query}" + (f" (asset_type={asset_type})" if asset_type else ""))
 
-        # Build the base multi_match query
-        must_clause = {
-            "multi_match": {
-                "query": query,
-                "fields": ["cargo.description", "driver_name", "status", "asset_name", "vessel_name", "equipment_model", "container_number"],
-                "type": "best_fields"
-            }
-        }
+        detected_statuses, free_text = _split_fleet_query(query)
+        if status:
+            status = status.strip().lower().replace("-", "_").replace(" ", "_")
+            if status not in FLEET_ASSET_STATUSES:
+                success = True
+                return (
+                    f"Unknown status '{status}'. "
+                    f"Valid statuses: {', '.join(FLEET_ASSET_STATUSES)}."
+                )
+            statuses = [status]
+        else:
+            statuses = detected_statuses
 
-        # When asset_type is provided, wrap in a bool query with a term filter
+        # Free text left after removing status words and generic fleet nouns;
+        # nothing left means "every asset with that status / type".
+        if free_text:
+            must_clause = {
+                "multi_match": {
+                    "query": free_text,
+                    "fields": ["cargo.description", "driver_name", "status", "asset_name", "vessel_name", "equipment_model", "container_number"],
+                    "type": "best_fields"
+                }
+            }
+        else:
+            must_clause = {"match_all": {}}
+
+        filters = []
         if asset_type:
+            filters.append({"term": {"asset_type": asset_type}})
+        if len(statuses) == 1:
+            filters.append({"term": {"status": statuses[0]}})
+        elif statuses:
+            filters.append({"terms": {"status": statuses}})
+
+        # With filters, wrap in a bool query; otherwise the bare clause
+        if filters:
             inner_es_query = {
                 "query": {
                     "bool": {
                         "must": [must_clause],
-                        "filter": [
-                            {"term": {"asset_type": asset_type}}
-                        ]
+                        "filter": filters,
                     }
                 }
             }
@@ -133,7 +195,7 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
         logger.exception("Error searching fleet data")
         return f"Error searching fleet data: {str(e)}"
     finally:
-        _log_tool_invocation("search_fleet_data", {"query": query, "asset_type": asset_type}, start_time, success, error_msg)
+        _log_tool_invocation("search_fleet_data", {"query": query, "asset_type": asset_type, "status": status}, start_time, success, error_msg)
 
 
 @tool

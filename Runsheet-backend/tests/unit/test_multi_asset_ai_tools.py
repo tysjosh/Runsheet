@@ -120,7 +120,9 @@ class TestSearchFleetDataAssetType:
                 set_current_tenant(_TENANT_ID):
             mock_es.search_documents = AsyncMock(return_value=mock_response)
 
-            await search_fleet_data(query="delayed", asset_type=None)
+            # A status word ("delayed") now becomes a status filter (F5), so
+            # use plain free text to pin the no-filter shape.
+            await search_fleet_data(query="perishables", asset_type=None)
 
             call_args = mock_es.search_documents.call_args
             es_query = call_args[0][1]
@@ -129,7 +131,7 @@ class TestSearchFleetDataAssetType:
             # Inner must clause is a plain multi_match, no extra asset_type filter
             assert outer_bool["must"][0] == {
                 "multi_match": {
-                    "query": "delayed",
+                    "query": "perishables",
                     "fields": [
                         "cargo.description",
                         "driver_name",
