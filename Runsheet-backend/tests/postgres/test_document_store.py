@@ -620,7 +620,8 @@ async def test_nested_sql_and_matcher_agree(store, index_name):
 async def test_cargo_search_query_shape_returns_only_matching_jobs(store, index_name):
     """``cargo_service.search_cargo``'s query (nested + inner_hits) must compile
     and select by element. The store does not produce ``inner_hits``, so the
-    flattened item list is empty; the job match and total are what this pins."""
+    service picks the matching items from ``_source``: ``data`` holds exactly
+    the matching item, not an empty list beside a non-zero total (review R2)."""
     from scheduling.services.cargo_service import CargoService
 
     await _seed(store, index_name, {
@@ -644,6 +645,11 @@ async def test_cargo_search_query_shape_returns_only_matching_jobs(store, index_
 
     assert "inner_hits" in str(redirect.queries[0])
     assert result["pagination"]["total"] == 1
+    assert result["data"] == [{
+        "job_id": "job-3", "job_type": None, "job_status": None,
+        "origin": None, "destination": None,
+        "container_number": "C1", "item_status": "pending",
+    }]
     response = await store.search_documents(index_name, redirect.queries[0])
     assert [h["_id"] for h in response["hits"]["hits"]] == ["job-3"]
 

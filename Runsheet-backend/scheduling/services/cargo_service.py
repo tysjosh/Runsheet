@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from errors.exceptions import resource_not_found, validation_error
+from persistence.document_matcher import matches
 from scheduling.models import CargoItem, CargoItemStatus
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
@@ -297,6 +298,7 @@ class CargoService:
             )
 
         from_offset = (page - 1) * size
+        item_query = {"bool": {"must": nested_filters}}
 
         query = {
             "query": {
@@ -306,11 +308,7 @@ class CargoService:
                         {
                             "nested": {
                                 "path": "cargo_manifest",
-                                "query": {
-                                    "bool": {
-                                        "must": nested_filters,
-                                    }
-                                },
+                                "query": item_query,
                                 "inner_hits": {
                                     "size": 100,
                                 },
@@ -334,9 +332,7 @@ class CargoService:
         results: list[dict] = []
         for hit in hits:
             source = hit["_source"]
-            inner_hits = hit.get("inner_hits", {}).get("cargo_manifest", {}).get("hits", {}).get("hits", [])
-            for inner_hit in inner_hits:
-                cargo_item = inner_hit["_source"]
+            for cargo_item in self._matching_cargo_items(hit, item_query):
                 results.append({
                     "job_id": source.get("job_id"),
                     "job_type": source.get("job_type"),
@@ -361,6 +357,27 @@ class CargoService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _matching_cargo_items(hit: dict, item_query: dict) -> list[dict]:
+        """The ``cargo_manifest`` elements of ``hit`` that satisfy ``item_query``.
+
+        Elasticsearch returns them as ``inner_hits``. The Postgres document
+        store selects the job by the same one-element rule but emits no
+        ``inner_hits``, so the elements are picked from ``_source`` with the
+        matcher that shares its semantics. Without this the search returned a
+        non-zero total with empty ``data`` (review R2).
+        """
+        if "inner_hits" in hit:
+            inner = hit["inner_hits"].get("cargo_manifest", {}).get("hits", {}).get("hits", [])
+            return [inner_hit["_source"] for inner_hit in inner]
+        manifest = hit["_source"].get("cargo_manifest") or []
+        if isinstance(manifest, dict):
+            manifest = [manifest]
+        return [
+            item for item in manifest
+            if isinstance(item, dict) and matches({"cargo_manifest": item}, item_query)
+        ]
 
     async def _get_job_doc(self, job_id: str, tenant_id: str) -> dict:
         """Fetch a raw job document from jobs_current with tenant filter.

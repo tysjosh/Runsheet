@@ -508,3 +508,49 @@ async def test_search_cargo_no_filters_raises_validation_error():
 
     assert exc_info.value.status_code == 400
     assert "filter" in exc_info.value.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_search_cargo_without_inner_hits_returns_the_matching_items():
+    """The Postgres store returns hits with no ``inner_hits``; the matching
+    cargo items must still come back in ``data`` (review R2: the search
+    returned ``total: 1`` with ``data: []``)."""
+    es = _make_es_mock()
+    es.search_documents = AsyncMock(return_value={
+        "hits": {
+            "hits": [
+                {
+                    "_id": "JOB_9",
+                    "_source": {
+                        "job_id": "JOB_9",
+                        "job_type": "cargo_transport",
+                        "status": "in_progress",
+                        "origin": "Port A",
+                        "destination": "Port B",
+                        "cargo_manifest": [
+                            {"item_id": "A", "container_number": "CONT-1", "item_status": "pending",
+                             "description": "Steel pipes"},
+                            # Right container, wrong status: excluded.
+                            {"item_id": "B", "container_number": "CONT-1", "item_status": "loaded",
+                             "description": "Steel beams"},
+                            {"item_id": "C", "container_number": "CONT-2", "item_status": "pending",
+                             "description": "Steel rods"},
+                            {"item_id": "D", "container_number": "CONT-1", "item_status": "pending",
+                             "description": "Cement"},
+                        ],
+                    },
+                }
+            ],
+            "total": {"value": 1},
+        }
+    })
+    svc = _make_service(es)
+
+    result = await svc.search_cargo(
+        "tenant_a", container_number="CONT-1", item_status="pending", description="steel"
+    )
+
+    assert result["pagination"]["total"] == 1
+    assert [item["item_id"] for item in result["data"]] == ["A"]
+    assert result["data"][0]["job_id"] == "JOB_9"
+    assert result["data"][0]["job_status"] == "in_progress"

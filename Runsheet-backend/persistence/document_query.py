@@ -64,7 +64,10 @@ counts as one element, as Elasticsearch indexes it; any other value (absent,
 scalar, null) has no elements and matches nothing. ``score_mode``,
 ``ignore_unmapped`` and ``inner_hits`` are accepted and ignored — they shape
 scoring and the response, not which documents match — so a caller reading
-``inner_hits`` off a hit gets none.
+``inner_hits`` off a hit gets none. The one such caller,
+``CargoService.search_cargo``, picks the matching elements from ``_source``
+with :func:`persistence.document_matcher.matches` when a hit has no
+``inner_hits``.
 
 Text matching (``match`` / ``multi_match`` / ``wildcard`` / ``prefix``) is
 case-insensitive substring, i.e. ``ILIKE '%term%'``. It is NOT tokenised, so it
