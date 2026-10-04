@@ -56,11 +56,16 @@ class SpecialistAgent:
 
         Never cache the result: its ``messages`` list must not outlive the
         call that created it (F1).
+
+        ``callback_handler=None`` installs Strands' null handler. The default
+        ``PrintingCallbackHandler`` writes every streamed answer and tool call
+        to stdout, which on staging put tenant data in CloudWatch (F13).
         """
         return Agent(
             model=self._model,
             system_prompt=self.SYSTEM_PROMPT,
             tools=list(self.TOOLS),
+            callback_handler=None,
         )
 
     async def handle(self, task: str, context: dict = None) -> str:

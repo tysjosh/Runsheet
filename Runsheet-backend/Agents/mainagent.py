@@ -305,7 +305,10 @@ class LogisticsAgent:
             You: "Here's the dispatch report: [completion rates, delays, asset utilization, recommendations]"
 
             Always announce your tool usage and explain the results clearly.""",
-            tools=ALL_TOOLS
+            tools=ALL_TOOLS,
+            # The default PrintingCallbackHandler echoes every answer and
+            # tool call to stdout (CloudWatch on staging, F13).
+            callback_handler=None,
         )
         logger.info("✅ Logistics Agent initialized with Strands + Gemini 2.5 Flash")
     

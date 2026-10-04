@@ -27,9 +27,16 @@ provider has no credential.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# LiteLLM's response objects trigger Pydantic serializer warnings that echo
+# model field values (answer text included) to stderr, i.e. CloudWatch (F13).
+warnings.filterwarnings(
+    "ignore", message=r"Pydantic serializer warnings", category=UserWarning
+)
 
 #: Providers this application knows how to authenticate. Kept deliberately
 #: short: each entry needs a credential story that is checkable at startup.
