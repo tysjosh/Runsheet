@@ -56,7 +56,7 @@ const mockGetAssets = apiService.getAssets as jest.MockedFunction<
   typeof apiService.getAssets
 >;
 
-import JobDetailPage from "./JobDetailPage";
+import JobDetailPage, { formatLiveEta } from "./JobDetailPage";
 
 function jobFixture(overrides: Partial<Job> = {}): Job {
   return {
@@ -226,5 +226,64 @@ describe("JobDetailPage — asset reassign picker", () => {
     await waitFor(() =>
       expect(mockReassign).toHaveBeenCalledWith("JOB-1", "TRK-005"),
     );
+  });
+});
+
+describe("formatLiveEta (R-2)", () => {
+  it("returns null when eta_minutes is missing", () => {
+    expect(
+      formatLiveEta({ estimated_arrival: "2026-10-04T19:00:00Z" }),
+    ).toBeNull();
+    expect(formatLiveEta({ eta_minutes: null })).toBeNull();
+    expect(formatLiveEta(null)).toBeNull();
+  });
+
+  it("formats minutes with the arrival time when both are present", () => {
+    const arrival = "2026-10-04T19:00:00Z";
+    expect(formatLiveEta({ eta_minutes: 12, estimated_arrival: arrival })).toBe(
+      `12 min (${new Date(arrival).toLocaleTimeString()})`,
+    );
+  });
+
+  it("omits an unparseable arrival time", () => {
+    expect(formatLiveEta({ eta_minutes: 0, estimated_arrival: "nope" })).toBe(
+      "0 min",
+    );
+  });
+});
+
+describe("JobDetailPage — live ETA row (R-2)", () => {
+  it("hides the Live ETA row when the ETA payload has no minutes", async () => {
+    mockGetJob.mockResolvedValue({
+      data: { ...jobFixture({ status: "scheduled" }), links: {} },
+      request_id: "j",
+    } as never);
+    mockGetJobEta.mockResolvedValue({
+      data: { estimated_arrival: "2026-10-04T19:00:00Z" },
+      request_id: "e",
+    } as never);
+
+    renderPage();
+    await waitFor(() => expect(mockGetJobEta).toHaveBeenCalled());
+    expect(await screen.findByText("Estimated Arrival")).toBeInTheDocument();
+
+    expect(screen.queryByText("Live ETA")).toBeNull();
+    expect(screen.queryByText(/undefined min/)).toBeNull();
+  });
+
+  it("shows the Live ETA row when minutes are present", async () => {
+    mockGetJob.mockResolvedValue({
+      data: { ...jobFixture(), links: {} },
+      request_id: "j",
+    } as never);
+    mockGetJobEta.mockResolvedValue({
+      data: { eta_minutes: 7, estimated_arrival: "2026-10-04T19:00:00Z" },
+      request_id: "e",
+    } as never);
+
+    renderPage();
+
+    expect(await screen.findByText("Live ETA")).toBeInTheDocument();
+    expect(screen.getByText(/^7 min \(/)).toBeInTheDocument();
   });
 });

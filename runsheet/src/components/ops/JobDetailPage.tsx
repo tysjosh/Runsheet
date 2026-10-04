@@ -116,6 +116,29 @@ function formatDateTime(dateStr?: string): string {
   });
 }
 
+/**
+ * Format the live ETA from ``GET /scheduling/jobs/{id}/eta``.
+ *
+ * Returns ``null`` when there is no live ETA (no numeric ``eta_minutes``), so
+ * the caller hides the row instead of printing "undefined min" (R-2). The
+ * arrival time is appended only when it parses as a date.
+ */
+export function formatLiveEta(
+  eta: {
+    eta_minutes?: number | null;
+    estimated_arrival?: string | null;
+  } | null,
+): string | null {
+  const minutes = eta?.eta_minutes;
+  if (typeof minutes !== "number" || !Number.isFinite(minutes)) return null;
+  const arrival = eta?.estimated_arrival
+    ? new Date(eta.estimated_arrival)
+    : null;
+  return arrival && !Number.isNaN(arrival.getTime())
+    ? `${minutes} min (${arrival.toLocaleTimeString()})`
+    : `${minutes} min`;
+}
+
 function formatJobType(jobType: string): string {
   return jobType
     .split("_")
@@ -474,9 +497,10 @@ export default function JobDetailPage({
   const [error, setError] = useState("");
   const [transitionError, setTransitionError] = useState("");
   const [eta, setEta] = useState<{
-    eta_minutes: number;
-    estimated_arrival: string;
+    eta_minutes?: number | null;
+    estimated_arrival?: string | null;
   } | null>(null);
+  const liveEta = formatLiveEta(eta);
   const [showReassign, setShowReassign] = useState(false);
   const [reassignAssetId, setReassignAssetId] = useState("");
   const [reassigning, setReassigning] = useState(false);
@@ -879,11 +903,11 @@ export default function JobDetailPage({
                 label="Estimated Arrival"
                 value={formatDateTime(job.estimated_arrival)}
               />
-              {eta && (
+              {liveEta && (
                 <DetailField
                   icon={<Clock className="w-4 h-4" />}
                   label="Live ETA"
-                  value={`${eta.eta_minutes} min (${new Date(eta.estimated_arrival).toLocaleTimeString()})`}
+                  value={liveEta}
                 />
               )}
               <DetailField

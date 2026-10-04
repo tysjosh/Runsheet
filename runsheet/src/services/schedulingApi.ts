@@ -391,21 +391,25 @@ export async function getDelayMetrics(
   );
 }
 
+/**
+ * Live ETA payload. The backend omits ``eta_minutes`` when there is no live
+ * ETA (e.g. a scheduled job), so every field is optional.
+ */
+export interface JobEta {
+  eta_minutes?: number | null;
+  estimated_arrival?: string | null;
+  calculated_at?: string;
+  delayed?: boolean;
+  delay_duration_minutes?: number | null;
+}
+
 /** GET /scheduling/jobs/:id/eta — get ETA for a job */
-export async function getJobEta(jobId: string): Promise<
-  SingleResponse<{
-    eta_minutes: number;
-    estimated_arrival: string;
-    calculated_at: string;
-  }>
-> {
-  return schedulingRequest<
-    SingleResponse<{
-      eta_minutes: number;
-      estimated_arrival: string;
-      calculated_at: string;
-    }>
-  >(`/scheduling/jobs/${encodeURIComponent(jobId)}/eta`);
+export async function getJobEta(
+  jobId: string,
+): Promise<SingleResponse<JobEta>> {
+  return schedulingRequest<SingleResponse<JobEta>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/eta`,
+  );
 }
 
 /** PATCH /scheduling/jobs/:id/reassign — reassign asset to a job */
