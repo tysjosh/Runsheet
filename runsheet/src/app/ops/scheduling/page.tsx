@@ -176,7 +176,9 @@ export default function SchedulingJobBoardPage() {
     <div className="h-full flex flex-col bg-white">
       {/* Header */}
       <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center justify-between mb-6">
+        {/* flex-wrap: in the narrower dashboard slot the actions drop below
+            the title instead of overflowing to the right (R-4). */}
+        <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
               <CalendarClock className="w-5 h-5 text-white" />

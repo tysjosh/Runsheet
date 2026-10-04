@@ -202,7 +202,12 @@ export default function DashboardLayout({
           <main className="flex-1 flex bg-white relative z-0 overflow-hidden">
             <DashboardChromeProvider value={chrome}>
               <InShellNavProvider value={inShellNav}>
-                <div className="flex-1 flex bg-white overflow-auto">
+                {/* min-w-0 on the wrapper and its direct child: flex items
+                    default to min-width:auto, so a wide table or header made
+                    the page wider than the slot beside the sidebar and
+                    clipped the right edge (R-4). Wide content scrolls inside
+                    its own panel instead. */}
+                <div className="flex-1 min-w-0 flex bg-white overflow-auto *:min-w-0">
                   {children}
                 </div>
               </InShellNavProvider>
