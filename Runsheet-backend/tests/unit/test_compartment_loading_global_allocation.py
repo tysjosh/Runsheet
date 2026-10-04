@@ -362,6 +362,55 @@ class TestDeliveryRequests:
         assert agent._customer_tank_repo.get.await_count == 1
 
     @pytest.mark.asyncio
+    async def test_two_orders_on_one_tank_share_its_ullage(self):
+        """Review R3: each order used to get the full ullage as its cap, so a
+        duplicate import or a re-order could overfill the tank together."""
+        orders = [
+            # Listed low-priority first: the budget follows priority, not list order.
+            _order("o_low", "HEATING_OIL", 100.0, customer_id="c", customer_tank_id="tank-B"),
+            _order("o_high", "HEATING_OIL", 100.0, customer_id="c", customer_tank_id="tank-B"),
+        ]
+        agent, _ = _loading_agent(orders, [])  # tank-B: 120 gal of room
+        requests = await agent._build_delivery_requests_from_orders(
+            TENANT,
+            _priority_list(_priority("tank-B", 0.5, order_id="o_low"),
+                           _priority("tank-B", 0.9, order_id="o_high")),
+        )
+
+        by_order = {r.order_id: r.hard_cap_liters for r in requests}
+        assert [r.order_id for r in requests] == ["o_high", "o_low"]
+        assert by_order["o_high"] == round(100 * GAL_TO_L, 2)  # 378.54
+        assert by_order["o_low"] == round(ORD_B_LITERS - by_order["o_high"], 2)  # 75.71
+        assert sum(by_order.values()) <= ORD_B_LITERS  # old: 757.08
+        assert all(r.quantity_liters == r.hard_cap_liters for r in requests)
+
+    @pytest.mark.asyncio
+    async def test_second_order_on_a_tank_with_no_room_left_is_skipped(self):
+        orders = [
+            _order("o1", "HEATING_OIL", None, customer_id="c",
+                   customer_tank_id="tank-B", fill_to_full=True),
+            _order("o2", "HEATING_OIL", 50.0, customer_id="c", customer_tank_id="tank-B"),
+            # Another tank is unaffected by tank-B's budget.
+            _order("o3", "HEATING_OIL", 50.0, customer_id="c", customer_tank_id="tank-C"),
+        ]
+        agent, deps = _loading_agent(
+            orders, [], tanks={"tank-B": _tank(500.0, 380.0), "tank-C": _tank(500.0, 0.0)}
+        )
+        requests = await agent._build_delivery_requests_from_orders(
+            TENANT,
+            _priority_list(_priority("tank-B", 0.9, order_id="o1"),
+                           _priority("tank-B", 0.8, order_id="o2"),
+                           _priority("tank-C", 0.7, order_id="o3")),
+        )
+
+        assert [(r.order_id, r.hard_cap_liters) for r in requests] == [
+            ("o1", ORD_B_LITERS),
+            ("o3", round(50 * GAL_TO_L, 2)),
+        ]
+        # Skipped for lack of room, like a full tank, not failed.
+        deps["signal_bus"].publish.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_unmatched_priorities_never_invent_legacy_demand(self):
         """Orders exist but match no priority: no 5 000 L-based station request."""
         agent, deps = _loading_agent(STAGING_ORDERS, _fleet())

@@ -41,6 +41,7 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
 from uuid import uuid4
@@ -132,6 +133,21 @@ DEFAULT_MIN_DROP_LITERS = 500.0
 
 # Default uncertainty buffer percentage (Req 3.6)
 DEFAULT_UNCERTAINTY_BUFFER_PCT = 10.0
+
+
+@dataclass(frozen=True)
+class _OrderCandidate:
+    """A loadable order before its tank's shared ullage is applied."""
+
+    score: Optional[float]
+    order_id: str
+    #: Set only when the tank's ullage is known; ``None`` means uncapped.
+    tank_id: Optional[str]
+    ullage_liters: Optional[float]
+    requested_liters: float
+    station_id: str
+    fuel_grade: FuelGrade
+    product_code: str
 
 
 class CompartmentLoadingAgent(OverlayAgentBase):
@@ -710,7 +726,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
           from it only for legacy compartment eligibility.
         * An order on a known customer tank is capped at the tank's ullage
           (``hard_cap_liters``); ``fill_to_full`` asks for exactly the ullage.
-          A full tank is skipped. An unknown tank is loaded as requested.
+          Orders on the same tank share that ullage in priority order, so
+          their caps together never exceed it; an order left with 0 L is
+          skipped. A full tank is skipped. An unknown tank is loaded as
+          requested.
         * Orders with no resolvable volume fail with ``unresolved_fill_volume``.
 
         Falls back to the legacy station path only when fuel_orders_current
@@ -747,7 +766,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             by_station.setdefault(p.station_id, p)
 
         tank_cache: Dict[str, Optional[CustomerTank]] = {}
-        scored: List[Tuple[Optional[float], str, DeliveryRequest]] = []
+        scored: List[_OrderCandidate] = []
 
         for order in fuel_orders:
             order_id = order.get("order_id", "")
@@ -830,44 +849,67 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 )
                 continue
 
-            cap_liters = requested_liters
-            if ullage_gal is not None:
-                cap_liters = min(requested_liters, ullage_gal * GALLONS_TO_LITERS)
+            scored.append(_OrderCandidate(
+                score=priority.priority_score if priority is not None else None,
+                order_id=order_id,
+                # Only a tank with a known ullage has a budget to share.
+                tank_id=customer_tank_id if ullage_gal is not None else None,
+                ullage_liters=(
+                    ullage_gal * GALLONS_TO_LITERS if ullage_gal is not None else None
+                ),
+                requested_liters=requested_liters,
+                station_id=station_id,
+                fuel_grade=fuel_grade,
+                product_code=canonical_code,
+            ))
+
+        # Priority order, then the tank budget: two orders on one tank (a
+        # duplicate import, a re-order before delivery) share its ullage, and
+        # the higher-priority order draws on it first (review R3).
+        scored.sort(key=lambda c: (c.score is None, -(c.score or 0.0), c.order_id))
+        remaining_liters: Dict[str, float] = {}
+        requests: List[DeliveryRequest] = []
+        for candidate in scored:
+            cap_liters = candidate.requested_liters
+            if candidate.tank_id is not None:
+                left = remaining_liters.setdefault(
+                    candidate.tank_id, round(candidate.ullage_liters, 2)
+                )
+                cap_liters = min(cap_liters, left)
             cap_liters = round(cap_liters, 2)
             if cap_liters <= 0:
                 logger.info(
-                    "CompartmentLoadingAgent: order %s resolves to 0 L; skipping",
-                    order_id,
+                    "CompartmentLoadingAgent: order %s resolves to 0 L "
+                    "(customer_tank %s ullage already allocated); skipping",
+                    candidate.order_id,
+                    candidate.tank_id,
                 )
                 continue
-
-            scored.append((
-                priority.priority_score if priority is not None else None,
-                order_id,
-                DeliveryRequest(
-                    station_id=station_id,
-                    order_id=order_id,
-                    fuel_grade=fuel_grade,
-                    # The order's own product code, canonicalized. Carried
-                    # alongside the coarse grade so the solver can weigh and
-                    # label the exact product — DEF is 1.09 kg/L but maps to AGO.
-                    product_code=canonical_code,
-                    quantity_liters=cap_liters,
-                    hard_cap_liters=cap_liters,
-                    min_drop_liters=DEFAULT_MIN_DROP_LITERS,
-                ),
+            if candidate.tank_id is not None:
+                remaining_liters[candidate.tank_id] = round(
+                    remaining_liters[candidate.tank_id] - cap_liters, 2
+                )
+            requests.append(DeliveryRequest(
+                station_id=candidate.station_id,
+                order_id=candidate.order_id,
+                fuel_grade=candidate.fuel_grade,
+                # The order's own product code, canonicalized. Carried
+                # alongside the coarse grade so the solver can weigh and
+                # label the exact product — DEF is 1.09 kg/L but maps to AGO.
+                product_code=candidate.product_code,
+                quantity_liters=cap_liters,
+                hard_cap_liters=cap_liters,
+                min_drop_liters=DEFAULT_MIN_DROP_LITERS,
             ))
 
-        if not scored:
+        if not requests:
             logger.info(
                 "CompartmentLoadingAgent: %d fuel order(s) for tenant %s "
                 "yielded no loadable delivery request",
                 len(fuel_orders),
                 tenant_id,
             )
-
-        scored.sort(key=lambda t: (t[0] is None, -(t[0] or 0.0), t[1]))
-        return [request for _, _, request in scored]
+        return requests
 
     @staticmethod
     def _match_priority(
