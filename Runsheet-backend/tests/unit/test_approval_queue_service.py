@@ -274,11 +274,14 @@ class TestApprove:
             await service.approve("action-1", "reviewer-1")
 
     async def test_approve_rejects_expired_entry(self):
+        """N7: an already-expired entry is ApprovalExpiredError (409), not 400."""
+        from Agents.approval_queue_service import ApprovalExpiredError
+
         entry = self._pending_entry()
         entry["status"] = "expired"
         service = _make_service(get_response=entry)
 
-        with pytest.raises(ValueError, match="expected 'pending'"):
+        with pytest.raises(ApprovalExpiredError):
             await service.approve("action-1", "reviewer-1")
 
     async def test_approve_executes_mutation_when_protocol_wired(self):
@@ -924,3 +927,155 @@ class TestConcurrencyControl:
 
         with pytest.raises(Exception, match="connection_timeout"):
             await service.approve("action-1", "reviewer-1")
+
+
+# ---------------------------------------------------------------------------
+# N7: decisions after expiry_time are refused
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionAfterExpiryN7:
+    """approve/reject past ``expiry_time`` expire the entry and raise.
+
+    The lazy path must leave the same trail as the sweep (``approval_expired``
+    broadcast and activity entry), because F12's re-proposal keys off them.
+    """
+
+    def _entry(self, *, minutes_from_now: float, status: str = "pending"):
+        return {
+            "action_id": "action-1",
+            "action_type": "mutation",
+            "tool_name": "cancel_job",
+            "parameters": {"job_id": "JOB_1"},
+            "risk_level": "high",
+            "proposed_by": "ai_agent",
+            "proposed_at": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "reviewed_by": None,
+            "reviewed_at": None,
+            "expiry_time": (
+                datetime.now(timezone.utc) + timedelta(minutes=minutes_from_now)
+            ).isoformat(),
+            "impact_summary": "Cancel job JOB_1",
+            "tenant_id": "t1",
+        }
+
+    @staticmethod
+    def _events(service):
+        return [c[0][0] for c in service._ws.broadcast_approval_event.call_args_list]
+
+    @staticmethod
+    def _activity_types(service):
+        return [c[0][0]["action_type"] for c in service._activity_log.log.call_args_list]
+
+    async def test_approve_after_expiry_expires_and_never_executes(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        entry = self._entry(minutes_from_now=-1)
+        protocol = MagicMock()
+        protocol._execute_mutation = AsyncMock(return_value="done")
+        service = _make_service(get_response=entry, confirmation_protocol=protocol)
+
+        with pytest.raises(ApprovalExpiredError) as info:
+            await service.approve("action-1", "reviewer-1", tenant_id="t1")
+
+        assert info.value.action_id == "action-1"
+        assert info.value.expiry_time == entry["expiry_time"]
+        assert service._es.stored_document["status"] == "expired"
+        assert self._events(service) == ["approval_expired"]
+        assert self._activity_types(service) == ["approval_expired"]
+        protocol._execute_mutation.assert_not_called()
+
+    async def test_reject_after_expiry_expires_and_records_no_feedback(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        entry = self._entry(minutes_from_now=-1)
+        service = _make_service(get_response=entry)
+        service._feedback = MagicMock()
+        service._feedback.record_rejection = AsyncMock()
+
+        with pytest.raises(ApprovalExpiredError):
+            await service.reject("action-1", "reviewer-1", reason="late", tenant_id="t1")
+
+        assert service._es.stored_document["status"] == "expired"
+        assert "rejection_reason" not in service._es.stored_document
+        assert self._events(service) == ["approval_expired"]
+        assert self._activity_types(service) == ["approval_expired"]
+        service._feedback.record_rejection.assert_not_called()
+
+    async def test_lazy_expiry_matches_the_sweep_side_effects(self):
+        """Same broadcast payload status and activity entry shape as expire_stale."""
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        lazy = _make_service(get_response=self._entry(minutes_from_now=-1))
+        with pytest.raises(ApprovalExpiredError):
+            await lazy.approve("action-1", "reviewer-1")
+
+        sweep_hit = {"_source": self._entry(minutes_from_now=-1)}
+        sweep = TestExpireStale()._service([sweep_hit])
+        assert await sweep.expire_stale() == 1
+
+        lazy_log = lazy._activity_log.log.call_args[0][0]
+        sweep_log = sweep._activity_log.log.call_args[0][0]
+        assert lazy_log == sweep_log
+        lazy_event = lazy._ws.broadcast_approval_event.call_args[0]
+        sweep_event = sweep._ws.broadcast_approval_event.call_args[0]
+        assert lazy_event[0] == sweep_event[0] == "approval_expired"
+        assert lazy_event[1]["status"] == sweep_event[1]["status"] == "expired"
+
+    async def test_future_expiry_still_approves_and_rejects(self):
+        approve_svc = _make_service(get_response=self._entry(minutes_from_now=5))
+        assert (await approve_svc.approve("action-1", "reviewer-1"))["status"] == "approved"
+
+        reject_svc = _make_service(get_response=self._entry(minutes_from_now=5))
+        assert (await reject_svc.reject("action-1", "reviewer-1"))["status"] == "rejected"
+
+    async def test_already_expired_status_refuses_reject(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        service = _make_service(
+            get_response=self._entry(minutes_from_now=5, status="expired")
+        )
+
+        with pytest.raises(ApprovalExpiredError):
+            await service.reject("action-1", "reviewer-1")
+        # Nothing new written or announced for an entry already expired.
+        service._es.atomic_update.assert_not_called()
+        assert self._events(service) == []
+
+    async def test_losing_the_race_to_the_sweep_still_reports_expired(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        service = _make_service(get_response=self._entry(minutes_from_now=-1))
+        original_get = service._es.get_document.side_effect
+        reads = {"n": 0}
+
+        async def _sweep_expires_after_first_read(index, doc_id):
+            document = await original_get(index, doc_id)
+            reads["n"] += 1
+            if reads["n"] == 1:
+                service._es.stored_document["status"] = "expired"
+            return document
+
+        service._es.get_document = AsyncMock(
+            side_effect=_sweep_expires_after_first_read
+        )
+
+        with pytest.raises(ApprovalExpiredError):
+            await service.approve("action-1", "reviewer-1")
+        # The sweep owned the transition; this call adds no second trail.
+        assert self._events(service) == []
+        assert self._activity_types(service) == []
+
+    async def test_unparseable_expiry_is_not_expired(self, caplog):
+        import logging
+
+        entry = self._entry(minutes_from_now=5)
+        entry["expiry_time"] = "not-a-time"
+        service = _make_service(get_response=entry)
+
+        with caplog.at_level(logging.WARNING, logger="Agents.approval_queue_service"):
+            result = await service.approve("action-1", "reviewer-1")
+
+        assert result["status"] == "approved"
+        assert any("unparseable expiry_time" in r.getMessage() for r in caplog.records)

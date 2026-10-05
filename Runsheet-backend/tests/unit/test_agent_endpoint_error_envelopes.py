@@ -156,11 +156,53 @@ def test_execution_error_maps_to_409_with_details(make_client):
     }
 
 
-def test_expired_maps_to_409_invalid_status_transition(make_client):
-    response = make_client(_Recording(exc=ApprovalExpiredError("act-1"))).post("/api/agent/approvals/act-1/approve")
+def test_expired_maps_to_409_approval_expired(make_client):
+    """N7 supersedes K10's INVALID_STATUS_TRANSITION: one code for expiry."""
+    exc = ApprovalExpiredError("act-1", "2026-10-04T00:00:00+00:00")
+    response = make_client(_Recording(exc=exc)).post("/api/agent/approvals/act-1/approve")
     assert response.status_code == 409
-    assert response.json()["error_code"] == "INVALID_STATUS_TRANSITION"
-    assert response.json()["message"] == "Approval act-1 expired before it was approved"
+    body = response.json()
+    assert body["error_code"] == "APPROVAL_EXPIRED"
+    assert body["message"] == "This approval expired before a decision was made."
+    assert body["details"] == {
+        "action_id": "act-1", "expiry_time": "2026-10-04T00:00:00+00:00",
+    }
+
+
+# ---------------------------------------------------------------------------
+# N7: approve/reject of a past-due entry through the real service
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        ("/api/agent/approvals/action-1/approve", None),
+        ("/api/agent/approvals/action-1/reject", {"reason": "late"}),
+    ],
+)
+def test_decision_after_expiry_is_409_approval_expired(make_client, path, body):
+    from datetime import datetime, timedelta, timezone
+
+    from tests.unit.test_approval_queue_service import _make_service
+
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    entry = {
+        "action_id": "action-1", "tool_name": "cancel_job",
+        "parameters": {"job_id": "JOB_1"}, "risk_level": "high",
+        "proposed_by": "ai_agent", "status": "pending",
+        "expiry_time": past, "tenant_id": "tenant-A",
+    }
+    service = _make_service(get_response=entry)
+
+    response = make_client(service).post(path, json=body)
+
+    assert response.status_code == 409, response.text
+    payload = response.json()
+    assert payload["error_code"] == "APPROVAL_EXPIRED"
+    assert payload["details"] == {"action_id": "action-1", "expiry_time": past}
+    assert payload.get("request_id")
+    assert service._es.stored_document["status"] == "expired"
 
 
 def test_forbidden_maps_to_403(make_client):

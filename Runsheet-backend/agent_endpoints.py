@@ -224,6 +224,20 @@ async def list_approvals(
         raise internal_error(message="Failed to list approvals")
 
 
+def _approval_expired(exc: ApprovalExpiredError) -> AppException:
+    """409 ``APPROVAL_EXPIRED`` for a decision after ``expiry_time`` (N7).
+
+    409 rather than 410: the entry still exists and can be read, now as
+    ``expired``.
+    """
+    return AppException(
+        error_code=ErrorCode.APPROVAL_EXPIRED,
+        message="This approval expired before a decision was made.",
+        status_code=409,
+        details={"action_id": exc.action_id, "expiry_time": exc.expiry_time},
+    )
+
+
 @router.post("/approvals/{action_id}/approve")
 async def approve_action(
     action_id: str,
@@ -271,12 +285,8 @@ async def approve_action(
                 "status": (exc.entry or {}).get("status"),
             },
         )
-    except ApprovalExpiredError:
-        raise AppException(
-            error_code=ErrorCode.INVALID_STATUS_TRANSITION,
-            message=f"Approval {action_id} expired before it was approved",
-            status_code=409,
-        )
+    except ApprovalExpiredError as exc:
+        raise _approval_expired(exc)
     except ApprovalForbiddenError:
         raise AppException(
             error_code=ErrorCode.FORBIDDEN,
@@ -320,6 +330,8 @@ async def reject_action(
             tenant_id=tenant.tenant_id,
         )
         return result
+    except ApprovalExpiredError as exc:
+        raise _approval_expired(exc)
     except ValueError as e:
         raise validation_error(message=str(e))
     except RuntimeError as e:

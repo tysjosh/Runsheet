@@ -194,11 +194,18 @@ class LoadingPlanExecutionError(Exception):
 
 
 class ApprovalExpiredError(Exception):
-    """A pending approval's expiry passed before it was approved (R11.4)."""
+    """A decision arrived after the approval's ``expiry_time`` (R11.4, N7).
 
-    def __init__(self, action_id: str):
-        super().__init__(f"Approval {action_id} expired before it was approved")
+    Raised by :meth:`ApprovalQueueService.approve` and ``reject`` for any tool
+    once ``expiry_time`` has passed or the entry is already ``expired``. Not a
+    ``ValueError`` (loading-plan design K10, NIT 12): the endpoints catch it
+    before their ``ValueError`` clause and answer 409 ``APPROVAL_EXPIRED``.
+    """
+
+    def __init__(self, action_id: str, expiry_time: Optional[str] = None):
+        super().__init__(f"Approval {action_id} expired before a decision was made")
         self.action_id = action_id
+        self.expiry_time = expiry_time
 
 
 class ApprovalForbiddenError(Exception):
@@ -336,17 +343,27 @@ class ApprovalQueueService:
         Raises:
             ValueError: If the entry is missing, another tenant's, or not
                 approvable (``LoadingPlanOverlapError`` is a subclass).
-            LoadingPlanExecutionError, ApprovalExpiredError,
-            ApprovalForbiddenError: loading approvals only (K10).
+            ApprovalExpiredError: ``expiry_time`` has passed (any tool, N7;
+                a past-due ``pending`` entry is marked ``expired`` first and
+                never executed) or a non-loading entry is already ``expired``.
+            LoadingPlanExecutionError, ApprovalForbiddenError: loading
+                approvals only (K10).
         """
         entry = await self._get_entry(action_id)
         if tenant_id is not None and entry.get("tenant_id") != tenant_id:
             raise ValueError(f"Approval entry {action_id} not found")
 
         if entry.get("tool_name") == LOADING_PLAN_TOOL:
+            # The loading path checks expiry itself, after its actor check and
+            # with its own expired_before_approval record (R11.4). An entry
+            # already ``expired`` stays a ValueError there: the overlap guard
+            # expires superseded plans, and the auto path relies on it (K10).
             return await self._approve_loading_plan(
                 entry, action_id, session_user_id=session_user_id, agent_actor=agent_actor
             )
+
+        # N7: a decision after expiry_time is refused, never executed.
+        await self._refuse_if_expired(entry, action_id)
 
         if entry["status"] != "pending":
             raise ValueError(
@@ -452,11 +469,14 @@ class ApprovalQueueService:
                 f"Cannot approve action {action_id}: "
                 f"current status is '{status}', expected 'pending'"
             )
-        if status == "pending":
-            expiry = _safe_ts(entry.get("expiry_time"))
-            if expiry is not None and expiry < now:
-                await self._expire_before_approval(entry, action_id)
-                raise ApprovalExpiredError(action_id)
+        if status == "pending" and self._is_past_expiry(entry, action_id, now):
+            await self._expire_lazily(
+                entry, action_id, now,
+                extra_fields={
+                    "execution_result": {"reason": REASON_EXPIRED_BEFORE_APPROVAL},
+                },
+            )
+            raise ApprovalExpiredError(action_id, entry.get("expiry_time"))
         if status == "approved":
             if not stored.get("attempt_id"):
                 # Approved before the executor existed (OQ7): never run, may be rejected.
@@ -751,17 +771,88 @@ class ApprovalQueueService:
         await self._broadcast("approval_execution_updated", entry)
         raise LoadingPlanExecutionError(entry, recorded)
 
-    async def _expire_before_approval(self, entry: dict, action_id: str) -> None:
-        """CAS pending -> expired for an approve that arrived after expiry (R11.4)."""
-        fields = {
-            "status": "expired",
-            "reviewed_at": datetime.now(timezone.utc).isoformat(),
-            "execution_result": {"reason": REASON_EXPIRED_BEFORE_APPROVAL},
-        }
+    # ------------------------------------------------------------------
+    # Expiry (sweep and lazy, N7)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_past_expiry(entry: dict, action_id: str, now: datetime) -> bool:
+        """``expiry_time <= now``. Missing or unparseable is not expired (logged)."""
+        raw = entry.get("expiry_time")
+        expiry = _safe_ts(raw)
+        if expiry is None:
+            if raw not in (None, ""):
+                logger.warning(
+                    "approval %s: unparseable expiry_time %r; treated as not expired",
+                    action_id, raw,
+                )
+            else:
+                logger.info("approval %s has no expiry_time", action_id)
+            return False
+        return expiry <= now
+
+    async def _expire_entry(
+        self,
+        entry: dict,
+        action_id: str,
+        now: datetime,
+        *,
+        extra_fields: Optional[dict] = None,
+    ) -> dict:
+        """CAS ``pending -> expired``, then broadcast and audit it.
+
+        The one body shared by :meth:`expire_stale` and the lazy check in
+        approve/reject, so both produce the same ``approval_expired`` broadcast
+        and activity entry F12's re-proposal relies on.
+
+        Raises:
+            RuntimeError: The entry was no longer ``pending``.
+        """
+        fields = {"status": "expired", "reviewed_at": now.isoformat()}
+        fields.update(extra_fields or {})
         await self._update_with_concurrency(action_id, fields, expected_status="pending")
-        expired = {**entry, **fields}
-        await self._broadcast("approval_expired", expired)
-        await self._log_expired(expired, action_id)
+        entry.update(fields)
+        await self._broadcast("approval_expired", entry)
+        await self._log_expired(entry, action_id)
+        return entry
+
+    async def _expire_lazily(
+        self,
+        entry: dict,
+        action_id: str,
+        now: datetime,
+        *,
+        extra_fields: Optional[dict] = None,
+    ) -> None:
+        """Expire a past-due ``pending`` entry a decision has just reached.
+
+        Losing the race to the sweep (or another reviewer's lazy expiry) is
+        fine; any other move under us stays a concurrency conflict.
+        """
+        try:
+            await self._expire_entry(entry, action_id, now, extra_fields=extra_fields)
+        except RuntimeError:
+            current = await self._get_entry(action_id)
+            if current.get("status") != "expired":
+                raise
+            logger.info("approval %s was expired concurrently", action_id)
+
+    async def _refuse_if_expired(
+        self, entry: dict, action_id: str, *, already_expired_raises: bool = True
+    ) -> None:
+        """Raise :class:`ApprovalExpiredError` for an expired or past-due entry.
+
+        A past-due ``pending`` entry is expired first (sweep side effects).
+        ``already_expired_raises=False`` leaves an entry whose status is
+        already ``expired`` to the caller's own status check.
+        """
+        status = entry.get("status")
+        if status == "expired" and already_expired_raises:
+            raise ApprovalExpiredError(action_id, entry.get("expiry_time"))
+        now = datetime.now(timezone.utc)
+        if status == "pending" and self._is_past_expiry(entry, action_id, now):
+            await self._expire_lazily(entry, action_id, now)
+            raise ApprovalExpiredError(action_id, entry.get("expiry_time"))
 
     async def _log_expired(self, entry: dict, action_id: str) -> None:
         if not self._activity_log:
@@ -1021,6 +1112,8 @@ class ApprovalQueueService:
 
         Raises:
             ValueError: Missing, another tenant's, or in a non-rejectable status.
+            ApprovalExpiredError: ``expiry_time`` has passed or the entry is
+                already ``expired`` (N7); no feedback is recorded.
             RuntimeError: The entry moved (or may have written) under the lock.
         """
         entry = await self._get_entry(action_id)
@@ -1028,6 +1121,11 @@ class ApprovalQueueService:
             raise ValueError(f"Approval entry {action_id} not found")
 
         loading = entry.get("tool_name") == LOADING_PLAN_TOOL
+        # N7: a rejection after expiry_time expires the entry instead. A
+        # loading plan already ``expired`` (superseded) keeps its K10 400.
+        await self._refuse_if_expired(
+            entry, action_id, already_expired_raises=not loading
+        )
         # Loading statuses whose rejectability depends on the stored record are
         # decided by the CAS below (RuntimeError -> 409 when refused).
         cas_decided = ("pending", "failed", "incomplete", "approved") if loading else ("pending",)
@@ -1160,23 +1258,11 @@ class ApprovalQueueService:
             entry = hit["_source"]
             action_id = entry["action_id"]
             try:
-                update_fields = {
-                    "status": "expired",
-                    "reviewed_at": now.isoformat(),
-                }
                 try:
-                    await self._update_with_concurrency(
-                        action_id, update_fields, expected_status="pending"
-                    )
+                    await self._expire_entry(entry, action_id, now)
                 except RuntimeError:
                     logger.info("expire_stale: %s no longer pending; skipped", action_id)
                     continue
-
-                entry.update(update_fields)
-                await self._broadcast("approval_expired", entry)
-
-                # Log expiry to activity log
-                await self._log_expired(entry, action_id)
 
                 expired_count += 1
             except Exception:
