@@ -25,6 +25,7 @@ from Agents.support.mvp_endpoints import (
     ReplanRequest,
 )
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from tests.unit._loading_plan_fakes import InMemoryDocumentStore
 
 
 # Default identity injected into authenticated test requests. The tenant
@@ -379,6 +380,157 @@ class TestApprovePlan:
             plan_doc=plan,
             actor_user_id=TEST_USER_ID,
         )
+
+    def test_scheduled_plan_is_approvable(self):
+        # K12 / R9.5: a plan the loading-plan executor applied is dispatchable.
+        store = InMemoryDocumentStore()
+        plan = _mvp_plan(status="scheduled", execution_status="succeeded")
+        store.seed("mvp_load_plans", "plan-1", plan)
+        dispatch_result = MagicMock()
+        dispatch_result.as_dict.return_value = {
+            "plan_id": "plan-1",
+            "run_id": "run-1",
+            "driver_id": "driver-1",
+            "truck_id": "truck-1",
+            "route_ids": [],
+            "execution_ids": [],
+            "order_ids": ["ord-1"],
+            "newly_dispatched": 1,
+            "already_dispatched": 0,
+        }
+        dispatch_service = MagicMock()
+        dispatch_service.dispatch = AsyncMock(return_value=dispatch_result)
+        app, _, _ = _create_test_app(es_service=store, plan_dispatch_service=dispatch_service)
+
+        response = TestClient(app).post("/api/fuel/mvp/plan/plan-1/approve")
+
+        assert response.status_code == 200
+        dispatch_service.dispatch.assert_awaited_once()
+        assert dispatch_service.dispatch.await_args.kwargs["plan_doc"]["status"] == "scheduled"
+
+    @pytest.mark.parametrize("status", ["rejected", "failed"])
+    def test_other_statuses_still_conflict(self, status):
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan(status=status))
+        dispatch_service = MagicMock()
+        dispatch_service.dispatch = AsyncMock()
+        app, _, _ = _create_test_app(es_service=store, plan_dispatch_service=dispatch_service)
+
+        response = TestClient(app).post("/api/fuel/mvp/plan/plan-1/approve")
+
+        assert response.status_code == 409
+        dispatch_service.dispatch.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Tests: POST /api/fuel/mvp/plan/{plan_id}/reject (K12 compare-and-set)
+# ---------------------------------------------------------------------------
+
+
+def _mvp_plan(*, status="proposed", tenant_id=TEST_TENANT_ID, **extra):
+    plan = {
+        "plan_id": "plan-1",
+        "run_id": "run-1",
+        "truck_id": "truck-1",
+        "tenant_id": tenant_id,
+        "status": status,
+        "assignments": [{"order_id": "ord-1"}],
+    }
+    plan.update(extra)
+    return plan
+
+
+class TestRejectPlan:
+    def _post(self, store, body=None):
+        app, _, _ = _create_test_app(es_service=store)
+        return TestClient(app).post("/api/fuel/mvp/plan/plan-1/reject", json=body)
+
+    def test_rejects_proposed_plan_via_atomic_update(self):
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan())
+
+        response = self._post(store, {"reason": "wrong truck"})
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "rejected"
+        stored = store.doc("mvp_load_plans", "plan-1")
+        assert stored["status"] == "rejected"
+        assert stored["rejected_by"] == TEST_USER_ID
+        assert stored["rejection_reason"] == "wrong truck"
+        assert store.calls("atomic_update", "mvp_load_plans") == ["plan-1"]
+        assert store.calls("update_document") == []
+
+    def test_failed_execution_stays_rejectable(self):
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan(execution_status="failed"))
+
+        response = self._post(store)
+
+        assert response.status_code == 200
+        assert store.doc("mvp_load_plans", "plan-1")["status"] == "rejected"
+
+    def test_scheduled_plan_conflicts(self):
+        # R9.6: an applied plan cannot be rejected.
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan(status="scheduled", execution_status="succeeded"))
+
+        response = self._post(store)
+
+        assert response.status_code == 409
+        assert response.json()["details"]["current_status"] == "scheduled"
+        assert store.doc("mvp_load_plans", "plan-1")["status"] == "scheduled"
+        assert store.calls("atomic_update") == []
+
+    @pytest.mark.parametrize("execution_status", ["in_progress", "incomplete", "succeeded"])
+    def test_proposed_plan_being_applied_conflicts(self, execution_status):
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan(execution_status=execution_status))
+
+        response = self._post(store)
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body["error_code"] == "INVALID_STATUS_TRANSITION"
+        assert body["details"] == {
+            "plan_id": "plan-1",
+            "current_status": "proposed",
+            "execution_status": execution_status,
+        }
+        assert store.doc("mvp_load_plans", "plan-1")["status"] == "proposed"
+
+    def test_executor_claim_between_read_and_write_wins(self):
+        # The read sees a plain proposed plan; the executor claims it before
+        # the write. The CAS re-checks under the row lock and refuses.
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan())
+
+        def claim(op, index, doc_id):
+            if (op, index) == ("atomic_update", "mvp_load_plans"):
+                store.poke("mvp_load_plans", "plan-1", execution_status="in_progress")
+
+        store.hooks.append(claim)
+
+        response = self._post(store)
+
+        assert response.status_code == 409
+        assert response.json()["details"]["execution_status"] == "in_progress"
+        assert store.doc("mvp_load_plans", "plan-1")["status"] == "proposed"
+
+    def test_missing_plan_is_404(self):
+        response = self._post(InMemoryDocumentStore())
+        assert response.status_code == 404
+
+    def test_plan_deleted_between_read_and_write_is_404(self):
+        store = InMemoryDocumentStore()
+        store.seed("mvp_load_plans", "plan-1", _mvp_plan())
+
+        def delete(op, index, doc_id):
+            if (op, index) == ("atomic_update", "mvp_load_plans"):
+                store.remove("mvp_load_plans", "plan-1")
+
+        store.hooks.append(delete)
+
+        assert self._post(store).status_code == 404
 
 
 # ---------------------------------------------------------------------------

@@ -824,6 +824,8 @@ class OrderIntakePipeline:
             "assigned_driver_id",
             "assigned_asset_id",
             "assigned_run_id",
+            # Owner of the run links (loading-plan-executor FREEZE rule 2).
+            "assigned_claim_id",
             "hold_reason",
             "pod_otp",
             "pod_otp_generated_at",

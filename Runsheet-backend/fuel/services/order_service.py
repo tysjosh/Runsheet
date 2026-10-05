@@ -29,6 +29,10 @@ from fuel.order_state_machine import (
     assert_transition,
     assert_window_present_for_transition,
 )
+from fuel.order_repository import (
+    OrderChangedConcurrentlyError,
+    OrderWriteDiscardedError,
+)
 from fuel.services.order_id_generator import mint_event_id
 from fuel.services.order_metrics import orders_state_transition_rejections_total
 from services.time_utils import utcnow
@@ -36,6 +40,9 @@ from services.time_utils import utcnow
 logger = logging.getLogger(__name__)
 
 __all__ = ["OrderService"]
+
+#: Keys a guarded transition restores on refusal (design K5a step 1).
+_GUARD_SNAPSHOT_KEYS = ("status", "last_event_timestamp", "updated_at", "hold_reason")
 
 # ---------------------------------------------------------------------------
 # Status → event_type mapping
@@ -197,6 +204,7 @@ class OrderService:
         actor_user_id: Optional[str] = None,
         client_event_timestamp: Optional[str] = None,
         event_payload_extra: Optional[Dict[str, Any]] = None,
+        guard_stored_state: bool = False,
     ) -> Dict[str, Any]:
         """Apply a status transition to an order.
 
@@ -238,6 +246,17 @@ class OrderService:
                 canonical keys above always win, so no caller can overwrite the
                 transition's own record; and like ``client_event_timestamp`` this
                 needs no ``fuel_order_events`` mapping change.
+            guard_stored_state: Loading-plan executor and MVP dispatch only
+                (design K5a). Persists *before* the event with a guarded
+                upsert that applies only if the stored status and
+                ``last_event_timestamp`` still equal the ones on ``order``.
+                On refusal the four snapshot keys are restored on ``order``
+                and :class:`~fuel.order_repository.OrderChangedConcurrentlyError`
+                or :class:`~fuel.order_repository.OrderWriteDiscardedError`
+                is re-raised unwrapped, with no event, counter, broadcast or
+                subscriber call. On success the stored ``last_event_timestamp``
+                and ``updated_at`` are written back to ``order`` so a chained
+                guarded call compares against exactly what is stored.
 
         Returns:
             The updated order document.
@@ -246,6 +265,11 @@ class OrderService:
             AppException: HTTP 409 on invalid transition or missing window.
         """
         old_status = order["status"]
+        prior = (
+            {k: order.get(k) for k in _GUARD_SNAPSHOT_KEYS}
+            if guard_stored_state
+            else None
+        )
 
         # 1. Validate the state machine transition
         try:
@@ -299,12 +323,28 @@ class OrderService:
             "trace_id": order.get("trace_id", ""),
         }
 
-        await self._order_repo.append_event(order["tenant_id"], event)
+        if prior is not None:
+            # K5a: persist first, guarded, so a refusal leaves no orphan event.
+            try:
+                stored = await self._order_repo.upsert_with_last_event_timestamp(
+                    order["tenant_id"],
+                    order,
+                    expected_status=prior["status"],
+                    expected_last_event_timestamp=prior["last_event_timestamp"],
+                )
+            except (OrderChangedConcurrentlyError, OrderWriteDiscardedError):
+                order.update(prior)
+                raise
+            order["last_event_timestamp"] = stored["last_event_timestamp"]
+            order["updated_at"] = stored["updated_at"]
+            await self._order_repo.append_event(order["tenant_id"], event)
+        else:
+            await self._order_repo.append_event(order["tenant_id"], event)
 
-        # 6. Persist the updated order
-        await self._order_repo.upsert_with_last_event_timestamp(
-            order["tenant_id"], order
-        )
+            # 6. Persist the updated order
+            await self._order_repo.upsert_with_last_event_timestamp(
+                order["tenant_id"], order
+            )
 
         # 7. Driver counter updates
         await self._update_driver_counters(order, old_status, new_status)

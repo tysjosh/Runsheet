@@ -803,8 +803,9 @@ async def approve_plan(
     The ``dispatcher_id`` is derived server-side from the verified
     session (``tenant.user_id``); it is never accepted from the client.
 
-    Replaying an already-dispatched plan is idempotent. Other statuses return
-    409.
+    Replaying an already-dispatched plan is idempotent. A ``scheduled`` plan
+    (applied by the loading-plan executor) dispatches with its run and truck.
+    Other statuses return 409.
 
     Validates: Requirements 2.1, 2.3, 2.4
     """
@@ -838,7 +839,9 @@ async def approve_plan(
         plan_doc = hits[0]["_source"]
         plan_status = plan_doc.get("status", "")
 
-        if plan_status not in ("draft", "proposed", "dispatched"):
+        # ``scheduled``: applied to its truck by the loading-plan executor
+        # (K12, R9.5); dispatch finds its orders already linked to the run.
+        if plan_status not in ("draft", "proposed", "scheduled", "dispatched"):
             raise AppException(
                 error_code=ErrorCode.INVALID_STATUS_TRANSITION,
                 message=(
@@ -955,7 +958,38 @@ async def reject_plan(
         if reason:
             update_doc["rejection_reason"] = reason
 
-        await es.update_document("mvp_load_plans", plan_id, update_doc)
+        # Compare-and-set under the row lock (K12, pass-2 finding 2): the
+        # loading-plan executor may claim the plan between the read above and
+        # this write, so the status and execution checks are repeated here.
+        def _reject(current):
+            if current.get("tenant_id") != tenant_id:
+                return None
+            if current.get("status") not in ("draft", "proposed"):
+                return None
+            if current.get("execution_status") in ("in_progress", "succeeded", "incomplete"):
+                return None
+            return {**current, **update_doc}
+
+        doc, applied = await es.atomic_update("mvp_load_plans", plan_id, _reject)
+        if doc is None or doc.get("tenant_id") != tenant_id:
+            raise resource_not_found(
+                message=f"Plan {plan_id} not found",
+                details={"plan_id": plan_id},
+            )
+        if not applied:
+            raise AppException(
+                error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+                message=(
+                    f"Plan {plan_id} cannot be rejected: it is being applied "
+                    "or has been applied to a truck."
+                ),
+                status_code=409,
+                details={
+                    "plan_id": plan_id,
+                    "current_status": doc.get("status"),
+                    "execution_status": doc.get("execution_status"),
+                },
+            )
 
         logger.info(
             "Rejected plan %s (tenant=%s, dispatcher=%s, reason=%s)",

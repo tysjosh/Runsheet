@@ -103,6 +103,7 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             "assigned_driver_id": {"type": "keyword"},
             "assigned_asset_id": {"type": "keyword"},
             "assigned_run_id": {"type": "keyword"},
+            "assigned_claim_id": {"type": "keyword"},
             # POD one-time code, provisioned by PODOTPService when the order
             # transitions to ``dispatched`` in a tenant with otp_required
             # (driver-mobile-app R5.25). The mapping is ``dynamic: strict``, so

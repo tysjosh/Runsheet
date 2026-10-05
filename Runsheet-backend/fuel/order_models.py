@@ -204,6 +204,10 @@ class FuelOrder(BaseModel):
     # existing same-tenant asset at write time (Req 2.3).
     assigned_asset_id: Optional[str] = None
     assigned_run_id: Optional[str] = None
+    # Owning claim id of the run links above: the loading-plan executor's
+    # attempt id or one MVP dispatch call's claim id. Release clears the links
+    # only for the owner of this id (loading-plan-executor design FREEZE rule 2).
+    assigned_claim_id: Optional[str] = None
     # POD one-time code provisioned at dispatch by ``PODOTPService`` and the
     # instant its validity window is measured from (driver-mobile-app R5.25,
     # R5.28-R5.30). Both nullable: absent means the tenant does not require a
