@@ -813,10 +813,20 @@ class LoadingPlanExecutor:
                     "loading plan: order claim failed tenant=%s plan=%s action=%s attempt=%s order=%s",
                     tenant_id, plan_id, action_id, attempt_id, order_id,
                 )
+                # A raised claim is ambiguous: the row may have committed
+                # before the error reached us. Release by ownership (FREEZE
+                # rule 2); a no-op when the claim never landed. If the
+                # release raises too, the link state is unknown, so hold the
+                # plan as incomplete with writes_made (both rejects refused)
+                # until a retry classifies the order.
+                released = await self._release_raised_claim(
+                    tenant_id, order_id, run_id=run_id, truck_id=truck_id,
+                    attempt_id=attempt_id, plan_id=plan_id,
+                )
                 return self._write_failure(
                     build, REASON_WRITE_FAILED, order_id, applied,
-                    first_write=not wrote and not pre.prior_writes, raised=True,
-                    plan_id=plan_id,
+                    first_write=released and not wrote and not pre.prior_writes,
+                    raised=True, plan_id=plan_id,
                 )
             if claim.outcome == "refused":
                 reason = claim.reason or REASON_ORDER_COMMITTED_ELSEWHERE
@@ -913,6 +923,29 @@ class LoadingPlanExecutor:
                 truck_id=truck_id,
             ),
         )
+
+    async def _release_raised_claim(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        run_id: str,
+        truck_id: str,
+        attempt_id: str,
+        plan_id: str,
+    ) -> bool:
+        """Release this attempt's link on ``order_id``; ``False`` if that raised."""
+        try:
+            await self._repo.release_assignment(
+                tenant_id, order_id, run_id=run_id, asset_id=truck_id, claim_id=attempt_id,
+            )
+        except Exception:
+            logger.exception(
+                "loading plan: releasing raised claim failed tenant=%s plan=%s attempt=%s order=%s",
+                tenant_id, plan_id, attempt_id, order_id,
+            )
+            return False
+        return True
 
     @staticmethod
     def _write_failure(

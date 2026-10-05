@@ -96,10 +96,14 @@ class InMemoryDocumentStore:
         exc: Optional[BaseException] = None,
         nth: int = 1,
         times: int = 1,
+        after_commit: bool = False,
     ) -> None:
         """Raise ``exc`` on the ``nth`` (and following ``times-1``) matching calls.
 
-        ``doc_id=None`` matches any id on ``index``.
+        ``doc_id=None`` matches any id on ``index``. With ``after_commit``
+        (``atomic_update`` only) the write is applied first and the error is
+        raised afterwards, like a Postgres COMMIT whose acknowledgement is
+        lost: the caller sees an error although the row changed.
         """
         self._faults.append(
             {
@@ -108,6 +112,7 @@ class InMemoryDocumentStore:
                 "nth": nth,
                 "times": times,
                 "seen": 0,
+                "after": after_commit,
             }
         )
 
@@ -171,17 +176,22 @@ class InMemoryDocumentStore:
         if self._yields is not None:
             for _ in range(next(self._yields, 0)):
                 await asyncio.sleep(0)
+        self._check_faults(op, index, doc_id, after=False)
+        for hook in list(self.hooks):
+            result = hook(op, index, doc_id)
+            if inspect.isawaitable(result):
+                await result
+
+    def _check_faults(self, op: str, index: str, doc_id: Optional[str], *, after: bool) -> None:
         key_id = None if doc_id is None else str(doc_id)
         for fault in self._faults:
+            if bool(fault.get("after")) != after:
+                continue
             method, idx, fid = fault["key"]
             if method == op and idx == index and (fid is None or fid == key_id):
                 fault["seen"] += 1
                 if fault["nth"] <= fault["seen"] < fault["nth"] + fault["times"]:
                     raise fault["exc"]
-        for hook in list(self.hooks):
-            result = hook(op, index, doc_id)
-            if inspect.isawaitable(result):
-                await result
 
     def _log(self, op: str, index: str, doc_id: Optional[str], applied: bool) -> None:
         self.ops.append((op, index, None if doc_id is None else str(doc_id), applied))
@@ -225,6 +235,18 @@ class InMemoryDocumentStore:
         **_ignored: Any,
     ) -> Tuple[Optional[Dict[str, Any]], bool]:
         await self._before("atomic_update", index, doc_id)
+        outcome = self._atomic_update(index, doc_id, transform, upsert)
+        # An ``after_commit`` fault: the write above stands, the caller errors.
+        self._check_faults("atomic_update", index, doc_id, after=True)
+        return outcome
+
+    def _atomic_update(
+        self,
+        index: str,
+        doc_id: str,
+        transform: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+        upsert: Optional[Dict[str, Any]],
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
         current = self.docs[index].get(str(doc_id))
         if current is None:
             if upsert is None:

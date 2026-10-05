@@ -533,6 +533,31 @@ class TestRejectPlan:
         assert self._post(store).status_code == 404
 
 
+async def test_reject_refused_after_committed_claim_whose_release_raised():
+    # Review pass 2 finding 1: the executor's claim committed, the call
+    # raised and so did the release. The plan is held ``incomplete`` and the
+    # plan reject endpoint refuses it, so the link is never stranded.
+    from Agents.approval_queue_service import LoadingPlanExecutionError
+    from tests.unit._loading_plan_fakes import ORDERS, ApprovalHarness, order_fixture
+
+    h = ApprovalHarness([order_fixture("ord-1", status="confirmed", tenant_id=TEST_TENANT_ID)],
+                        tenant_id=TEST_TENANT_ID)
+    h.add_plan("A", ["ord-1"], plan_id="plan-1")
+    h.store.fail_on("atomic_update", ORDERS, "ord-1", nth=1, after_commit=True)
+    h.store.fail_on("atomic_update", ORDERS, "ord-1", nth=2)  # the release
+    with pytest.raises(LoadingPlanExecutionError):
+        await h.approve("A")
+    assert h.plan("plan-1")["execution_status"] == "incomplete"
+
+    app, _, _ = _create_test_app(es_service=h.store)
+    response = TestClient(app).post("/api/fuel/mvp/plan/plan-1/reject", json=None)
+
+    assert response.status_code == 409
+    assert response.json()["details"]["execution_status"] == "incomplete"
+    assert h.plan("plan-1")["status"] != "rejected"
+    assert h.links("ord-1") == ("run-A", "truck-A")
+
+
 # ---------------------------------------------------------------------------
 # Tests: GET /api/fuel/mvp/forecasts (Req 8.4)
 # ---------------------------------------------------------------------------

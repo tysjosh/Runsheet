@@ -728,6 +728,65 @@ async def test_first_claim_raising_with_no_prior_writes_is_retryable_failed():
     assert result.writes_made is False and result.retryable is True
 
 
+async def test_first_claim_committed_then_raised_is_released_and_clean_failed():
+    # Review pass 2 finding 1: the claim row commits, then the call raises
+    # (a lost COMMIT acknowledgement). The executor releases by ownership.
+    h = Harness(_three())
+    h.store.fail_on("atomic_update", ORDERS, "ord-1", nth=1, after_commit=True)
+
+    result = await h.run()
+
+    assert result.outcome == "failed" and result.reason == "write_failed"
+    assert result.writes_made is False and result.retryable is True
+    for oid in ("ord-1", "ord-2", "ord-3"):
+        assert h.links(oid) == (None, None), oid
+        assert h.order(oid)["status"] == "confirmed"
+        assert h.events(oid) == []
+    assert h.order("ord-1").get("assigned_claim_id") is None
+    assert h.store.calls("atomic_update", ORDERS) == ["ord-1", "ord-1"]  # claim, release
+    assert h.plan()["execution_status"] == "failed"
+
+
+async def test_first_claim_committed_then_release_also_raising_holds_incomplete():
+    # The link state is unknown, so nothing may treat the plan as unwritten.
+    h = Harness(_three())
+    h.store.fail_on("atomic_update", ORDERS, "ord-1", nth=1, after_commit=True)
+    h.store.fail_on("atomic_update", ORDERS, "ord-1", nth=2)  # the release
+
+    result = await h.run()
+
+    assert result.outcome == "incomplete" and result.reason == "write_failed"
+    assert result.writes_made is True and result.retryable is True
+    assert h.links("ord-1") == ("run-1", "truck-1")
+    assert h.order("ord-1")["assigned_claim_id"] == result.attempt_id
+    assert h.plan()["execution_status"] == "incomplete"
+
+    # A retry classifies the order (already linked here) and completes.
+    retry = await h.run()
+    assert retry.outcome == "applied"
+    for oid in ("ord-1", "ord-2", "ord-3"):
+        assert h.order(oid)["status"] == "scheduled"
+        assert h.links(oid) == ("run-1", "truck-1")
+        assert len(h.events(oid, "order_assigned")) == 1
+
+
+async def test_later_claim_committed_then_raised_is_released_and_incomplete():
+    h = Harness(_three())
+    h.store.fail_on("atomic_update", ORDERS, "ord-2", nth=1, after_commit=True)
+
+    result = await h.run()
+
+    assert result.outcome == "incomplete" and result.writes_made is True
+    assert result.applied_order_ids == ["ord-1"]
+    assert h.links("ord-2") == (None, None)
+    assert h.order("ord-2")["status"] == "confirmed" and h.events("ord-2") == []
+    assert h.links("ord-3") == (None, None)
+
+    retry = await h.run()
+    assert retry.outcome == "applied"
+    assert all(h.order(o)["status"] == "scheduled" for o in ("ord-1", "ord-2", "ord-3"))
+
+
 # ---------------------------------------------------------------------------
 # T-U5 concurrency (P4)
 # ---------------------------------------------------------------------------

@@ -436,6 +436,21 @@ async def test_claim_store_error_propagates_and_releases_claims():
     h.assert_nothing_dispatched()
 
 
+@pytest.mark.parametrize("raising", ["ord-1", "ord-2", "ord-3"])
+async def test_claim_committed_then_raised_is_released(raising):
+    # Review pass 2 finding 1: the claim row commits, then the call raises
+    # (a lost COMMIT acknowledgement). The order is released by ownership.
+    h = Harness(_three())
+    h.store.fail_on("atomic_update", ORDERS, raising, nth=1, after_commit=True)
+
+    with pytest.raises(RuntimeError, match="injected store fault"):
+        await h.dispatch()
+
+    assert raising in h.releases
+    h.assert_unlinked(*THREE)
+    h.assert_nothing_dispatched()
+
+
 async def test_already_linked_order_is_not_released_on_refusal():
     h = Harness(
         [

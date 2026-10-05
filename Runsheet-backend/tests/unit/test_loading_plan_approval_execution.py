@@ -233,6 +233,38 @@ async def test_t_u10_incomplete_with_writes_retries_to_completion_and_refuses_re
     assert all(h.order(o)["status"] == "scheduled" for o in ("o1", "o2", "o3"))
 
 
+async def test_t_u10_committed_then_raised_claim_released_keeps_approval_unwritten():
+    # Review pass 2 finding 1: the claim commits, the call raises, the
+    # release clears it. Nothing is linked, so the holding entry stays
+    # rejectable and the order is free for the next run.
+    h = ApprovalHarness(_orders("o1", "o2"))
+    h.add_plan("A", ["o1", "o2"])
+    h.store.fail_on("atomic_update", ORDERS, "o1", nth=1, after_commit=True)
+    exc = await _raises(h.approve("A"), LoadingPlanExecutionError)
+    assert exc.result.outcome == "failed" and exc.result.writes_made is False
+    assert h.links("o1") == (None, None) and h.links("o2") == (None, None)
+    assert h.result("A")["writes_made"] is False
+    assert h.plan("plan-A")["execution_status"] == "failed"
+    assert (await h.reject("A"))["status"] == "rejected"
+
+
+async def test_t_u10_committed_claim_with_failed_release_refuses_reject_then_retries():
+    h = ApprovalHarness(_orders("o1", "o2"))
+    h.add_plan("A", ["o1", "o2"])
+    h.store.fail_on("atomic_update", ORDERS, "o1", nth=1, after_commit=True)
+    h.store.fail_on("atomic_update", ORDERS, "o1", nth=2)  # the release
+    exc = await _raises(h.approve("A"), LoadingPlanExecutionError)
+    assert exc.result.outcome == "incomplete" and exc.result.writes_made is True
+    assert h.status("A") == "incomplete" and h.result("A")["writes_made"] is True
+    assert h.links("o1") == ("run-A", "truck-A")
+    assert h.plan("plan-A")["execution_status"] == "incomplete"
+    await _raises(h.reject("A"), RuntimeError)
+    assert h.status("A") == "incomplete"
+    done = await h.approve("A")
+    assert done["status"] == "executed"
+    assert all(h.order(o)["status"] == "scheduled" for o in ("o1", "o2"))
+
+
 async def test_t_u10_fresh_approved_entry_is_in_progress_with_no_writes():
     h = ApprovalHarness(_orders("o1"))
     h.add_plan("A", ["o1"], status="approved", reviewed_by="user-0",

@@ -221,14 +221,21 @@ class FuelPlanDispatchService:
                         if order.get("status") in _ACTIVE_STATUSES:
                             continue
                         order_id = str(order["order_id"])
-                        claim = await self._order_repository.claim_assignment(
-                            tenant_id,
-                            order_id,
-                            run_id=run_id,
-                            asset_id=truck_id,
-                            expected_status=order["status"],
-                            claim_id=claim_id,
-                        )
+                        try:
+                            claim = await self._order_repository.claim_assignment(
+                                tenant_id,
+                                order_id,
+                                run_id=run_id,
+                                asset_id=truck_id,
+                                expected_status=order["status"],
+                                claim_id=claim_id,
+                            )
+                        except Exception:
+                            # Ambiguous: the claim may have committed before
+                            # the error reached us. Releasing by ownership is
+                            # a no-op if it never landed.
+                            fresh.append(order_id)
+                            raise
                         if claim.outcome == "refused":
                             reason = claim.reason or "order_committed_elsewhere"
                             logger.warning(
