@@ -20,8 +20,10 @@ Key behaviours:
     kept answers are labelled by specialist (N3).
   - ``route_stream`` orchestrates the full flow (classify → delegate →
     stream normalized ``ChatEvent``s); ``route`` collects it into a string.
-  - LLM failures are retried per ``Agents.llm_errors`` and surface as one
-    typed error event with a safe message, never as answer text (F3).
+  - LLM failures are retried per ``Agents.llm_errors`` and surface as
+    typed error events with a safe message, never as answer text (F3): one
+    terminal event when nothing could answer, one ``partial`` event per
+    failed specialist when the rest of the answer stands (N4).
   - No-match requests fall back to the reporting agent.
   - Complex requests are delegated to the ExecutionPlanner.
 
@@ -42,6 +44,7 @@ from typing import Any, AsyncIterator, Dict, List, Optional, Pattern, Tuple
 from Agents.llm_errors import (
     AI_RATE_LIMITED,
     AI_SERVICE_UNAVAILABLE,
+    DOMAIN_LABELS,
     MAX_ATTEMPTS,
     AgentServiceError,
     ChatEvent,
@@ -49,6 +52,7 @@ from Agents.llm_errors import (
     classify_llm_exception,
     done_event,
     error_event,
+    partial_error_event,
     retry_delay,
     safe_message_for,
     status_event,
@@ -85,15 +89,6 @@ def _failed_note(domain: str) -> str:
 _QUALIFIER_KEYWORDS = frozenset({
     "location", "schedule", "delay", "fuel", "diesel", "petrol", "delivery", "ops",
 })
-
-#: Section headings for answers from more than one specialist.
-DOMAIN_LABELS: Dict[str, str] = {
-    "fleet": "Fleet",
-    "scheduling": "Scheduling",
-    "fuel": "Fuel",
-    "ops": "Operations",
-    "reporting": "Reporting",
-}
 
 
 @functools.lru_cache(maxsize=None)
@@ -252,9 +247,11 @@ class AgentOrchestrator:
     ) -> str:
         """Collect :meth:`route_stream` into one string.
 
-        Returns the joined text. Raises ``AgentServiceError`` (safe message
-        only) when the stream ended in an error event. The stream is drained
-        first so its ``routing_completed`` entry is always written.
+        Returns the joined text; a partial error event becomes a short note
+        naming the failed specialist. Raises ``AgentServiceError`` (safe
+        message only) when the stream ended in a non-partial error event. The
+        stream is drained first so its ``routing_completed`` entry is always
+        written.
         """
         parts: List[str] = []
         error: Optional[ChatEvent] = None
@@ -263,6 +260,9 @@ class AgentOrchestrator:
         ):
             if event["type"] == "text":
                 parts.append(event["content"])
+            elif event["type"] == "error" and event.get("partial"):
+                note = _failed_note(event.get("specialist") or "AI")
+                parts.append(("\n\n" if parts else "") + note)
             elif event["type"] == "error":
                 error = event
         if error is not None:
@@ -293,9 +293,11 @@ class AgentOrchestrator:
         Provider failures are retried per :mod:`Agents.llm_errors`. When every
         target fails the stream carries one ``error`` event (code, safe
         message, ``request_id``) and no text; when some fail, the answered
-        text plus a short note per failed domain. Exception text never
-        reaches an event (F3). ``routing_completed`` records ``outcome``
-        ``success`` / ``partial`` / ``failure`` (F4).
+        text plus one ``error`` event with ``partial=True`` and
+        ``specialist`` per failed domain (N4). Exception text never reaches
+        an event (F3). ``routing_completed`` records ``outcome``
+        ``success`` / ``partial`` / ``failure`` (F4); partial events do not
+        make it a failure.
         """
         start_time = time.monotonic()
 
@@ -346,7 +348,7 @@ class AgentOrchestrator:
         async for event in events:
             if event["type"] == "text":
                 response_length += len(event["content"])
-            elif event["type"] == "error":
+            elif event["type"] == "error" and not event.get("partial"):
                 errored = True
             yield event
 
@@ -544,13 +546,18 @@ class AgentOrchestrator:
         task: str,
         context: dict,
         request_id: Optional[str],
+        text_reaches_client: bool = True,
     ) -> AsyncIterator[ChatEvent]:
         """Run one specialist with the bounded LLM retry policy.
 
-        Retries only while the current attempt has emitted no text: once text
-        reached the client a retry would repeat it. Each wait is announced as
-        ``status(retrying)``. Full exception detail is logged here, server
-        side; the caller only ever sees ``AgentServiceError``'s safe message.
+        When the caller forwards text live (``text_reaches_client``), retries
+        only while the current attempt has emitted no text: a retry would
+        repeat text the client already has. When the caller buffers text, a
+        retry is allowed after text too, and the caller discards that
+        specialist's buffer on its ``status(retrying)`` (N4). Each wait is
+        announced as ``status(retrying)``. Full exception detail is logged
+        here, server side; the caller only ever sees ``AgentServiceError``'s
+        safe message.
         """
         attempt = 0
         while True:
@@ -571,7 +578,11 @@ class AgentOrchestrator:
                     target, attempt, MAX_ATTEMPTS, failure.code, request_id,
                     exc_info=exc,
                 )
-                delay = None if emitted_text else retry_delay(failure, attempt, self._rand)
+                delay = (
+                    None
+                    if emitted_text and text_reaches_client
+                    else retry_delay(failure, attempt, self._rand)
+                )
                 if delay is None:
                     raise AgentServiceError(
                         failure.code,
@@ -611,6 +622,12 @@ class AgentOrchestrator:
         text live. Several targets have their text buffered (status and tool
         events still stream live) and flushed by :meth:`_answer_sections`;
         targets whose non-answer was dropped are appended to ``dropped``.
+
+        Unless every target failed before any text (one terminal error), each
+        failed target gets a :func:`partial_error_event` right after its text
+        (live) or at its slot in the flush (buffered). A buffered target may
+        be retried after partial text; its discarded attempt never reaches
+        the client (N4).
         """
         context = {"tenant_id": tenant_id}
         if session_id:
@@ -618,45 +635,52 @@ class AgentOrchestrator:
 
         buffered = len(targets) > 1
         answers: List[Tuple[str, str]] = []
-        attempted = 0
+        attempted: List[str] = []
         any_text = False
         for target in targets:
             agent = self._specialists.get(target)
             if not agent:
                 continue
-            attempted += 1
+            attempted.append(target)
             yield status_event("specialist_start", specialist=target)
             parts: List[str] = []
             try:
                 async for event in self._run_specialist(
-                    target, agent, user_message, context, request_id
+                    target, agent, user_message, context, request_id,
+                    text_reaches_client=not buffered,
                 ):
+                    if buffered and event["type"] == "text":
+                        parts.append(event["content"])
+                        continue
                     if event["type"] == "text":
-                        if buffered:
-                            parts.append(event["content"])
-                            continue
                         any_text = True
+                    elif (
+                        event.get("stage") == "retrying"
+                        and event.get("specialist") == target
+                    ):
+                        parts.clear()  # the failed attempt's text is discarded
                     yield event
             except AgentServiceError as err:
                 failures[target] = err
             answer = "".join(parts)
-            if answer:
+            # A buffered specialist that finally failed sends no text: its
+            # answer is incomplete and the partial error stands in for it.
+            if answer and target not in failures:
                 answers.append((target, answer))
 
-        if buffered and answers:
-            for event in self._answer_sections(answers, dropped):
-                yield event
-            any_text = True
-
-        if attempted and len(failures) == attempted and not any_text:
+        if attempted and len(failures) == len(attempted) and not any_text:
             yield self._combined_error(
                 [e for e in failures.values() if e is not None], request_id
             )
             return
 
-        for target in failures:
-            yield text_event(("\n\n" if any_text else "") + _failed_note(target))
-            any_text = True
+        sections = dict(self._answer_sections(answers, dropped)) if answers else {}
+        for target in attempted:
+            if target in sections:
+                yield sections[target]
+                any_text = True
+            if target in failures:
+                yield partial_error_event(failures[target], request_id, specialist=target)
 
         if not any_text:
             yield text_event(NO_RESULTS_MESSAGE)
@@ -664,14 +688,15 @@ class AgentOrchestrator:
     @staticmethod
     def _answer_sections(
         answers: List[Tuple[str, str]], dropped: Optional[List[str]]
-    ) -> List[ChatEvent]:
+    ) -> List[Tuple[str, ChatEvent]]:
         """Text events for buffered answers from several specialists (N3).
 
         Non-answers are dropped when at least one answer is substantive, so a
         "There are no scheduled jobs" from one specialist no longer sits next
         to another's list of those jobs. When more than one answer is kept
         each is headed by its specialist's label. When every answer is a
-        non-answer, all are kept.
+        non-answer, all are kept. Returns ``(target, text event)`` pairs in
+        answer order.
         """
         substantive = [(t, a) for t, a in answers if not _is_non_answer(a)]
         kept = substantive or answers
@@ -679,11 +704,14 @@ class AgentOrchestrator:
             kept_targets = {t for t, _ in kept}
             dropped.extend(t for t, _ in answers if t not in kept_targets)
         if len(kept) == 1:
-            return [text_event(kept[0][1])]
+            return [(kept[0][0], text_event(kept[0][1]))]
         return [
-            text_event(
-                ("\n\n" if i else "")
-                + f"**{DOMAIN_LABELS.get(target, target.title())}**\n\n{answer}"
+            (
+                target,
+                text_event(
+                    ("\n\n" if i else "")
+                    + f"**{DOMAIN_LABELS.get(target, target.title())}**\n\n{answer}"
+                ),
             )
             for i, (target, answer) in enumerate(kept)
         ]
@@ -700,10 +728,12 @@ class AgentOrchestrator:
     ) -> AsyncIterator[ChatEvent]:
         """Run a complex request through the ExecutionPlanner.
 
-        The plan runs to completion and is reported as one text block. When
-        every read step failed and at least one failure was an AI-service
-        error, the request reports that error instead of a plan of failures.
-        A planner exception falls back to simple sequential execution.
+        The plan runs to completion and is reported as one text block,
+        followed by one partial error event per domain whose read step failed
+        with an AI-service error. When every read step failed and at least one
+        failure was an AI-service error, the request reports that error
+        instead of a plan of failures. A planner exception falls back to
+        simple sequential execution.
         """
         yield status_event("planning")
 
@@ -747,6 +777,20 @@ class AgentOrchestrator:
             return
 
         yield text_event(self._format_plan_result(executed_plan))
+
+        # One partial event per domain whose read step failed on the AI
+        # service (N4). Steps that failed for other reasons are already shown
+        # as failed in the plan text.
+        reported = set()
+        for step in read_steps:
+            err = by_domain.get(step.agent)
+            if (
+                getattr(step.status, "value", step.status) == "failed"
+                and err is not None
+                and step.agent not in reported
+            ):
+                reported.add(step.agent)
+                yield partial_error_event(err, request_id, specialist=step.agent)
 
     # ------------------------------------------------------------------
     # Result synthesis

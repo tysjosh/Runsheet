@@ -688,7 +688,9 @@ class LogisticsAgent:
                     request_id=request_id,
                 ):
                     yielded_any = True
-                    if event.get("type") == "error":
+                    # A partial error (one specialist failed, the rest of
+                    # the answer stands) is not a failed response (N4).
+                    if event.get("type") == "error" and not event.get("partial"):
                         saw_error = True
                     yield event
             except Exception as e:

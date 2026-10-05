@@ -346,6 +346,40 @@ def error_event_for(err: AgentServiceError, request_id: Optional[str]) -> ChatEv
     return error_event(err.code, err.safe_message, request_id, err.retry_after_seconds)
 
 
+#: Display names for the specialist domains (chat section headings and the
+#: partial-failure message).
+DOMAIN_LABELS = {
+    "fleet": "Fleet",
+    "scheduling": "Scheduling",
+    "fuel": "Fuel",
+    "ops": "Operations",
+    "reporting": "Reporting",
+}
+
+
+def partial_error_event(
+    err: AgentServiceError,
+    request_id: Optional[str],
+    specialist: Optional[str] = None,
+) -> ChatEvent:
+    """One specialist failed while the rest of the answer stands (N4).
+
+    The F3 :func:`error_event` shape plus ``specialist`` and ``partial=True``.
+    It is not terminal: the stream goes on, and clients keep the answer.
+    ``specialist`` defaults to ``err.domain``.
+    """
+    domain = specialist or err.domain
+    label = DOMAIN_LABELS[domain].lower() if domain in DOMAIN_LABELS else (domain or "AI")
+    message = (
+        f"The {label} assistant couldn't answer this part. "
+        f"{safe_message_for(err.code, err.retry_after_seconds)}"
+    )
+    event = error_event(err.code, message, request_id, err.retry_after_seconds)
+    event["specialist"] = domain
+    event["partial"] = True
+    return event
+
+
 def done_event() -> ChatEvent:
     return ChatEvent(type="done")
 
@@ -356,6 +390,7 @@ __all__ = [
     "AgentServiceError",
     "BASE_DELAY_S",
     "ChatEvent",
+    "DOMAIN_LABELS",
     "LLMFailure",
     "MAX_ATTEMPTS",
     "MAX_DELAY_S",
@@ -367,6 +402,7 @@ __all__ = [
     "done_event",
     "error_event",
     "error_event_for",
+    "partial_error_event",
     "retry_after_seconds",
     "retry_delay",
     "safe_message_for",

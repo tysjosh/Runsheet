@@ -229,8 +229,17 @@ async def test_outcome_partial_keeps_the_answer_and_adds_a_safe_note():
 
     text = "".join(e["content"] for e in events if e["type"] == "text")
     assert "12 trucks" in text
-    assert "The fuel assistant couldn't answer this part right now." in text
-    assert not [e for e in events if e["type"] == "error"]
+    # The failure is a typed partial error event, not note text (N4).
+    assert "couldn't answer" not in text
+    errors = [e for e in events if e["type"] == "error"]
+    assert len(errors) == 1
+    assert {k: errors[0][k] for k in ("code", "partial", "specialist", "request_id")} == {
+        "code": "AI_RATE_LIMITED",
+        "partial": True,
+        "specialist": "fuel",
+        "request_id": "req-123",
+    }
+    assert errors[0]["message"].startswith("The fuel assistant couldn't answer this part.")
     _assert_no_leak(events)
     entry = _routing_completed(log)
     assert entry["outcome"] == "partial"
