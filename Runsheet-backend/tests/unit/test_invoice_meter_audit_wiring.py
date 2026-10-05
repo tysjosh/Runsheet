@@ -159,14 +159,12 @@ async def test_expired_calibration_flags_invoice_and_links_ticket(mock_now):
         "invoices_current",
         doc["invoice_id"],
         {
-            "doc": {
-                "warnings": [
-                    {
-                        "code": "meter.calibration_expired",
-                        "message": "Meter calibration expired",
-                    }
-                ]
-            }
+            "warnings": [
+                {
+                    "code": "meter.calibration_expired",
+                    "message": "Meter calibration expired",
+                }
+            ]
         },
     )
 
@@ -195,11 +193,11 @@ async def test_valid_calibration_links_ticket_without_flag(mock_now):
     meter_svc.check_meter_calibration_for_delivery.assert_awaited_once()
     meter_svc.link_ticket_to_invoice.assert_awaited_once()
 
-    # No warnings.doc update should have been issued.
+    # No warnings update should have been issued.
     for call in es.update_document.call_args_list:
         args, kwargs = call
         if len(args) >= 3:
-            assert "warnings" not in args[2].get("doc", {})
+            assert "warnings" not in args[2]
 
 
 @pytest.mark.asyncio

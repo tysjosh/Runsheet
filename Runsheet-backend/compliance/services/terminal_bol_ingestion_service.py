@@ -686,7 +686,7 @@ class TerminalBOLIngestionService:
 
         # 5. Persist the update
         await self._es.update_document(
-            TERMINAL_BOLS_INDEX, bol_id, {"doc": update_doc}
+            TERMINAL_BOLS_INDEX, bol_id, update_doc
         )
 
         # 6. Reconstruct the updated BOL for return
@@ -810,7 +810,7 @@ class TerminalBOLIngestionService:
         }
 
         await self._es.update_document(
-            TERMINAL_BOLS_INDEX, bol_id, {"doc": update_doc}
+            TERMINAL_BOLS_INDEX, bol_id, update_doc
         )
 
         logger.info(

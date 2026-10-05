@@ -538,7 +538,7 @@ class InvoiceService:
                 await self._es.update_document(
                     INVOICES_CURRENT_INDEX,
                     invoice_id,
-                    {"doc": {"warnings": warnings}},
+                    {"warnings": warnings},
                 )
                 logger.warning(
                     "InvoiceService: invoice %s (tenant %s) flagged with "

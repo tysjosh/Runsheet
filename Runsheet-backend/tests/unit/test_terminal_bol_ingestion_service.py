@@ -485,8 +485,8 @@ class TestLinkToLoadPlan:
         assert call_args[0][0] == "terminal_bols"
         assert call_args[0][1] == bol_id
         update_payload = call_args[0][2]
-        assert update_payload["doc"]["load_plan_id"] == load_plan_id
-        assert update_payload["doc"]["status"] == "linked"
+        assert update_payload["load_plan_id"] == load_plan_id
+        assert update_payload["status"] == "linked"
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_transitions_status_to_linked(self, es_service, registry):
@@ -520,8 +520,8 @@ class TestLinkToLoadPlan:
 
         call_args = es_service.update_document.call_args
         update_payload = call_args[0][2]
-        assert update_payload["doc"]["status"] == "linked"
-        assert "updated_at" in update_payload["doc"]
+        assert update_payload["status"] == "linked"
+        assert "updated_at" in update_payload
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_raises_error_when_bol_not_found(self, es_service, registry):
@@ -644,8 +644,8 @@ class TestLinkToLoadPlan:
         es_service.update_document.assert_called_once()
         call_args = es_service.update_document.call_args
         update_payload = call_args[0][2]
-        assert update_payload["doc"]["load_plan_id"] == load_plan_id
-        assert update_payload["doc"]["status"] == "linked"
+        assert update_payload["load_plan_id"] == load_plan_id
+        assert update_payload["status"] == "linked"
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_uses_tenant_scoped_query(self, es_service, registry):
@@ -1219,7 +1219,7 @@ class TestVCFCrossReference:
         # Verify the update_document call includes the flag
         update_call = es_service.update_document.call_args
         update_payload = update_call[0][2]  # third positional arg
-        assert update_payload["doc"]["vcf_discrepancy_flag"] is True
+        assert update_payload["vcf_discrepancy_flag"] is True
 
 
 # ---------------------------------------------------------------------------

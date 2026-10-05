@@ -318,7 +318,7 @@ class LearningPolicyAgent(OverlayAgentBase):
             if reason:
                 doc["rollback_reason"] = reason
             await self._es.update_document(
-                POLICY_EXPERIMENTS_INDEX, experiment_id, {"doc": doc}
+                POLICY_EXPERIMENTS_INDEX, experiment_id, doc
             )
         except Exception as e:
             logger.error("Failed to update experiment status: %s", e)

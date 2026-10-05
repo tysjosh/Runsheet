@@ -598,7 +598,7 @@ class TestUpdateExperimentStatus:
         call_args = deps["es_service"].update_document.call_args
         assert call_args[0][0] == POLICY_EXPERIMENTS_INDEX
         assert call_args[0][1] == "exp-001"
-        doc = call_args[0][2]["doc"]
+        doc = call_args[0][2]
         assert doc["status"] == "graduated"
 
     @pytest.mark.asyncio
@@ -609,7 +609,7 @@ class TestUpdateExperimentStatus:
         )
 
         call_args = deps["es_service"].update_document.call_args
-        doc = call_args[0][2]["doc"]
+        doc = call_args[0][2]
         assert doc["rollback_reason"] == "KPI degraded"
 
     @pytest.mark.asyncio
@@ -618,7 +618,7 @@ class TestUpdateExperimentStatus:
         await agent._update_experiment_status("exp-001", "graduated")
 
         call_args = deps["es_service"].update_document.call_args
-        doc = call_args[0][2]["doc"]
+        doc = call_args[0][2]
         assert "rollback_reason" not in doc
 
     @pytest.mark.asyncio
