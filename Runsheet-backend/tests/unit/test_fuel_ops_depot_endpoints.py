@@ -594,6 +594,110 @@ class TestDeleteDepot:
         assert "depot_001" in es.docs
 
 
+class _FakeTenantSettings:
+    """Records default-depot reads/writes like ``TenantSettingsService``."""
+
+    def __init__(self, default_depot_id=None, fail=False):
+        self.default_depot_id = default_depot_id
+        self.fail = fail
+        self.set_calls: List[tuple] = []
+
+    async def get_default_depot_id(self, tenant_id):
+        if self.fail:
+            raise RuntimeError("redis down")
+        return self.default_depot_id
+
+    async def set_default_depot_id(self, tenant_id, depot_id):
+        self.set_calls.append((tenant_id, depot_id))
+        self.default_depot_id = depot_id
+
+
+@pytest.fixture
+def tenant_settings():
+    """Install a fake tenant settings service; restore the previous one."""
+    from ops.middleware.tenant_guard import (
+        configure_tenant_guard,
+        get_tenant_settings_service,
+    )
+
+    previous = get_tenant_settings_service()
+
+    def _install(fake):
+        configure_tenant_guard(fake)
+        return fake
+
+    yield _install
+    configure_tenant_guard(previous)
+
+
+class TestDeleteDepotN6:
+    """N6: delete clears the tenant default and never answers a false 204."""
+
+    def test_clears_the_tenant_default_when_it_was_the_deleted_depot(
+        self, tenant_settings
+    ):
+        settings = tenant_settings(_FakeTenantSettings("depot_001"))
+        app, es = _build_app()
+        _seed_depot(es)
+
+        resp = TestClient(app).delete("/api/fuel/mvp/depots/depot_001")
+
+        assert resp.status_code == 204
+        assert settings.set_calls == [("tenant-1", None)]
+        assert settings.default_depot_id is None
+
+    def test_leaves_a_different_default_untouched(self, tenant_settings):
+        settings = tenant_settings(_FakeTenantSettings("depot_other"))
+        app, es = _build_app()
+        _seed_depot(es)
+
+        resp = TestClient(app).delete("/api/fuel/mvp/depots/depot_001")
+
+        assert resp.status_code == 204
+        assert settings.set_calls == []
+        assert settings.default_depot_id == "depot_other"
+
+    def test_settings_failure_still_returns_204(self, tenant_settings):
+        tenant_settings(_FakeTenantSettings("depot_001", fail=True))
+        app, es = _build_app()
+        _seed_depot(es)
+
+        resp = TestClient(app).delete("/api/fuel/mvp/depots/depot_001")
+
+        assert resp.status_code == 204
+        assert "depot_001" not in es.docs
+
+    def test_404_does_not_touch_the_default(self, tenant_settings):
+        settings = tenant_settings(_FakeTenantSettings("does-not-exist"))
+        app, _ = _build_app()
+
+        resp = TestClient(app).delete("/api/fuel/mvp/depots/does-not-exist")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"]["error_code"] == "depot_not_found"
+        assert settings.set_calls == []
+
+    def test_incomplete_delete_is_500_with_the_standard_envelope(self):
+        app, es = _build_app()
+        _seed_depot(es)
+
+        async def _keeps(index, doc_id):
+            return True  # reports success, keeps the document
+
+        es.delete_document = _keeps
+
+        resp = TestClient(app, raise_server_exceptions=False).delete(
+            "/api/fuel/mvp/depots/depot_001"
+        )
+
+        assert resp.status_code == 500
+        body = resp.json()
+        assert body["error_code"] == "INTERNAL_ERROR"
+        assert body["message"] == "Depot delete did not complete"
+        assert body["details"] == {"depot_id": "depot_001"}
+        assert body.get("request_id")
+
+
 # ---------------------------------------------------------------------------
 # configure_fuel_ops_endpoints wiring (Req 2.2.2)
 # ---------------------------------------------------------------------------

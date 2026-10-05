@@ -177,6 +177,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from errors.exceptions import (
     depot_not_found,
     driver_not_found,
+    internal_error,
     supplier_contract_not_found,
     terminal_not_found,
     validation_error,
@@ -226,6 +227,7 @@ from fuel.customer_tank_models import (
 from fuel.depot_models import (
     CrossTenantAccessError as DepotCrossTenantAccessError,
     Depot,
+    DepotDeleteIncompleteError,
     DepotRepository,
     DepotStatus,
 )
@@ -2214,6 +2216,11 @@ async def delete_depot(
     * Not-found → HTTP 404 with structured ``depot_not_found`` detail.
     * Cross-tenant → HTTP 403 with structured
       ``cross_tenant_access_denied`` detail.
+    * Still readable after the delete → HTTP 500 (never a false 204).
+
+    A hard delete from every store. When the tenant's default depot was the
+    deleted one, the default is cleared so the start-position resolver stops
+    pointing at it (N6).
 
     Validates: Requirement 2.2.2.
     """
@@ -2224,6 +2231,11 @@ async def delete_depot(
         deleted = await repo.delete(tenant.tenant_id, depot_id)
     except DepotCrossTenantAccessError as exc:
         raise _translate_depot_cross_tenant_error(exc)
+    except DepotDeleteIncompleteError:
+        raise internal_error(
+            message="Depot delete did not complete",
+            details={"depot_id": depot_id},
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -2235,12 +2247,38 @@ async def delete_depot(
                 "depot_id": depot_id,
             },
         )
+    await _clear_default_depot_if(tenant.tenant_id, depot_id)
     logger.info(
         "fuel_ops.depots.delete: tenant=%s depot=%s",
         tenant.tenant_id,
         depot_id,
     )
     return None
+
+
+async def _clear_default_depot_if(tenant_id: str, depot_id: str) -> None:
+    """Clear ``tenant_settings.default_depot_id`` when it names ``depot_id``.
+
+    Best-effort: the depot is already gone, and with a dangling default the
+    resolver falls through to ``no_depot_configured``, so a settings failure
+    is logged and the delete still answers 204.
+    """
+    from ops.middleware.tenant_guard import get_tenant_settings_service
+
+    svc = get_tenant_settings_service()
+    if svc is None:
+        return
+    try:
+        if await svc.get_default_depot_id(tenant_id) == depot_id:
+            await svc.set_default_depot_id(tenant_id, None)
+    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+        logger.warning(
+            "fuel_ops.depots.delete: could not clear default depot for "
+            "tenant=%s depot=%s: %s",
+            tenant_id,
+            depot_id,
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------------
