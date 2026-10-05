@@ -644,7 +644,8 @@ class TestGenerateQuarterlyReport:
             # get_fuel_gallons_by_jurisdiction: fuel_card_transactions
             Exception("index_not_found_exception"),
             # _get_jurisdiction_tax_rates: tax_jurisdictions
-            # TX state excise = 20 cents/gallon (FIPS 48).
+            # TX state excise = 20 cents/gallon (FIPS 48), stored in the
+            # Tax_Engine RATE_SCALE convention (tenths of a cent) as 200.
             {
                 "hits": {
                     "hits": [
@@ -653,7 +654,7 @@ class TestGenerateQuarterlyReport:
                                 "fips_code": "48",
                                 "jurisdiction_level": "state",
                                 "tax_type": "excise",
-                                "rate_cents_per_gallon": 20,
+                                "rate_cents_per_gallon": 200,
                             }
                         }
                     ],

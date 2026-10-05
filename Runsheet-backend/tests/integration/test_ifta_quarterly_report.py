@@ -244,6 +244,35 @@ def _make_fuel_card_response() -> Dict[str, Any]:
     }
 
 
+def _make_tax_jurisdictions_response() -> Dict[str, Any]:
+    """State excise rows in the Tax_Engine RATE_SCALE convention (tenths of a cent).
+
+    CA 200 = 20.0 c/gal and NV 270 = 27.0 c/gal are in effect for the quarter.
+    The other two CA rows must be ignored: one takes effect after the quarter
+    ends, the other expired before it began.
+    """
+    def row(fips, rate, effective, expiry=None):
+        src = {
+            "fips_code": fips,
+            "jurisdiction_level": "state",
+            "tax_type": "excise",
+            "rate_cents_per_gallon": rate,
+            "effective_date": effective,
+            "tenant_id": TENANT_ID,
+        }
+        if expiry:
+            src["expiry_date"] = expiry
+        return {"_source": src}
+
+    hits = [
+        row("06", 200, "2025-01-01"),
+        row("32", 270, "2025-01-01"),
+        row("06", 900, "2026-10-01"),  # next quarter
+        row("06", 800, "2024-01-01", expiry="2026-06-30"),  # expired before Q3
+    ]
+    return {"hits": {"hits": hits, "total": {"value": len(hits)}}}
+
+
 # ---------------------------------------------------------------------------
 # ES mock builder with call routing
 # ---------------------------------------------------------------------------
@@ -256,7 +285,11 @@ def _build_es_mock() -> AsyncMock:
 
     call_counter: Dict[str, int] = {}
 
-    async def _search_documents(index: str, query: Any, **kwargs) -> Dict:
+    # ``size`` is positional: the reporter calls
+    # ``search_documents(index, query, 200)``. A mock without it raised
+    # TypeError there, which the reporter swallowed as "no rates", so the
+    # tax-rate path was never exercised (finding C6).
+    async def _search_documents(index: str, query: Any, size: int = 100, **kwargs) -> Dict:
         call_counter.setdefault(index, 0)
         call_counter[index] += 1
 
@@ -273,6 +306,8 @@ def _build_es_mock() -> AsyncMock:
             return _make_terminal_bols_response()
         elif index == "fuel_card_transactions":
             return _make_fuel_card_response()
+        elif index == "tax_jurisdictions":
+            return _make_tax_jurisdictions_response()
         else:
             return {"hits": {"hits": [], "total": {"value": 0}}}
 
@@ -444,3 +479,28 @@ class TestIFTAQuarterlyReport:
         # AZ: truck_B(400)
         assert "AZ" in jur_map
         assert jur_map["AZ"].total_miles == TRUCK_B_AZ_MILES
+
+
+class TestIFTATaxRates:
+    """Finding C6: rates are scaled from tenths of a cent and dated to the quarter."""
+
+    @pytest.mark.asyncio
+    async def test_tax_rates_are_scaled_and_dated(self, caplog):
+        es = _build_es_mock()
+        reporter = IFTAReporter(es, AsyncMock())
+
+        with caplog.at_level(logging.WARNING, logger="compliance.services.ifta_reporter"):
+            report = await reporter.generate_quarterly_report(TENANT_ID, QUARTER)
+
+        assert any(c.args[0] == "tax_jurisdictions" for c in es.search_documents.call_args_list)
+        assert not [r for r in caplog.records if "failed to load" in r.getMessage()]
+
+        entries = [j for t in report.trucks for j in t.jurisdictions]
+        ca = [j for j in entries if j.jurisdiction == "CA"]
+        nv = [j for j in entries if j.jurisdiction == "NV"]
+        assert ca and nv
+        for j in ca:
+            assert j.tax_rate == 20.0
+            assert j.tax_due == round(j.net_taxable_gallons * 20.0, 2)
+        for j in nv:
+            assert j.tax_rate == 27.0

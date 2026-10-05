@@ -49,6 +49,7 @@ from compliance.services.compliance_es_mappings import (
     TERMINAL_BOLS_INDEX,
 )
 from compliance.services.state_boundary_detector import StateBoundaryDetector
+from compliance.services.tax_engine import RATE_SCALE
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -1138,9 +1139,9 @@ class IFTAReporter:
     # ------------------------------------------------------------------
 
     async def _get_jurisdiction_tax_rates(
-        self, tenant_id: str
+        self, tenant_id: str, quarter: str
     ) -> Dict[str, float]:
-        """Return ``{state_code: rate_cents_per_gallon}`` for IFTA states.
+        """Return ``{state_code: cents_per_gallon}`` for IFTA states in ``quarter``.
 
         Resolves the state-level fuel excise rate for each jurisdiction
         from the ``tax_jurisdictions`` index (the same rate table the
@@ -1149,11 +1150,18 @@ class IFTAReporter:
         in cents per gallon so :meth:`generate_quarterly_report` can
         compute ``tax_due`` per jurisdiction.
 
+        Stored rates use the Tax_Engine :data:`RATE_SCALE` convention (tenths
+        of a cent per gallon), so they are divided by ``RATE_SCALE`` here.
+        Only rows in effect for some part of the quarter count: a row that
+        starts on or after the quarter's end, or expired before its start, is
+        skipped (finding C6).
+
         Rows that are not state-level excise rates are ignored. Failures
         are logged and yield an empty map so the report still renders
         (with zero tax) rather than failing outright.
         """
         fips_to_state = {fips: code for code, fips in _STATE_CODE_TO_FIPS.items()}
+        quarter_start, quarter_end = _quarter_date_range(quarter)
 
         base_query: Dict[str, Any] = {
             "query": {
@@ -1190,10 +1198,16 @@ class IFTAReporter:
             rate = source.get("rate_cents_per_gallon")
             if state_code is None or rate is None:
                 continue
+            effective = source.get("effective_date")
+            if effective is not None and str(effective)[:10] >= quarter_end:
+                continue  # takes effect after the quarter
+            expiry = source.get("expiry_date")
+            if expiry is not None and str(expiry)[:10] < quarter_start:
+                continue  # expired before the quarter
             # Keep the highest excise rate seen for the state (defensive
             # against overlapping rows); typically there is exactly one.
             existing = rates.get(state_code)
-            rate_val = float(rate)
+            rate_val = float(rate) / RATE_SCALE
             if existing is None or rate_val > existing:
                 rates[state_code] = rate_val
         return rates
@@ -1256,7 +1270,7 @@ class IFTAReporter:
         # Step 3b: Load per-jurisdiction excise tax rates (cents/gallon)
         # so tax_due can be computed below. Empty when no rate table is
         # configured — the report still renders with zero tax.
-        tax_rates = await self._get_jurisdiction_tax_rates(tenant_id)
+        tax_rates = await self._get_jurisdiction_tax_rates(tenant_id, quarter)
 
         # Build a lookup: truck_id -> {jurisdiction -> total_gallons}
         # Exclude flagged trucks from fuel data
