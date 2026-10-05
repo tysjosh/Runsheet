@@ -962,7 +962,7 @@ async def initialize(app, container: ServiceContainer) -> None:
             TerminalBOLIngestionService,
         )
         from compliance.services.terminal_bol_edi_parser import (
-            EDIParserRegistry,
+            create_default_registry,
         )
 
         # Resolve optional dependencies for the ingestion service
@@ -982,7 +982,9 @@ async def initialize(app, container: ServiceContainer) -> None:
             else None
         )
 
-        edi_parser_registry = EDIParserRegistry()
+        # The standard X12 856 + pipe-delimited strategies. An empty registry
+        # rejects every payload as unrecognised (finding C1).
+        edi_parser_registry = create_default_registry()
         bol_ingestion_service = TerminalBOLIngestionService(
             es_service=es_service,
             edi_parser_registry=edi_parser_registry,

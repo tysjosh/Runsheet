@@ -212,3 +212,36 @@ async def mock_app_and_run(container, captured_jobs):
     app = MagicMock()
     await compliance_mod.initialize(app, container)
     return app
+
+
+class TestTerminalBOLWiring:
+    """The BOL service must boot with the standard EDI strategies (finding C1).
+
+    An empty ``EDIParserRegistry`` rejected every payload as unrecognised, so
+    ``POST /api/compliance/terminal-bols`` could never ingest anything.
+    """
+
+    @pytest.mark.asyncio
+    async def test_registry_has_the_standard_strategies_and_parses_pipe(
+        self, mock_app_and_run, container
+    ):
+        from compliance.services.terminal_bol_edi_parser import (
+            PipeDelimitedParser,
+            X12856Parser,
+        )
+
+        svc = container.terminal_bol_ingestion_service
+        registry = svc._edi_parser_registry
+        kinds = {type(s) for s in registry.strategies}
+        assert {X12856Parser, PipeDelimitedParser} <= kinds
+
+        header = (
+            "load_number|product_code|gross_gallons|net_gallons|observed_temperature|"
+            "api_gravity|supplier_name|terminal_name|driver_id|timestamp"
+        )
+        row = (
+            "LOAD-2024-001|UNL87|8500.0|8450.5|72.5|58.2|Marathon Petroleum|"
+            "Pasadena Terminal|DRV-100|2024-01-15T10:30:00"
+        )
+        fields = registry.parse(f"{header}\n{row}\n".encode("utf-8"))
+        assert fields["load_number"] == "LOAD-2024-001"
