@@ -1602,8 +1602,9 @@ async def test_route_planning_routable_orders_from_postgres(engine, read_from_pg
         feature_flag_service=MagicMock(),
     )
     rows = await agent._fetch_routable_orders(TENANT)
-    # Only confirmed + scheduled are routable.
-    assert {r["order_id"] for r in rows} == {"o_conf", "o_sched"}
+    # N2: routable = LOADABLE_ORDER_STATUSES (placed, confirmed, scheduled),
+    # the same set the loader loads.
+    assert {r["order_id"] for r in rows} == {"o_conf", "o_sched", "o_placed"}
 
 
 async def test_delivery_prioritization_pending_and_discovery_from_postgres(engine, read_from_pg):

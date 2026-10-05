@@ -74,6 +74,7 @@ from fuel.services.fuel_product_catalog import (
     canonicalize,
     canonicalize_or_warn,
 )
+from fuel.order_models import LOADABLE_ORDER_STATUSES
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from fuel.services.sourcing_recommender import (
     InvalidBrandedPreferenceError,
@@ -1371,7 +1372,8 @@ class RoutePlanningAgent(OverlayAgentBase):
         # Fuel-order-based stop building (Task 11.2, Req 5.2.1–5.2.3)
         # ------------------------------------------------------------------
         # In addition to the loading-proposal flow, build stops directly
-        # from fuel_orders_current WHERE status IN {confirmed, scheduled}.
+        # from fuel_orders_current WHERE status IN LOADABLE_ORDER_STATUSES
+        # ({placed, confirmed, scheduled}, the set the loader loads; N2).
         # This ensures the route planning agent can operate on fuel orders
         # even when no compartment_loading proposal is buffered. Window
         # misses are surfaced on the last produced route plan (if any) or
@@ -2090,7 +2092,8 @@ class RoutePlanningAgent(OverlayAgentBase):
     ]:
         """Build route stops from fuel_orders_current.
 
-        Reads orders WHERE status IN {confirmed, scheduled} for the tenant.
+        Reads orders WHERE status IN LOADABLE_ORDER_STATUSES ({placed,
+        confirmed, scheduled}, shared with the loader; N2) for the tenant.
         Uses ship_to_lat/ship_to_lon as the stop coordinate; falls back to
         geocoding ship_to_address via the existing hook when null.
 
@@ -2194,7 +2197,7 @@ class RoutePlanningAgent(OverlayAgentBase):
                 "bool": {
                     "filter": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"status": ["confirmed", "scheduled"]}},
+                        {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}},
                     ]
                 }
             },
@@ -2209,7 +2212,7 @@ class RoutePlanningAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search(
                 "fuel_order", tenant_id,
-                in_filters={"status": ["confirmed", "scheduled"]},
+                in_filters={"status": list(LOADABLE_ORDER_STATUSES)},
                 page=1, size=1000,
             )
             if pg is not _NOT_CUT_OVER:

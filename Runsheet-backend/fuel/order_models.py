@@ -35,7 +35,7 @@ Validates: Requirements 1.1, 1.1.7, 1.1.8, 1.1.9, 1.1.10, 1.1.11.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -48,6 +48,12 @@ OrderStatus = Literal[
     "placed", "confirmed", "scheduled", "dispatched",
     "in_transit", "delivered", "failed", "cancelled", "on_hold",
 ]
+
+#: Order statuses that are still open work: compartment loading, delivery
+#: prioritization and route planning all read exactly this set. They must
+#: agree, or the route planner can't find stops for orders the loader loaded
+#: (staging N2: ``placed`` orders ended up as ``unresolvable_stop_locations``).
+LOADABLE_ORDER_STATUSES: Tuple[str, ...] = ("placed", "confirmed", "scheduled")
 
 CallType = Literal["will_call", "auto_fill", "keep_full", "one_off"]
 
@@ -396,6 +402,7 @@ class Driver(BaseModel):
 
 __all__ = [
     "OrderStatus",
+    "LOADABLE_ORDER_STATUSES",
     "CallType",
     "IntakeChannelType",
     "DriverStatus",

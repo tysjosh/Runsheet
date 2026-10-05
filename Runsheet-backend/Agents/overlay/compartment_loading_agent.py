@@ -117,6 +117,7 @@ from fuel.services.fuel_product_catalog import (
     canonicalize_or_warn,
     is_known_product,
 )
+from fuel.order_models import LOADABLE_ORDER_STATUSES
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from services.unit_conversion import GAL_TO_L
 
@@ -132,10 +133,11 @@ GALLONS_TO_LITERS: Final[float] = GAL_TO_L
 #: ``""`` is committed to an applied loading plan and is not loaded again.
 #: R8.6 rule: loadable = loadable statuses minus committed; routable = loadable
 #: statuses (RoutePlanningAgent keeps no committed exclusion, R8.5); committed
-#: draw = committed loadable plus dispatched/in_transit. At rebase, use N2's
-#: LOADABLE_ORDER_STATUSES here if it has landed, keeping this clause separate.
+#: draw = committed loadable plus dispatched/in_transit. The status set is the
+#: shared :data:`fuel.order_models.LOADABLE_ORDER_STATUSES` (N2); the committed
+#: clause stays separate.
 COMMITTED_ORDER_FIELD: Final[str] = "assigned_run_id"
-_LOADABLE_ORDER_STATUSES: Final[tuple] = ("placed", "confirmed", "scheduled")
+_LOADABLE_ORDER_STATUSES: Final[tuple] = LOADABLE_ORDER_STATUSES
 _IN_FLIGHT_ORDER_STATUSES: Final[tuple] = ("dispatched", "in_transit")
 
 

@@ -40,6 +40,7 @@ from Agents.support.fuel_distribution_models import (
     TankForecast,
 )
 from Agents.support.mvp_es_mappings import MVP_TANK_FORECASTS_INDEX
+from fuel.order_models import LOADABLE_ORDER_STATUSES
 from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 
@@ -313,7 +314,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             "query": {
                 "bool": {
                     "filter": [
-                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}}
+                        {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}}
                     ]
                 }
             },
@@ -332,7 +333,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search_all_tenants(
                 "fuel_order",
-                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                in_filters={"status": list(LOADABLE_ORDER_STATUSES)},
                 size=10_000,
             )
             if pg is not _NOT_CUT_OVER:
@@ -431,7 +432,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
                 "bool": {
                     "filter": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}},
+                        {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}},
                     ]
                 }
             },
@@ -446,7 +447,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search(
                 "fuel_order", tenant_id,
-                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                in_filters={"status": list(LOADABLE_ORDER_STATUSES)},
                 page=1, size=1000,
             )
             if pg is not _NOT_CUT_OVER:
