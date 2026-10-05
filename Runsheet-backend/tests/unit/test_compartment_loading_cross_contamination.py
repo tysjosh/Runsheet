@@ -194,11 +194,12 @@ def _install_compartments(deps: Dict[str, Any], *hits: Dict[str, Any]) -> None:
     call_count = [0]
 
     async def _search(index: str, query: Dict[str, Any], size: int = None):
-        call_count[0] += 1
         if index == "fuel_orders_current":
             # Return empty so the agent falls back to legacy priority-list path
+            # (the K11 committed-order probe reads this index too).
             return {"hits": {"hits": []}}
-        if call_count[0] <= 2:
+        call_count[0] += 1
+        if call_count[0] <= 1:
             # First non-fuel-orders call is truck_compartments
             return {"hits": {"hits": list(hits)}}
         return {"hits": {"hits": []}}

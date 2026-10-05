@@ -651,6 +651,7 @@ class HybridReadRepository:
                      range_lte: Optional[str] = None,
                      range_lt: Optional[str] = None,
                      exists_fields: Optional[List[str]] = None,
+                     unlinked_fields: Optional[List[str]] = None,
                      text_query: Optional[str] = None,
                      text_fields: Optional[List[str]] = None,
                      sort_field: str = "created_at",
@@ -666,7 +667,8 @@ class HybridReadRepository:
         inclusive ``>= range_gte`` / ``<= range_lte`` (or exclusive ``<
         range_lt``) string comparison (ISO-8601 timestamps sort lexically ==
         chronologically); ``exists_fields`` require the document field to be
-        present and non-null (ES ``exists``). ``text_query`` + ``text_fields``
+        present and non-null (ES ``exists``); ``unlinked_fields`` require it
+        to be absent, null or ``""`` (K11). ``text_query`` + ``text_fields``
         apply a case-insensitive substring (``ILIKE %q%``) match ORed across the
         named document fields — the Postgres analogue of the ES ``wildcard``
         free-text search, giving the same "contains" semantics on both read
@@ -696,6 +698,11 @@ class HybridReadRepository:
             where.append(self.model.document[key].as_boolean() == bool(value))
         for field in (exists_fields or []):
             where.append(self._doc_field(field).is_not(None))
+        # K11: absent, JSON null (``->>`` gives SQL NULL for both) or "".
+        for field in (unlinked_fields or []):
+            where.append(
+                or_(self._doc_field(field).is_(None), self._doc_field(field) == "")
+            )
         if range_field and range_gte is not None:
             where.append(self._doc_field(range_field) >= range_gte)
         if range_field and range_lte is not None:
@@ -745,6 +752,7 @@ class HybridReadRepository:
         range_lte: Optional[str] = None,
         range_lt: Optional[str] = None,
         exists_fields: Optional[List[str]] = None,
+        unlinked_fields: Optional[List[str]] = None,
         sort_field: str = "created_at",
         sort_order: str = "asc",
         size: int = _DEFAULT_PAGE_LIMIT,
@@ -780,6 +788,11 @@ class HybridReadRepository:
             where.append(self.model.document[key].as_boolean() == bool(value))
         for field in (exists_fields or []):
             where.append(self._doc_field(field).is_not(None))
+        # K11: absent, JSON null (``->>`` gives SQL NULL for both) or "".
+        for field in (unlinked_fields or []):
+            where.append(
+                or_(self._doc_field(field).is_(None), self._doc_field(field) == "")
+            )
         if range_field and range_gte is not None:
             where.append(self._doc_field(range_field) >= range_gte)
         if range_field and range_lte is not None:

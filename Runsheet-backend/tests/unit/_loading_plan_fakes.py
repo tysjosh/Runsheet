@@ -608,6 +608,8 @@ class ApprovalHarness:
         lock_timeout: float = 2.0,
         store: Optional[InMemoryDocumentStore] = None,
         clock: Optional[Callable[[], datetime]] = None,
+        ws: Optional[Any] = None,
+        activity: Optional[Any] = None,
     ) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
@@ -629,8 +631,10 @@ class ApprovalHarness:
         self.order_service = OrderService(
             order_repo=self.repo, ws_manager=self.order_ws, driver_counter_service=AsyncMock()
         )
-        self.ws = SpyAgentWS()
-        self.activity = FakeActivityLog()
+        # FEAT-004: the integration tests pass the real AgentActivityWSManager
+        # and ActivityLogService (as bootstrap wires them).
+        self.ws = ws if ws is not None else SpyAgentWS()
+        self.activity = activity if activity is not None else FakeActivityLog()
         self.feedback = MagicMock()
         self.feedback.record_rejection = AsyncMock()
         self.svc = ApprovalQueueService(
@@ -768,9 +772,135 @@ class ApprovalHarness:
         ]
 
 
+# ---------------------------------------------------------------------------
+# CompartmentLoadingAgent over the in-memory store (FEAT-004)
+# ---------------------------------------------------------------------------
+
+TRUCK_COMPARTMENTS = "truck_compartments"
+
+
+class FakeCustomerTankRepo:
+    """``CustomerTankRepository.get`` stand-in: ``tanks`` maps a tank id to
+    ``(capacity_gallons, current_level_gallons)``; unknown ids return None."""
+
+    def __init__(self, tanks: Optional[Dict[str, Tuple[float, float]]] = None) -> None:
+        self.tanks: Dict[str, Tuple[float, float]] = dict(tanks or {})
+
+    async def get(self, *, tenant_id: str, customer_tank_id: str) -> Any:
+        from types import SimpleNamespace
+
+        spec = self.tanks.get(customer_tank_id)
+        if spec is None:
+            return None
+        return SimpleNamespace(capacity_gallons=spec[0], current_level_gallons=spec[1])
+
+
+def seed_fleet(
+    store: InMemoryDocumentStore,
+    *,
+    tenant_id: str = "tenant-1",
+    trucks: Sequence[str] = ("truck-1",),
+    per_truck: int = 3,
+    capacity_liters: float = 4000.0,
+    grades: Sequence[str] = ("AGO",),
+) -> None:
+    """Seed ``truck_compartments`` docs the agent's ``_query_trucks`` reads."""
+    for truck_id in trucks:
+        for idx in range(per_truck):
+            store.seed(
+                TRUCK_COMPARTMENTS,
+                f"{truck_id}:c{idx}",
+                {
+                    "compartment_id": f"c{idx}",
+                    "truck_id": truck_id,
+                    "capacity_liters": capacity_liters,
+                    "allowed_grades": list(grades),
+                    "position_index": idx,
+                    "tenant_id": tenant_id,
+                },
+            )
+
+
+def priority_list_for(
+    order_ids: Iterable[str], *, tenant_id: str = "tenant-1", run_id: str = "run-1"
+) -> Any:
+    """A CRITICAL ``DeliveryPriorityList`` keyed by order id, first id highest."""
+    from Agents.support.fuel_distribution_models import (
+        DeliveryPriority,
+        DeliveryPriorityList,
+        FuelGrade,
+        PriorityBucket,
+    )
+
+    ids = list(order_ids)
+    return DeliveryPriorityList(
+        priorities=[
+            DeliveryPriority(
+                station_id=oid,
+                order_id=oid,
+                fuel_grade=FuelGrade.AGO,
+                priority_score=round(0.9 - 0.01 * i, 4),
+                priority_bucket=PriorityBucket.CRITICAL,
+            )
+            for i, oid in enumerate(ids)
+        ],
+        tenant_id=tenant_id,
+        run_id=run_id,
+    )
+
+
+def loading_agent(
+    store: InMemoryDocumentStore,
+    *,
+    confirmation_protocol: Optional[Any] = None,
+    tanks: Optional[Dict[str, Tuple[float, float]]] = None,
+    mode: str = "active_gated",
+) -> Any:
+    """A real ``CompartmentLoadingAgent`` reading orders, trucks and inventory
+    from ``store`` and persisting plans to it. The signal bus, agent WS and
+    compartment-state repo are mocks; ``mode`` is the pipeline override."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from Agents.overlay.compartment_loading_agent import CompartmentLoadingAgent
+
+    bus = MagicMock()
+    bus.subscribe = AsyncMock()
+    bus.unsubscribe = AsyncMock()
+    bus.publish = AsyncMock(return_value=1)
+    agent_ws = MagicMock()
+    agent_ws.broadcast_activity = AsyncMock()
+    agent_ws.broadcast_event = AsyncMock()
+    activity = MagicMock()
+    activity.log = AsyncMock(return_value="log-id")
+    activity.log_monitoring_cycle = AsyncMock(return_value="log-id")
+    state_repo = MagicMock()
+    state_repo.mark_loaded = AsyncMock()
+    if confirmation_protocol is None:
+        confirmation_protocol = MagicMock()
+        confirmation_protocol.process_mutation = AsyncMock()
+    agent = CompartmentLoadingAgent(
+        signal_bus=bus,
+        es_service=store,
+        activity_log_service=activity,
+        ws_manager=agent_ws,
+        confirmation_protocol=confirmation_protocol,
+        autonomy_config_service=MagicMock(),
+        feature_flag_service=MagicMock(),
+        compartment_state_repo=state_repo,
+        customer_tank_repo=FakeCustomerTankRepo(tanks),
+    )
+    agent._pipeline_mode_override = mode
+    return agent
+
+
 __all__ = [
     "APPROVALS",
     "ApprovalHarness",
+    "FakeCustomerTankRepo",
+    "TRUCK_COMPARTMENTS",
+    "loading_agent",
+    "priority_list_for",
+    "seed_fleet",
     "DictRedis",
     "FakeActivityLog",
     "SpyAgentWS",

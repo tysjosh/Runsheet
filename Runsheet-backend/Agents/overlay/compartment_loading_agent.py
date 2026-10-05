@@ -43,7 +43,7 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Final, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from Agents.overlay.base_overlay_agent import (
@@ -127,6 +127,27 @@ logger = logging.getLogger(__name__)
 #: the conversion because orders are gallons-denominated while the compartment
 #: solver and its kg/L densities are litres-denominated.
 GALLONS_TO_LITERS: Final[float] = GAL_TO_L
+
+#: K11 / R8.1: an order whose ``assigned_run_id`` is neither absent, null nor
+#: ``""`` is committed to an applied loading plan and is not loaded again.
+#: R8.6 rule: loadable = loadable statuses minus committed; routable = loadable
+#: statuses (RoutePlanningAgent keeps no committed exclusion, R8.5); committed
+#: draw = committed loadable plus dispatched/in_transit. At rebase, use N2's
+#: LOADABLE_ORDER_STATUSES here if it has landed, keeping this clause separate.
+COMMITTED_ORDER_FIELD: Final[str] = "assigned_run_id"
+_LOADABLE_ORDER_STATUSES: Final[tuple] = ("placed", "confirmed", "scheduled")
+_IN_FLIGHT_ORDER_STATUSES: Final[tuple] = ("dispatched", "in_transit")
+
+
+def _unlinked_clause(field: str) -> Dict[str, Any]:
+    """K11 document-store clause: ``field`` absent, null or ``""``."""
+    return {"bool": {
+        "should": [
+            {"bool": {"must_not": [{"exists": {"field": field}}]}},
+            {"term": {field: ""}},
+        ],
+        "minimum_should_match": 1,
+    }}
 
 # Default minimum delivery quantity in liters (Req 3.5)
 DEFAULT_MIN_DROP_LITERS = 500.0
@@ -236,6 +257,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             if customer_tank_repo is not None
             else CustomerTankRepository(es_service)
         )
+        # Per-evaluate state, reset at the start of every evaluate (R3.10, K11).
+        self._order_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._all_orders_committed = False
+        self._committed_order_count = 0
 
     # ------------------------------------------------------------------
     # Post-construction wiring helpers
@@ -352,6 +377,10 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         Returns:
             List of InterventionProposals with loading plan actions.
         """
+        self._order_snapshots = {}
+        self._all_orders_committed = False
+        self._committed_order_count = 0
+
         # Step 1: Collect buffered priority lists
         priority_lists = list(self._priority_buffer)
         self._priority_buffer.clear()
@@ -407,6 +436,28 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         delivery_requests = await self._build_delivery_requests_from_orders(
             tenant_id, priority_list
         )
+        if not delivery_requests and self._all_orders_committed:
+            # K11: the steady state after every plan is applied. no_input keeps
+            # it non-error in the pipeline log, and the distinct code tells a
+            # dispatcher "nothing left to load" from a failure.
+            logger.info(
+                "CompartmentLoadingAgent: every loadable order for tenant %s "
+                "is committed to an applied loading plan (%d order(s))",
+                tenant_id,
+                self._committed_order_count,
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="all_loadable_orders_committed",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "every loadable order is already committed to an "
+                        "applied loading plan"
+                    ),
+                    committed_orders=self._committed_order_count,
+                )
+            )
+            return []
         if not delivery_requests:
             # A priority list arrived but none of its entries resolved to a
             # loadable request. Unlike the empty-buffer case above there *was*
@@ -741,6 +792,23 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         fuel_orders = await self._query_fuel_orders(tenant_id)
 
         if not fuel_orders:
+            # K11: no uncommitted order. When committed ones exist, the tenant
+            # has real demand already on applied plans: never invent legacy
+            # station demand on top of it.
+            committed = await self._count_committed_loadable_orders(tenant_id)
+            if committed is None:
+                # Probe failed: fail closed (no invented demand), no flag.
+                return []
+            if committed > 0:
+                self._all_orders_committed = True
+                self._committed_order_count = committed
+                logger.info(
+                    "CompartmentLoadingAgent: no uncommitted fuel order for "
+                    "tenant %s; %d loadable order(s) already committed",
+                    tenant_id,
+                    committed,
+                )
+                return []
             # Fallback to legacy priority-list path during deprecation window
             logger.debug(
                 "CompartmentLoadingAgent: no fuel_orders_current docs found "
@@ -775,6 +843,14 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             gallons_requested = order.get("gallons_requested")
             fill_to_full = order.get("fill_to_full", False)
             customer_tank_id = order.get("customer_tank_id")
+            if order_id:
+                # R3.10: what the plan was built from, checked at approve time.
+                self._order_snapshots[order_id] = {
+                    "product_code": product_code,
+                    "customer_tank_id": customer_tank_id,
+                    "gallons_requested": gallons_requested,
+                    "fill_to_full": fill_to_full,
+                }
 
             priority = self._match_priority(order, by_order, by_station)
             if eligible and priority is None:
@@ -868,6 +944,25 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # the higher-priority order draws on it first (review R3).
         scored.sort(key=lambda c: (c.score is None, -(c.score or 0.0), c.order_id))
         remaining_liters: Dict[str, float] = {}
+        # K11 committed tank draw: volume already on applied plans or in flight
+        # comes off each known tank's budget first, so it can under-load but
+        # never overfill.
+        ullage_by_tank: Dict[str, float] = {}
+        for c in scored:
+            if c.tank_id is not None and c.ullage_liters is not None:
+                ullage_by_tank.setdefault(c.tank_id, c.ullage_liters)
+        if ullage_by_tank:
+            draw = await self._committed_tank_draw(
+                tenant_id, sorted(ullage_by_tank)
+            )
+            for tank_id, drawn in draw.items():
+                if tank_id not in ullage_by_tank:
+                    continue
+                remaining_liters[tank_id] = (
+                    0.0
+                    if drawn is None
+                    else max(0.0, round(ullage_by_tank[tank_id] - drawn, 2))
+                )
         requests: List[DeliveryRequest] = []
         for candidate in scored:
             cap_liters = candidate.requested_liters
@@ -947,8 +1042,11 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 "bool": {
                     "must": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}},
+                        {"terms": {"status": list(_LOADABLE_ORDER_STATUSES)}},
                     ],
+                    # K11 / R8.1: committed orders (linked run id) are not
+                    # loadable; a hand-scheduled order with no run id is (R8.3).
+                    "filter": [_unlinked_clause(COMMITTED_ORDER_FIELD)],
                 },
             },
             "size": 500,
@@ -963,7 +1061,8 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search(
                 "fuel_order", tenant_id,
-                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                in_filters={"status": list(_LOADABLE_ORDER_STATUSES)},
+                unlinked_fields=[COMMITTED_ORDER_FIELD],
                 page=1, size=500,
             )
             if pg is not _NOT_CUT_OVER:
@@ -986,6 +1085,141 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 e,
             )
             return []
+
+    async def _read_orders(
+        self,
+        tenant_id: str,
+        statuses: Sequence[str],
+        *,
+        linked: bool,
+        tank_ids: Optional[Sequence[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Tenant-scoped order read by status, optionally linked to a run.
+
+        ``linked=True`` keeps only orders with a non-empty ``assigned_run_id``
+        (K11 committed). Raises on a store error; the callers decide how to
+        fail closed.
+        """
+        in_filters: Dict[str, list] = {"status": list(statuses)}
+        must: List[Dict[str, Any]] = [
+            {"term": {"tenant_id": tenant_id}},
+            {"terms": {"status": list(statuses)}},
+        ]
+        if tank_ids is not None:
+            in_filters["customer_tank_id"] = list(tank_ids)
+            must.append({"terms": {"customer_tank_id": list(tank_ids)}})
+        bool_query: Dict[str, Any] = {"must": must}
+        if linked:
+            bool_query["filter"] = [{"exists": {"field": COMMITTED_ORDER_FIELD}}]
+            bool_query["must_not"] = [{"term": {COMMITTED_ORDER_FIELD: ""}}]
+
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "fuel_order", tenant_id,
+            in_filters=in_filters,
+            exists_fields=[COMMITTED_ORDER_FIELD] if linked else None,
+            page=1, size=500,
+        )
+        if pg is not _NOT_CUT_OVER:
+            orders = list(pg.get("items", []) or [])
+        else:
+            resp = await self._es.search_documents(
+                FUEL_ORDERS_CURRENT_INDEX, {"query": {"bool": bool_query}, "size": 500}, 500
+            )
+            orders = [
+                hit["_source"]
+                for hit in resp.get("hits", {}).get("hits", [])
+                if hit.get("_source")
+            ]
+        # Re-check in Python: exists_fields keeps "" on the hybrid path, and
+        # the status set must hold whatever the backend returned.
+        wanted = set(statuses)
+        return [
+            o for o in orders
+            if o.get("status") in wanted
+            and (not linked or o.get(COMMITTED_ORDER_FIELD))
+        ]
+
+    async def _count_committed_loadable_orders(
+        self, tenant_id: str
+    ) -> Optional[int]:
+        """Loadable-status orders already linked to a run (K11), or ``None``
+        when the probe fails (logged WARNING)."""
+        try:
+            committed = await self._read_orders(
+                tenant_id, _LOADABLE_ORDER_STATUSES, linked=True
+            )
+        except Exception as e:
+            logger.warning(
+                "CompartmentLoadingAgent: committed-order probe failed for "
+                "tenant %s (%s); building no delivery request",
+                tenant_id,
+                type(e).__name__,
+            )
+            return None
+        return len(committed)
+
+    async def _committed_tank_draw(
+        self, tenant_id: str, tank_ids: Sequence[str]
+    ) -> Dict[str, Optional[float]]:
+        """Litres already committed to each tank (K11); ``None`` = full draw.
+
+        Counts dispatched/in_transit orders whatever their run id, plus
+        loadable-status orders linked to a run. A ``fill_to_full`` order
+        draws the whole ullage; otherwise ``gallons_requested`` in litres. On
+        a read error every tank is treated as fully drawn (fail closed for
+        overfill).
+        """
+        if not tank_ids:
+            return {}
+        try:
+            in_flight = await self._read_orders(
+                tenant_id, _IN_FLIGHT_ORDER_STATUSES, linked=False,
+                tank_ids=tank_ids,
+            )
+            committed = await self._read_orders(
+                tenant_id, _LOADABLE_ORDER_STATUSES, linked=True,
+                tank_ids=tank_ids,
+            )
+        except Exception as e:
+            logger.warning(
+                "CompartmentLoadingAgent: committed tank-draw read failed for "
+                "tenant %s (%s); treating %d known tank(s) as full",
+                tenant_id,
+                type(e).__name__,
+                len(tank_ids),
+            )
+            return {tank_id: None for tank_id in tank_ids}
+
+        wanted = set(tank_ids)
+        draw: Dict[str, Optional[float]] = {}
+        seen: set = set()
+        for order in [*in_flight, *committed]:
+            tank_id = order.get("customer_tank_id")
+            order_id = order.get("order_id")
+            if tank_id not in wanted or order.get("tenant_id") not in (None, tenant_id):
+                continue
+            if order_id and order_id in seen:
+                continue
+            if order_id:
+                seen.add(order_id)
+            if tank_id in draw and draw[tank_id] is None:
+                continue
+            if order.get("fill_to_full"):
+                draw[tank_id] = None
+                continue
+            try:
+                liters = float(order.get("gallons_requested") or 0.0) * GALLONS_TO_LITERS
+            except (TypeError, ValueError):
+                # Unknown volume on a committed order: assume the full draw.
+                draw[tank_id] = None
+                continue
+            draw[tank_id] = round((draw.get(tank_id) or 0.0) + max(0.0, liters), 2)
+        return draw
 
     # ------------------------------------------------------------------
     # Customer tank resolution for ullage caps (Task 11.3 / Req 5.3.2)
@@ -1653,6 +1887,13 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     "run_id": loading_plan.run_id,
                     "order_ids": order_ids,
                     "truck_id": loading_plan.truck_id,
+                    # R3.10: the order fields this plan was built from; the
+                    # executor refuses a plan whose orders changed since.
+                    "order_snapshots": {
+                        oid: self._order_snapshots[oid]
+                        for oid in order_ids
+                        if oid in self._order_snapshots
+                    },
                     "assignments": [
                         a.model_dump(mode="json")
                         for a in loading_plan.assignments
