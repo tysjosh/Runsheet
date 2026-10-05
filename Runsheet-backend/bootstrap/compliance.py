@@ -947,6 +947,17 @@ async def initialize(app, container: ServiceContainer) -> None:
             "IFTA Reporter API wiring failed (task 12.10): %s", exc
         )
 
+    # ── VCF calculator (Req 10.4) ─────────────────────────────────
+    # Registered before the BOL block so the ingestion service's VCF
+    # cross-check runs. Nothing registered it before, so the check was
+    # silently skipped on every BOL (finding C4).
+    try:
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        container.vcf_calculator = VCFCalculator()
+        logger.info("VCFCalculator registered on container")
+    except Exception as exc:
+        logger.warning("VCFCalculator registration failed: %s", exc)
     # ── Terminal BOL Ingestion REST endpoints (Task 11.11) ────────
     # Wire the TerminalBOLIngestionService and ES service into
     # ``compliance.api.terminal_bol_endpoints`` so the POST (EDI),

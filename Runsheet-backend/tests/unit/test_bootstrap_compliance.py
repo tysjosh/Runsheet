@@ -245,3 +245,15 @@ class TestTerminalBOLWiring:
         )
         fields = registry.parse(f"{header}\n{row}\n".encode("utf-8"))
         assert fields["load_number"] == "LOAD-2024-001"
+
+    @pytest.mark.asyncio
+    async def test_vcf_calculator_is_registered_and_injected(
+        self, mock_app_and_run, container
+    ):
+        """Finding C4: without a registered calculator the BOL VCF check never ran."""
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        assert container.has("vcf_calculator")
+        calc = container.get("vcf_calculator")
+        assert isinstance(calc, VCFCalculator)
+        assert container.terminal_bol_ingestion_service._vcf_calculator is calc

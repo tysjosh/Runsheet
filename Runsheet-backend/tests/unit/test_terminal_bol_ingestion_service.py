@@ -1944,3 +1944,88 @@ class TestCombinedValidationScenarios:
         vcf_calculator.compute_net_gallons.assert_called_once()
         file_storage.put.assert_called_once()
         es_service.index_document.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: VCF cross-check with the real calculator (findings C4 + C5)
+# ---------------------------------------------------------------------------
+
+
+def _pipe_bol(net_gallons: float) -> bytes:
+    header = (
+        "load_number|product_code|gross_gallons|net_gallons|observed_temperature|"
+        "api_gravity|supplier_name|terminal_name|driver_id|timestamp"
+    )
+    row = (
+        f"LOAD-VCF-{net_gallons}|ULSD|8000.0|{net_gallons}|72.0|35.0|Valero|"
+        "Houston Terminal|DRV-200|2024-01-15T10:30:00"
+    )
+    return f"{header}\n{row}\n".encode("utf-8")
+
+
+def _pending_bol_hit(bol_id: str) -> dict:
+    return {
+        "hits": {
+            "hits": [{
+                "_source": {
+                    "bol_id": bol_id,
+                    "tenant_id": _TENANT_ID,
+                    "load_number": "PENDING",
+                    "product_code": "PENDING",
+                    "gross_gallons": 0.1,
+                    "net_gallons": 0.1,
+                    "observed_temperature_f": 60.0,
+                    "api_gravity": 0.0,
+                    "supplier_name": "PENDING",
+                    "terminal_name": "PENDING",
+                    "driver_id": "PENDING",
+                    "timestamp": "2024-01-15T10:30:00+00:00",
+                    "status": "pending_confirmation",
+                    "needs_operator_confirmation": True,
+                    "created_at": "2024-01-15T10:30:00+00:00",
+                    "updated_at": "2024-01-15T10:30:00+00:00",
+                }
+            }]
+        }
+    }
+
+
+class TestRealVCFCrossCheck:
+    """A Table 6B-correct BOL is not flagged; an old-math one is."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("net", "flagged"), [(7955.6, False), (7975.3, True)])
+    async def test_ingest_edi(self, es_service, registry, net, flagged):
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            vcf_calculator=VCFCalculator(),
+        )
+        bol = await svc.ingest_edi(_pipe_bol(net), _TENANT_ID)
+        assert bol.vcf_discrepancy_flag is flagged
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("net", "flagged"), [(7955.6, False), (7975.3, True)])
+    async def test_confirm_manual_bol(self, es_service, registry, net, flagged):
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        es_service.search_documents = AsyncMock(return_value=_pending_bol_hit("bol_vcf_real"))
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            vcf_calculator=VCFCalculator(),
+        )
+        await svc.confirm_manual_bol(
+            _TENANT_ID,
+            "bol_vcf_real",
+            {
+                "gross_gallons": 8000.0,
+                "net_gallons": net,
+                "observed_temperature_f": 72.0,
+                "api_gravity": 35.0,
+            },
+        )
+        payload = es_service.update_document.call_args[0][2]
+        assert payload["vcf_discrepancy_flag"] is flagged
