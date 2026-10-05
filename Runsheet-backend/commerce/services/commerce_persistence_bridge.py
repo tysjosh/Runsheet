@@ -37,6 +37,16 @@ def _enabled() -> bool:
     return bool(get_settings().commerce_dual_write_postgres)
 
 
+def dual_write_enabled() -> bool:
+    """Public form of :func:`_enabled`: is the relational mirror being written?
+
+    The loading-plan executor's projection check (design K6) uses it to tell a
+    lagging projection (repairable with one mirror write) from a mirror that is
+    switched off while reads are cut over (``projection_mirror_disabled``).
+    """
+    return _enabled()
+
+
 def _payments_authoritative() -> bool:
     """True when payments should be written to Postgres FIRST (authoritative).
 

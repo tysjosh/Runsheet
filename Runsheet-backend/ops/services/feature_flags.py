@@ -309,6 +309,24 @@ class FeatureFlagService:
             )
             return "disabled"
 
+    async def get_overlay_state_strict(self, flag_key: str, tenant_id: str) -> Optional[str]:
+        """Like get_overlay_state_or_none, but a Redis error raises instead of returning "disabled".
+
+        The loading-plan executor needs to tell a Redis fault from an explicit
+        ``disabled`` (which executes), so a shadow tenant never mutates when
+        Redis is unreachable (loading-plan-executor design K8, R6.3/R6.4).
+        """
+        if not self.client:
+            raise RuntimeError("Redis client not connected. Call connect() first.")
+        key = f"{OVERLAY_PREFIX}{flag_key}:{tenant_id}"
+        value = await self.client.get(key)          # errors propagate
+        if value is None:
+            return None
+        await self._refresh_ttl(key)                # never raises
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8")
+        return value
+
     async def set_overlay_state(
         self, flag_key: str, tenant_id: str, state: str, user_id: str
     ) -> str:

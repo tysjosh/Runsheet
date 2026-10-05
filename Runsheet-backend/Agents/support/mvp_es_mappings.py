@@ -172,6 +172,18 @@ MVP_LOAD_PLANS_MAPPING = {
             "estimated_cost":         {"type": "object", "dynamic": True},
             "actual_cost":            {"type": "object", "dynamic": True},
             "cost_variance_pct":      {"type": "float"},
+            # Loading-plan executor claim, lease and result (design K4).
+            # Declared here and in MVP_ADDITIVE_MAPPING_UPDATES so existing
+            # indices gain them too. applied_by/applied_at are separate from
+            # approved_by/approved_at, which MVP dispatch overwrites (R7.6).
+            "execution_status":       {"type": "keyword"},
+            "execution_attempt_id":   {"type": "keyword"},
+            "execution_claimed_at":   {"type": "date"},
+            "execution_action_id":    {"type": "keyword"},
+            "execution_approved_at":  {"type": "date"},
+            "applied_by":             {"type": "keyword"},
+            "applied_at":             {"type": "date"},
+            "execution_result":       {"type": "object", "dynamic": True},
         },
     },
     "settings": {
@@ -581,7 +593,19 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
                     # still reports "complete" with nothing persisted.
                     "product_code": {"type": "keyword"},
                 },
-            }
+            },
+            # Loading-plan executor fields (design K4). Same trap as
+            # product_code: mvp_load_plans is dynamic:strict, so declaring
+            # them only in MVP_LOAD_PLANS_MAPPING would reject every plan
+            # claim on an existing cluster.
+            "execution_status":      {"type": "keyword"},
+            "execution_attempt_id":  {"type": "keyword"},
+            "execution_claimed_at":  {"type": "date"},
+            "execution_action_id":   {"type": "keyword"},
+            "execution_approved_at": {"type": "date"},
+            "applied_by":            {"type": "keyword"},
+            "applied_at":            {"type": "date"},
+            "execution_result":      {"type": "object", "dynamic": True},
         }
     },
     MVP_ROUTES_INDEX: {

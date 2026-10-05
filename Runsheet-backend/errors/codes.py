@@ -108,6 +108,9 @@ class ErrorCode(str, Enum):
     INVALID_STATUS_TRANSITION = "INVALID_STATUS_TRANSITION"
     """Requested status transition is not allowed by the order state machine (HTTP 409)"""
 
+    LOADING_PLAN_EXECUTION_FAILED = "LOADING_PLAN_EXECUTION_FAILED"
+    """An approved loading plan was not (fully) applied to its orders (HTTP 409, design K10)"""
+
     CHANNEL_DISABLED = "CHANNEL_DISABLED"
     """Intake channel is disabled and cannot accept orders (HTTP 403)"""
 
@@ -351,6 +354,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.MISSING_CLIENT_EVENT_ID: 400,
     ErrorCode.MISSING_HOLD_REASON: 400,
     ErrorCode.INVALID_STATUS_TRANSITION: 409,
+    ErrorCode.LOADING_PLAN_EXECUTION_FAILED: 409,
     ErrorCode.CHANNEL_DISABLED: 403,
     ErrorCode.INSUFFICIENT_ROLE: 403,
     ErrorCode.DRIVER_UNAVAILABLE: 409,
