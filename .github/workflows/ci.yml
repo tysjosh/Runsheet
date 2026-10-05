@@ -303,12 +303,20 @@ jobs:
           # reachable server. A green step that ran nothing is precisely the
           # outcome the fixtures were written to avoid, so require passes and
           # forbid skips explicitly.
-          if ! grep -qE '[0-9]+ passed' /tmp/docstore.log; then
+          #
+          # Both checks read only pytest's final summary line, e.g.
+          # "===== 153 passed, 2 skipped in 16.76s =====". Grepping the whole
+          # log matched application output instead: the loading-plan executor
+          # logs "applied=2 skipped=0", which contains "2 skipped", so a run
+          # with 153 passed and 0 skipped failed this step.
+          summary=$(grep -E '^=+ .+ in [0-9.]+s' /tmp/docstore.log | tail -n 1)
+          echo "pytest summary: ${summary}"
+          if ! printf '%s\n' "$summary" | grep -qE '[0-9]+ passed'; then
             echo "❌ No document-store tests passed — they were skipped or not collected."
             echo "   The Postgres service or POSTGRES_TEST_URL is not reachable."
             exit 1
           fi
-          if grep -qE '[0-9]+ skipped' /tmp/docstore.log; then
+          if printf '%s\n' "$summary" | grep -qE '[0-9]+ skipped'; then
             echo "❌ Some document-store tests skipped; every one of them needs the database."
             exit 1
           fi
