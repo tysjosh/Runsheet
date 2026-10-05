@@ -2063,6 +2063,19 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     logger.info("Fuel-ops hardening bootstrap complete")
 
+    # Last step: re-apply the HTTP-client / LiteLLM log levels (N1). litellm is
+    # first imported during this bootstrap, after TelemetryService applied them,
+    # and may set its own loggers and handler to DEBUG on import. Its debug and
+    # httpx INFO lines carry request URLs, including Gemini's ``?key=``.
+    try:
+        from telemetry.log_safety import apply_library_log_levels
+
+        apply_library_log_levels(
+            getattr(settings, "http_client_log_level", "WARNING")
+        )
+    except Exception as exc:  # noqa: BLE001 — logging setup must not fail boot
+        logger.warning("Re-applying HTTP client log levels failed: %s", exc)
+
 
 async def shutdown(app, container: ServiceContainer) -> None:
     """Stop agents in order: L2 → L1 → L0, then close resources (Req 10.5)."""

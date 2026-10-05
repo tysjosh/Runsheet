@@ -21,7 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional, List, Tuple
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -378,6 +378,14 @@ class Settings(BaseSettings):
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    )
+    http_client_log_level: str = Field(
+        default="WARNING",
+        description=(
+            "Level for the httpx, httpcore and LiteLLM loggers. Their INFO lines "
+            "carry request URLs (Gemini puts the API key in ?key=), so keep "
+            "WARNING outside debugging. Secrets are redacted at any level."
+        ),
     )
     otel_endpoint: Optional[str] = Field(
         default=None,
@@ -967,14 +975,14 @@ class Settings(BaseSettings):
             )
         return v
 
-    @field_validator("log_level")
+    @field_validator("log_level", "http_client_log_level")
     @classmethod
-    def validate_log_level(cls, v: str) -> str:
-        """Validate that log_level is a valid logging level."""
+    def validate_log_level(cls, v: str, info: ValidationInfo) -> str:
+        """Validate that log_level / http_client_log_level is a valid logging level."""
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         v = v.strip().upper()
         if v not in valid_levels:
-            raise ValueError(f"log_level must be one of: {', '.join(valid_levels)}")
+            raise ValueError(f"{info.field_name} must be one of: {', '.join(valid_levels)}")
         return v
     
     @field_validator("session_store_type")

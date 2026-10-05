@@ -31,6 +31,11 @@ except ImportError:
     )
 
 from services.time_utils import utcnow
+from telemetry.log_safety import (
+    apply_library_log_levels,
+    install_log_redaction,
+    redact_secrets,
+)
 
 
 class JSONFormatter(logging.Formatter):
@@ -83,15 +88,18 @@ class JSONFormatter(logging.Formatter):
         if hasattr(record, "extra_data") and record.extra_data:
             log_data.update(record.extra_data)
         
-        # Include exception information if present
+        # Include exception information if present. The redacting record
+        # factory pre-renders exc_text with secrets masked; prefer it.
         if record.exc_info:
-            log_data["exception"] = self.formatException(record.exc_info)
+            log_data["exception"] = record.exc_text or self.formatException(record.exc_info)
         
         # Include stack trace if present (for non-exception stack info)
         if record.stack_info:
             log_data["stack_trace"] = record.stack_info
         
-        return json.dumps(log_data, default=str)
+        # Second redaction pass over the whole line: extra_data is attached
+        # after the record factory runs, so only this pass sees it (N1).
+        return redact_secrets(json.dumps(log_data, default=str))
 
 
 class TelemetryService:
@@ -151,6 +159,14 @@ class TelemetryService:
         stdout_handler.setLevel(log_level)
         stdout_handler.setFormatter(json_formatter)
         root_logger.addHandler(stdout_handler)
+        
+        # Keep credentials out of the logs (N1): scrub every record at
+        # creation, and quiet the HTTP-client / LiteLLM loggers, whose INFO
+        # lines carry request URLs such as Gemini's ``?key=...``.
+        install_log_redaction()
+        apply_library_log_levels(
+            getattr(self.settings, "http_client_log_level", "WARNING")
+        )
         
         # Create service-specific logger
         self._logger = logging.getLogger("telemetry")
