@@ -340,8 +340,10 @@ class TestRouteSimple:
             }
         )
 
-        # "truck fuel" matches fleet + fuel but no conjunction → simple
-        result = await orch.route("truck fuel status", "tenant-1")
+        # Two entity keywords (truck → fleet, consumption → fuel) and no
+        # conjunction → simple, two targets. "truck fuel status" now narrows
+        # to fleet: "fuel" alone is a qualifier (N3).
+        result = await orch.route("truck fuel consumption", "tenant-1")
 
         fleet_agent.handle.assert_called_once()
         fuel_agent.handle.assert_called_once()

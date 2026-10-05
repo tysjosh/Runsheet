@@ -139,11 +139,12 @@ async def test_orchestrator_route_does_not_leak_across_tenants():
         activity_log_service=activity_log,
     )
 
-    # Keyword routing: "truck" -> fleet; "delayed trucks" -> fleet + scheduling.
+    # Keyword routing: "truck" -> fleet; "truck jobs" -> fleet + scheduling
+    # (two entity keywords; "delayed trucks" narrows to fleet since N3).
     # No LLM classification runs.
     await orch.route("Find truck QA-TRUCK-AG-01", "tenant-A")
     tenant_a_calls = len(model.calls)
-    await orch.route("Show me delayed trucks", "tenant-B")
+    await orch.route("Show truck jobs", "tenant-B")
 
     assert tenant_a_calls == 1
     assert len(model.calls) == 3  # fleet + scheduling for tenant B

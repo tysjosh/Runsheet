@@ -8,10 +8,16 @@ multi-domain requests are routed through the ExecutionPlanner for
 structured plan-based execution.
 
 Key behaviours:
-  - ``_classify_intent`` matches message keywords against the routing
-    table to identify target specialist domains.
+  - ``_classify_intent`` matches message keywords (word-start, so "stops"
+    is not "ops") against the routing table, then narrows each clause to
+    the one domain whose *entity* keyword matched when the other domains
+    matched only via qualifiers ("scheduled fuel delivery jobs" is a
+    scheduling question, not three) (N3).
   - ``_is_complex_request`` detects multi-step or cross-domain requests
     that benefit from structured planning.
+  - With several simple targets, answers are buffered; a non-answer
+    ("There are no ...") is dropped when another target answered, and the
+    kept answers are labelled by specialist (N3).
   - ``route_stream`` orchestrates the full flow (classify → delegate →
     stream normalized ``ChatEvent``s); ``route`` collects it into a string.
   - LLM failures are retried per ``Agents.llm_errors`` and surface as one
@@ -23,13 +29,15 @@ Requirements: 7.6, 7.7, 7.8
 """
 
 import asyncio
+import functools
 import inspect
 import logging
 import random
+import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Pattern, Tuple
 
 from Agents.llm_errors import (
     AI_RATE_LIMITED,
@@ -70,6 +78,46 @@ def _failed_note(domain: str) -> str:
     return f"_The {domain} assistant couldn't answer this part right now._"
 
 
+#: Routing keywords that describe *what kind* of thing is asked about rather
+#: than the thing itself: "scheduled fuel delivery jobs" is about jobs. A
+#: clause whose one entity keyword belongs to a single domain goes only to
+#: that domain, even when other domains matched through these (N3).
+_QUALIFIER_KEYWORDS = frozenset({
+    "location", "schedule", "delay", "fuel", "diesel", "petrol", "delivery", "ops",
+})
+
+#: Section headings for answers from more than one specialist.
+DOMAIN_LABELS: Dict[str, str] = {
+    "fleet": "Fleet",
+    "scheduling": "Scheduling",
+    "fuel": "Fuel",
+    "ops": "Operations",
+    "reporting": "Reporting",
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _keyword_pattern(keyword: str) -> Pattern[str]:
+    """Word-start, prefix match: "trucks" and "scheduled" match, "stops"
+    (``ops``) and "translate" (``sla``) do not."""
+    return re.compile(r"\b" + re.escape(keyword), re.IGNORECASE)
+
+
+#: A short reply that says the specialist has nothing to report. Only the
+#: first 300 characters are checked, and only replies of at most 500.
+_NON_ANSWER = re.compile(
+    r"\b(i (?:cannot|can't|can not|am unable|am not able|don't have|do not have)"
+    r"|unable to|there (?:are|is) no|no [^.]{0,60}(?:found|available|at this time|exist)"
+    r"|not (?:available|found)|outside (?:of )?my)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_non_answer(text: str) -> bool:
+    stripped = text.strip()
+    return len(stripped) <= 500 and bool(_NON_ANSWER.search(stripped[:300]))
+
+
 class AgentOrchestrator:
     """Routes requests to specialist agents and synthesizes results.
 
@@ -93,7 +141,7 @@ class AgentOrchestrator:
         ],
         "fuel": [
             "fuel", "refill", "station", "diesel", "petrol",
-            "consumption",
+            "consumption", "refuel",
         ],
         "ops": [
             "shipment", "rider", "sla", "delivery", "ops", "breach",
@@ -111,6 +159,12 @@ class AgentOrchestrator:
         " followed by ", " next ", " additionally ",
         " as well as ", " plus ",
     ]
+
+    # Clause boundaries for per-clause target narrowing.
+    _CLAUSE_SPLIT = re.compile(
+        "|".join(re.escape(i) for i in _COMPLEX_INDICATORS) + r"|[,;]",
+        re.IGNORECASE,
+    )
 
     def __init__(
         self,
@@ -230,7 +284,10 @@ class AgentOrchestrator:
 
         Event order: ``status(routing)``, then per specialist
         ``status(specialist_start)`` and its ``text`` (with ``tool`` /
-        ``tool_result`` when the specialist streams), then ``done``. Complex
+        ``tool_result`` when the specialist streams), then ``done``. With
+        several targets the text is held back until every target finished
+        (status and tool events still stream) and then sent as labelled
+        sections, without non-answers when another target answered. Complex
         requests emit ``status(planning)`` and one ``text`` block.
 
         Provider failures are retried per :mod:`Agents.llm_errors`. When every
@@ -272,16 +329,19 @@ class AgentOrchestrator:
         yield status_event("routing", targets=targets)
 
         failures: Dict[str, Optional[AgentServiceError]] = {}
+        dropped: List[str] = []
         response_length = 0
         errored = False
 
         if is_complex:
             events = self._stream_complex_request(
                 user_message, targets, tenant_id, session_id, request_id, failures,
+                dropped,
             )
         else:
             events = self._stream_simple_request(
                 user_message, targets, tenant_id, session_id, request_id, failures,
+                dropped,
             )
         async for event in events:
             if event["type"] == "text":
@@ -317,6 +377,7 @@ class AgentOrchestrator:
                 "response_length": response_length,
                 "failed_targets": list(failures),
                 "error_codes": sorted({e.code for e in failures.values() if e is not None}),
+                "dropped_targets": dropped,
             },
         })
 
@@ -337,19 +398,45 @@ class AgentOrchestrator:
             message: The user's natural language message.
 
         Returns:
-            List of matched domain names (may be empty).
+            List of matched domain names (may be empty), un-narrowed: every
+            domain any keyword matched. Routing uses :meth:`_narrow_targets`.
         """
-        message_lower = message.lower()
-        matched: List[str] = []
+        return list(self._domain_hits(message))
+
+    def _domain_hits(self, text: str) -> Dict[str, bool]:
+        """Matched domains in routing-table order, each mapped to whether an
+        *entity* keyword (not only a ``_QUALIFIER_KEYWORDS`` one) matched."""
+        hits: Dict[str, bool] = {}
         for domain, keywords in self.ROUTING_TABLE.items():
-            if any(kw in message_lower for kw in keywords):
-                matched.append(domain)
-        return matched
+            for kw in keywords:
+                if _keyword_pattern(kw).search(text):
+                    is_entity = kw not in _QUALIFIER_KEYWORDS
+                    hits[domain] = hits.get(domain, False) or is_entity
+        return hits
+
+    def _narrow_targets(self, message: str) -> List[str]:
+        """Keyword targets, narrowed per clause (N3).
+
+        The message is split on ``_COMPLEX_INDICATORS`` and ``,``/``;``. In a
+        clause where exactly one domain matched through an entity keyword,
+        the other domains matched only through qualifiers, so the clause goes
+        to that one domain. Otherwise it goes to every domain it matched.
+        Returns the ordered union over the clauses.
+        """
+        targets: List[str] = []
+        for clause in self._CLAUSE_SPLIT.split(message):
+            hits = self._domain_hits(clause)
+            entities = [d for d, is_entity in hits.items() if is_entity]
+            for domain in (entities if len(entities) == 1 else list(hits)):
+                if domain not in targets:
+                    targets.append(domain)
+        return targets or self._classify_intent_keywords(message)
 
     async def _classify_intent(self, message: str) -> List[str]:
         """Hybrid intent classification: keywords first, LLM fallback.
 
-        1. Scans the message for keywords from the routing table.
+        1. Matches routing-table keywords and narrows them per clause
+           (:meth:`_narrow_targets`).
         2. If no keywords match, asks Gemini to classify the intent.
         3. Falls back to empty list if both fail.
 
@@ -360,7 +447,7 @@ class AgentOrchestrator:
             List of matched domain names (may be empty).
         """
         # Step 1: Fast keyword matching
-        matched = self._classify_intent_keywords(message)
+        matched = self._narrow_targets(message)
 
         if matched:
             return matched
@@ -413,7 +500,7 @@ class AgentOrchestrator:
 
         A request is considered complex if it contains conjunction or
         sequencing indicators (e.g. "and", "then", "also") **and**
-        matches more than one specialist domain.
+        targets more than one specialist domain after narrowing.
 
         Args:
             message: The user's natural language message.
@@ -426,7 +513,7 @@ class AgentOrchestrator:
             indicator in message_lower
             for indicator in self._COMPLEX_INDICATORS
         )
-        targets = self._classify_intent_keywords(message)
+        targets = self._narrow_targets(message)
         return has_conjunction and len(targets) > 1
 
     # ------------------------------------------------------------------
@@ -516,16 +603,21 @@ class AgentOrchestrator:
         session_id: Optional[str],
         request_id: Optional[str],
         failures: Dict[str, Optional[AgentServiceError]],
+        dropped: Optional[List[str]] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Run each matched specialist in turn and stream its events.
 
-        Failed targets are recorded in ``failures``. Answers from several
-        specialists are separated by a blank line, as ``_synthesize`` did.
+        Failed targets are recorded in ``failures``. One target streams its
+        text live. Several targets have their text buffered (status and tool
+        events still stream live) and flushed by :meth:`_answer_sections`;
+        targets whose non-answer was dropped are appended to ``dropped``.
         """
         context = {"tenant_id": tenant_id}
         if session_id:
             context["session_id"] = session_id
 
+        buffered = len(targets) > 1
+        answers: List[Tuple[str, str]] = []
         attempted = 0
         any_text = False
         for target in targets:
@@ -534,19 +626,27 @@ class AgentOrchestrator:
                 continue
             attempted += 1
             yield status_event("specialist_start", specialist=target)
-            started_text = False
+            parts: List[str] = []
             try:
                 async for event in self._run_specialist(
                     target, agent, user_message, context, request_id
                 ):
-                    if event["type"] == "text" and not started_text:
-                        started_text = True
-                        if any_text:
-                            yield text_event("\n\n")
+                    if event["type"] == "text":
+                        if buffered:
+                            parts.append(event["content"])
+                            continue
                         any_text = True
                     yield event
             except AgentServiceError as err:
                 failures[target] = err
+            answer = "".join(parts)
+            if answer:
+                answers.append((target, answer))
+
+        if buffered and answers:
+            for event in self._answer_sections(answers, dropped):
+                yield event
+            any_text = True
 
         if attempted and len(failures) == attempted and not any_text:
             yield self._combined_error(
@@ -561,6 +661,33 @@ class AgentOrchestrator:
         if not any_text:
             yield text_event(NO_RESULTS_MESSAGE)
 
+    @staticmethod
+    def _answer_sections(
+        answers: List[Tuple[str, str]], dropped: Optional[List[str]]
+    ) -> List[ChatEvent]:
+        """Text events for buffered answers from several specialists (N3).
+
+        Non-answers are dropped when at least one answer is substantive, so a
+        "There are no scheduled jobs" from one specialist no longer sits next
+        to another's list of those jobs. When more than one answer is kept
+        each is headed by its specialist's label. When every answer is a
+        non-answer, all are kept.
+        """
+        substantive = [(t, a) for t, a in answers if not _is_non_answer(a)]
+        kept = substantive or answers
+        if dropped is not None:
+            kept_targets = {t for t, _ in kept}
+            dropped.extend(t for t, _ in answers if t not in kept_targets)
+        if len(kept) == 1:
+            return [text_event(kept[0][1])]
+        return [
+            text_event(
+                ("\n\n" if i else "")
+                + f"**{DOMAIN_LABELS.get(target, target.title())}**\n\n{answer}"
+            )
+            for i, (target, answer) in enumerate(kept)
+        ]
+
     async def _stream_complex_request(
         self,
         user_message: str,
@@ -569,6 +696,7 @@ class AgentOrchestrator:
         session_id: Optional[str],
         request_id: Optional[str],
         failures: Dict[str, Optional[AgentServiceError]],
+        dropped: Optional[List[str]] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Run a complex request through the ExecutionPlanner.
 
@@ -599,6 +727,7 @@ class AgentOrchestrator:
             # Fall back to simple sequential execution
             async for event in self._stream_simple_request(
                 user_message, targets, tenant_id, session_id, request_id, failures,
+                dropped,
             ):
                 yield event
             return

@@ -207,13 +207,15 @@ async def test_outcome_success_when_every_target_answers():
         activity_log=log,
     )
 
-    events = await _events(orch, "truck fuel status")
+    events = await _events(orch, "truck fuel consumption")
 
     entry = _routing_completed(log)
     assert entry["outcome"] == "success"
     assert entry["details"]["failed_targets"] == []
     assert entry["details"]["error_codes"] == []
-    assert "".join(e["content"] for e in events if e["type"] == "text") == "a\n\nb"
+    # Several answers are labelled by specialist (N3).
+    text = "".join(e["content"] for e in events if e["type"] == "text")
+    assert text == "**Fleet**\n\na\n\n**Fuel**\n\nb"
 
 
 async def test_outcome_partial_keeps_the_answer_and_adds_a_safe_note():
@@ -223,7 +225,7 @@ async def test_outcome_partial_keeps_the_answer_and_adds_a_safe_note():
         activity_log=log,
     )
 
-    events = await _events(orch, "truck fuel status")
+    events = await _events(orch, "truck fuel consumption")
 
     text = "".join(e["content"] for e in events if e["type"] == "text")
     assert "12 trucks" in text
@@ -243,7 +245,7 @@ async def test_outcome_failure_when_every_target_fails():
         activity_log=log,
     )
 
-    events = await _events(orch, "truck fuel status")
+    events = await _events(orch, "truck fuel consumption")
 
     errors = [e for e in events if e["type"] == "error"]
     # Any rate limit among the failures makes the whole request rate-limited.
