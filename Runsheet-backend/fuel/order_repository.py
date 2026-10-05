@@ -390,15 +390,22 @@ class FuelOrderRepository:
         asset_id: str,
         expected_status: str,
         claim_id: str,
+        expected_last_event_timestamp: Any = _UNSET,
     ) -> AssignmentClaim:
         """Link an order to one run and truck under the row lock (link CAS).
 
         Refused when the order is missing or cross-tenant
         (``order_not_found``), its status is not ``expected_status``
         (``order_changed_since_plan``), or it is linked to another run or
-        truck (``order_committed_elsewhere``). ``already_linked`` when both
-        links already name the targets; ``assigned_claim_id`` is then left
-        as is. ``linked`` writes both links and ``assigned_claim_id``.
+        truck (``order_committed_elsewhere``). When
+        ``expected_last_event_timestamp`` is given, a stored
+        ``last_event_timestamp`` that differs by value is also refused as
+        ``order_changed_since_plan``: the caller's read is stale, so a
+        same-status edit (an ERP/CSV re-sync changing quantity or tank)
+        cannot slip in between the caller's read and this claim.
+        ``already_linked`` when both links already name the targets;
+        ``assigned_claim_id`` is then left as is. ``linked`` writes both
+        links and ``assigned_claim_id``.
 
         Never touches ``last_event_timestamp`` or ``assigned_driver_id``, and
         writes ``es_documents`` only: the guarded upsert that follows mirrors
@@ -428,6 +435,16 @@ class FuelOrderRepository:
             if run not in (None, run_id) or asset not in (None, asset_id):
                 verdict["reason"] = "order_committed_elsewhere"
                 return None
+            if expected_last_event_timestamp is not _UNSET:
+                try:
+                    same = _ts(current.get("last_event_timestamp")) == _ts(
+                        expected_last_event_timestamp
+                    )
+                except (TypeError, ValueError):
+                    same = False  # unparseable is never a match (K5a)
+                if not same:
+                    verdict["reason"] = "order_changed_since_plan"
+                    return None
             if (run, asset) == (run_id, asset_id):
                 verdict["outcome"] = "already_linked"
                 return None

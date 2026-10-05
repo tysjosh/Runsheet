@@ -234,6 +234,49 @@ async def test_claim_refusals(seed, reason):
         assert store.doc(ORDERS, "o1").get("assigned_claim_id") is None
 
 
+@pytest.mark.parametrize(
+    ("stored_ts", "expected_ts"),
+    [(TS1, TS0), ("garbage", TS0), (None, TS0), (TS0, None)],
+    ids=["newer", "unparseable", "stored_missing", "expected_missing"],
+)
+async def test_claim_refuses_when_stored_timestamp_differs_from_callers_read(stored_ts, expected_ts):
+    # Review pass 1, finding 1: a same-status edit between the caller's read
+    # and the claim (an ERP re-sync changing gallons_requested) is refused.
+    store, repo = _repo(fuel_order_doc("o1", last_event_timestamp=TS0))
+    store.poke(ORDERS, "o1", gallons_requested=999.0, last_event_timestamp=stored_ts)
+    claim = await repo.claim_assignment(
+        T, "o1", run_id="run-1", asset_id="truck-1", expected_status="confirmed",
+        claim_id="c-1", expected_last_event_timestamp=expected_ts,
+    )
+    assert (claim.outcome, claim.reason) == ("refused", "order_changed_since_plan")
+    assert _write_count(store) == 0
+    stored = store.doc(ORDERS, "o1")
+    assert (stored.get("assigned_run_id"), stored.get("assigned_claim_id")) == (None, None)
+
+
+async def test_claim_timestamp_guard_compares_by_value_not_string():
+    store, repo = _repo(fuel_order_doc("o1", last_event_timestamp="2026-07-29T12:00:00+00:00"))
+    claim = await repo.claim_assignment(
+        T, "o1", run_id="run-1", asset_id="truck-1", expected_status="confirmed",
+        claim_id="c-1", expected_last_event_timestamp=TS0,  # same instant, "Z" form
+    )
+    assert claim.outcome == "linked"
+
+
+async def test_claim_timestamp_guard_refuses_a_stale_already_linked_read():
+    doc = fuel_order_doc(
+        "o1", status="scheduled", assigned_run_id="run-1", assigned_asset_id="truck-1",
+        assigned_claim_id="attempt-A", last_event_timestamp=TS1,
+    )
+    store, repo = _repo(doc)
+    claim = await repo.claim_assignment(
+        T, "o1", run_id="run-1", asset_id="truck-1", expected_status="scheduled",
+        claim_id="attempt-B", expected_last_event_timestamp=TS0,
+    )
+    assert (claim.outcome, claim.reason) == ("refused", "order_changed_since_plan")
+    assert _write_count(store) == 0
+
+
 async def test_claim_rejects_blank_claim_id():
     _store, repo = _repo(fuel_order_doc("o1"))
     with pytest.raises(ValueError):

@@ -184,6 +184,33 @@ async def test_concurrent_claims_for_different_runs_link_one(es, tenant):
     assert stored["assigned_claim_id"] == winner.order["assigned_claim_id"]
 
 
+async def test_claim_refuses_a_same_status_edit_after_the_callers_read(es, tenant):
+    # Review pass 1, finding 1, against the real row-locked atomic_update.
+    oid = _oid("ord")
+    await _seed(es, ORDERS, oid, fuel_order_doc(oid, tenant_id=tenant))
+    repo = FuelOrderRepository(es)
+    read = await repo.get_current(tenant, oid)
+    await es.atomic_update(ORDERS, oid, lambda c: {
+        **c, "gallons_requested": 999.0, "last_event_timestamp": "2026-07-29T12:30:00+00:00",
+    })
+
+    claim = await repo.claim_assignment(
+        tenant, oid, run_id="run-a", asset_id="truck-a", expected_status="confirmed",
+        claim_id="claim-a", expected_last_event_timestamp=read["last_event_timestamp"],
+    )
+
+    assert (claim.outcome, claim.reason) == ("refused", "order_changed_since_plan")
+    stored = await es.get_document(ORDERS, oid)
+    assert stored.get("assigned_run_id") is None and stored.get("assigned_claim_id") is None
+
+    fresh = await repo.get_current(tenant, oid)
+    claim = await repo.claim_assignment(
+        tenant, oid, run_id="run-a", asset_id="truck-a", expected_status="confirmed",
+        claim_id="claim-a", expected_last_event_timestamp=fresh["last_event_timestamp"],
+    )
+    assert claim.outcome == "linked"
+
+
 async def test_guarded_upsert_refuses_after_a_concurrent_status_change(es, tenant):
     oid = _oid("ord")
     await _seed(es, ORDERS, oid, fuel_order_doc(oid, tenant_id=tenant))

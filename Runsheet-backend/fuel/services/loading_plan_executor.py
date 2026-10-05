@@ -794,8 +794,11 @@ class LoadingPlanExecutor:
         applied = list(pre.applied)
         wrote = False
         for order_id in sorted(pre.to_apply):
-            status, steps, _seen_order = pre.to_apply[order_id]
+            status, steps, seen_order = pre.to_apply[order_id]
             try:
+                # The preflight read's timestamp rides into the claim CAS so a
+                # same-status edit (quantity, tank, product) landing between
+                # preflight and this claim is refused, not applied (R3.11).
                 claim = await self._repo.claim_assignment(
                     tenant_id,
                     order_id,
@@ -803,6 +806,7 @@ class LoadingPlanExecutor:
                     asset_id=truck_id,
                     expected_status=status,
                     claim_id=attempt_id,
+                    expected_last_event_timestamp=seen_order.get("last_event_timestamp"),
                 )
             except Exception:
                 logger.exception(

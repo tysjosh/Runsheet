@@ -660,6 +660,64 @@ async def test_first_claim_refused_with_no_prior_writes_is_failed():
     assert h.order_writes() == []
 
 
+RESYNC_TS = "2026-07-29T12:10:00+00:00"
+
+
+def _resync(h, order_id):
+    """An ERP/CSV re-sync: same status, new quantity, newer timestamp."""
+    return lambda: h.store.poke(
+        ORDERS, order_id, gallons_requested=999.0, last_event_timestamp=RESYNC_TS
+    )
+
+
+async def test_same_status_edit_before_first_claim_is_a_clean_failure():
+    # Review pass 1, finding 1: preflight read ord-1 as planned; a re-sync
+    # lands before its claim. The claim CAS carries the preflight timestamp.
+    h = Harness(_three())
+    h.on("atomic_update", ORDERS, "ord-1", _resync(h, "ord-1"))
+
+    result = await h.run()
+
+    assert result.outcome == "failed" and result.reason == "order_changed_since_plan"
+    assert result.writes_made is False and result.retryable is False
+    assert result.failures == [{"order_id": "ord-1", "reason": "order_changed_since_plan"}]
+    assert result.applied_order_ids == []
+    assert h.order_writes() == []
+    for oid in ("ord-1", "ord-2", "ord-3"):
+        assert h.links(oid) == (None, None) and h.order(oid)["status"] == "confirmed"
+    assert h.order("ord-1")["gallons_requested"] == 999.0
+    assert h.notified == [] and h.ws.broadcast.await_count == 0
+    assert h.plan()["execution_status"] == "failed"
+
+
+async def test_same_status_edit_before_later_claim_is_incomplete_and_retry_names_it():
+    h = Harness(_three())
+    h.on("atomic_update", ORDERS, "ord-2", _resync(h, "ord-2"))
+
+    first = await h.run()
+
+    assert first.outcome == "incomplete" and first.reason == "order_changed_since_plan"
+    assert first.writes_made is True and first.retryable is True
+    assert first.applied_order_ids == ["ord-1"]
+    assert first.pending_order_ids == ["ord-2", "ord-3"]
+    assert first.failures == [{"order_id": "ord-2", "reason": "order_changed_since_plan"}]
+    # The edited order was never linked or moved; the old sizing is not applied.
+    assert h.links("ord-2") == (None, None) and h.order("ord-2")["status"] == "confirmed"
+    assert h.events("ord-2") == []
+    assert h.links("ord-3") == (None, None)
+    assert h.plan()["execution_status"] == "incomplete"
+
+    mark = h.mark()
+    retry = await h.run()
+
+    assert retry.outcome == "incomplete" and retry.reason == "order_changed_since_plan"
+    assert "Order ord-2" in retry.message and "(1 of 3 orders)" in retry.message
+    assert retry.failures == [
+        {"order_id": "ord-2", "reason": "order_changed_since_plan", "field": "gallons_requested"}
+    ]
+    assert h.order_writes(mark) == []
+
+
 async def test_first_claim_raising_with_no_prior_writes_is_retryable_failed():
     h = Harness(_three())
     h.store.fail_on("atomic_update", ORDERS, "ord-1", nth=1)
