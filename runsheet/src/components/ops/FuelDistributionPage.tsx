@@ -155,6 +155,8 @@ const URGENCY_CONFIG: Record<string, { color: string; bg: string }> = {
 const STATUS_BADGE_CONFIG: Record<string, { color: string; bg: string }> = {
   draft: { color: "text-gray-700", bg: "bg-gray-100" },
   proposed: { color: "text-gray-700", bg: "bg-gray-100" },
+  // R12.7 (K13): an approved loading plan whose orders are linked but not yet dispatched.
+  scheduled: { color: "text-warning-dark", bg: "bg-warning-light" },
   dispatched: { color: "text-info-dark", bg: "bg-info-light" },
   completed: { color: "text-success-dark", bg: "bg-success-light" },
   rejected: { color: "text-error-dark", bg: "bg-error-light" },
@@ -162,8 +164,10 @@ const STATUS_BADGE_CONFIG: Record<string, { color: string; bg: string }> = {
 
 const VARIANCE_THRESHOLD = 5; // 5% threshold for color coding
 
-// Statuses that allow approve/reject actions
-const APPROVABLE_STATUSES = ["draft", "proposed"];
+// Statuses that allow approve (dispatch) and reject actions (R12.7, K13).
+// A `scheduled` plan can still be dispatched but no longer rejected.
+const DISPATCHABLE_STATUSES = ["draft", "proposed", "scheduled"];
+const REJECTABLE_STATUSES = ["draft", "proposed"];
 
 // ─── Status Badge Component ──────────────────────────────────────────────────
 
@@ -1793,23 +1797,23 @@ function PlanDetailView({
           <ChevronLeft className="w-4 h-4" /> Back to plans
         </button>
         <div className="flex items-center gap-2">
-          {APPROVABLE_STATUSES.includes(currentStatus) && (
-            <>
-              <button
-                onClick={() => onApprove(planId)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors"
-              >
-                <Check className="w-3 h-3" />
-                Approve
-              </button>
-              <button
-                onClick={() => onReject(planId)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
-              >
-                <X className="w-3 h-3" />
-                Reject
-              </button>
-            </>
+          {DISPATCHABLE_STATUSES.includes(currentStatus) && (
+            <button
+              onClick={() => onApprove(planId)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors"
+            >
+              <Check className="w-3 h-3" />
+              Approve
+            </button>
+          )}
+          {REJECTABLE_STATUSES.includes(currentStatus) && (
+            <button
+              onClick={() => onReject(planId)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
+            >
+              <X className="w-3 h-3" />
+              Reject
+            </button>
           )}
           <button
             onClick={onReplan}
@@ -2344,6 +2348,7 @@ function PlansTab() {
           <option value="">All statuses</option>
           <option value="draft">Draft</option>
           <option value="proposed">Proposed</option>
+          <option value="scheduled">Scheduled</option>
           <option value="dispatched">Dispatched</option>
           <option value="completed">Completed</option>
           <option value="rejected">Rejected</option>
@@ -2413,37 +2418,37 @@ function PlansTab() {
                 </div>
               </div>
               <div className="flex items-center gap-2 ml-4">
-                {/* Approve/Reject buttons for draft/proposed plans */}
-                {APPROVABLE_STATUSES.includes(p.status) && (
-                  <>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleApprove(p.plan_id);
-                      }}
-                      disabled={approveLoading === p.plan_id}
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors disabled:opacity-50"
-                      aria-label={`Approve plan ${p.plan_id}`}
-                    >
-                      {approveLoading === p.plan_id ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <Check className="w-3 h-3" />
-                      )}
-                      Approve
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowRejectDialog(p.plan_id);
-                      }}
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
-                      aria-label={`Reject plan ${p.plan_id}`}
-                    >
-                      <X className="w-3 h-3" />
-                      Reject
-                    </button>
-                  </>
+                {/* Approve for draft/proposed/scheduled, Reject for draft/proposed (R12.7) */}
+                {DISPATCHABLE_STATUSES.includes(p.status) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleApprove(p.plan_id);
+                    }}
+                    disabled={approveLoading === p.plan_id}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors disabled:opacity-50"
+                    aria-label={`Approve plan ${p.plan_id}`}
+                  >
+                    {approveLoading === p.plan_id ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Check className="w-3 h-3" />
+                    )}
+                    Approve
+                  </button>
+                )}
+                {REJECTABLE_STATUSES.includes(p.status) && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowRejectDialog(p.plan_id);
+                    }}
+                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
+                    aria-label={`Reject plan ${p.plan_id}`}
+                  >
+                    <X className="w-3 h-3" />
+                    Reject
+                  </button>
                 )}
                 <button
                   onClick={() => {

@@ -28,7 +28,56 @@ export type ApprovalStatus =
   | "approved"
   | "rejected"
   | "expired"
-  | "executed";
+  | "executed"
+  // Loading-plan execution outcomes (K7, K13)
+  | "failed"
+  | "incomplete"
+  | "shadowed";
+
+/** Outcome of one loading-plan execution attempt (K4, K13). */
+export type LoadingPlanOutcome =
+  | "applied"
+  | "replayed"
+  | "shadow"
+  | "failed"
+  | "incomplete"
+  | "in_progress";
+
+/**
+ * Loading-plan execution result as stored on an approval entry
+ * (mirrors the backend LoadingPlanExecutionResult field for field, K13).
+ */
+export interface LoadingPlanExecutionResult {
+  outcome: LoadingPlanOutcome;
+  success: boolean;
+  replay: boolean;
+  plan_id: string | null;
+  run_id: string | null;
+  truck_id: string | null;
+  order_ids: string[];
+  applied_order_ids: string[];
+  settled_order_ids: string[];
+  pending_order_ids: string[];
+  would_apply: Array<Record<string, unknown>>;
+  failures: Array<{
+    order_id: string;
+    reason: string;
+    status?: string;
+    field?: string;
+  }>;
+  reason: string | null;
+  retryable: boolean;
+  writes_made: boolean;
+  message: string;
+  attempt_id: string | null;
+  // added by the approval service
+  actor_user_id?: string;
+  finished_at?: string;
+  auto_executed?: boolean;
+  // present while an attempt is running
+  state?: "in_progress";
+  claimed_at?: string;
+}
 
 export type RiskLevel = "low" | "medium" | "high";
 
@@ -47,7 +96,9 @@ export interface ApprovalEntry {
   reviewed_at: string | null;
   expiry_time: string;
   impact_summary: string;
-  execution_result?: Record<string, unknown>;
+  /** Legacy and non-loading entries carry other shapes (K13). */
+  execution_result?: Partial<LoadingPlanExecutionResult> &
+    Record<string, unknown>;
   tenant_id: string;
 }
 
@@ -165,13 +216,23 @@ function normalizePaginated<T>(raw: LoosePaginated): {
 
 // ─── Approval Queue Endpoints ────────────────────────────────────────────────
 
-/** GET /agent/approvals — list pending approvals for a tenant */
+/**
+ * GET /agent/approvals — list pending approvals for a tenant.
+ * With includeUnresolved, also returns incomplete/failed entries and approved
+ * loading plans (R12, K13).
+ */
 export async function getApprovals(
   tenantId: string = getCurrentTenantId(),
   page: number = 1,
   size: number = 20,
+  includeUnresolved: boolean = false,
 ): Promise<PaginatedApprovals> {
-  const qs = buildQueryString({ tenant_id: tenantId, page, size });
+  const qs = buildQueryString({
+    tenant_id: tenantId,
+    page,
+    size,
+    include_unresolved: includeUnresolved ? true : undefined,
+  });
   const raw = await agentRequest<LoosePaginated>(`/approvals${qs}`);
   return normalizePaginated<ApprovalEntry>(raw);
 }

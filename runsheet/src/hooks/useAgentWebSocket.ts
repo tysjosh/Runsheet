@@ -45,6 +45,7 @@ export type AgentEventType =
   | "approval_approved"
   | "approval_rejected"
   | "approval_expired"
+  | "approval_execution_updated"
   | "agent_action_executed";
 
 /**
@@ -166,7 +167,8 @@ export function useAgentWebSocket(
         case "approval_created":
         case "approval_approved":
         case "approval_rejected":
-        case "approval_expired": {
+        case "approval_expired":
+        case "approval_execution_updated": {
           const approval = message.data as ApprovalEntry;
           const event = { type: message.type, approval };
           setLastApprovalEvent(event);

@@ -467,6 +467,35 @@ describe("FuelDistributionPage — Plans tab", () => {
       screen.queryByText("Plan generated successfully"),
     ).not.toBeInTheDocument();
   });
+
+  it("renders a scheduled plan with a warning badge, Approve and no Reject (R12.7)", async () => {
+    mockListPlans.mockResolvedValue({
+      data: [
+        {
+          plan_id: "plan-sched",
+          run_id: "run-sched",
+          status: "scheduled",
+          truck_id: "truck-9",
+          created_at: "2026-10-04T12:00:00Z",
+        },
+      ],
+      pagination: { page: 1, size: 10, total: 1, total_pages: 1 },
+      request_id: "req-sched",
+    });
+    render(<FuelDistributionPage />);
+    const badge = await screen.findByText("scheduled");
+    expect(badge).toHaveClass("bg-warning-light");
+    expect(badge).not.toHaveClass("bg-info-light");
+    expect(
+      screen.getByRole("button", { name: "Approve plan plan-sched" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject plan plan-sched" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Scheduled" }),
+    ).toBeInTheDocument();
+  });
 });
 
 // ─── Emergency-stop destination picker (Batch D2, Req 6.2.4) ────────────────
