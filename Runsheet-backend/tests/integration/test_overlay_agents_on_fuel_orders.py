@@ -605,16 +605,20 @@ class TestFullPipelineIntegration:
         assert priority_list is not None
         assert len(priority_list.priorities) > 0
 
-        # Step 2: Run route planning on confirmed/scheduled orders
+        # Step 2: Run route planning on the loadable orders
         route_agent = _build_route_planning_agent(es)
         result_orders, stop_locations, window_misses = (
             await route_agent.build_stops_from_fuel_orders(TENANT_ID)
         )
 
-        # Verify route planning got the right orders
-        routable_statuses = {"confirmed", "scheduled"}
+        # Verify route planning got the right orders: the same statuses the
+        # loader and prioritization read (N2).
+        from fuel.order_models import LOADABLE_ORDER_STATUSES
+
+        routable_statuses = set(LOADABLE_ORDER_STATUSES)
         for order in result_orders:
             assert order["status"] in routable_statuses
+        assert "placed" in {o["status"] for o in result_orders}
 
         # Verify stop locations are populated
         assert len(stop_locations) > 0
