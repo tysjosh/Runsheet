@@ -72,6 +72,10 @@ class AgentActivityWSManager(BaseWSManager):
 
         Returns the number of clients that successfully received the message.
 
+        An entry that carries a ``tenant_id`` goes only to that tenant's
+        sockets (loading-plan-executor K9); system entries without one keep
+        the all-clients behaviour.
+
         Validates: Requirement 8.7
         """
         message = {
@@ -79,25 +83,34 @@ class AgentActivityWSManager(BaseWSManager):
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
+        tenant_id = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if tenant_id:
+            return await self.broadcast_to_tenant(tenant_id, message)
         return await self.broadcast(message)
 
     async def broadcast_approval_event(self, event_type: str, data: dict) -> int:
         """
-        Broadcast an approval queue event to all connected clients.
+        Broadcast an approval queue event to the entry's tenant only.
 
         Wraps the data with the given *event_type* (e.g. ``approval_created``,
-        ``approval_approved``, ``approval_rejected``, ``approval_expired``).
+        ``approval_approved``, ``approval_rejected``, ``approval_expired``,
+        ``approval_execution_updated``). Data without a ``tenant_id`` is
+        dropped with a WARNING (fail closed, loading-plan-executor K9).
 
         Returns the number of clients that successfully received the message.
 
         Validates: Requirement 2.7
         """
+        tenant_id = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if not tenant_id:
+            logger.warning("approval event %s without tenant_id dropped", event_type)
+            return 0
         message = {
             "type": event_type,
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        return await self.broadcast(message)
+        return await self.broadcast_to_tenant(tenant_id, message)
 
     async def broadcast_event(self, event_type: str, data: dict) -> int:
         """

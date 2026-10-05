@@ -539,27 +539,69 @@ class TestExpireStale:
             }
         }
 
+    def _service(self, hits):
+        """A service whose ``atomic_update`` acts on the hits' stored documents.
+
+        ``expire_stale`` writes through ``_update_with_concurrency`` guarded on
+        ``pending`` (loading-plan-executor K7), so each hit needs a stored copy.
+        """
+        service = _make_service(search_hits=hits)
+        docs = {h["_source"]["action_id"]: dict(h["_source"]) for h in hits}
+        service.docs = docs
+
+        async def _atomic_update(index, doc_id, transform, **kwargs):
+            current = dict(docs[doc_id])
+            updated = transform(current)
+            if updated is None:
+                return (current, False)
+            docs[doc_id] = dict(updated)
+            return (dict(updated), True)
+
+        service._es.atomic_update = AsyncMock(side_effect=_atomic_update)
+        return service
+
     async def test_expire_stale_returns_count(self):
         hits = [self._expired_hit("a-1"), self._expired_hit("a-2")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         count = await service.expire_stale()
 
         assert count == 2
 
     async def test_expire_stale_updates_status_to_expired(self):
         hits = [self._expired_hit("a-1")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         await service.expire_stale()
 
-        service._es.update_document.assert_called_once()
-        call_args = service._es.update_document.call_args
+        # The write is the guarded CAS, never a bare update_document (K7).
+        service._es.update_document.assert_not_called()
+        service._es.atomic_update.assert_called_once()
+        call_args = service._es.atomic_update.call_args
         assert call_args[0][0] == "agent_approval_queue"
         assert call_args[0][1] == "a-1"
-        assert call_args[0][2]["status"] == "expired"
+        assert service.docs["a-1"]["status"] == "expired"
+
+    async def test_expire_stale_skips_an_entry_that_moved(self):
+        """The sweeper never turns an approved entry into expired (K7)."""
+        hits = [self._expired_hit("a-1"), self._expired_hit("a-2")]
+        service = self._service(hits)
+        service.docs["a-1"]["status"] = "approved"  # approved after the search
+
+        count = await service.expire_stale()
+
+        assert count == 1
+        assert service.docs["a-1"]["status"] == "approved"
+        expired = [
+            c[0][1]["action_id"]
+            for c in service._ws.broadcast_approval_event.call_args_list
+            if c[0][0] == "approval_expired"
+        ]
+        assert expired == ["a-2"]
+        logged = [c[0][0]["details"]["action_id"] for c in service._activity_log.log.call_args_list]
+        assert logged == ["a-2"]
 
     async def test_expire_stale_broadcasts_approval_expired(self):
         hits = [self._expired_hit("a-1")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         await service.expire_stale()
 
         calls = service._ws.broadcast_approval_event.call_args_list
@@ -568,7 +610,7 @@ class TestExpireStale:
 
     async def test_expire_stale_logs_to_activity_log(self):
         hits = [self._expired_hit("a-1")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         await service.expire_stale()
 
         service._activity_log.log.assert_called_once()
@@ -599,11 +641,16 @@ class TestExpireStale:
     async def test_expire_stale_continues_on_individual_failure(self):
         """If one entry fails to expire, others should still be processed."""
         hits = [self._expired_hit("a-1"), self._expired_hit("a-2")]
-        service = _make_service(search_hits=hits)
-        # First call fails, second succeeds
-        service._es.update_document = AsyncMock(
-            side_effect=[Exception("ES error"), {"result": "updated"}]
-        )
+        service = self._service(hits)
+        # First write fails, second succeeds
+        succeed = service._es.atomic_update.side_effect
+
+        async def _first_fails(index, doc_id, transform, **kwargs):
+            if doc_id == "a-1":
+                raise Exception("ES error")
+            return await succeed(index, doc_id, transform, **kwargs)
+
+        service._es.atomic_update = AsyncMock(side_effect=_first_fails)
         count = await service.expire_stale()
 
         assert count == 1
@@ -679,6 +726,30 @@ class TestListPending:
 
         assert result["items"] == []
         assert result["total"] == 0
+
+    async def test_list_pending_include_unresolved_status_clause(self):
+        """K7: unresolved entries and approved loading plans are listed on request."""
+        service = _make_service(search_hits=[])
+        await service.list_pending("t1", page=2, size=5, include_unresolved=True)
+
+        query = service._es.search_documents.call_args[0][1]
+        must_clauses = query["query"]["bool"]["must"]
+        assert {"term": {"tenant_id": "t1"}} in must_clauses
+        assert {"term": {"status": "pending"}} not in must_clauses
+        assert {
+            "bool": {
+                "should": [
+                    {"terms": {"status": ["pending", "incomplete", "failed"]}},
+                    {"bool": {"filter": [
+                        {"term": {"status": "approved"}},
+                        {"term": {"tool_name": "apply_loading_plan"}},
+                    ]}},
+                ],
+                "minimum_should_match": 1,
+            }
+        } in must_clauses
+        assert query["sort"] == [{"proposed_at": {"order": "desc"}}]
+        assert query["from"] == 5 and query["size"] == 5
 
 
 # ---------------------------------------------------------------------------

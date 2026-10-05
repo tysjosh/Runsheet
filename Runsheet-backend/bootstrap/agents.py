@@ -1070,6 +1070,35 @@ async def initialize(app, container: ServiceContainer) -> None:
             ),
         )
 
+    # Loading-plan executor (loading-plan-executor K1). Registered on the
+    # protocol after construction because the order services exist only now.
+    # It shares PLAN_EXECUTION_LOCK (the default) with FuelPlanDispatchService
+    # above, so the two never claim one tenant's orders concurrently (freeze 1).
+    if container.has("order_repository") and container.has("order_service"):
+        from fuel.services.loading_plan_executor import LoadingPlanExecutor
+        loading_plan_executor = LoadingPlanExecutor(
+            es_service=es_service,
+            order_repository=container.get("order_repository"),
+            order_service=container.get("order_service"),
+            feature_flag_service=(
+                container.ops_feature_flags if container.has("ops_feature_flags") else None
+            ),
+        )
+        container.loading_plan_executor = loading_plan_executor
+        confirmation_protocol.set_loading_plan_executor(loading_plan_executor)
+        logger.info("LoadingPlanExecutor registered")
+    else:
+        logger.error(
+            "LoadingPlanExecutor not wired: order_repository/order_service missing; "
+            "loading approvals will record executor_unavailable"
+        )
+    from commerce.services import commerce_persistence_bridge as _bridge
+    if _bridge.read_from_postgres() and not _bridge.dual_write_enabled():
+        logger.error(
+            "Order reads are cut over to Postgres but dual-write is off: applied "
+            "loading plans will report projection_mirror_disabled"
+        )
+
     configure_mvp_endpoints(
         pipeline=mvp_pipeline,
         es_service=es_service,

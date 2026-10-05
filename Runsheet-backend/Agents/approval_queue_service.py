@@ -3,37 +3,221 @@ Approval Queue Service for managing pending agent actions.
 
 Manages the lifecycle of agent-proposed actions requiring human approval.
 Entries are stored in the `agent_approval_queue` Elasticsearch index with
-status tracking (pending, approved, rejected, expired, executed).
+status tracking.
 
-State machine:
+State machine (every tool):
     pending → approved → executed
     pending → rejected
     pending → expired
 
-Uses ES optimistic concurrency (seq_no / primary_term) to prevent
-concurrent approve/reject races. Broadcasts approval events via
-WebSocket on every state change.
+``apply_loading_plan`` approvals (loading-plan-executor design K7) add:
+    approved   → executed | shadowed | failed | incomplete
+                 | approved (stale reclaim) | rejected (legacy entries only)
+    incomplete → approved (retry) | rejected (only while nothing was written)
+    failed     → rejected
+
+Every write is a compare-and-set (``_update_with_concurrency`` or an
+``atomic_update`` transform), so concurrent approve/reject/expire calls
+cannot overwrite each other. Broadcasts approval events via WebSocket on
+every state change.
 
 Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.8
 """
+import dataclasses
+import time
 import uuid
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
+
+from fuel.services.loading_plan_executor import (
+    REASON_APPROVAL_RELEASED_DURING_EXECUTION,
+    REASON_EXECUTION_IN_PROGRESS,
+    REASON_EXPIRED_BEFORE_APPROVAL,
+    REASON_INTERNAL_ERROR,
+    REASON_LEGACY_APPROVAL,
+    LoadingPlanExecutionResult,
+)
+from persistence.timestamps import parse_ts
 
 logger = logging.getLogger(__name__)
 
-# Valid status transitions for the approval lifecycle
+# Valid status transitions for the approval lifecycle (K7 adds the loading rows).
 VALID_TRANSITIONS = {
     "pending": {"approved", "rejected", "expired"},
-    "approved": {"executed"},
+    "approved": {
+        "executed", "shadowed", "failed", "incomplete",
+        "approved",   # stale reclaim
+        "rejected",   # legacy loading entries only
+    },
+    "incomplete": {"approved", "rejected"},
+    "failed": {"rejected"},
 }
 
 #: Per-truck loading-plan proposals from CompartmentLoadingAgent.
 LOADING_PLAN_TOOL = "apply_loading_plan"
-#: Statuses in which an approval may still dispatch (pending) or already has.
-_LIVE_STATUSES = ("pending", "approved", "executed")
-_COMMITTED_STATUSES = frozenset({"approved", "executed"})
+#: Loading approvals the supersede guard reads (K7, R5.2).
+_LIVE_STATUSES = ("pending", "approved", "executed", "incomplete")
+#: Modes in which an approved plan writes orders; only these expire competitors (R5.1).
+EXECUTING_MODES = frozenset({"disabled", "active_gated", "active_auto"})
+#: An ``approved`` loading entry whose attempt claimed less than this ago is running.
+APPROVAL_LEASE_SECONDS = 120
+#: Page size of the supersede guard's search (paged with ``search_after``).
+_OVERLAP_PAGE_SIZE = 500
+
+#: Executor outcome -> ``loading_plan_execution`` activity outcome (K9).
+_ACTIVITY_OUTCOMES = {
+    "applied": "executed",
+    "replayed": "replayed",
+    "shadow": "shadow",
+    "failed": "failed",
+    "incomplete": "incomplete",
+    "in_progress": "incomplete",
+}
+
+
+def loading_plan_order_ids(parameters) -> set:
+    """Order ids an ``apply_loading_plan`` approval would commit.
+
+    ``parameters.order_ids`` when present, else the assignments' ``order_id``
+    (proposals queued before ``order_ids`` existed).
+    """
+    if not isinstance(parameters, dict):
+        return set()
+    order_ids = parameters.get("order_ids")
+    if not order_ids:
+        order_ids = [
+            a.get("order_id")
+            for a in parameters.get("assignments") or []
+            if isinstance(a, dict)
+        ]
+    return {o for o in order_ids if isinstance(o, str) and o}
+
+
+def _holds_orders(entry: dict) -> bool:
+    """Whether a loading approval holds its orders against other plans (K7).
+
+    ``incomplete`` always holds (it may have written). ``approved`` and
+    ``executed`` hold only when they carry ``execution_result.attempt_id``:
+    entries without one predate the executor ("Unknown tool" / "ES not
+    wired" results, or approved-but-never-run) and wrote nothing.
+    """
+    status = entry.get("status")
+    if status == "incomplete":
+        return True
+    if status in ("approved", "executed"):
+        return bool((entry.get("execution_result") or {}).get("attempt_id"))
+    return False
+
+
+def _safe_ts(value: Any) -> Optional[datetime]:
+    try:
+        return parse_ts(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def build_loading_plan_execution_entry(
+    entry: dict, result: LoadingPlanExecutionResult, *, actor: str, duration_ms: int
+) -> dict:
+    """The one ``loading_plan_execution`` activity entry per invocation (K9, R10.1)."""
+    params = entry.get("parameters") or {}
+    plan_id = result.plan_id or params.get("plan_id")
+    return {
+        "agent_id": entry.get("proposed_by") or "unknown",
+        "action_type": "loading_plan_execution",
+        "tool_name": LOADING_PLAN_TOOL,
+        "parameters": {"plan_id": plan_id},
+        "risk_level": entry.get("risk_level"),
+        "outcome": _ACTIVITY_OUTCOMES.get(result.outcome, "failed"),
+        "duration_ms": int(duration_ms),
+        "tenant_id": entry.get("tenant_id"),
+        "user_id": actor,
+        "details": {
+            "action_id": entry.get("action_id"),
+            "plan_id": plan_id,
+            "run_id": result.run_id,
+            "truck_id": result.truck_id,
+            "order_ids": list(result.order_ids),
+            "applied_order_ids": list(result.applied_order_ids),
+            "settled_order_ids": list(result.settled_order_ids),
+            "reason": result.reason,
+            "failures": [dict(f) for f in result.failures],
+            "retryable": result.retryable,
+            "writes_made": result.writes_made,
+            "attempt_id": result.attempt_id,
+        },
+    }
+
+
+class LoadingPlanOverlapError(ValueError):
+    """The plan shares an order with a holding approval; the entry stays pending.
+
+    A ``ValueError`` so existing callers and the endpoint mapping are unchanged.
+    """
+
+
+class LoadingPlanExecutionError(Exception):
+    """A loading approval did not end executed/shadowed (K10).
+
+    ``entry`` is the approval as stored (or ``None``) and ``result`` the
+    structured outcome; ``str(exc)`` is the fixed template text only.
+    """
+
+    def __init__(self, entry: Optional[dict], result: LoadingPlanExecutionResult):
+        super().__init__(result.message)
+        self.entry = entry
+        self.result = result
+
+    @classmethod
+    def from_reason(
+        cls,
+        entry: Optional[dict],
+        reason: str,
+        *,
+        retryable: bool,
+        writes_made: bool = False,
+    ) -> "LoadingPlanExecutionError":
+        """legacy_approval, execution_in_progress, approval_released_during_execution."""
+        plan_id = ((entry or {}).get("parameters") or {}).get("plan_id")
+        return cls(
+            entry,
+            LoadingPlanExecutionResult.failure(
+                plan_id, reason, retryable=retryable, writes_made=writes_made
+            ),
+        )
+
+    @classmethod
+    def from_stored(cls, entry: dict) -> "LoadingPlanExecutionError":
+        """A failed/incomplete entry re-raised with the result it already records."""
+        return cls(entry, LoadingPlanExecutionResult.from_dict(entry.get("execution_result") or {}))
+
+
+class ApprovalExpiredError(Exception):
+    """A pending approval's expiry passed before it was approved (R11.4)."""
+
+    def __init__(self, action_id: str):
+        super().__init__(f"Approval {action_id} expired before it was approved")
+        self.action_id = action_id
+
+
+class ApprovalForbiddenError(Exception):
+    """A loading plan approval needs a session user or an in-process agent actor (R7.4)."""
+
+    def __init__(self, action_id: str):
+        super().__init__("A signed-in user is required to approve a loading plan")
+        self.action_id = action_id
+
+
+def _status_for(result: LoadingPlanExecutionResult, writes_made: bool) -> str:
+    """Approval status for an executor outcome and the sticky ``writes_made`` (K7 table)."""
+    if result.outcome in ("applied", "replayed"):
+        return "executed"
+    if result.outcome == "shadow":
+        return "incomplete" if writes_made else "shadowed"
+    if result.outcome == "failed":
+        return "incomplete" if (writes_made or result.retryable) else "failed"
+    return "incomplete"  # incomplete, in_progress
 
 
 class ApprovalQueueService:
@@ -118,34 +302,57 @@ class ApprovalQueueService:
         )
         return action_id
 
-    async def approve(self, action_id: str, reviewer_id: str) -> dict:
-        """Approve a pending action and optionally execute it.
+    async def approve(
+        self,
+        action_id: str,
+        reviewer_id: str,
+        *,
+        tenant_id: Optional[str] = None,
+        session_user_id: Optional[str] = None,
+        agent_actor: Optional[str] = None,
+    ) -> dict:
+        """Approve a pending action and execute it.
 
-        Uses ES optimistic concurrency to prevent concurrent approve/reject
-        races. If a confirmation_protocol is wired, the approved mutation
-        is executed and the result stored.
+        ``tenant_id`` (always passed by the endpoint and the auto path) scopes
+        the lookup: another tenant's entry is reported exactly like a missing
+        one (R7.1).
+
+        ``apply_loading_plan`` approvals follow the loading lifecycle
+        (:meth:`_approve_loading_plan`, design K7). Their actor is
+        ``session_user_id`` or the in-process ``agent_actor``; ``reviewer_id``
+        is never used as the actor (R7.3, R7.4). Other tools keep the path
+        below unchanged.
 
         Args:
             action_id: The UUID of the approval entry.
             reviewer_id: The ID of the user approving the action.
+            tenant_id: The caller's verified tenant, when known.
+            session_user_id: The verified session user (endpoint only).
+            agent_actor: ``agent:<id>`` for the auto path (in-process only).
 
         Returns:
             The updated approval entry dict.
 
         Raises:
-            ValueError: If the entry is not in "pending" status.
+            ValueError: If the entry is missing, another tenant's, or not
+                approvable (``LoadingPlanOverlapError`` is a subclass).
+            LoadingPlanExecutionError, ApprovalExpiredError,
+            ApprovalForbiddenError: loading approvals only (K10).
         """
         entry = await self._get_entry(action_id)
+        if tenant_id is not None and entry.get("tenant_id") != tenant_id:
+            raise ValueError(f"Approval entry {action_id} not found")
+
+        if entry.get("tool_name") == LOADING_PLAN_TOOL:
+            return await self._approve_loading_plan(
+                entry, action_id, session_user_id=session_user_id, agent_actor=agent_actor
+            )
 
         if entry["status"] != "pending":
             raise ValueError(
                 f"Cannot approve action {action_id}: "
                 f"current status is '{entry['status']}', expected 'pending'"
             )
-
-        if entry.get("tool_name") == LOADING_PLAN_TOOL:
-            # Raises ValueError (entry stays pending) on a conflict.
-            await self._supersede_overlapping_loading_plans(entry, action_id)
 
         now = datetime.now(timezone.utc)
         update_fields = {
@@ -214,88 +421,500 @@ class ApprovalQueueService:
         )
         return entry
 
+    # ------------------------------------------------------------------
+    # Loading-plan approvals (design K7, K9, K10)
+    # ------------------------------------------------------------------
+
+    async def _approve_loading_plan(
+        self,
+        entry: dict,
+        action_id: str,
+        *,
+        session_user_id: Optional[str],
+        agent_actor: Optional[str],
+    ) -> dict:
+        """K7 steps 3-7 for an ``apply_loading_plan`` approval."""
+        actor = session_user_id or agent_actor
+        if not actor:
+            raise ApprovalForbiddenError(action_id)
+
+        status = entry.get("status")
+        stored = entry.get("execution_result") or {}
+        now = datetime.now(timezone.utc)
+
+        # 3. Short-circuits that start no attempt.
+        if status in ("executed", "shadowed"):
+            return entry  # R4.4: no executor call, no writes
+        if status == "failed":
+            raise LoadingPlanExecutionError.from_stored(entry)
+        if status not in ("pending", "approved", "incomplete"):
+            raise ValueError(
+                f"Cannot approve action {action_id}: "
+                f"current status is '{status}', expected 'pending'"
+            )
+        if status == "pending":
+            expiry = _safe_ts(entry.get("expiry_time"))
+            if expiry is not None and expiry < now:
+                await self._expire_before_approval(entry, action_id)
+                raise ApprovalExpiredError(action_id)
+        if status == "approved":
+            if not stored.get("attempt_id"):
+                # Approved before the executor existed (OQ7): never run, may be rejected.
+                raise LoadingPlanExecutionError.from_reason(
+                    entry, REASON_LEGACY_APPROVAL, retryable=False
+                )
+            claimed_at = _safe_ts(stored.get("claimed_at"))
+            if claimed_at is None:
+                logger.warning(
+                    "loading approval %s: attempt %s has no parseable claimed_at; treated as stale",
+                    action_id, stored.get("attempt_id"),
+                )
+            elif claimed_at > now - timedelta(seconds=APPROVAL_LEASE_SECONDS):
+                logger.info(
+                    "loading approval %s: attempt %s still running", action_id, stored.get("attempt_id")
+                )
+                raise LoadingPlanExecutionError.from_reason(
+                    entry, REASON_EXECUTION_IN_PROGRESS, retryable=True, writes_made=True
+                )
+
+        tenant_id = entry.get("tenant_id")
+        params = entry.get("parameters") or {}
+        plan_id = params.get("plan_id")
+        seen_status = status
+        seen_attempt = stored.get("attempt_id")  # None for pending
+        started = time.monotonic()
+
+        # 3a. One mode resolution per attempt; no hold when it is unusable.
+        protocol = self._confirmation_protocol
+        wired = protocol is not None and bool(protocol.has_loading_plan_executor())
+        mode = None
+        if wired:
+            try:
+                mode = await protocol.resolve_loading_mode(tenant_id)
+            except Exception:
+                logger.warning(
+                    "loading approval %s: mode resolution raised for tenant=%s",
+                    action_id, tenant_id, exc_info=True,
+                )
+                mode = None
+        if not wired or mode is None:
+            if not wired:
+                logger.error(
+                    "loading approval %s: LoadingPlanExecutor not wired (tenant=%s plan=%s); "
+                    "executor_unavailable recorded",
+                    action_id, tenant_id, plan_id,
+                )
+                result = LoadingPlanExecutionResult.unavailable(plan_id)
+            else:
+                logger.warning(
+                    "loading approval %s: loading mode unresolvable (tenant=%s plan=%s)",
+                    action_id, tenant_id, plan_id,
+                )
+                result = LoadingPlanExecutionResult.mode_unavailable(plan_id)
+            return await self._record_unresolved(
+                entry, action_id, result,
+                seen_status=seen_status, seen_attempt=seen_attempt,
+                actor=actor, agent_actor=agent_actor, started=started,
+            )
+
+        # 3b. Hold the orders and start the attempt.
+        attempt_id = uuid.uuid4().hex
+        claimed_iso = datetime.now(timezone.utc).isoformat()
+        first_approval = seen_status == "pending"
+        if seen_status == "pending":
+            await self._check_loading_overlap(
+                tenant_id,
+                loading_plan_order_ids(params),
+                action_id,
+                expire_pending=mode in EXECUTING_MODES,
+            )
+            in_progress = {
+                "state": "in_progress",
+                "attempt_id": attempt_id,
+                "claimed_at": claimed_iso,
+                "actor_user_id": actor,
+                "auto_executed": agent_actor is not None,
+                "writes_made": False,
+            }
+            fields = {
+                "status": "approved",
+                "reviewed_by": actor,
+                "reviewed_at": claimed_iso,
+                "execution_result": in_progress,
+            }
+            await self._update_with_concurrency(action_id, fields, expected_status="pending")
+            entry = {**entry, **fields}
+            await self._broadcast("approval_approved", entry)
+        else:
+            reclaim = seen_status == "approved"
+
+            def _start(current: dict) -> Optional[dict]:
+                if current.get("status") != seen_status:
+                    return None
+                cur = current.get("execution_result") or {}
+                if cur.get("attempt_id") != seen_attempt:
+                    return None
+                # Sticky writes_made comes from the stored record under the row
+                # lock; a stalled attempt being reclaimed may have written.
+                writes = True if reclaim else bool(cur.get("writes_made", True))
+                return {
+                    **current,
+                    "status": "approved",
+                    "execution_result": {
+                        "state": "in_progress",
+                        "attempt_id": attempt_id,
+                        "claimed_at": claimed_iso,
+                        "actor_user_id": actor,
+                        "auto_executed": cur.get("auto_executed", agent_actor is not None),
+                        "writes_made": writes,
+                    },
+                }
+
+            doc, applied = await self._es.atomic_update(self.INDEX, action_id, _start)
+            if not applied:
+                if reclaim:
+                    raise LoadingPlanExecutionError.from_reason(
+                        entry, REASON_EXECUTION_IN_PROGRESS, retryable=True, writes_made=True
+                    )
+                raise RuntimeError(
+                    f"Concurrent modification detected for action {action_id}. "
+                    f"Another user may have already approved or rejected this action."
+                )
+            entry = doc
+        prev = entry.get("execution_result") or {}
+
+        # 4. Execute with the mode resolved above.
+        from Agents.confirmation_protocol import MutationRequest
+
+        request = MutationRequest(
+            tool_name=entry["tool_name"],
+            parameters=params,
+            tenant_id=tenant_id,
+            agent_id=entry.get("proposed_by") or "unknown",
+        )
+        try:
+            result = await protocol.execute_loading_plan(
+                request,
+                mode=mode,
+                actor_user_id=actor,
+                action_id=action_id,
+                approved_at=entry.get("reviewed_at"),
+            )
+        except Exception:
+            logger.exception(
+                "loading approval: unexpected executor error tenant=%s plan=%s action=%s attempt=%s",
+                tenant_id, plan_id, action_id, attempt_id,
+            )
+            result = dataclasses.replace(
+                LoadingPlanExecutionResult.failure(
+                    plan_id, REASON_INTERNAL_ERROR, retryable=True, writes_made=True
+                ),
+                outcome="incomplete",
+            )
+
+        # 5. Record, with sticky writes_made.
+        if result.attempt_id is not None:
+            # This call's own plan claim read authoritative state (K3).
+            writes_made = bool(result.writes_made)
+        else:
+            writes_made = bool(
+                result.writes_made or prev.get("writes_made") or result.outcome == "in_progress"
+            )
+        new_status = _status_for(result, writes_made)
+        recorded = dataclasses.replace(result, writes_made=writes_made, attempt_id=attempt_id)
+        execution_result = {
+            **recorded.as_dict(),
+            "actor_user_id": actor,
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+            "auto_executed": prev.get("auto_executed"),
+        }
+
+        def _record(current: dict) -> Optional[dict]:
+            if current.get("status") != "approved":
+                return None
+            if (current.get("execution_result") or {}).get("attempt_id") != attempt_id:
+                return None
+            return {**current, "status": new_status, "execution_result": execution_result}
+
+        doc, applied = await self._es.atomic_update(self.INDEX, action_id, _record)
+        lost = not applied
+        if lost:
+            logger.warning(
+                "loading approval %s: record for attempt %s lost (entry moved); re-reading",
+                action_id, attempt_id,
+            )
+            try:
+                entry = await self._get_entry(action_id)
+            except ValueError:
+                entry = doc or entry
+        else:
+            entry = doc
+
+        # 6. Audit and broadcast (one loading_plan_execution entry per invocation).
+        duration_ms = int((time.monotonic() - started) * 1000)
+        await self._log_loading_execution(entry, recorded, actor, duration_ms)
+        if first_approval and self._activity_log:
+            try:
+                await self._log_approved(
+                    entry, action_id, actor,
+                    executed=entry.get("status") == "executed",
+                    execution_success=result.success,
+                )
+            except Exception:
+                logger.warning("Failed to log approval of %s", action_id, exc_info=True)
+        await self._broadcast("approval_execution_updated", entry)
+
+        # 7. Return or raise.
+        final = entry.get("status")
+        if lost:
+            if final in ("executed", "shadowed"):
+                return entry
+            if final in ("failed", "incomplete"):
+                raise LoadingPlanExecutionError.from_stored(entry)
+            if final == "approved":
+                raise LoadingPlanExecutionError.from_reason(
+                    entry, REASON_EXECUTION_IN_PROGRESS, retryable=True, writes_made=True
+                )
+            logger.error("approval %s released while attempt %s was running", action_id, attempt_id)
+            raise LoadingPlanExecutionError.from_reason(
+                entry, REASON_APPROVAL_RELEASED_DURING_EXECUTION, retryable=False, writes_made=True
+            )
+        logger.info(
+            "loading approval %s: attempt %s by %s -> %s (outcome=%s reason=%s)",
+            action_id, attempt_id, actor, final, result.outcome, result.reason,
+        )
+        if final in ("executed", "shadowed"):
+            return entry
+        raise LoadingPlanExecutionError(entry, recorded)
+
+    async def _record_unresolved(
+        self,
+        entry: dict,
+        action_id: str,
+        result: LoadingPlanExecutionResult,
+        *,
+        seen_status: str,
+        seen_attempt: Optional[str],
+        actor: str,
+        agent_actor: Optional[str],
+        started: float,
+    ) -> dict:
+        """K7 step 3a: record an unusable mode / unwired executor without a hold, then raise."""
+        finished = datetime.now(timezone.utc).isoformat()
+
+        def _transform(current: dict) -> Optional[dict]:
+            if current.get("status") != seen_status:
+                return None
+            cur = current.get("execution_result") or {}
+            if cur.get("attempt_id") != seen_attempt:
+                return None  # another attempt finished in between: its record stands
+            # missing => assume written (K7)
+            sticky = False if seen_status == "pending" else bool(cur.get("writes_made", True))
+            return {
+                **current,
+                "execution_result": {
+                    **result.as_dict(),
+                    "writes_made": sticky,
+                    "attempt_id": cur.get("attempt_id"),
+                    "auto_executed": cur.get("auto_executed", agent_actor is not None),
+                    "actor_user_id": actor,
+                    "finished_at": finished,
+                },
+            }
+
+        stored = entry.get("execution_result") or {}
+        if seen_status in ("pending", "incomplete"):
+            doc, applied = await self._es.atomic_update(self.INDEX, action_id, _transform)
+            if not applied:
+                logger.info(
+                    "loading approval %s: entry moved before the unresolved result was recorded",
+                    action_id,
+                )
+                raise RuntimeError(f"Concurrent modification detected for action {action_id}")
+            entry = doc
+            stored = entry.get("execution_result") or {}
+            recorded = dataclasses.replace(
+                result,
+                writes_made=bool(stored.get("writes_made")),
+                attempt_id=stored.get("attempt_id"),
+            )
+        else:
+            # A stale approved entry is left untouched: its in-progress record
+            # must stay CAS-able by the next reclaim.
+            recorded = dataclasses.replace(
+                result,
+                writes_made=bool(stored.get("writes_made", True)),
+                attempt_id=stored.get("attempt_id"),
+            )
+        duration_ms = int((time.monotonic() - started) * 1000)
+        await self._log_loading_execution(entry, recorded, actor, duration_ms)
+        await self._broadcast("approval_execution_updated", entry)
+        raise LoadingPlanExecutionError(entry, recorded)
+
+    async def _expire_before_approval(self, entry: dict, action_id: str) -> None:
+        """CAS pending -> expired for an approve that arrived after expiry (R11.4)."""
+        fields = {
+            "status": "expired",
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            "execution_result": {"reason": REASON_EXPIRED_BEFORE_APPROVAL},
+        }
+        await self._update_with_concurrency(action_id, fields, expected_status="pending")
+        expired = {**entry, **fields}
+        await self._broadcast("approval_expired", expired)
+        await self._log_expired(expired, action_id)
+
+    async def _log_expired(self, entry: dict, action_id: str) -> None:
+        if not self._activity_log:
+            return
+        await self._activity_log.log({
+            "agent_id": entry.get("proposed_by", "unknown"),
+            "action_type": "approval_expired",
+            "tool_name": entry.get("tool_name"),
+            "parameters": entry.get("parameters"),
+            "risk_level": entry.get("risk_level"),
+            "outcome": "expired",
+            "duration_ms": 0,
+            "tenant_id": entry.get("tenant_id"),
+            "details": {"action_id": action_id},
+        })
+
+    async def _log_loading_execution(
+        self, entry: dict, result: LoadingPlanExecutionResult, actor: str, duration_ms: int
+    ) -> None:
+        """Write the K9 entry; a logging failure never changes the outcome (R10.3)."""
+        if not self._activity_log:
+            return
+        try:
+            await self._activity_log.log(
+                build_loading_plan_execution_entry(
+                    entry, result, actor=actor, duration_ms=duration_ms
+                )
+            )
+        except Exception:
+            logger.warning(
+                "Failed to log loading plan execution for %s",
+                entry.get("action_id"), exc_info=True,
+            )
+
     @staticmethod
     def _loading_plan_order_ids(parameters) -> set:
-        """Order ids an ``apply_loading_plan`` approval would dispatch."""
-        if not isinstance(parameters, dict):
-            return set()
-        order_ids = parameters.get("order_ids")
-        if not order_ids:
-            order_ids = [
-                a.get("order_id")
-                for a in parameters.get("assignments") or []
-                if isinstance(a, dict)
-            ]
-        return {o for o in order_ids if isinstance(o, str) and o}
+        """Alias of :func:`loading_plan_order_ids` for existing callers."""
+        return loading_plan_order_ids(parameters)
 
     async def _supersede_overlapping_loading_plans(
         self, entry: dict, action_id: str
     ) -> None:
-        """Make room for approving one loading plan (F10).
+        """Executing-mode guard for ``entry`` (``expire_pending=True``)."""
+        await self._check_loading_overlap(
+            entry.get("tenant_id"),
+            loading_plan_order_ids(entry.get("parameters")),
+            action_id,
+            expire_pending=True,
+        )
+
+    async def _check_loading_overlap(
+        self,
+        tenant_id: Optional[str],
+        order_ids: set,
+        action_id: str,
+        *,
+        expire_pending: bool,
+    ) -> None:
+        """Make room for approving one loading plan (F10, K7, R5).
 
         Plans from one loading run are order-disjoint, so each truck's plan
         can be approved. Across runs they are not: a re-run while older plans
         are still pending proposes the same orders again. Approving one plan
         therefore:
 
-        * refuses (``ValueError``, this entry stays pending) if another plan
-          already approved or executed shares an order with it;
-        * otherwise expires every pending plan sharing an order, recording
-          ``execution_result.superseded_by``. ``expired`` is reused because the
-          approval index is ``dynamic: strict`` and a system supersede must not
-          look like a reviewer's rejection (no feedback signal).
+        * refuses (:class:`LoadingPlanOverlapError`, this entry stays pending)
+          if another plan that **holds** its orders shares an order with it.
+          A plan holds (``_holds_orders``) while it is ``incomplete``, or
+          ``approved``/``executed`` with ``execution_result.attempt_id``.
+          ``failed`` and ``shadowed`` plans wrote nothing and do not hold
+          (R5.3); legacy approved/executed entries without an ``attempt_id``
+          predate the executor and do not hold either;
+        * otherwise, when ``expire_pending`` (the attempt resolved an
+          executing mode, R5.1), expires every pending plan sharing an order,
+          recording ``execution_result.superseded_by``. ``expired`` is reused
+          because the approval index is ``dynamic: strict`` and a system
+          supersede must not look like a reviewer's rejection. Under
+          ``shadow`` the guard is check-only, so a shadow approval never
+          expires a competitor.
 
         A pending plan that moves before it can be expired is a conflict too:
-        the caller retries rather than racing another reviewer.
+        the caller retries rather than racing another reviewer (plain
+        ``ValueError``).
 
-        Known dead end (review R5): ``ConfirmationProtocol`` has no executor
-        for ``apply_loading_plan`` yet, so an approved plan is recorded
-        ``executed`` while its orders stay placed/confirmed/scheduled. Later
-        loading runs propose those orders again, and approving any such plan
-        is refused here because the first plan still holds them. Once the
-        executor dispatches the orders, they leave the loadable statuses and
-        the refusal stops arising. Until then, a dispatcher sees the refusal
-        on every re-proposed order.
+        The executor (``fuel.services.loading_plan_executor``) commits an
+        approved plan's orders to its truck and run and moves them to
+        ``scheduled``; ``CompartmentLoadingAgent`` leaves committed orders out
+        of the next run (R8), so the refusal no longer arises on every
+        re-proposed order (closes the former "known dead end", R5.6).
+
+        Supersede-then-fail is accepted (K7): when the guard expired
+        competitors and the execution then ends ``failed``, they stay
+        expired. Their orders are not held by anything, so the next loading
+        run proposes them again.
+
+        The search is narrowed to entries naming one of the orders (or
+        carrying no ``order_ids``, checked through ``assignments``) and paged
+        with ``search_after``; overlap is still computed here.
         """
-        order_ids = self._loading_plan_order_ids(entry.get("parameters"))
         if not order_ids:
             return
 
-        query = {
+        query: dict = {
             "query": {
                 "bool": {
                     "filter": [
-                        {"term": {"tenant_id": entry.get("tenant_id")}},
+                        {"term": {"tenant_id": tenant_id}},
                         {"term": {"tool_name": LOADING_PLAN_TOOL}},
                         {"terms": {"status": list(_LIVE_STATUSES)}},
-                    ]
+                    ],
+                    "should": [
+                        {"terms": {"parameters.order_ids": sorted(order_ids)}},
+                        {"bool": {"must_not": [{"exists": {"field": "parameters.order_ids"}}]}},
+                    ],
+                    "minimum_should_match": 1,
                 }
             },
-            "size": 500,
+            "sort": [{"proposed_at": {"order": "asc"}}, {"action_id": {"order": "asc"}}],
+            "size": _OVERLAP_PAGE_SIZE,
         }
-        result = await self._es.search_documents(self.INDEX, query)
         overlapping = []
-        for hit in result.get("hits", {}).get("hits", []):
-            other = hit.get("_source") or {}
-            other_id = other.get("action_id")
-            if not other_id or other_id == action_id:
-                continue
-            # Overlap is computed here rather than queried: ``parameters`` is a
-            # dynamic object, not a nested field the store can filter on.
-            shared = order_ids & self._loading_plan_order_ids(other.get("parameters"))
-            if shared:
-                overlapping.append((other, shared))
+        while True:
+            result = await self._es.search_documents(self.INDEX, query)
+            hits = result.get("hits", {}).get("hits", [])
+            for hit in hits:
+                other = hit.get("_source") or {}
+                other_id = other.get("action_id")
+                if not other_id or other_id == action_id:
+                    continue
+                # Overlap is computed here rather than queried: ``parameters`` is a
+                # dynamic object, not a nested field the store can filter on.
+                shared = order_ids & loading_plan_order_ids(other.get("parameters"))
+                if shared:
+                    overlapping.append((other, shared))
+            if len(hits) < _OVERLAP_PAGE_SIZE or not hits[-1].get("sort"):
+                break
+            query = {**query, "search_after": hits[-1]["sort"]}
 
         for other, shared in overlapping:
-            if other.get("status") in _COMMITTED_STATUSES:
-                raise ValueError(
+            if _holds_orders(other):
+                raise LoadingPlanOverlapError(
                     f"Cannot approve action {action_id}: conflicts with "
                     f"approved loading plan {other['action_id']} for order(s) "
                     f"{', '.join(sorted(shared))}"
                 )
 
+        if not expire_pending:
+            return
+
         now_iso = datetime.now(timezone.utc).isoformat()
         for other, shared in overlapping:
+            if other.get("status") != "pending":
+                continue
             other_id = other["action_id"]
             fields = {
                 "status": "expired",
@@ -343,9 +962,20 @@ class ApprovalQueueService:
             )
 
     async def _log_approved(
-        self, entry: dict, action_id: str, reviewer_id: str, executed: bool
+        self,
+        entry: dict,
+        action_id: str,
+        reviewer_id: str,
+        executed: bool,
+        execution_success: Any = None,
     ) -> None:
-        """Write the ``approval_approved`` audit entry for a reviewed action."""
+        """Write the ``approval_approved`` audit entry for a reviewed action.
+
+        Loading approvals pass ``execution_success=result.success`` so it is
+        never true for a failed or shadow outcome (R10.2).
+        """
+        if execution_success is None and executed:
+            execution_success = (entry.get("execution_result") or {}).get("success")
         await self._activity_log.log({
             "agent_id": entry.get("proposed_by", "unknown"),
             "action_type": "approval_approved",
@@ -359,34 +989,68 @@ class ApprovalQueueService:
             "details": {
                 "action_id": action_id,
                 "executed": executed,
-                "execution_success": (
-                    entry.get("execution_result", {}).get("success")
-                    if executed else None
-                ),
+                "execution_success": execution_success,
             },
         })
 
-    async def reject(self, action_id: str, reviewer_id: str, reason: str = "") -> dict:
-        """Reject a pending action and store a feedback signal.
+    async def reject(
+        self,
+        action_id: str,
+        reviewer_id: str,
+        reason: str = "",
+        *,
+        tenant_id: Optional[str] = None,
+    ) -> dict:
+        """Reject an action and store a feedback signal.
+
+        Any tool: ``pending``. ``apply_loading_plan`` also: ``failed``,
+        ``incomplete`` whose sticky ``execution_result.writes_made`` is false
+        (missing counts as true), and legacy ``approved`` entries without an
+        ``attempt_id`` (K7). The write is an ``atomic_update`` that re-checks
+        the same rule under the row lock.
 
         Args:
             action_id: The UUID of the approval entry.
             reviewer_id: The ID of the user rejecting the action.
             reason: Optional rejection reason.
+            tenant_id: The caller's verified tenant; another tenant's entry
+                is reported as not found (R7.1).
 
         Returns:
             The updated approval entry dict.
 
         Raises:
-            ValueError: If the entry is not in "pending" status.
+            ValueError: Missing, another tenant's, or in a non-rejectable status.
+            RuntimeError: The entry moved (or may have written) under the lock.
         """
         entry = await self._get_entry(action_id)
+        if tenant_id is not None and entry.get("tenant_id") != tenant_id:
+            raise ValueError(f"Approval entry {action_id} not found")
 
-        if entry["status"] != "pending":
+        loading = entry.get("tool_name") == LOADING_PLAN_TOOL
+        # Loading statuses whose rejectability depends on the stored record are
+        # decided by the CAS below (RuntimeError -> 409 when refused).
+        cas_decided = ("pending", "failed", "incomplete", "approved") if loading else ("pending",)
+        if entry["status"] not in cas_decided:
             raise ValueError(
                 f"Cannot reject action {action_id}: "
                 f"current status is '{entry['status']}', expected 'pending'"
             )
+
+        def _rejectable(doc: dict) -> bool:
+            status = doc.get("status")
+            if status == "pending":
+                return True
+            if not loading:
+                return False
+            stored = doc.get("execution_result") or {}
+            if status == "failed":
+                return True
+            if status == "incomplete":
+                return not bool(stored.get("writes_made", True))
+            if status == "approved":
+                return not stored.get("attempt_id")  # legacy only
+            return False
 
         now = datetime.now(timezone.utc)
         update_fields = {
@@ -395,11 +1059,23 @@ class ApprovalQueueService:
             "reviewed_at": now.isoformat(),
             "rejection_reason": reason,
         }
+        seen: dict = {}
 
-        await self._update_with_concurrency(
-            action_id, update_fields, expected_status="pending"
-        )
-        entry.update(update_fields)
+        def _reject(current: dict) -> Optional[dict]:
+            if not _rejectable(current):
+                return None
+            seen["status"] = current.get("status")
+            return {**current, **update_fields}
+
+        doc, applied = await self._es.atomic_update(self.INDEX, action_id, _reject)
+        if not applied:
+            logger.info("reject of %s refused: status or writes_made moved", action_id)
+            raise RuntimeError(
+                f"Concurrent modification detected for action {action_id}. "
+                f"Another user may have already approved or rejected this action."
+            )
+        was_pending = seen.get("status") == "pending"
+        entry = doc if isinstance(doc, dict) else {**entry, **update_fields}
 
         # Broadcast rejection event
         await self._broadcast("approval_rejected", entry)
@@ -420,8 +1096,10 @@ class ApprovalQueueService:
             })
 
         # Store the rejection as a feedback signal so agents can learn from
-        # it (F7, Req 12.1). A feedback failure never fails the reject.
-        if self._feedback:
+        # it (F7, Req 12.1). Only a rejected proposal is feedback; dismissing a
+        # failed/incomplete loading approval is not (K7). A feedback failure
+        # never fails the reject.
+        if self._feedback and was_pending:
             try:
                 await self._feedback.record_rejection(
                     agent_id=entry.get("proposed_by", "unknown"),
@@ -453,7 +1131,10 @@ class ApprovalQueueService:
         """Mark expired approvals whose expiry_time has passed.
 
         Queries for entries with status="pending" and expiry_time < now,
-        updates each to "expired", and logs the expiry to the activity log.
+        updates each to "expired" through a CAS guarded on ``pending`` (K7),
+        and logs the expiry to the activity log. An entry that moved under
+        the sweeper (approved, rejected or already expired) is skipped: not
+        counted, not broadcast, not logged.
 
         Returns:
             The number of entries that were expired.
@@ -483,24 +1164,19 @@ class ApprovalQueueService:
                     "status": "expired",
                     "reviewed_at": now.isoformat(),
                 }
-                await self._es.update_document(self.INDEX, action_id, update_fields)
+                try:
+                    await self._update_with_concurrency(
+                        action_id, update_fields, expected_status="pending"
+                    )
+                except RuntimeError:
+                    logger.info("expire_stale: %s no longer pending; skipped", action_id)
+                    continue
 
                 entry.update(update_fields)
                 await self._broadcast("approval_expired", entry)
 
                 # Log expiry to activity log
-                if self._activity_log:
-                    await self._activity_log.log({
-                        "agent_id": entry.get("proposed_by", "unknown"),
-                        "action_type": "approval_expired",
-                        "tool_name": entry.get("tool_name"),
-                        "parameters": entry.get("parameters"),
-                        "risk_level": entry.get("risk_level"),
-                        "outcome": "expired",
-                        "duration_ms": 0,
-                        "tenant_id": entry.get("tenant_id"),
-                        "details": {"action_id": action_id},
-                    })
+                await self._log_expired(entry, action_id)
 
                 expired_count += 1
             except Exception:
@@ -511,23 +1187,48 @@ class ApprovalQueueService:
 
         return expired_count
 
-    async def list_pending(self, tenant_id: str, page: int = 1, size: int = 20) -> dict:
+    async def list_pending(
+        self,
+        tenant_id: str,
+        page: int = 1,
+        size: int = 20,
+        *,
+        include_unresolved: bool = False,
+    ) -> dict:
         """List pending approvals for a tenant, sorted by proposed_at descending.
 
         Args:
             tenant_id: The tenant to filter by.
             page: Page number (1-based).
             size: Number of entries per page.
+            include_unresolved: Also list ``incomplete`` and ``failed``
+                entries and ``approved`` loading plans (a stranded attempt
+                stays visible and reclaimable, K7/K13).
 
         Returns:
             Dict with "items" (list of entries), "total" count, "page", and "size".
         """
         from_offset = (page - 1) * size
+        if include_unresolved:
+            status_clause: dict = {
+                "bool": {
+                    "should": [
+                        {"terms": {"status": ["pending", "incomplete", "failed"]}},
+                        {"bool": {"filter": [
+                            {"term": {"status": "approved"}},
+                            {"term": {"tool_name": LOADING_PLAN_TOOL}},
+                        ]}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            }
+        else:
+            status_clause = {"term": {"status": "pending"}}
         query = {
             "query": {
                 "bool": {
                     "must": [
-                        {"term": {"status": "pending"}},
+                        status_clause,
                         {"term": {"tenant_id": tenant_id}},
                     ]
                 }

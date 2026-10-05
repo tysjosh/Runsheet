@@ -8,6 +8,8 @@ rejection, and activity log / approval queue wiring.
 
 Requirements: 1.4, 1.5, 1.6, 1.7, 1.8, 10.3
 """
+import logging as _logging
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -18,6 +20,22 @@ from Agents.confirmation_protocol import (
 )
 from Agents.risk_registry import RiskLevel
 from Agents.business_validator import ValidationResult
+from Agents.approval_queue_service import (
+    ApprovalForbiddenError,
+    LoadingPlanExecutionError,
+    LoadingPlanOverlapError,
+)
+from fuel.services.loading_plan_executor import (
+    MESSAGE_TEMPLATES,
+    LoadingPlanExecutionResult,
+)
+from tests.unit._loading_plan_fakes import (
+    APPROVALS,
+    ORDERS,
+    ApprovalHarness,
+    FakeFeatureFlagService,
+    order_fixture,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -849,3 +867,240 @@ class TestApprovalQueueDeduplication:
             _make_request(tool_name="mystery_tool", parameters={"a": 1, "b": 99})
         )
         assert fresh.confirmation_method == "approval_queue"
+
+
+# ---------------------------------------------------------------------------
+# T-U13: apply_loading_plan auto path and refusal (loading-plan-executor K1)
+# ---------------------------------------------------------------------------
+
+_T = "tenant-1"
+_AGENT = "compartment_loading"
+
+
+def _loading_harness(*order_ids, autonomy="full-auto", **kwargs):
+    return ApprovalHarness(
+        [order_fixture(o, tenant_id=_T) for o in order_ids], autonomy=autonomy, **kwargs
+    )
+
+
+def _loading_request(h, seed_id, order_ids):
+    """A proposal for a seeded plan, as CompartmentLoadingAgent routes it."""
+    entry = h.add_plan(seed_id, order_ids)
+    h.store.remove(APPROVALS, seed_id)
+    return MutationRequest(
+        tool_name="apply_loading_plan",
+        parameters=entry["parameters"],
+        tenant_id=_T,
+        agent_id=_AGENT,
+    )
+
+
+def _created(h):
+    """The approval entries process_mutation created (one per call)."""
+    return list(h.store.docs[APPROVALS].values())
+
+
+class TestLoadingPlanAutoPath:
+    async def test_full_auto_success_runs_through_the_approval_lifecycle(self):
+        h = _loading_harness("o1", "o2")
+        approve_calls = []
+        real_approve = h.svc.approve
+
+        async def spy(*args, **kwargs):
+            approve_calls.append(kwargs)
+            return await real_approve(*args, **kwargs)
+
+        h.svc.approve = spy
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1", "o2"]))
+
+        assert result.executed is True and result.confirmation_method == "immediate"
+        assert "Unknown tool" not in (result.result or "")
+        (entry,) = _created(h)
+        assert entry["status"] == "executed"
+        assert entry["reviewed_by"] == "agent:compartment_loading"
+        assert entry["execution_result"]["auto_executed"] is True
+        assert result.approval_id == entry["action_id"]
+        assert h.ws.types() == ["approval_created", "approval_approved", "approval_execution_updated"]
+        assert approve_calls == [{
+            "reviewer_id": "agent:compartment_loading", "tenant_id": _T,
+            "session_user_id": None, "agent_actor": "agent:compartment_loading",
+        }]
+        assert len(h.execute_calls) == 1
+        assert h.activity.mutations == [("immediate", result.result, "success")]
+        assert h.order("o1")["status"] == "scheduled"
+
+    async def test_fault_leaves_incomplete_auto_entry_a_dispatcher_can_finish(self):
+        h = _loading_harness("o1", "o2")
+        h.store.fail_on("atomic_update", ORDERS, "o2", nth=2)
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1", "o2"]))
+        assert result.executed is False and result.confirmation_method == "immediate"
+        (entry,) = _created(h)
+        assert entry["status"] == "incomplete"
+        assert entry["execution_result"]["auto_executed"] is True
+        assert h.activity.mutations == [("immediate", None, "pending_approval")]
+        done = await h.approve(entry["action_id"], user="dispatcher-1")
+        assert done["status"] == "executed"
+        assert done["execution_result"]["auto_executed"] is True
+
+    async def test_overlap_with_a_holder_queues_without_executing(self):
+        h = _loading_harness("o1", "o2")
+        h.add_plan("HOLD", ["o1"], status="executed", execution_result={"attempt_id": "a0"})
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1", "o2"]))
+        assert result.executed is False and result.confirmation_method == "approval_queue"
+        assert result.result == "Queued for approval: overlaps a plan already being applied"
+        assert h.store.doc(APPROVALS, result.approval_id)["status"] == "pending"
+        assert h.execute_calls == []
+        assert h.activity.mutations == [("approval_queue", None, "pending_approval")]
+
+    async def test_shadow_tenant_records_shadowed(self):
+        h = _loading_harness("o1", ff=FakeFeatureFlagService("shadow"))
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.executed is False and result.confirmation_method == "immediate"
+        assert h.store.doc(APPROVALS, result.approval_id)["status"] == "shadowed"
+        assert h.activity.mutations == [("immediate", None, "pending_approval")]
+
+    async def test_unresolvable_mode_leaves_created_entry_pending(self):
+        h = _loading_harness("o1", ff=FakeFeatureFlagService(raises=ConnectionError("down")))
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.executed is False and result.confirmation_method == "approval_queue"
+        assert result.result == MESSAGE_TEMPLATES["mode_unavailable"].format(plan_id="plan-seed")
+        assert h.store.doc(APPROVALS, result.approval_id)["status"] == "pending"
+        assert h.activity.mutations == [("approval_queue", None, "pending_approval")]
+
+    async def test_unwired_executor_message_comes_from_the_template(self):
+        h = _loading_harness("o1", wired=False)
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.confirmation_method == "approval_queue"
+        assert result.result == MESSAGE_TEMPLATES["executor_unavailable"].format(plan_id="plan-seed")
+
+    async def test_non_overlap_value_error_is_left_for_review(self):
+        h = _loading_harness("o1")
+        h.svc.approve = AsyncMock(side_effect=ValueError(
+            "Cannot approve action X: overlapping loading plan Y changed while approving; retry"
+        ))
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.executed is False and result.confirmation_method == "approval_queue"
+        assert result.result == "Queued for approval: the plan could not be approved automatically"
+        assert h.activity.mutations == [("approval_queue", None, "pending_approval")]
+
+    async def test_overlap_error_gives_the_overlap_text(self):
+        h = _loading_harness("o1")
+        h.svc.approve = AsyncMock(side_effect=LoadingPlanOverlapError("conflict"))
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.result == "Queued for approval: overlaps a plan already being applied"
+
+    async def test_in_progress_error_message_is_a_template(self):
+        h = _loading_harness("o1")
+
+        async def busy(action_id, **kwargs):
+            raise LoadingPlanExecutionError.from_reason(
+                h.store.doc(APPROVALS, action_id), "execution_in_progress",
+                retryable=True, writes_made=True,
+            )
+
+        h.svc.approve = busy
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.result == MESSAGE_TEMPLATES["execution_in_progress"].format(plan_id="plan-seed")
+        assert result.confirmation_method == "approval_queue"  # the entry is still pending
+
+    async def test_full_auto_never_calls_execute_mutation_for_the_tool(self):
+        h = _loading_harness("o1")
+        h.protocol._execute_mutation = AsyncMock(side_effect=AssertionError("must not run"))
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.executed is True
+        h.protocol._execute_mutation.assert_not_called()
+
+    async def test_suggest_only_queues(self):
+        h = _loading_harness("o1", autonomy="suggest-only")
+        result = await h.protocol.process_mutation(_loading_request(h, "seed", ["o1"]))
+        assert result.executed is False and result.confirmation_method == "approval_queue"
+        assert h.store.doc(APPROVALS, result.approval_id)["status"] == "pending"
+        assert h.execute_calls == []
+
+    async def test_approve_without_session_or_agent_actor_is_forbidden(self):
+        h = _loading_harness("o1")
+        h.add_plan("A", ["o1"])
+        with pytest.raises(ApprovalForbiddenError):
+            await h.svc.approve("A", reviewer_id="x", tenant_id=_T, session_user_id=None, agent_actor=None)
+
+
+class TestExecuteMutationRefusesLoadingPlans:
+    async def test_direct_call_returns_the_refusal_and_writes_nothing(self, caplog):
+        h = _loading_harness("o1")
+        request = _loading_request(h, "seed", ["o1"])
+        h.svc.create = AsyncMock()
+        mark = h.mark()
+        with caplog.at_level(_logging.ERROR, logger="Agents.confirmation_protocol"):
+            text = await h.protocol._execute_mutation(request)
+        assert text == "apply_loading_plan runs only through the approval queue; no mutation executed"
+        assert "Unknown tool" not in text and "Successfully" not in text
+        h.svc.create.assert_not_called()
+        assert h.execute_calls == []
+        assert h.writes_since(mark) == []
+        errors = [r for r in caplog.records if r.levelno == _logging.ERROR]
+        assert len(errors) == 1
+
+    async def test_refusal_holds_without_an_es_service(self):
+        protocol = _make_protocol()
+        text = await protocol._execute_mutation(_make_request(tool_name="apply_loading_plan"))
+        assert "approval queue" in text and "ES not wired" not in text
+
+
+class TestLoadingPlanExecutorRegistry:
+    async def test_unwired_protocol(self):
+        protocol = _make_protocol()
+        assert protocol.has_loading_plan_executor() is False
+        assert await protocol.resolve_loading_mode("t1") is None
+        result = await protocol.execute_loading_plan(
+            _make_request(tool_name="apply_loading_plan", parameters={"plan_id": "P1"}),
+            mode="active_gated", actor_user_id="u", action_id="a", approved_at=None,
+        )
+        assert result.reason == "executor_unavailable" and result.retryable is True
+        assert result.writes_made is False
+
+    async def test_execute_loading_plan_passes_parameters_and_mode(self):
+        protocol = _make_protocol()
+        executor = MagicMock()
+        executor.resolve_mode = AsyncMock(return_value="shadow")
+        executor.execute = AsyncMock(return_value="result")
+        protocol.set_loading_plan_executor(executor)
+        assert protocol.has_loading_plan_executor() is True
+        assert await protocol.resolve_loading_mode("t1") == "shadow"
+        params = {
+            "plan_id": "P1", "truck_id": "T1", "order_ids": ["b", "a"],
+            "order_snapshots": {"a": {"gallons_requested": 1.0}},
+        }
+        out = await protocol.execute_loading_plan(
+            _make_request(tool_name="apply_loading_plan", parameters=params),
+            mode="active_gated", actor_user_id="u1", action_id="act", approved_at="2026-07-29T00:00:00Z",
+        )
+        assert out == "result"
+        executor.execute.assert_awaited_once_with(
+            tenant_id="t1", plan_id="P1", expected_order_ids=["a", "b"], expected_truck_id="T1",
+            order_snapshots={"a": {"gallons_requested": 1.0}}, actor_user_id="u1",
+            action_id="act", approved_at="2026-07-29T00:00:00Z", mode="active_gated",
+        )
+
+
+class TestLoadingPlanExecutionErrorShape:
+    def test_from_stored_on_a_partial_record(self):
+        exc = LoadingPlanExecutionError.from_stored({"parameters": {"plan_id": "P1"}, "execution_result": {}})
+        assert exc.result.writes_made is True
+        assert exc.result.message == MESSAGE_TEMPLATES["internal_error"].format(plan_id="")
+
+    def test_from_reason_uses_the_template(self):
+        exc = LoadingPlanExecutionError.from_reason(
+            {"parameters": {"plan_id": "P1"}, "status": "approved"}, "legacy_approval", retryable=False
+        )
+        assert str(exc) == exc.result.message == MESSAGE_TEMPLATES["legacy_approval"].format(plan_id="P1")
+        assert exc.entry["status"] == "approved"
+
+    @pytest.mark.parametrize("d", [{}, {"reason": None}, {"reason": "no_such_reason"}])
+    def test_from_dict_never_raises(self, d):
+        result = LoadingPlanExecutionResult.from_dict(d)
+        assert result.message == MESSAGE_TEMPLATES["internal_error"].format(plan_id="")
+        assert result.writes_made is True
+
+    def test_failure_with_unknown_reason(self):
+        result = LoadingPlanExecutionResult.failure("P1", "no_such_reason", retryable=True, writes_made=False)
+        assert result.message == MESSAGE_TEMPLATES["internal_error"].format(plan_id="P1")

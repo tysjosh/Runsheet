@@ -216,16 +216,20 @@ class TestBroadcastActivity:
 
 
 class TestBroadcastApprovalEvent:
-    """Tests for the broadcast_approval_event method."""
+    """Tests for the broadcast_approval_event method.
+
+    Approval events are tenant-scoped (loading-plan-executor K9), so sockets
+    connect with a tenant and the data carries it.
+    """
 
     @pytest.mark.asyncio
     async def test_broadcast_approval_event_uses_event_type(self):
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
 
-        data = {"action_id": "abc-123", "status": "pending"}
+        data = {"action_id": "abc-123", "status": "pending", "tenant_id": "t1"}
         await manager.broadcast_approval_event("approval_created", data)
 
         msg = ws.send_json.call_args_list[1][0][0]
@@ -239,10 +243,10 @@ class TestBroadcastApprovalEvent:
         ws1 = _make_websocket()
         ws2 = _make_websocket()
 
-        await manager.connect(ws1)
-        await manager.connect(ws2)
+        await manager.connect(ws1, tenant_id="t1")
+        await manager.connect(ws2, tenant_id="t1")
 
-        data = {"action_id": "abc-123"}
+        data = {"action_id": "abc-123", "tenant_id": "t1"}
         count = await manager.broadcast_approval_event("approval_approved", data)
 
         assert count == 2
@@ -253,19 +257,92 @@ class TestBroadcastApprovalEvent:
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="t1")
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "t1",
             "pending_count": 0,
         }
 
-        count = await manager.broadcast_approval_event("approval_rejected", {"action_id": "x"})
+        count = await manager.broadcast_approval_event(
+            "approval_rejected", {"action_id": "x", "tenant_id": "t1"}
+        )
 
         assert count == 1
         assert manager.get_connection_count() == 1
         assert ws_dead not in manager._clients
+
+
+class TestTenantScopedBroadcasts:
+    """T-U12b: approval and tenant-bearing activity events stay in their tenant."""
+
+    async def _two_tenants(self):
+        manager = AgentActivityWSManager()
+        ws1, ws2 = _make_websocket(), _make_websocket()
+        await manager.connect(ws1, tenant_id="t1")
+        await manager.connect(ws2, tenant_id="t2")
+        return manager, ws1, ws2
+
+    @staticmethod
+    def _received(ws):
+        # Index 0 is the connection handshake.
+        return [c[0][0] for c in ws.send_json.call_args_list[1:]]
+
+    @pytest.mark.asyncio
+    async def test_approval_event_reaches_only_its_tenant(self):
+        manager, ws1, ws2 = await self._two_tenants()
+        count = await manager.broadcast_approval_event(
+            "approval_execution_updated",
+            {"action_id": "a", "tenant_id": "t1", "execution_result": {"outcome": "applied"}},
+        )
+        assert count == 1
+        assert [m["type"] for m in self._received(ws1)] == ["approval_execution_updated"]
+        assert self._received(ws2) == []
+
+    @pytest.mark.asyncio
+    async def test_approval_event_without_tenant_is_dropped(self, caplog):
+        manager, ws1, ws2 = await self._two_tenants()
+        with caplog.at_level("WARNING", logger="Agents.agent_ws_manager"):
+            count = await manager.broadcast_approval_event("approval_created", {"action_id": "a"})
+        assert count == 0
+        assert self._received(ws1) == [] and self._received(ws2) == []
+        assert any("without tenant_id dropped" in r.getMessage() for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_activity_with_tenant_is_scoped_and_without_reaches_all(self):
+        manager, ws1, ws2 = await self._two_tenants()
+        assert await manager.broadcast_activity({"action_type": "x", "tenant_id": "t2"}) == 1
+        assert self._received(ws1) == []
+        assert len(self._received(ws2)) == 1
+        assert await manager.broadcast_activity({"action_type": "system"}) == 2
+        assert len(self._received(ws1)) == 1
+        assert len(self._received(ws2)) == 2
+
+    @pytest.mark.asyncio
+    async def test_tenant_broadcast_keeps_backpressure_and_dead_cleanup(self):
+        manager = AgentActivityWSManager(max_pending_messages=1)
+        busy, dead, ok = _make_websocket(), _make_websocket(fail_send=True), _make_websocket()
+        await manager.connect(ok, tenant_id="t1")
+        now = datetime.now(timezone.utc)
+        manager._clients[busy] = {"connected_at": now, "last_send": None, "tenant_id": "t1", "pending_count": 1}
+        manager._clients[dead] = {"connected_at": now, "last_send": None, "tenant_id": "t1", "pending_count": 0}
+
+        count = await manager.broadcast_approval_event("approval_created", {"tenant_id": "t1"})
+
+        assert count == 1
+        assert dead not in manager._clients
+        assert busy in manager._clients
+        metrics = manager.get_metrics()
+        assert metrics["messages_dropped_total"] == 1
+        assert metrics["send_failures_total"] == 1
+        busy.send_json.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_broadcast_to_tenant_blank_tenant_reaches_nobody(self):
+        manager, ws1, ws2 = await self._two_tenants()
+        assert await manager.broadcast_to_tenant("", {"type": "x"}) == 0
+        assert self._received(ws1) == [] and self._received(ws2) == []
 
 
 # ---------------------------------------------------------------------------

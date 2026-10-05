@@ -108,6 +108,114 @@ class ConfirmationProtocol:
         self._validator = business_validator
         self._es = es_service
         self._notification_service = notification_service
+        # Set after construction by bootstrap (the order services are built
+        # later than the protocol); None means approvals record
+        # executor_unavailable (loading-plan-executor K1, R1.4).
+        self._loading_plan_executor = None
+
+    # ------------------------------------------------------------------
+    # Loading-plan executor registry (design K1)
+    # ------------------------------------------------------------------
+
+    def set_loading_plan_executor(self, executor) -> None:
+        """Register the ``LoadingPlanExecutor`` for ``apply_loading_plan``."""
+        self._loading_plan_executor = executor
+
+    def has_loading_plan_executor(self) -> bool:
+        return self._loading_plan_executor is not None
+
+    async def resolve_loading_mode(self, tenant_id: str) -> Optional[str]:
+        """The tenant's loading mode (strict read, K8), or None when unwired/unreadable."""
+        if self._loading_plan_executor is None:
+            return None
+        return await self._loading_plan_executor.resolve_mode(tenant_id)
+
+    async def execute_loading_plan(
+        self,
+        request: "MutationRequest",
+        *,
+        mode: str,
+        actor_user_id: str,
+        action_id: Optional[str],
+        approved_at: Optional[str],
+    ):
+        """Run the executor for an approved plan with the mode ``approve`` resolved.
+
+        Returns a ``LoadingPlanExecutionResult``. Unwired -> ``executor_unavailable``
+        (ERROR); ``ApprovalQueueService.approve`` refuses that case before taking
+        a hold, so this branch only defends direct callers.
+        """
+        from Agents.approval_queue_service import loading_plan_order_ids
+        from fuel.services.loading_plan_executor import LoadingPlanExecutionResult
+
+        params = request.parameters or {}
+        plan_id = params.get("plan_id")
+        if self._loading_plan_executor is None:
+            logger.error(
+                "ConfirmationProtocol: LoadingPlanExecutor not wired; plan %s for tenant %s not applied",
+                plan_id, request.tenant_id,
+            )
+            return LoadingPlanExecutionResult.unavailable(plan_id)
+        return await self._loading_plan_executor.execute(
+            tenant_id=request.tenant_id,
+            plan_id=plan_id,
+            expected_order_ids=sorted(loading_plan_order_ids(params)),
+            expected_truck_id=params.get("truck_id"),
+            order_snapshots=params.get("order_snapshots") or {},
+            actor_user_id=actor_user_id,
+            action_id=action_id,
+            approved_at=approved_at,
+            mode=mode,
+        )
+
+    async def _auto_execute_loading_plan(self, request: "MutationRequest", risk_level) -> "MutationResult":
+        """Auto path (R1.2): create a normal entry and approve it as the agent.
+
+        Shares the human-approval lifecycle (guard, mode, CAS, executor,
+        record, audit) instead of executing here.
+        """
+        from Agents.approval_queue_service import (
+            LoadingPlanExecutionError,
+            LoadingPlanOverlapError,
+        )
+
+        actor = f"agent:{request.agent_id}"
+        action_id = await self._approval_queue.create(request, risk_level)
+        try:
+            entry = await self._approval_queue.approve(
+                action_id, reviewer_id=actor, tenant_id=request.tenant_id,
+                session_user_id=None, agent_actor=actor,
+            )
+        except LoadingPlanOverlapError:
+            # Overlap with a holder: the entry stays pending (today's 4c behaviour).
+            logger.info("auto loading plan %s queued: overlaps a holding approval", action_id)
+            return MutationResult(
+                executed=False, approval_id=action_id, risk_level=risk_level.value,
+                result="Queued for approval: overlaps a plan already being applied",
+                confirmation_method="approval_queue",
+            )
+        except ValueError:
+            # Guard "changed while approving; retry", not found, rejected/expired.
+            logger.warning("auto loading plan %s left for review: approval did not proceed", action_id)
+            return MutationResult(
+                executed=False, approval_id=action_id, risk_level=risk_level.value,
+                result="Queued for approval: the plan could not be approved automatically",
+                confirmation_method="approval_queue",
+            )
+        except LoadingPlanExecutionError as exc:
+            # failed / incomplete / in_progress / unresolvable mode, recorded and broadcast.
+            queued = (exc.entry or {}).get("status") == "pending"  # K7 step 3a
+            return MutationResult(
+                executed=False, approval_id=action_id, risk_level=risk_level.value,
+                result=exc.result.message,
+                confirmation_method="approval_queue" if queued else "immediate",
+            )
+        result = entry.get("execution_result") or {}
+        return MutationResult(
+            executed=bool(result.get("success")), approval_id=action_id,
+            risk_level=risk_level.value, result=result.get("message", ""),
+            confirmation_method="immediate",
+        )
 
     async def process_mutation(self, request: MutationRequest) -> MutationResult:
         """Route a mutation through risk classification and autonomy level checks.
@@ -146,6 +254,15 @@ class ConfirmationProtocol:
         should_auto_execute = self._should_auto_execute(risk_level, autonomy)
 
         if should_auto_execute:
+            if request.tool_name == "apply_loading_plan":
+                # K1 auto path: through the approval lifecycle, never _execute_mutation.
+                mutation_result = await self._auto_execute_loading_plan(request, risk_level)
+                # A not-executed attempt must not read as a successful mutation.
+                await self._activity_log.log_mutation(
+                    request, risk_level, mutation_result.confirmation_method,
+                    mutation_result.result if mutation_result.executed else None,
+                )
+                return mutation_result
             # 4a. Execute immediately
             result = await self._execute_mutation(request)
             await self._activity_log.log_mutation(
@@ -308,6 +425,15 @@ class ConfirmationProtocol:
                     e,
                 )
                 return f"Failed to execute {tool_name}: {e}"
+
+        # Loading plans run only through ApprovalQueueService.approve (K1,
+        # R1.3); a direct call is a regression and writes nothing.
+        if tool_name == "apply_loading_plan":
+            logger.error(
+                "apply_loading_plan reached _execute_mutation directly (tenant=%s); refused",
+                tenant_id,
+            )
+            return "apply_loading_plan runs only through the approval queue; no mutation executed"
 
         if self._es is None:
             logger.warning(

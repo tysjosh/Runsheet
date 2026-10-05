@@ -533,9 +533,247 @@ class FakeFeatureFlagService:
         raise AssertionError("the lenient overlay read must not be used for loading plans")
 
 
+# ---------------------------------------------------------------------------
+# FEAT-003: the approval lifecycle wired as in bootstrap/agents.py
+# ---------------------------------------------------------------------------
+
+
+class FakeActivityLog:
+    """Records ``log`` / ``log_mutation`` calls; ``fail`` makes ``log`` raise."""
+
+    def __init__(self) -> None:
+        self.entries: List[Dict[str, Any]] = []
+        self.mutations: List[Tuple[str, Any, str]] = []  # (confirmation_method, result, outcome)
+        self.fail = False
+
+    async def log(self, entry: Dict[str, Any]) -> str:
+        if self.fail:
+            raise RuntimeError("activity log down")
+        self.entries.append(copy.deepcopy(entry))
+        return f"log-{len(self.entries)}"
+
+    async def log_mutation(self, request, risk_level, confirmation_method, result) -> str:
+        # Same outcome rule as ActivityLogService.log_mutation.
+        outcome = "success" if result else "pending_approval"
+        if confirmation_method == "rejected":
+            outcome = "rejected"
+        self.mutations.append((confirmation_method, result, outcome))
+        return f"mut-{len(self.mutations)}"
+
+    def of(self, action_type: str) -> List[Dict[str, Any]]:
+        return [e for e in self.entries if e.get("action_type") == action_type]
+
+
+class SpyAgentWS:
+    """Records approval and activity broadcasts (deep copies)."""
+
+    def __init__(self) -> None:
+        self.events: List[Tuple[str, Dict[str, Any]]] = []
+        self.activity: List[Dict[str, Any]] = []
+
+    async def broadcast_approval_event(self, event_type: str, data: Dict[str, Any]) -> int:
+        self.events.append((event_type, copy.deepcopy(data)))
+        return 1
+
+    async def broadcast_activity(self, data: Dict[str, Any]) -> int:
+        self.activity.append(copy.deepcopy(data))
+        return 1
+
+    def of(self, event_type: str) -> List[Dict[str, Any]]:
+        return [d for t, d in self.events if t == event_type]
+
+    def types(self) -> List[str]:
+        return [t for t, _d in self.events]
+
+
+class ApprovalHarness:
+    """Real ApprovalQueueService + ConfirmationProtocol + LoadingPlanExecutor
+    + FuelOrderRepository + OrderService (default clock) over one
+    :class:`InMemoryDocumentStore`, with a fake activity log and a spy WS.
+
+    ``ff`` is the executor's flag service (default ``active_gated``);
+    ``wired=False`` leaves the protocol without an executor; ``autonomy``
+    drives ``process_mutation`` (``full-auto`` reaches the auto path for HIGH);
+    ``clock`` is the executor's clock (plan lease), e.g. a :class:`TickingClock`.
+    """
+
+    def __init__(
+        self,
+        orders: Sequence[Dict[str, Any]] = (),
+        *,
+        tenant_id: str = "tenant-1",
+        ff: Optional[Any] = None,
+        wired: bool = True,
+        autonomy: str = "suggest-only",
+        lock_timeout: float = 2.0,
+        store: Optional[InMemoryDocumentStore] = None,
+        clock: Optional[Callable[[], datetime]] = None,
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        from Agents.approval_queue_service import ApprovalQueueService
+        from Agents.business_validator import ValidationResult
+        from Agents.confirmation_protocol import ConfirmationProtocol
+        from Agents.risk_registry import RiskLevel
+        from fuel.order_repository import FuelOrderRepository
+        from fuel.services.loading_plan_executor import LoadingPlanExecutor
+        from fuel.services.order_service import OrderService
+        from persistence.plan_execution_lock import PlanExecutionLock
+
+        self.tenant_id = tenant_id
+        self.store = store or InMemoryDocumentStore()
+        for order in orders:
+            self.store.seed(ORDERS, order["order_id"], order)
+        self.repo = FuelOrderRepository(self.store)
+        self.order_ws = AsyncMock()
+        self.order_service = OrderService(
+            order_repo=self.repo, ws_manager=self.order_ws, driver_counter_service=AsyncMock()
+        )
+        self.ws = SpyAgentWS()
+        self.activity = FakeActivityLog()
+        self.feedback = MagicMock()
+        self.feedback.record_rejection = AsyncMock()
+        self.svc = ApprovalQueueService(
+            es_service=self.store,
+            ws_manager=self.ws,
+            activity_log_service=self.activity,
+            feedback_service=self.feedback,
+        )
+        risk = MagicMock()
+        risk.classify = AsyncMock(return_value=RiskLevel.HIGH)
+        validator = MagicMock()
+        validator.validate = AsyncMock(return_value=ValidationResult(valid=True, reason=None))
+        self.autonomy = MagicMock()
+        self.autonomy.get_level = AsyncMock(return_value=autonomy)
+        self.protocol = ConfirmationProtocol(
+            risk_registry=risk,
+            approval_queue_service=self.svc,
+            autonomy_config_service=self.autonomy,
+            activity_log_service=self.activity,
+            business_validator=validator,
+            es_service=self.store,
+        )
+        self.svc._confirmation_protocol = self.protocol
+        self.ff = ff if ff is not None else FakeFeatureFlagService("active_gated")
+        self.lock = PlanExecutionLock(use_postgres=False, timeout_seconds=lock_timeout)
+        self.executor = LoadingPlanExecutor(
+            es_service=self.store,
+            order_repository=self.repo,
+            order_service=self.order_service,
+            feature_flag_service=self.ff,
+            plan_lock=self.lock,
+            **({"clock": clock} if clock is not None else {}),
+        )
+        self.execute_calls: List[Dict[str, Any]] = []
+        real_execute = self.executor.execute
+
+        async def _spy_execute(**kwargs):
+            self.execute_calls.append(dict(kwargs))
+            return await real_execute(**kwargs)
+
+        self.executor.execute = _spy_execute
+        if wired:
+            self.protocol.set_loading_plan_executor(self.executor)
+
+    # -- seeding ---------------------------------------------------------
+
+    def add_plan(
+        self,
+        action_id: str,
+        order_ids: Sequence[str],
+        *,
+        plan_id: Optional[str] = None,
+        truck_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        status: str = "pending",
+        proposed_at: Optional[str] = None,
+        plan_overrides: Optional[Dict[str, Any]] = None,
+        **entry_overrides: Any,
+    ) -> Dict[str, Any]:
+        """Seed an ``mvp_load_plans`` document and its approval entry."""
+        plan_id = plan_id or f"plan-{action_id}"
+        orders = [self.store.doc(ORDERS, o) or {"order_id": o} for o in order_ids]
+        plan = plan_doc(
+            plan_id,
+            orders=orders,
+            tenant_id=self.tenant_id,
+            truck_id=truck_id or f"truck-{action_id}",
+            run_id=run_id or f"run-{action_id}",
+            **(plan_overrides or {}),
+        )
+        self.store.seed(PLANS, plan_id, plan)
+        entry = approval_entry(
+            action_id,
+            plan,
+            status=status,
+            tenant_id=self.tenant_id,
+            # Seeding order = proposal order (strictly increasing ISO stamps).
+            proposed_at=proposed_at or (
+                datetime(2026, 7, 29, 11, 31, tzinfo=timezone.utc)
+                + timedelta(seconds=len(self.store.docs[APPROVALS]))
+            ).isoformat(),
+            **entry_overrides,
+        )
+        self.store.seed(APPROVALS, action_id, entry)
+        return entry
+
+    # -- actions ---------------------------------------------------------
+
+    def approve(self, action_id: str, user: Optional[str] = "user-1", **kwargs: Any):
+        kwargs.setdefault("reviewer_id", user or "unknown")
+        kwargs.setdefault("tenant_id", self.tenant_id)
+        kwargs.setdefault("session_user_id", user)
+        return self.svc.approve(action_id, **kwargs)
+
+    def reject(self, action_id: str, user: str = "user-1", reason: str = "no", **kwargs: Any):
+        kwargs.setdefault("tenant_id", self.tenant_id)
+        return self.svc.reject(action_id, user, reason, **kwargs)
+
+    # -- reads -----------------------------------------------------------
+
+    def entry(self, action_id: str) -> Dict[str, Any]:
+        return self.store.doc(APPROVALS, action_id)
+
+    def status(self, action_id: str) -> str:
+        return self.entry(action_id)["status"]
+
+    def result(self, action_id: str) -> Dict[str, Any]:
+        return self.entry(action_id).get("execution_result") or {}
+
+    def order(self, order_id: str) -> Dict[str, Any]:
+        return self.store.doc(ORDERS, order_id)
+
+    def plan(self, plan_id: str) -> Dict[str, Any]:
+        return self.store.doc(PLANS, plan_id)
+
+    def links(self, order_id: str) -> Tuple[Optional[str], Optional[str]]:
+        doc = self.order(order_id)
+        return (doc.get("assigned_run_id"), doc.get("assigned_asset_id"))
+
+    def order_events(self, order_id: str, event_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        return [
+            e
+            for e in sorted(self.store.events(order_id), key=lambda e: e["event_timestamp"])
+            if event_type is None or e["event_type"] == event_type
+        ]
+
+    def mark(self) -> int:
+        return len(self.store.ops)
+
+    def writes_since(self, mark: int, *indices: str) -> List[Tuple[str, str, Optional[str]]]:
+        return [
+            (op, idx, d)
+            for op, idx, d, applied in self.store.ops[mark:]
+            if applied and op in _WRITE_OPS and (not indices or idx in indices)
+        ]
+
+
 __all__ = [
     "APPROVALS",
+    "ApprovalHarness",
     "DictRedis",
+    "FakeActivityLog",
+    "SpyAgentWS",
     "EVENTS",
     "FakeFeatureFlagService",
     "InMemoryDocStore",

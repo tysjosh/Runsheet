@@ -1,8 +1,10 @@
 """Loading-plan approvals never commit one order twice (staging F10 d, review R4).
 
 ``ApprovalQueueService.approve`` refuses an ``apply_loading_plan`` approval
-that overlaps an approved or executed plan, and otherwise expires the
-overlapping pending plans before its own pending -> approved CAS. The example
+that overlaps a plan that holds its orders (``incomplete``, or
+``approved``/``executed`` with ``execution_result.attempt_id``;
+loading-plan-executor K7), and otherwise expires the overlapping pending
+plans before its own pending -> approved CAS. The example
 tests in ``tests/unit/test_loading_plan_approval_supersede.py`` pin single
 scenarios. This state machine generates plans with overlapping order sets and
 interleaves approves, rejects and concurrent approve/approve and
@@ -12,7 +14,7 @@ CAS writes interleave in different orders.
 
 Invariants checked after every step:
 
-* no order id is in more than one approved/executed plan;
+* no order id is in more than one holding plan;
 * every expired plan names the plan that superseded it
   (``execution_result.superseded_by``), and the two share an order;
 * a sequential approve succeeds exactly when no committed plan overlaps it,
@@ -35,12 +37,56 @@ from hypothesis.stateful import (
     rule,
 )
 
-from Agents.approval_queue_service import ApprovalQueueService
+from Agents.approval_queue_service import (
+    ApprovalQueueService,
+    LoadingPlanExecutionError,
+    LoadingPlanOverlapError,
+    _holds_orders,
+)
+from Agents.confirmation_protocol import ConfirmationProtocol
+from fuel.services.loading_plan_executor import LoadingPlanExecutionResult
 
 TENANT = "t1"
 ORDERS = [f"ord_{c}" for c in "ABCD"]
-COMMITTED = {"approved", "executed"}
-REFUSALS = (ValueError, RuntimeError)
+#: Executor outcomes the fake returns, cycled per call (T-U17).
+OUTCOMES = ("applied", "failed", "incomplete")
+REFUSALS = (ValueError, RuntimeError, LoadingPlanExecutionError)
+
+
+class _FakeExecutor:
+    """Stands in for ``LoadingPlanExecutor`` behind a real ``ConfirmationProtocol``.
+
+    ``applied`` -> approval ``executed`` (holds); ``failed`` with no writes ->
+    ``failed`` (does not hold, R5.3); ``incomplete`` -> ``incomplete`` (holds).
+    """
+
+    def __init__(self, outcomes) -> None:
+        self._outcomes = list(outcomes)
+        self._n = 0
+
+    async def resolve_mode(self, tenant_id):
+        return "active_gated"
+
+    async def execute(self, *, plan_id, expected_order_ids, **_kwargs):
+        outcome = self._outcomes[self._n % len(self._outcomes)]
+        self._n += 1
+        orders = list(expected_order_ids)
+        return LoadingPlanExecutionResult(
+            outcome=outcome,
+            success=outcome == "applied",
+            replay=False,
+            plan_id=plan_id,
+            run_id="run-1",
+            truck_id="truck",
+            order_ids=orders,
+            applied_order_ids=orders if outcome == "applied" else [],
+            pending_order_ids=orders if outcome == "incomplete" else [],
+            reason=None if outcome == "applied" else "write_failed",
+            retryable=outcome == "incomplete",
+            writes_made=outcome != "failed",
+            message=outcome,
+            attempt_id=f"plan-attempt-{self._n}",
+        )
 
 
 class _YieldingStore:
@@ -126,8 +172,11 @@ schedules = st.lists(st.integers(min_value=0, max_value=2), min_size=2, max_size
 class SupersedeMachine(RuleBasedStateMachine):
     plans = Bundle("plans")
 
-    @initialize(with_executor=st.booleans())
-    def setup(self, with_executor: bool) -> None:
+    @initialize(
+        with_executor=st.booleans(),
+        outcomes=st.lists(st.sampled_from(OUTCOMES), min_size=1, max_size=4),
+    )
+    def setup(self, with_executor: bool, outcomes=("applied",)) -> None:
         self.store = _YieldingStore()
         es = MagicMock()
         es.get_document = AsyncMock(side_effect=self.store.get_document)
@@ -138,17 +187,20 @@ class SupersedeMachine(RuleBasedStateMachine):
         ws.broadcast_approval_event = AsyncMock()
         activity = MagicMock()
         activity.log = AsyncMock(return_value="log-1")
-        confirmation = None
-        if with_executor:
-            # What staging does today: no executor, so approve records executed.
-            confirmation = MagicMock()
-            confirmation._execute_mutation = AsyncMock(
-                return_value="Unknown tool apply_loading_plan — no mutation executed"
-            )
         self.svc = ApprovalQueueService(
             es_service=es, ws_manager=ws, activity_log_service=activity,
-            confirmation_protocol=confirmation,
         )
+        self.with_executor = with_executor
+        if with_executor:
+            # A real protocol with a fake executor (R5.7). Without one,
+            # every approve records executor_unavailable and holds nothing.
+            protocol = ConfirmationProtocol(
+                risk_registry=MagicMock(), approval_queue_service=self.svc,
+                autonomy_config_service=MagicMock(), activity_log_service=activity,
+                business_validator=MagicMock(),
+            )
+            protocol.set_loading_plan_executor(_FakeExecutor(outcomes))
+            self.svc._confirmation_protocol = protocol
         self.next_id = 0
         self.next_reviewer = 0
 
@@ -157,11 +209,14 @@ class SupersedeMachine(RuleBasedStateMachine):
     def _status(self, action_id: str) -> str:
         return self.store.docs[action_id]["status"]
 
+    def _holds(self, action_id: str) -> bool:
+        return _holds_orders(self.store.docs[action_id])
+
     def _committed_overlap(self, action_id: str) -> bool:
         mine = _orders(self.store.docs[action_id])
         return any(
             other_id != action_id
-            and doc["status"] in COMMITTED
+            and _holds_orders(doc)
             and _orders(doc) & mine
             for other_id, doc in self.store.docs.items()
         )
@@ -183,33 +238,55 @@ class SupersedeMachine(RuleBasedStateMachine):
         self.store.docs[action_id] = _plan_doc(action_id, order_ids)
         return action_id
 
+    def _approve(self, action_id: str, reviewer: str):
+        return self.svc.approve(action_id, reviewer, session_user_id=reviewer)
+
     @rule(action_id=plans)
     def approve(self, action_id: str) -> None:
-        was_pending = self._status(action_id) == "pending"
+        before = self._status(action_id)
         blocked = self._committed_overlap(action_id)
 
-        error = asyncio.run(self._outcome(self.svc.approve(action_id, self._reviewer())))
+        error = asyncio.run(self._outcome(self._approve(action_id, self._reviewer())))
+        after = self._status(action_id)
 
-        if not was_pending:
-            assert isinstance(error, ValueError)
+        if before in ("executed", "shadowed"):
+            assert error is None and after == before  # R4.4 short-circuit
             return
-        if blocked:
-            assert isinstance(error, ValueError)
-            assert self._status(action_id) == "pending"
-        else:
-            # Disjoint from every committed plan: the approve goes through.
-            assert error is None, error
-            assert self._status(action_id) in COMMITTED
+        if before in ("rejected", "expired"):
+            assert isinstance(error, ValueError) and after == before
+            return
+        if before == "failed":
+            assert isinstance(error, LoadingPlanExecutionError) and after == "failed"
+            return
+        if not self.with_executor:
+            # executor_unavailable is recorded without a hold (K7 step 3a).
+            assert isinstance(error, LoadingPlanExecutionError)
+            assert after == before and not (before == "pending" and self._holds(action_id))
+            return
+        if before == "pending" and blocked:
+            assert isinstance(error, LoadingPlanOverlapError)
+            assert after == "pending"
+            return
+        # Disjoint from every holding plan (or a retry): the attempt runs.
+        assert after in ("executed", "failed", "incomplete"), after
+        assert (error is None) == (after == "executed"), error
 
     @rule(action_id=plans)
     def reject(self, action_id: str) -> None:
-        was_pending = self._status(action_id) == "pending"
+        doc = self.store.docs[action_id]
+        before = doc["status"]
+        writes = bool((doc.get("execution_result") or {}).get("writes_made", True))
         error = asyncio.run(self._outcome(self.svc.reject(action_id, self._reviewer(), "no")))
-        if was_pending:
+        if before in ("pending", "failed") or (before == "incomplete" and not writes):
             assert error is None
             assert self._status(action_id) == "rejected"
+        elif before == "incomplete":
+            # It may have written: never rejectable (K7).
+            assert isinstance(error, RuntimeError)
+            assert self._status(action_id) == "incomplete"
         else:
             assert isinstance(error, ValueError)
+            assert self._status(action_id) == before
 
     def _reviewer(self) -> str:
         """A reviewer id unique to one call, so its writes are attributable."""
@@ -217,48 +294,64 @@ class SupersedeMachine(RuleBasedStateMachine):
         return f"reviewer-{self.next_reviewer}"
 
     def _assert_approve_outcome(
-        self, action_id: str, reviewer: str, error: Optional[BaseException]
+        self,
+        action_id: str,
+        reviewer: str,
+        error: Optional[BaseException],
+        before: str,
+        pair: tuple = (),
     ) -> None:
         doc = self.store.docs[action_id]
-        committed_by_call = doc["status"] in COMMITTED and doc.get("reviewed_by") == reviewer
+        held_by_call = _holds_orders(doc) and doc.get("reviewed_by") == reviewer
+        if before != "pending":
+            return  # retries / short-circuits are covered by the sequential rule
         if error is None:
-            assert committed_by_call
-        else:
-            # A refused approve never committed its own entry.
-            assert not committed_by_call
+            # Executed by this call, or by the other call of the pair on the
+            # same entry (a re-approve returns the stored entry, R4.4; a retry
+            # of an incomplete entry keeps the first reviewed_by, K7).
+            assert doc["status"] == "executed" and _holds_orders(doc)
+            assert doc.get("reviewed_by") in (reviewer, *pair)
+        elif not isinstance(error, LoadingPlanExecutionError):
+            # Overlap, lost CAS or not approvable: this call took no hold.
+            # (A LoadingPlanExecutionError means the attempt ran and recorded
+            # failed/incomplete, or nothing was wired; the other call of the
+            # pair may have moved the entry on since.)
+            assert not held_by_call
 
     @rule(first=plans, second=plans, schedule=schedules)
     def concurrent_approves(self, first: str, second: str, schedule: List[int]) -> None:
         reviewers = (self._reviewer(), self._reviewer())
+        before = (self._status(first), self._status(second))
         self.store.schedule = list(schedule)
 
         async def _both():
             return await asyncio.gather(
-                self._outcome(self.svc.approve(first, reviewers[0])),
-                self._outcome(self.svc.approve(second, reviewers[1])),
+                self._outcome(self._approve(first, reviewers[0])),
+                self._outcome(self._approve(second, reviewers[1])),
             )
 
         errors = asyncio.run(_both())
         self.store.schedule = []
-        for action_id, reviewer, error in zip((first, second), reviewers, errors):
-            self._assert_approve_outcome(action_id, reviewer, error)
+        for action_id, reviewer, error, was in zip((first, second), reviewers, errors, before):
+            self._assert_approve_outcome(action_id, reviewer, error, was, reviewers)
 
     @rule(to_approve=plans, to_reject=plans, schedule=schedules)
     def concurrent_approve_and_reject(
         self, to_approve: str, to_reject: str, schedule: List[int]
     ) -> None:
         approver, rejecter = self._reviewer(), self._reviewer()
+        before = self._status(to_approve)
         self.store.schedule = list(schedule)
 
         async def _both():
             return await asyncio.gather(
-                self._outcome(self.svc.approve(to_approve, approver)),
+                self._outcome(self._approve(to_approve, approver)),
                 self._outcome(self.svc.reject(to_reject, rejecter, "no")),
             )
 
         approve_error, reject_error = asyncio.run(_both())
         self.store.schedule = []
-        self._assert_approve_outcome(to_approve, approver, approve_error)
+        self._assert_approve_outcome(to_approve, approver, approve_error, before)
         rejected = self.store.docs[to_reject]
         if reject_error is None:
             assert rejected["status"] == "rejected"
@@ -274,7 +367,7 @@ class SupersedeMachine(RuleBasedStateMachine):
             return
         holder: Dict[str, str] = {}
         for action_id, doc in self.store.docs.items():
-            if doc["status"] not in COMMITTED:
+            if not _holds_orders(doc):
                 continue
             for order_id in _orders(doc):
                 assert order_id not in holder, (
@@ -317,13 +410,14 @@ class TestRacingOverlappingApprovals:
         extra_b=order_sets,
         schedule=schedules,
         with_executor=st.booleans(),
+        outcomes=st.lists(st.sampled_from(OUTCOMES), min_size=1, max_size=2),
         reject_instead=st.booleans(),
     )
     def test_two_racing_overlapping_approvals_never_both_commit(
-        self, shared, extra_a, extra_b, schedule, with_executor, reject_instead
+        self, shared, extra_a, extra_b, schedule, with_executor, outcomes, reject_instead
     ):
         machine = SupersedeMachine()
-        machine.setup(with_executor=with_executor)
+        machine.setup(with_executor=with_executor, outcomes=outcomes)
         a = machine.propose(sorted({shared, *extra_a}))
         b = machine.propose(sorted({shared, *extra_b}))
         bystander = machine.propose(["ord_Z"])
@@ -335,6 +429,6 @@ class TestRacingOverlappingApprovals:
 
         machine.no_order_in_two_committed_plans()
         machine.expired_plans_name_an_overlapping_superseder()
-        committed = [x for x in (a, b) if machine._status(x) in COMMITTED]
+        committed = [x for x in (a, b) if machine._holds(x)]
         assert len(committed) <= 1
         assert machine._status(bystander) == "pending"

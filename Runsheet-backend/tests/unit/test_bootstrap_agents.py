@@ -164,6 +164,17 @@ class TestAgentsBootstrap:
             assert container.has("agent_orchestrator")
             assert container.has("redis_client")
             assert container.has("plan_dispatch_service")
+            # loading-plan-executor K1: the executor is registered on the
+            # protocol and shares the dispatch service's per-tenant lock.
+            from persistence.plan_execution_lock import PLAN_EXECUTION_LOCK
+            assert container.has("loading_plan_executor")
+            executor = container.loading_plan_executor
+            container.confirmation_protocol.set_loading_plan_executor.assert_called_once_with(
+                executor
+            )
+            assert executor._plan_lock is PLAN_EXECUTION_LOCK
+            assert container.plan_dispatch_service._plan_lock is PLAN_EXECUTION_LOCK
+            assert executor._ff is container.ops_feature_flags
             # F7: the approval queue records rejections through the same
             # FeedbackService the container exposes.
             assert (

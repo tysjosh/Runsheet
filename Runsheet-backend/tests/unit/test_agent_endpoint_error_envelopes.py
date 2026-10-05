@@ -82,3 +82,113 @@ def test_500_body_omits_exception_text(client, method, path, body) -> None:
     assert "SECRET-91c2" not in response.text
     assert "10.0.3.17" not in response.text
     assert "error" not in (response.json().get("details") or {})
+
+
+# ---------------------------------------------------------------------------
+# Loading-plan approve/reject mapping (loading-plan-executor K10)
+# ---------------------------------------------------------------------------
+
+from Agents.approval_queue_service import (  # noqa: E402
+    ApprovalExpiredError,
+    ApprovalForbiddenError,
+    LoadingPlanExecutionError,
+    LoadingPlanOverlapError,
+)
+from fuel.services.loading_plan_executor import LoadingPlanExecutionResult  # noqa: E402
+
+
+class _Recording:
+    """Approval service stub that records its kwargs and raises ``exc``."""
+
+    def __init__(self, exc=None, value=None):
+        self.exc, self.value, self.calls = exc, value, []
+
+    def __getattr__(self, name):
+        async def _call(*args, **kwargs):
+            self.calls.append((name, args, kwargs))
+            if self.exc is not None:
+                raise self.exc
+            return self.value if self.value is not None else {"items": [], "total": 0}
+        return _call
+
+
+@pytest.fixture
+def make_client(client, monkeypatch):
+    def _make(service):
+        monkeypatch.setattr(agent_endpoints, "_approval_queue_service", service)
+        return client
+    return _make
+
+
+def _execution_error(status="incomplete"):
+    result = LoadingPlanExecutionResult(
+        outcome="incomplete", success=False, replay=False, plan_id="P1", run_id="R1",
+        truck_id="T1", failures=[{"order_id": "o2", "reason": "write_failed"}],
+        reason="write_failed", retryable=True, writes_made=True,
+        message="Loading plan P1 is partly applied: a write failed. Retry to finish it.",
+        attempt_id="a1",
+    )
+    return LoadingPlanExecutionError({"status": status, "parameters": {"plan_id": "P1"}}, result)
+
+
+def test_approve_passes_session_identity_and_never_agent_actor(make_client):
+    svc = _Recording(value={"status": "executed"})
+    response = make_client(svc).post("/api/agent/approvals/act-1/approve?reviewer_id=spoof")
+    assert response.status_code == 200
+    ((name, _args, kwargs),) = svc.calls
+    assert name == "approve"
+    assert kwargs == {
+        "action_id": "act-1", "reviewer_id": "user-1",
+        "tenant_id": "tenant-A", "session_user_id": "user-1",
+    }
+
+
+def test_execution_error_maps_to_409_with_details(make_client):
+    response = make_client(_Recording(exc=_execution_error())).post("/api/agent/approvals/act-1/approve")
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["error_code"] == "LOADING_PLAN_EXECUTION_FAILED"
+    assert body["message"].startswith("Loading plan P1 is partly applied")
+    assert body["details"] == {
+        "action_id": "act-1", "plan_id": "P1", "reason": "write_failed",
+        "failures": [{"order_id": "o2", "reason": "write_failed"}],
+        "retryable": True, "writes_made": True, "status": "incomplete",
+    }
+
+
+def test_expired_maps_to_409_invalid_status_transition(make_client):
+    response = make_client(_Recording(exc=ApprovalExpiredError("act-1"))).post("/api/agent/approvals/act-1/approve")
+    assert response.status_code == 409
+    assert response.json()["error_code"] == "INVALID_STATUS_TRANSITION"
+    assert response.json()["message"] == "Approval act-1 expired before it was approved"
+
+
+def test_forbidden_maps_to_403(make_client):
+    response = make_client(_Recording(exc=ApprovalForbiddenError("act-1"))).post("/api/agent/approvals/act-1/approve")
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "FORBIDDEN"
+
+
+def test_overlap_keeps_the_validation_response(make_client):
+    response = make_client(_Recording(exc=LoadingPlanOverlapError("conflicts with approved loading plan A"))).post(
+        "/api/agent/approvals/act-1/approve"
+    )
+    assert response.status_code == 400
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
+def test_reject_passes_tenant(make_client):
+    svc = _Recording(value={"status": "rejected"})
+    response = make_client(svc).post("/api/agent/approvals/act-1/reject", json={"reason": "no"})
+    assert response.status_code == 200
+    ((name, _args, kwargs),) = svc.calls
+    assert name == "reject" and kwargs["tenant_id"] == "tenant-A"
+
+
+@pytest.mark.parametrize("query, expected", [("", False), ("?include_unresolved=true", True)])
+def test_list_forwards_include_unresolved(make_client, query, expected):
+    svc = _Recording()
+    response = make_client(svc).get(f"/api/agent/approvals{query}")
+    assert response.status_code == 200
+    ((name, _args, kwargs),) = svc.calls
+    assert name == "list_pending" and kwargs["include_unresolved"] is expected

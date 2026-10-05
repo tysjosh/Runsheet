@@ -395,9 +395,9 @@ class TestAgentActivityManagerMetrics:
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         count = await manager.broadcast_approval_event(
-            "approval_created", {"action_id": "abc"}
+            "approval_created", {"action_id": "abc", "tenant_id": "t1"}
         )
 
         assert count == 1

@@ -9,6 +9,11 @@ copies could be approved.
 Approving one plan now expires every overlapping pending plan
 (``execution_result.superseded_by``) and refuses when an overlapping plan is
 already approved.
+
+Loading-plan executor (FEAT-003): approve now runs the executor, so the
+harness wires a stub protocol whose executor applies every plan, approvals
+carry the session user, a successful approve ends ``executed``, and only
+entries with ``execution_result.attempt_id`` hold their orders (K7).
 """
 
 from __future__ import annotations
@@ -18,9 +23,35 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from Agents.approval_queue_service import ApprovalQueueService
+from Agents.approval_queue_service import (
+    ApprovalQueueService,
+    LoadingPlanOverlapError,
+)
+from fuel.services.loading_plan_executor import LoadingPlanExecutionResult
 
 TENANT = "t1"
+#: What a new-flow holder carries (legacy entries without it do not hold).
+HOLDING = {"attempt_id": "attempt-0", "success": True}
+
+
+class _StubProtocol:
+    """Executor wiring stand-in: mode active_gated, every plan applies."""
+
+    def has_loading_plan_executor(self) -> bool:
+        return True
+
+    async def resolve_loading_mode(self, tenant_id):
+        return "active_gated"
+
+    async def execute_loading_plan(self, request, *, mode, actor_user_id, action_id, approved_at):
+        order_ids = sorted(request.parameters.get("order_ids") or [])
+        return LoadingPlanExecutionResult(
+            outcome="applied", success=True, replay=False,
+            plan_id=request.parameters.get("plan_id"), run_id="run-1",
+            truck_id=request.parameters.get("truck_id"),
+            order_ids=order_ids, applied_order_ids=order_ids,
+            message="applied", attempt_id="plan-attempt",
+        )
 
 
 class _Store:
@@ -107,9 +138,13 @@ def _service(*docs: Dict[str, Any], feedback=None):
     activity.log = AsyncMock(return_value="log-1")
     svc = ApprovalQueueService(
         es_service=es, ws_manager=ws, activity_log_service=activity,
-        feedback_service=feedback,
+        confirmation_protocol=_StubProtocol(), feedback_service=feedback,
     )
     return svc, store, ws, activity
+
+
+def _approve(svc, action_id: str, user: str):
+    return svc.approve(action_id, reviewer_id=user, session_user_id=user)
 
 
 def _actions(activity, action_type: str) -> List[Dict[str, Any]]:
@@ -130,9 +165,9 @@ class TestSupersede:
             feedback=feedback,
         )
 
-        result = await svc.approve("A", reviewer_id="dispatcher-1")
+        result = await _approve(svc, "A", "dispatcher-1")
 
-        assert result["status"] == "approved"
+        assert result["status"] == "executed"
         b = store.docs["B"]
         assert b["status"] == "expired"
         assert b["execution_result"] == {
@@ -151,22 +186,22 @@ class TestSupersede:
     @pytest.mark.asyncio
     async def test_a_superseded_plan_can_no_longer_be_approved(self):
         svc, store, _, _ = _service(_plan("A", ["ord_A"]), _plan("B", ["ord_A"]))
-        await svc.approve("A", reviewer_id="dispatcher-1")
+        await _approve(svc, "A", "dispatcher-1")
 
         with pytest.raises(ValueError, match="expired"):
-            await svc.approve("B", reviewer_id="dispatcher-2")
+            await _approve(svc, "B", "dispatcher-2")
         assert store.docs["B"]["status"] == "expired"
 
     @pytest.mark.asyncio
     async def test_conflict_with_an_approved_plan_refuses_and_stays_pending(self):
         svc, store, _, _ = _service(
-            _plan("A", ["ord_A"], status="approved"),
+            {**_plan("A", ["ord_A"], status="approved"), "execution_result": HOLDING},
             _plan("C", ["ord_A", "ord_C"]),
             _plan("D", ["ord_C"]),
         )
 
-        with pytest.raises(ValueError, match="conflicts with approved loading plan A"):
-            await svc.approve("C", reviewer_id="dispatcher-1")
+        with pytest.raises(LoadingPlanOverlapError, match="conflicts with approved loading plan A"):
+            await _approve(svc, "C", "dispatcher-1")
 
         assert store.docs["C"]["status"] == "pending"
         # Refused before anything was superseded.
@@ -175,10 +210,11 @@ class TestSupersede:
     @pytest.mark.asyncio
     async def test_conflict_with_an_executed_plan_refuses(self):
         svc, store, _, _ = _service(
-            _plan("A", ["ord_A"], status="executed"), _plan("C", ["ord_A"]),
+            {**_plan("A", ["ord_A"], status="executed"), "execution_result": HOLDING},
+            _plan("C", ["ord_A"]),
         )
         with pytest.raises(ValueError, match="conflicts with approved loading plan A"):
-            await svc.approve("C", reviewer_id="dispatcher-1")
+            await _approve(svc, "C", "dispatcher-1")
         assert store.docs["C"]["status"] == "pending"
 
     @pytest.mark.asyncio
@@ -186,10 +222,10 @@ class TestSupersede:
         svc, store, _, _ = _service(
             _plan("T1", ["ord_A"]), _plan("T2", ["ord_B"]),
         )
-        await svc.approve("T1", reviewer_id="dispatcher-1")
-        await svc.approve("T2", reviewer_id="dispatcher-1")
-        assert store.docs["T1"]["status"] == "approved"
-        assert store.docs["T2"]["status"] == "approved"
+        await _approve(svc, "T1", "dispatcher-1")
+        await _approve(svc, "T2", "dispatcher-1")
+        assert store.docs["T1"]["status"] == "executed"
+        assert store.docs["T2"]["status"] == "executed"
 
     @pytest.mark.asyncio
     async def test_concurrent_change_is_a_conflict_and_leaves_own_entry_pending(self):
@@ -203,7 +239,7 @@ class TestSupersede:
         store.before_update = _other_reviewer_wins
 
         with pytest.raises(ValueError, match="changed while approving"):
-            await svc.approve("A", reviewer_id="dispatcher-1")
+            await _approve(svc, "A", "dispatcher-1")
         assert store.docs["A"]["status"] == "pending"
         assert store.docs["B"]["status"] == "approved"
 
@@ -213,7 +249,7 @@ class TestSupersede:
         svc, store, _, _ = _service(
             _plan("A", ["ord_A"]), _plan("OLD", ["ord_A"], legacy_params=True),
         )
-        await svc.approve("A", reviewer_id="dispatcher-1")
+        await _approve(svc, "A", "dispatcher-1")
         assert store.docs["OLD"]["status"] == "expired"
 
     @pytest.mark.asyncio
@@ -225,6 +261,6 @@ class TestSupersede:
             _plan("X", ["ord_A"], tenant_id="t2"),
             other_tool,
         )
-        await svc.approve("A", reviewer_id="dispatcher-1")
+        await _approve(svc, "A", "dispatcher-1")
         assert store.docs["X"]["status"] == "pending"
         assert store.docs["J"]["status"] == "pending"

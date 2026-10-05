@@ -27,6 +27,12 @@ from errors.exceptions import (
 )
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
+from Agents.approval_queue_service import (
+    ApprovalExpiredError,
+    ApprovalForbiddenError,
+    LoadingPlanExecutionError,
+)
+
 from Agents.api_authz import (
     agent_admin_dependency,
     agent_ops_dependency,
@@ -176,17 +182,29 @@ async def list_approvals(
     tenant: TenantContext = Depends(get_tenant_context),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
+    include_unresolved: bool = Query(
+        False,
+        description=(
+            "Also list incomplete/failed entries and approved loading plans "
+            "(loading-plan-executor K7)"
+        ),
+    ),
 ):
     """
     List pending approval requests for a tenant.
 
     Returns pending approval entries sorted by ``proposed_at`` descending.
+    With ``include_unresolved`` the list also carries entries that still need
+    a dispatcher (``incomplete``, ``failed``, ``approved`` loading plans).
 
     Validates: Requirement 2.3
     """
     svc = _get_approval_queue()
     try:
-        result = await svc.list_pending(tenant_id=tenant.tenant_id, page=page, size=size)
+        result = await svc.list_pending(
+            tenant_id=tenant.tenant_id, page=page, size=size,
+            include_unresolved=include_unresolved,
+        )
         # Dual-field deprecation: add unified PaginatedResponse fields
         from schemas.common import paginated_response_dict
 
@@ -227,8 +245,44 @@ async def approve_action(
     svc = _get_approval_queue()
     actor = tenant.user_id or reviewer_id or "unknown"
     try:
-        result = await svc.approve(action_id=action_id, reviewer_id=actor)
+        # K10: the loading-plan actor is the verified session user only;
+        # agent_actor is never set from this endpoint (R7.3, R7.4).
+        result = await svc.approve(
+            action_id=action_id,
+            reviewer_id=actor,
+            tenant_id=tenant.tenant_id,
+            session_user_id=tenant.user_id,
+        )
         return result
+    except LoadingPlanExecutionError as exc:
+        # Fixed-template message and structured details only (R11.2, R11.5).
+        res = exc.result
+        raise AppException(
+            error_code=ErrorCode.LOADING_PLAN_EXECUTION_FAILED,
+            message=res.message,
+            status_code=409,
+            details={
+                "action_id": action_id,
+                "plan_id": res.plan_id,
+                "reason": res.reason,
+                "failures": list(res.failures),
+                "retryable": res.retryable,
+                "writes_made": res.writes_made,
+                "status": (exc.entry or {}).get("status"),
+            },
+        )
+    except ApprovalExpiredError:
+        raise AppException(
+            error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+            message=f"Approval {action_id} expired before it was approved",
+            status_code=409,
+        )
+    except ApprovalForbiddenError:
+        raise AppException(
+            error_code=ErrorCode.FORBIDDEN,
+            message="A signed-in user is required to approve a loading plan",
+            status_code=403,
+        )
     except ValueError as e:
         raise validation_error(message=str(e))
     except RuntimeError as e:
@@ -262,7 +316,8 @@ async def reject_action(
     actor = tenant.user_id or reviewer_id or "unknown"
     try:
         result = await svc.reject(
-            action_id=action_id, reviewer_id=actor, reason=reason
+            action_id=action_id, reviewer_id=actor, reason=reason,
+            tenant_id=tenant.tenant_id,
         )
         return result
     except ValueError as e:

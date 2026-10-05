@@ -393,11 +393,11 @@ class TestAgentActivityWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_agent_ws_broadcast_approval_event(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="t1")
 
         count = await self.manager.broadcast_approval_event(
             "approval_created",
-            {"approval_id": "APR-001", "action": "reassign_asset"},
+            {"approval_id": "APR-001", "action": "reassign_asset", "tenant_id": "t1"},
         )
         assert count == 1
 
