@@ -305,6 +305,25 @@ async def initialize(app, container: ServiceContainer) -> None:
     # Elasticsearch (module-level singleton)
     container.es_service = elasticsearch_service
 
+    # FileStorageService (S3). Built here, before any domain boots, so
+    # compliance (terminal BOL raw documents) and agents share one instance.
+    # It used to be built in the agents bootstrap, which runs after
+    # compliance, so terminal BOLs never had storage (finding C9).
+    try:
+        from services.file_storage_service import build_file_storage_service_from_env
+
+        file_storage_service = build_file_storage_service_from_env()
+        if file_storage_service is not None:
+            container.file_storage_service = file_storage_service
+            logger.info("FileStorageService registered")
+        else:
+            logger.info(
+                "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
+                "FUEL_OPS_S3_REGION not configured"
+            )
+    except Exception as exc:
+        logger.warning("FileStorageService wiring failed: %s", exc)
+
     # Seed baseline data (development / demo only).
     #
     # Historically this ran unconditionally at every boot, which meant a

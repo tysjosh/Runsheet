@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import mimetypes
+import os
 import re
 import uuid
 from dataclasses import dataclass
@@ -44,9 +45,18 @@ logger = logging.getLogger(__name__)
 
 #: Supported upload/read categories. ``bol`` and ``rack_csv`` are server-side
 #: outputs; ``signature``, ``photo``, and ``meter_ticket`` come from drivers;
-#: ``attachment`` is a catch-all for tenant-generated files.
+#: ``attachment`` is a catch-all for tenant-generated files; ``terminal_bol``
+#: holds the raw document behind an ingested terminal BOL (scan or EDI).
 VALID_CATEGORIES: frozenset[str] = frozenset(
-    {"signature", "photo", "meter_ticket", "bol", "rack_csv", "attachment"}
+    {
+        "signature",
+        "photo",
+        "meter_ticket",
+        "bol",
+        "rack_csv",
+        "attachment",
+        "terminal_bol",
+    }
 )
 
 #: MIME types accepted on upload for driver-facing categories + BOL PDFs.
@@ -60,6 +70,9 @@ _CATEGORY_EXTRA_MIME_TYPES: Dict[str, frozenset[str]] = {
     "rack_csv": frozenset({"text/csv"}),
     # BOL generation always produces PDFs — narrow the allow-list.
     "bol": frozenset({"application/pdf"}),
+    # Terminal BOLs: manual scans use the default image/PDF types; raw EDI
+    # payloads (X12 856 or pipe-delimited) are stored as-is.
+    "terminal_bol": frozenset({"application/edi-x12", "text/plain"}),
 }
 
 #: Default per-tenant max upload size (Req 4.1.5). 10 MiB.
@@ -565,3 +578,22 @@ class FileStorageService:
                 self._audit(event)  # type: ignore[misc]
         except Exception as exc:  # pragma: no cover - audit must never break ops
             logger.error("file_storage audit emit failed: %s", exc)
+
+
+def build_file_storage_service_from_env() -> Optional[FileStorageService]:
+    """Build the process-wide :class:`FileStorageService` from the environment.
+
+    Reads ``FUEL_OPS_S3_BUCKET`` and ``FUEL_OPS_S3_REGION`` (falling back to
+    ``AWS_REGION`` / ``AWS_DEFAULT_REGION``), the same names the agents
+    bootstrap used. Returns ``None`` when either is unset, so a dev stack
+    without S3 runs without file storage.
+    """
+    bucket = os.environ.get("FUEL_OPS_S3_BUCKET")
+    region = (
+        os.environ.get("FUEL_OPS_S3_REGION")
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+    )
+    if not bucket or not region:
+        return None
+    return FileStorageService(bucket=bucket, region=region)

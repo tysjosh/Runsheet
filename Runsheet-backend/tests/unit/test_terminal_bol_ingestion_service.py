@@ -302,7 +302,7 @@ class TestIngestManual:
 
         file_storage.put.assert_called_once_with(
             tenant_id=_TENANT_ID,
-            category="terminal_bols",
+            category="terminal_bol",
             content_bytes=file_bytes,
             content_type="application/pdf",
         )
@@ -1446,7 +1446,7 @@ class TestIngestEdiRawDocumentPersistence:
         # Verify FileStorageService.put() was called with the raw EDI bytes
         file_storage.put.assert_called_once_with(
             tenant_id=_TENANT_ID,
-            category="terminal_bols",
+            category="terminal_bol",
             content_bytes=payload,
             content_type="application/edi-x12",
         )
@@ -1554,7 +1554,7 @@ class TestIngestEdiRawDocumentPersistence:
         # Verify the exact raw bytes are stored (not the parsed version)
         file_storage.put.assert_called_once_with(
             tenant_id=_TENANT_ID,
-            category="terminal_bols",
+            category="terminal_bol",
             content_bytes=payload,
             content_type="application/edi-x12",
         )
@@ -2029,3 +2029,44 @@ class TestRealVCFCrossCheck:
         )
         payload = es_service.update_document.call_args[0][2]
         assert payload["vcf_discrepancy_flag"] is flagged
+
+
+# ---------------------------------------------------------------------------
+# Tests: raw document storage with the real FileStorageService (finding C9)
+# ---------------------------------------------------------------------------
+
+
+class TestRawDocumentStorage:
+    """Raw documents land under the ``terminal_bol`` category.
+
+    The service used ``terminal_bols``, which FileStorageService rejects, so
+    every put raised and was swallowed as a warning.
+    """
+
+    @staticmethod
+    def _fss():
+        from services.file_storage_service import FileStorageService
+
+        return FileStorageService(bucket="b", region="us-east-2", s3_client=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_manual_scan_stores_raw_document_ref(self, es_service, registry):
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            file_storage_service=self._fss(),
+        )
+        bol = await svc.ingest_manual(b"\x89PNG\r\n\x1a\n", "image/png", _TENANT_ID)
+        assert bol.raw_document_ref is not None
+        assert bol.raw_document_ref.startswith(f"tenants/{_TENANT_ID}/terminal_bol/")
+
+    @pytest.mark.asyncio
+    async def test_edi_payload_stores_raw_document_ref(self, es_service, registry):
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            file_storage_service=self._fss(),
+        )
+        bol = await svc.ingest_edi(_make_valid_pipe_payload(), _TENANT_ID)
+        assert bol.raw_document_ref is not None
+        assert bol.raw_document_ref.startswith(f"tenants/{_TENANT_ID}/terminal_bol/")

@@ -114,6 +114,38 @@ class TestCoreBootstrap:
         assert container.has("settings")
         assert container.has("es_service")
 
+    @pytest.mark.parametrize("bucket", ["qa-bucket", None])
+    @pytest.mark.asyncio
+    async def test_file_storage_service_is_built_before_domains(
+        self, mock_app, container, _mock_external_services, monkeypatch, bucket
+    ):
+        """Finding C9: core (first in the boot order) registers file storage so
+        compliance's terminal-BOL service gets it; absent config, none is built."""
+        if bucket:
+            monkeypatch.setenv("FUEL_OPS_S3_BUCKET", bucket)
+        else:
+            monkeypatch.delenv("FUEL_OPS_S3_BUCKET", raising=False)
+        monkeypatch.setenv("FUEL_OPS_S3_REGION", "us-east-2")
+
+        with patch("config.settings.get_settings", return_value=MagicMock()), \
+             patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
+             patch("health.service.HealthCheckService", return_value=MagicMock()), \
+             patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
+             patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
+             patch("websocket.connection_manager.bind_container"), \
+             patch("errors.handlers.register_exception_handlers"):
+
+            sys.modules.pop("bootstrap.core", None)
+            from bootstrap.core import initialize
+            await initialize(mock_app, container)
+
+        from services.file_storage_service import FileStorageService
+
+        if bucket:
+            assert isinstance(container.get("file_storage_service"), FileStorageService)
+        else:
+            assert not container.has("file_storage_service")
+
 
 class _CommerceESIndexProvisioningRemoved:
     """``TestCommerceESIndexProvisioning`` was here — three tests.

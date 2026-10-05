@@ -375,33 +375,18 @@ async def initialize(app, container: ServiceContainer) -> None:
         credentials_vault = None
         logger.warning("TenantCredentialsVault wiring failed: %s", exc)
 
-    # 4. FileStorageService — S3-backed object store with tenant
-    #    prefixes and presigned URLs. Only constructed when a bucket is
-    #    configured; local-dev / CI skip the S3 path entirely.
-    file_storage_service = None
-    try:
-        from services.file_storage_service import FileStorageService
-
-        _bucket = fuel_ops_settings.get("s3_bucket")
-        _region = fuel_ops_settings.get("s3_region")
-        if _bucket and _region:
-            file_storage_service = FileStorageService(
-                bucket=_bucket,
-                region=_region,
-            )
-            container.file_storage_service = file_storage_service
-            logger.info(
-                "FileStorageService registered (bucket=%s region=%s)",
-                _bucket,
-                _region,
-            )
-        else:
-            logger.info(
-                "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
-                "FUEL_OPS_S3_REGION not configured"
-            )
-    except Exception as exc:
-        logger.warning("FileStorageService wiring failed: %s", exc)
+    # 4. FileStorageService — built once by the core bootstrap (it must exist
+    #    before compliance boots); reuse that instance here.
+    file_storage_service = (
+        container.get("file_storage_service")
+        if container.has("file_storage_service")
+        else None
+    )
+    if file_storage_service is None:
+        logger.info(
+            "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
+            "FUEL_OPS_S3_REGION not configured"
+        )
 
     # 5. MeterTicketOCRService — AWS Textract wrapper. Requires a
     #    FileStorageService to fetch the meter-ticket bytes. When S3 is

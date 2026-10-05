@@ -397,7 +397,7 @@ class TerminalBOLIngestionService:
             try:
                 raw_document_ref = self._file_storage_service.put(
                     tenant_id=tenant_id,
-                    category="terminal_bols",
+                    category="terminal_bol",
                     content_bytes=edi_payload,
                     content_type="application/edi-x12",
                 )
@@ -485,7 +485,7 @@ class TerminalBOLIngestionService:
             try:
                 raw_document_ref = self._file_storage_service.put(
                     tenant_id=tenant_id,
-                    category="terminal_bols",
+                    category="terminal_bol",
                     content_bytes=file_bytes,
                     content_type=content_type,
                 )
