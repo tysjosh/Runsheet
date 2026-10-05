@@ -99,6 +99,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql.elements import ColumnElement, Grouping
 
 __all__ = [
+    "InvalidQueryValueError",
     "UnsupportedQueryError",
     "build_predicate",
     "build_order_by",
@@ -106,6 +107,7 @@ __all__ = [
     "collect_query_fields",
     "collect_sort_fields",
     "parse_date_math",
+    "reject_control_characters",
     "resolve_source_filter",
     "sort_entries",
     "sort_values_of",
@@ -128,6 +130,52 @@ class UnsupportedQueryError(NotImplementedError):
         )
         self.clause = clause
         self.context = context
+
+
+# ---------------------------------------------------------------------------
+# Control characters in query values
+# ---------------------------------------------------------------------------
+
+#: C0 controls except tab, newline and carriage return, plus DEL. Postgres
+#: rejects NUL in text and jsonb outright, so a filter value carrying one used to
+#: reach the database and come back as a 500.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+class InvalidQueryValueError(ValueError):
+    """A query key or value contains a control character.
+
+    A ``ValueError`` so endpoints that already map ``ValueError`` to 400 do so;
+    ``errors.handlers`` also finds it under an ``internal_error`` wrapper. The
+    message is fixed and safe to return: the offending value is never echoed.
+    """
+
+    reason = "control_character"
+    safe_message = "A filter value contains a control character."
+
+    def __init__(self) -> None:
+        super().__init__(self.safe_message)
+
+
+def reject_control_characters(value: Any, *, _depth: int = 0) -> None:
+    """Raise :class:`InvalidQueryValueError` if any key or string holds a control character.
+
+    Walks dicts (keys and values), lists, tuples and sets. Tab, newline and
+    carriage return are allowed, as is any printable unicode.
+    """
+    if _depth > 64:
+        return
+    if isinstance(value, str):
+        if _CONTROL_CHARACTERS.search(value):
+            raise InvalidQueryValueError()
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and _CONTROL_CHARACTERS.search(key):
+                raise InvalidQueryValueError()
+            reject_control_characters(item, _depth=_depth + 1)
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        for item in value:
+            reject_control_characters(item, _depth=_depth + 1)
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ error response without exposing internal details.
 import logging
 import traceback
 import uuid
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -47,6 +47,60 @@ def get_request_id(request: Request) -> str:
     return str(uuid.uuid4())
 
 
+#: How far down ``__cause__``/``__context__`` the query-value check looks.
+_CHAIN_DEPTH = 10
+
+
+def _query_value_error_in_chain(exc: BaseException) -> Optional[BaseException]:
+    """The ``InvalidQueryValueError`` at or under ``exc``, if any (N5).
+
+    Endpoints commonly wrap service calls in ``except Exception: raise
+    internal_error(...)``, which turns a client's bad filter value into a 500.
+    Walking the chain lets those endpoints answer 400 without each one being
+    changed. Cycle-safe and bounded to :data:`_CHAIN_DEPTH` links.
+    """
+    # Imported lazily: persistence imports SQLAlchemy and must not load with
+    # the error package.
+    from persistence.document_query import InvalidQueryValueError
+
+    seen: set = set()
+    current: Optional[BaseException] = exc
+    for _ in range(_CHAIN_DEPTH):
+        if current is None or id(current) in seen:
+            return None
+        if isinstance(current, InvalidQueryValueError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def _query_value_error_response(
+    request: Request, request_id: str, found: BaseException
+) -> JSONResponse:
+    """400 VALIDATION_ERROR for a control character in a filter value."""
+    logger.warning(
+        "Rejected query value with a control character",
+        extra={
+            "error_code": ErrorCode.VALIDATION_ERROR.value,
+            "request_id": request_id,
+            "path": request.url.path,
+            "method": request.method,
+        },
+    )
+    error_response = ErrorResponse(
+        error_code=ErrorCode.VALIDATION_ERROR.value,
+        # The fixed, safe message; the offending value is never echoed.
+        message=getattr(found, "safe_message", "Invalid filter value."),
+        details={"reason": getattr(found, "reason", "control_character")},
+        request_id=request_id,
+    )
+    return JSONResponse(
+        status_code=400,
+        content=error_response.model_dump(exclude_none=True),
+    )
+
+
 async def handle_app_exception(request: Request, exc: AppException) -> JSONResponse:
     """
     Handle known application exceptions and convert to structured response.
@@ -65,6 +119,11 @@ async def handle_app_exception(request: Request, exc: AppException) -> JSONRespo
     error_code, message, details, and request_id fields.
     """
     request_id = get_request_id(request)
+
+    if exc.status_code >= 500:
+        found = _query_value_error_in_chain(exc)
+        if found is not None:
+            return _query_value_error_response(request, request_id, found)
     
     # Log the error with context
     logger.warning(
@@ -113,6 +172,10 @@ async def handle_unexpected_exception(request: Request, exc: Exception) -> JSONR
     generic error response without exposing internal details.
     """
     request_id = get_request_id(request)
+
+    found = _query_value_error_in_chain(exc)
+    if found is not None:
+        return _query_value_error_response(request, request_id, found)
     
     # Log the full stack trace for debugging
     logger.error(

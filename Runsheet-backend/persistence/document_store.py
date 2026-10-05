@@ -68,6 +68,7 @@ from persistence.document_query import (
     build_search_after,
     collect_query_fields,
     collect_sort_fields,
+    reject_control_characters,
     resolve_source_filter,
     sort_values_of,
 )
@@ -459,6 +460,7 @@ class PostgresDocumentStore:
         matched document is silently lost — ES runs the query first and then
         updates each hit with a version check, abandoning conflicts.
         """
+        reject_control_characters(query)
         model = self._model()
         predicate = build_predicate(
             model.document, query, id_column=model.doc_id, now=now
@@ -495,6 +497,7 @@ class PostgresDocumentStore:
         Note the deliberate asymmetry with :meth:`search_documents`: this has no
         page limit, because a partially-applied delete is worse than a slow one.
         """
+        reject_control_characters(query)
         model = self._model()
         predicate = build_predicate(
             model.document, query, id_column=model.doc_id, now=now
@@ -542,7 +545,12 @@ class PostgresDocumentStore:
         stop a slow aggregation holding the event loop, and the equivalent here is
         the statement timeout on the Postgres session. Keeping the parameter means
         no call site changes.
+
+        Raises :class:`persistence.document_query.InvalidQueryValueError` before
+        touching the database when any key or string in the body holds a control
+        character (Postgres rejects NUL; N5).
         """
+        reject_control_characters(query)
         model = self._model()
         body = dict(query or {})
         _assert_body_understood(index, body)

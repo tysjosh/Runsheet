@@ -915,3 +915,40 @@ async def test_an_ordinary_field_on_a_restricted_index_still_works(store):
         "fuel_orders_current", {"query": {"term": {"status": "delivered"}}, "size": 1}
     )
     assert "hits" in response
+
+
+# ---------------------------------------------------------------------------
+# Control characters in query values (N5)
+# ---------------------------------------------------------------------------
+
+
+async def test_a_nul_filter_value_raises_a_query_value_error_not_a_db_error(
+    store, index_name
+):
+    """Postgres rejects NUL in jsonb; the store refuses it first (400 upstream).
+
+    The error class is read off the module so this test fails, rather than the
+    module failing to collect, on code that predates it.
+    """
+    import persistence.document_query as dq
+
+    await _seed(store, index_name, {"a": {"tenant_id": TENANT, "agent_id": "x"}})
+    query = {"term": {"agent_id": "\x00"}}
+    with pytest.raises(dq.InvalidQueryValueError):
+        await store.search_documents(index_name, {"query": query})
+    with pytest.raises(dq.InvalidQueryValueError):
+        await store.update_by_query(index_name, query, lambda doc: doc)
+    with pytest.raises(dq.InvalidQueryValueError):
+        await store.delete_by_query(index_name, query)
+    assert await store.get_document(index_name, "a") is not None
+
+
+@pytest.mark.parametrize("value", ["a\tb", "line\nnext", "cr\r", "Zürich – 東京 🚚"])
+async def test_tab_newline_and_unicode_filter_values_still_match(
+    store, index_name, value
+):
+    await _seed(store, index_name, {"a": {"tenant_id": TENANT, "agent_id": value}})
+    found = await store.search_documents(
+        index_name, {"query": {"term": {"agent_id": value}}}
+    )
+    assert [h["_id"] for h in found["hits"]["hits"]] == ["a"]

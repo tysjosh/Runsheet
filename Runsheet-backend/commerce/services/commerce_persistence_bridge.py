@@ -1145,10 +1145,24 @@ def _hybrid_cut_over(aggregate_type: str) -> bool:
     return HybridReadRepository.is_registered(aggregate_type)
 
 
+def _reject_control_characters(*values) -> None:
+    """Refuse control characters in relational read arguments (N5).
+
+    psycopg rejects NUL in bound text parameters, so a filter value carrying
+    one would surface as a 500. Raises
+    :class:`persistence.document_query.InvalidQueryValueError` (a
+    ``ValueError``), which ``errors.handlers`` maps to 400.
+    """
+    from persistence.document_query import reject_control_characters
+
+    reject_control_characters(list(values))
+
+
 async def read_hybrid_get(aggregate_type: str, tenant_id: str, doc_id: str):
     """Read one hybrid aggregate from Postgres, or _NOT_CUT_OVER when ES-served."""
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, doc_id)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1165,6 +1179,7 @@ async def read_hybrid_get_any(aggregate_type: str, doc_id: str):
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(doc_id)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1178,6 +1193,7 @@ async def read_hybrid_find_one(aggregate_type: str, tenant_id: str, *,
     """First tenant-scoped doc matching term_filters, or _NOT_CUT_OVER off."""
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, term_filters)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1192,6 +1208,7 @@ async def read_hybrid_list(aggregate_type: str, tenant_id: str, *,
     """List a hybrid aggregate from Postgres, or _NOT_CUT_OVER when ES-served."""
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, filters, cursor)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1226,6 +1243,10 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(
+        tenant_id, term_filters, in_filters, bool_filters,
+        range_gte, range_lte, range_lt, text_query,
+    )
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1266,6 +1287,10 @@ async def read_hybrid_search_all_tenants(aggregate_type: str, *,
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(
+        term_filters, in_filters, bool_filters, range_gte,
+        range_lte, range_lt,
+    )
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1304,6 +1329,10 @@ async def read_hybrid_fetch_for_aggregation(
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(
+        tenant_id, term_filters, in_filters, bool_filters,
+        range_gte, range_lte,
+    )
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1334,6 +1363,7 @@ async def read_hybrid_list_sorted(
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, term_filters, cursor)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
