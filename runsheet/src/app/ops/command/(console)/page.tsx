@@ -31,6 +31,7 @@ import ReportViewer from "../../../../components/ReportViewer";
 import {
   applyChatStreamEvent,
   type ChatStreamMessage,
+  isTerminalChatEvent,
   parseSseChunk,
 } from "../../../../services/chatStream";
 
@@ -246,7 +247,7 @@ export default function CommandInterfacePage() {
             }, 500);
           }
 
-          if (event.type === "done" || event.type === "error") return;
+          if (isTerminalChatEvent(event)) return;
         }
       }
     } catch (error) {

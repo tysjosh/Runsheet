@@ -8,6 +8,7 @@ import remarkGfm from "remark-gfm";
 import {
   applyChatStreamEvent,
   type ChatStreamMessage,
+  isTerminalChatEvent,
   parseSseChunk,
 } from "../services/chatStream";
 import ReportViewer from "./ReportViewer";
@@ -202,7 +203,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
             }, 500);
           }
 
-          if (event.type === "done" || event.type === "error") {
+          if (isTerminalChatEvent(event)) {
             return;
           }
         }

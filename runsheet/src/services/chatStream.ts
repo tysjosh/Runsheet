@@ -41,6 +41,9 @@ export type ChatStreamEvent =
       message: string;
       request_id?: string | null;
       retry_after_seconds?: number;
+      /** One specialist failed; the rest of the answer stands and the stream goes on. */
+      partial?: boolean;
+      specialist?: string;
     }
   | { type: "done" }
   | {
@@ -104,6 +107,15 @@ export function parseSseChunk(buffer: string): {
   }
 
   return { events, rest };
+}
+
+/**
+ * True when the client should stop reading the stream: `done`, or an error
+ * that ended the turn. A `partial` error (one specialist failed while the
+ * rest of the answer stands) is followed by more events.
+ */
+export function isTerminalChatEvent(event: ChatStreamEvent): boolean {
+  return event.type === "done" || (event.type === "error" && !event.partial);
 }
 
 let idSeq = 0;
@@ -197,6 +209,33 @@ export function applyChatStreamEvent<M extends ChatStreamMessage>(
         isStreaming: false,
       };
       const updated = [...messages];
+      if (event.partial) {
+        // Keep the answer so far, show the failure after it, and keep
+        // streaming into a continuation so later text lands below it.
+        if (streamingIdx !== -1) {
+          updated[streamingIdx] = {
+            ...updated[streamingIdx],
+            isStreaming: false,
+          };
+        }
+        updated.push(
+          {
+            id: nextId("assistant"),
+            role: "assistant",
+            timestamp: new Date(),
+            ...errorFields,
+          } as M,
+          {
+            id: nextId("assistant"),
+            role: "assistant",
+            content: "",
+            timestamp: new Date(),
+            isStreaming: true,
+            isContinuation: true,
+          } as M,
+        );
+        return updated;
+      }
       if (streamingIdx === -1) {
         updated.push({
           id: nextId("assistant"),

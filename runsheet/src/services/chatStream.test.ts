@@ -7,8 +7,10 @@
  * message carrying the server's safe text and request id.
  */
 
+import * as chatStream from "./chatStream";
 import {
   applyChatStreamEvent,
+  type ChatStreamEvent,
   type ChatStreamMessage,
   parseSseChunk,
 } from "./chatStream";
@@ -143,6 +145,60 @@ describe("applyChatStreamEvent", () => {
     expect(messages[2].content).toBe("3");
   });
 
+  // Staging finding N4: one specialist failing must not wipe the answer.
+  it("keeps the answer on a partial error and streams later text after it", () => {
+    const events: ChatStreamEvent[] = [
+      { type: "text", content: "12 trucks" },
+      {
+        type: "error",
+        code: "AI_RATE_LIMITED",
+        message: "The fuel assistant couldn't answer this part.",
+        request_id: "req-123",
+        partial: true,
+        specialist: "fuel",
+      },
+      { type: "text", content: "more" },
+      { type: "done" },
+    ];
+    const messages = events.reduce<ChatStreamMessage[]>(
+      (acc, event) => applyChatStreamEvent(acc, event),
+      [streamingAssistant()],
+    );
+
+    expect(messages).toHaveLength(3);
+    expect(messages[0]).toMatchObject({
+      content: "12 trucks",
+      isStreaming: false,
+    });
+    expect(messages[0].isError).toBeFalsy();
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      isError: true,
+      isStreaming: false,
+      content:
+        "The fuel assistant couldn't answer this part.\n\nReference: req-123",
+    });
+    expect(messages[2]).toMatchObject({
+      role: "assistant",
+      content: "more",
+      isStreaming: false,
+      isContinuation: true,
+    });
+  });
+
+  it("still replaces the streaming message on a non-partial error", () => {
+    const messages = applyChatStreamEvent(
+      [{ ...streamingAssistant(), content: "half" }],
+      { type: "error", code: "AI_SERVICE_UNAVAILABLE", message: "down" },
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      content: "down",
+      isError: true,
+      isStreaming: false,
+    });
+  });
+
   it("stops streaming on done and ignores status events", () => {
     const start = [streamingAssistant()];
     expect(
@@ -150,5 +206,26 @@ describe("applyChatStreamEvent", () => {
     ).toBe(start);
     const done = applyChatStreamEvent(start, { type: "done" });
     expect(done[0].isStreaming).toBe(false);
+  });
+});
+
+describe("isTerminalChatEvent", () => {
+  // Read through the namespace so the test fails on an assertion, not an
+  // import error, when the export is missing.
+  const isTerminal = (event: ChatStreamEvent): unknown => {
+    const fn = (chatStream as Record<string, unknown>).isTerminalChatEvent;
+    return typeof fn === "function" ? fn(event) : undefined;
+  };
+
+  it("is true for done and a non-partial error", () => {
+    expect(isTerminal({ type: "done" })).toBe(true);
+    expect(isTerminal({ type: "error", code: "X", message: "m" })).toBe(true);
+  });
+
+  it("is false for a partial error and for text", () => {
+    expect(
+      isTerminal({ type: "error", code: "X", message: "m", partial: true }),
+    ).toBe(false);
+    expect(isTerminal({ type: "text", content: "x" })).toBe(false);
   });
 });
