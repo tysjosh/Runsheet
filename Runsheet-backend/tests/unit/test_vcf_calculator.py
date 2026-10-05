@@ -94,19 +94,21 @@ def test_vcf_is_exactly_one_at_reference_temperature(api_gravity: float) -> None
 # ---------------------------------------------------------------------------
 # 2. Known-point VCF values for common fuel products
 #
-# The three baselines below were generated from the shipped polynomial
-# (not the printed ASTM D1250 table) per the task brief: our VCF is a
-# polynomial approximation, so the "known values" we pin are the ones the
-# implementation produces, with a ``rel=1e-3`` tolerance. Any change to
-# the Table 6B constants or the alpha_60 formula will move these numbers
-# outside that envelope.
+# ASTM D1250 / API MPMS 11.1 Table 6B values (alpha per °F, density-band
+# K0/K1), pinned to abs=5e-6 — half a unit in the printed table's sixth
+# decimal. The earlier baselines were captured from an implementation that
+# scaled dT by 5/9 and used the fuel-oil K pair for every product, so they
+# under-corrected every volume (finding C5).
 # ---------------------------------------------------------------------------
 
 # (temperature_f, api_gravity, expected_vcf)
 KNOWN_POINT_VCFS = [
-    pytest.param(80.0, 60.0, 0.9938050223647413, id="gasoline_60api_at_80F"),
-    pytest.param(80.0, 35.0, 0.9948561939378365, id="diesel_35api_at_80F"),
-    pytest.param(40.0, 35.0, 1.005127979044618, id="diesel_35api_at_40F"),
+    pytest.param(72.0, 35.0, 0.994444, id="diesel_35api_at_72F"),
+    pytest.param(85.0, 60.0, 0.982829, id="gasoline_60api_at_85F"),
+    pytest.param(45.0, 35.0, 1.006919, id="diesel_35api_at_45F"),
+    pytest.param(80.0, 60.0, 0.986276, id="gasoline_60api_at_80F"),
+    pytest.param(80.0, 35.0, 0.990730, id="diesel_35api_at_80F"),
+    pytest.param(40.0, 35.0, 1.009219, id="diesel_35api_at_40F"),
 ]
 
 
@@ -119,12 +121,7 @@ def test_vcf_matches_known_baseline_within_tolerance(
     api_gravity: float,
     expected_vcf: float,
 ) -> None:
-    """Known-point VCFs track the polynomial baseline to rel=1e-3.
-
-    The ``rel=1e-3`` envelope is an order of magnitude looser than the
-    typical floating-point noise of the Table 6B polynomial but tight
-    enough to flag a coefficient change (which shifts the result by
-    percents, not per-mille).
+    """Known-point VCFs match Table 6B to the printed sixth decimal.
 
     Validates: Requirement 2.2
     """
@@ -132,7 +129,7 @@ def test_vcf_matches_known_baseline_within_tolerance(
         temperature_f=temperature_f,
         api_gravity=api_gravity,
     )
-    assert vcf == pytest.approx(expected_vcf, rel=1e-3)
+    assert vcf == pytest.approx(expected_vcf, abs=5e-6)
 
 
 @pytest.mark.parametrize(
@@ -424,10 +421,8 @@ def test_compute_net_gallons_rounds_to_one_decimal_place() -> None:
         api_gravity=api_gravity,
     )
 
-    # Baseline captured from the polynomial implementation (Task 2.7 brief
-    # explicitly states we should use the implementation as the reference,
-    # not printed table values).
-    assert net_gallons == pytest.approx(7975.3, abs=0.05)
+    # Table 6B reference: 8000 gal of 35 °API at 72 °F is 7955.6 net.
+    assert net_gallons == pytest.approx(7955.6, abs=0.05)
 
     # Separately pin the rounding contract so a regression in the rounding
     # digit count (e.g. round(net, 2)) is caught even if the math drifts.
@@ -545,3 +540,46 @@ def test_default_api_gravity_raises_value_error_for_unknown_product(
     """
     with pytest.raises(ValueError):
         _CALCULATOR.default_api_gravity(product_code)
+
+
+@pytest.mark.parametrize(
+    ("temperature_f", "api_gravity", "expected_net"),
+    [
+        pytest.param(72.0, 35.0, 7955.6, id="diesel_72F"),
+        pytest.param(85.0, 60.0, 7862.6, id="gasoline_85F"),
+        pytest.param(45.0, 35.0, 8055.4, id="diesel_45F"),
+    ],
+)
+def test_compute_net_gallons_matches_table_6b(
+    temperature_f: float, api_gravity: float, expected_net: float
+) -> None:
+    """8000 gross gallons convert to the Table 6B net volumes (finding C5)."""
+    net = _CALCULATOR.compute_net_gallons(8000.0, temperature_f, api_gravity)
+    assert net == pytest.approx(expected_net, abs=0.05)
+
+
+@pytest.mark.parametrize(
+    ("api_gravity", "band"),
+    [
+        pytest.param(35.0, "fuel_oils", id="diesel"),
+        pytest.param(45.0, "jet_kerosene", id="jet"),
+        pytest.param(50.0, "transition", id="transition"),
+        pytest.param(60.0, "gasolines", id="gasoline"),
+    ],
+)
+def test_alpha_uses_the_density_band_coefficients(api_gravity: float, band: str) -> None:
+    """alpha_60 comes from the K0/K1 (or A/B) pair of the product's density band."""
+    from compliance.services.vcf_calculator import (
+        TABLE_6B_BANDS,
+        WATER_DENSITY_AT_60F_KG_PER_M3,
+        table_6b_alpha_60,
+    )
+
+    rho = 141.5 / (131.5 + api_gravity) * WATER_DENSITY_AT_60F_KG_PER_M3
+    selected = next(b for b in TABLE_6B_BANDS if rho >= b[1])
+    assert selected[0] == band
+    _name, _rho_min, kind, c0, c1 = selected
+    expected = c0 + c1 / rho**2 if kind == "ab" else c0 / rho**2 + c1 / rho
+    assert table_6b_alpha_60(rho) == pytest.approx(expected, rel=1e-12)
+    # Published Table 6B alphas for refined products sit in 0.0004-0.0007 /°F.
+    assert 0.0004 < table_6b_alpha_60(rho) < 0.0007

@@ -121,44 +121,58 @@ DEFAULT_API_GRAVITY_BY_PRODUCT: Final[Dict[str, float]] = {
 # ---------------------------------------------------------------------------
 # ASTM D1250 / API MPMS Ch. 11.1 Table 6B constants
 # ---------------------------------------------------------------------------
-# The generalized-products polynomial approximation expresses the thermal
-# expansion coefficient at 60 °F (``alpha_60``) as a function of the
-# density-at-60 °F in kg/m³:
+# Table 6B (generalized refined products, °API at 60 °F) computes the
+# thermal-expansion coefficient at 60 °F from the density at 60 °F in kg/m³,
+# with K0/K1 chosen by DENSITY BAND (not by product code):
 #
-#     alpha_60 = (K0 + K1 * rho_60) / rho_60 ** 2
+#     alpha_60 = K0 / rho_60 ** 2 + K1 / rho_60         (per °F)
 #
-# and then returns a VCF of:
+# except in the gasoline/jet transition zone, where
 #
-#     VCF = exp(-alpha_60 * dT * (1 + 0.8 * alpha_60 * dT))
+#     alpha_60 = A + B / rho_60 ** 2                    (per °F)
 #
-# where ``dT`` is the temperature delta from the 60 °F (15.556 °C) reference
-# in degrees Celsius. The constants below are the Table 6B coefficients for
-# "generalized products" (i.e. refined petroleum products such as gasoline,
-# distillate, jet, kerosene — the product mix Runsheet actually moves), as
-# published in API MPMS Chapter 11.1 (ASTM D1250-04/08). Crude oil uses
-# Table 6A with different constants; it is intentionally not supported here.
+# and then
 #
-# Sources:
-#   * API MPMS Ch. 11.1 (2004 / 2008) — Volume Correction Factors.
-#   * ASTM D1250-08 Table 6B — Generalized Products, °API at 60 °F.
-#   * "Manual of Petroleum Measurement Standards" reprints publishing the
-#     same K0/K1 pair for generalized refined products.
+#     VCF = exp(-alpha_60 * dT * (1 + 0.8 * alpha_60 * dT)),  dT = t − 60 °F.
+#
+# alpha_60 is per °F and dT is in °F: there is no °F→°C conversion. The
+# earlier implementation used one fuel-oil K pair for every product and
+# scaled dT by 5/9, which under-corrected every volume (finding C5).
+# Crude oil uses Table 6A with different constants; it is not supported here.
+#
+# Sources: API MPMS Ch. 11.1 (1980, Table 6B) / ASTM D1250 Table 6B.
 
-#: K0 coefficient of the Table 6B generalized-products polynomial
-#: (kg/m³)². Used to compute ``alpha_60`` from the density at 60 °F.
+#: Table 6B density bands, densest first. Each entry is
+#: ``(name, rho_min_kg_m3, kind, c0, c1)``: a band applies when
+#: ``rho_60 >= rho_min``. For ``kind == "k"``, ``alpha = c0/rho² + c1/rho``;
+#: for ``kind == "ab"`` (transition zone), ``alpha = c0 + c1/rho²``.
+TABLE_6B_BANDS: Final[tuple] = (
+    ("fuel_oils", 838.3127, "k", 103.8720, 0.2701),
+    ("jet_kerosene", 787.5195, "k", 330.3010, 0.0),
+    ("transition", 770.3520, "ab", -0.00186840, 1489.0670),
+    ("gasolines", 0.0, "k", 192.4571, 0.2438),
+)
+
+#: K0 of the Table 6B fuel-oil band (kg/m³)². Kept for importers; the
+#: calculator selects coefficients from :data:`TABLE_6B_BANDS`.
 TABLE_6B_K0: Final[float] = 103.8720
 
-#: K1 coefficient of the Table 6B generalized-products polynomial (kg/m³).
+#: K1 of the Table 6B fuel-oil band (kg/m³).
 TABLE_6B_K1: Final[float] = 0.2701
 
-#: Density of pure water at 60 °F in kg/m³. Multiplying a relative-density
-#: (specific-gravity) value by this constant converts it to the absolute
-#: density expected by the Table 6B polynomial.
-WATER_DENSITY_AT_60F_KG_PER_M3: Final[float] = 999.012
+#: Density of water at 60 °F in kg/m³, the value API MPMS 11.1 uses to turn
+#: relative density into the absolute density the Table 6B bands expect.
+WATER_DENSITY_AT_60F_KG_PER_M3: Final[float] = 999.016
 
-#: Conversion factor from a Fahrenheit delta to a Celsius delta
-#: (``delta_C = delta_F * 5 / 9``).
-FAHRENHEIT_TO_CELSIUS_DELTA: Final[float] = 5.0 / 9.0
+
+def table_6b_alpha_60(rho_60_kg_m3: float) -> float:
+    """Return Table 6B ``alpha_60`` (per °F) for a density at 60 °F in kg/m³."""
+    for _name, rho_min, kind, c0, c1 in TABLE_6B_BANDS:
+        if rho_60_kg_m3 >= rho_min:
+            if kind == "ab":
+                return c0 + c1 / rho_60_kg_m3 ** 2
+            return c0 / rho_60_kg_m3 ** 2 + c1 / rho_60_kg_m3
+    raise AssertionError("unreachable: the gasoline band has rho_min 0")
 
 
 # ---------------------------------------------------------------------------
@@ -287,34 +301,21 @@ class VCFCalculator:
         relative_density_60 = 141.5 / (131.5 + api_gravity)
 
         # Step 2 — Convert the relative density to an absolute density in
-        # kg/m³, the unit the Table 6B polynomial expects. Multiplying by
-        # the density of water at 60 °F (≈ 999.012 kg/m³) gives the
-        # product's absolute density at the reference temperature.
+        # kg/m³, the unit the Table 6B bands are defined in.
         base_density_kg_m3 = relative_density_60 * WATER_DENSITY_AT_60F_KG_PER_M3
 
-        # Step 3 — Evaluate the Table 6B thermal-expansion coefficient at
-        # 60 °F for generalized products:
-        #     alpha_60 = (K0 + K1 * rho_60) / rho_60 ** 2
-        # Units: 1/°C. Using the published K0/K1 pair guarantees the
-        # returned VCFs match the printed D1250 Table 6B to the published
-        # precision (six decimal places) across the validated range.
-        alpha_60 = (TABLE_6B_K0 + TABLE_6B_K1 * base_density_kg_m3) / (
-            base_density_kg_m3 ** 2
-        )
+        # Step 3 — Table 6B thermal-expansion coefficient at 60 °F, per °F,
+        # with coefficients chosen by density band (fuel oils, jet/kerosene,
+        # transition zone, gasolines).
+        alpha_60 = table_6b_alpha_60(base_density_kg_m3)
 
-        # Step 4 — Convert the Fahrenheit temperature delta to Celsius.
-        # The reference point is 60 °F (≡ 15.556 °C); equivalently, we
-        # can work entirely in Fahrenheit deltas scaled by 5/9. Using the
-        # delta form avoids the repeated (T_F − 32) subtraction and keeps
-        # the formula identical to the ASTM D1250 presentation.
-        delta_t_c = (temperature_f - REFERENCE_TEMPERATURE_F) * FAHRENHEIT_TO_CELSIUS_DELTA
+        # Step 4 — Temperature delta from the 60 °F reference, in °F (alpha
+        # is per °F, so no Celsius conversion).
+        delta_t_f = temperature_f - REFERENCE_TEMPERATURE_F
 
         # Step 5 — Apply the D1250 VCF formula:
         #     VCF = exp(-alpha_60 * dT * (1 + 0.8 * alpha_60 * dT))
-        # ``math.exp`` is used (rather than ``numpy.exp``) to keep this
-        # module free of third-party numerical dependencies; it is a pure
-        # scalar computation.
-        exponent = -alpha_60 * delta_t_c * (1.0 + 0.8 * alpha_60 * delta_t_c)
+        exponent = -alpha_60 * delta_t_f * (1.0 + 0.8 * alpha_60 * delta_t_f)
         return math.exp(exponent)
 
     def compute_net_gallons(
@@ -506,8 +507,9 @@ __all__ = [
     "ERROR_CODE_INPUT_OUT_OF_RANGE",
     "NET_GALLONS_ROUNDING_DIGITS",
     "DEFAULT_API_GRAVITY_BY_PRODUCT",
+    "TABLE_6B_BANDS",
     "TABLE_6B_K0",
     "TABLE_6B_K1",
     "WATER_DENSITY_AT_60F_KG_PER_M3",
-    "FAHRENHEIT_TO_CELSIUS_DELTA",
+    "table_6b_alpha_60",
 ]
