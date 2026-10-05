@@ -305,6 +305,9 @@ class ErrorCode(str, Enum):
     DRIVER_NOT_DISPATCH_ELIGIBLE = "DRIVER_NOT_DISPATCH_ELIGIBLE"
     """Driver fails Dispatch_Eligibility for the requested operation (HTTP 409)"""
 
+    DUPLICATE_METER_NUMBER = "DUPLICATE_METER_NUMBER"
+    """A meter with this meter_number is already registered for the tenant (HTTP 409)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -410,6 +413,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.HOS_LIMIT_REACHED: 409,
     ErrorCode.HOS_FIGURES_UNAVAILABLE: 409,
     ErrorCode.DRIVER_NOT_DISPATCH_ELIGIBLE: 409,
+    ErrorCode.DUPLICATE_METER_NUMBER: 409,
 }
 
 

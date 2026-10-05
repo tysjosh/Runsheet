@@ -34,7 +34,8 @@ from compliance.services.compliance_es_mappings import (
     METER_REGISTRY_INDEX,
     METER_AUDIT_TRAIL_INDEX,
 )
-from errors.exceptions import resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -125,8 +126,27 @@ class MeterAuditService:
         Validates the input via the MeterRegistration Pydantic model,
         assigns a server-generated ``meter_id``, and persists to ES.
 
+        A ``meter_number`` already registered for the tenant raises 409
+        ``DUPLICATE_METER_NUMBER``. A calibration that has already expired is
+        stored ``expired_calibration`` whatever status the caller sent
+        (finding C7).
+
+        Freeze decision: the duplicate check is check-then-write. The registry
+        has no unique constraint, so two simultaneous creates of the same
+        number can both succeed. Accepted for an admin-only form.
+
         Validates: Requirement 8.1, 8.3
         """
+        if await self.get_meter_by_number(tenant_id, meter_number.strip()) is not None:
+            raise AppException(
+                ErrorCode.DUPLICATE_METER_NUMBER,
+                f"Meter number '{meter_number}' is already registered",
+                details={"meter_number": meter_number},
+            )
+
+        if calibration_expiry_date < utcnow().date():
+            status = "expired_calibration"
+
         meter = MeterRegistration(
             tenant_id=tenant_id,
             meter_number=meter_number,

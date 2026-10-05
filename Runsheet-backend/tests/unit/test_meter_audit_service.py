@@ -186,6 +186,54 @@ class TestMeterAuditServiceRegisterMeter:
         es.index_document.assert_not_called()
 
 
+class TestRegisterMeterC7:
+    """Finding C7: status follows expiry at create; duplicates are 409."""
+
+    _KW = dict(
+        meter_number="MTR-NEW",
+        truck_id="truck_abc",
+        calibration_certificate_number="CAL-1",
+        calibration_date=date(2025, 1, 1),
+        weights_measures_authority="TX Weights & Measures",
+    )
+
+    @pytest.mark.asyncio
+    @patch("compliance.services.meter_audit_service.utcnow", return_value=_FIXED_NOW)
+    async def test_already_expired_is_stored_expired_calibration(self, _now):
+        es = _make_es_service()
+        doc = await MeterAuditService(es).register_meter(
+            _TENANT_ID, calibration_expiry_date=date(2026, 5, 31), **self._KW
+        )
+        assert doc["status"] == "expired_calibration"
+        assert es.index_document.call_args[0][2]["status"] == "expired_calibration"
+
+    @pytest.mark.asyncio
+    @patch("compliance.services.meter_audit_service.utcnow", return_value=_FIXED_NOW)
+    async def test_future_expiry_stays_active(self, _now):
+        es = _make_es_service()
+        doc = await MeterAuditService(es).register_meter(
+            _TENANT_ID, calibration_expiry_date=date(2026, 6, 1), **self._KW
+        )
+        assert doc["status"] == "active"
+
+    @pytest.mark.asyncio
+    @patch("compliance.services.meter_audit_service.utcnow", return_value=_FIXED_NOW)
+    async def test_duplicate_meter_number_is_409(self, _now):
+        es = _make_es_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_search_response([_make_meter_doc(meter_number="MTR-NEW")])
+        )
+        with pytest.raises(AppException) as exc_info:
+            await MeterAuditService(es).register_meter(
+                _TENANT_ID, calibration_expiry_date=date(2027, 1, 1), **self._KW
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.error_code.value == "DUPLICATE_METER_NUMBER"
+        query = es.search_documents.call_args[0][1]
+        assert "'meter_number': 'MTR-NEW'" in repr(query)
+        es.index_document.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Tests: get_meter
 # ---------------------------------------------------------------------------
