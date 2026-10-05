@@ -168,6 +168,29 @@ const VARIANCE_THRESHOLD = 5; // 5% threshold for color coding
 // A `scheduled` plan can still be dispatched but no longer rejected.
 const DISPATCHABLE_STATUSES = ["draft", "proposed", "scheduled"];
 const REJECTABLE_STATUSES = ["draft", "proposed"];
+// A plan keeps draft/proposed until the loading-plan executor finalizes it, so
+// a running, partly applied or just-applied plan would still look rejectable.
+// The backend reject CAS refuses these with 409 and stays the authoritative
+// guard; the page just stops offering a button that can only fail. Approve
+// stays, so an incomplete plan keeps its recovery path.
+const NON_REJECTABLE_EXECUTION_STATUSES = [
+  "in_progress",
+  "incomplete",
+  "succeeded",
+];
+
+/** Plan documents carry ``execution_status`` once the executor has touched them. */
+type WithExecutionStatus = { execution_status?: string | null };
+
+function isRejectable(
+  status: string,
+  executionStatus?: string | null,
+): boolean {
+  return (
+    REJECTABLE_STATUSES.includes(status) &&
+    !NON_REJECTABLE_EXECUTION_STATUSES.includes(executionStatus ?? "")
+  );
+}
 
 // ─── Status Badge Component ──────────────────────────────────────────────────
 
@@ -1785,6 +1808,8 @@ function PlanDetailView({
   if (!plan) return null;
 
   const currentStatus = planStatus || (plan as any).status || "draft";
+  const executionStatus = (plan.loading_plan as WithExecutionStatus | null)
+    ?.execution_status;
 
   return (
     <div className="space-y-6">
@@ -1806,7 +1831,7 @@ function PlanDetailView({
               Approve
             </button>
           )}
-          {REJECTABLE_STATUSES.includes(currentStatus) && (
+          {isRejectable(currentStatus, executionStatus) && (
             <button
               onClick={() => onReject(planId)}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
@@ -2418,7 +2443,7 @@ function PlansTab() {
                 </div>
               </div>
               <div className="flex items-center gap-2 ml-4">
-                {/* Approve for draft/proposed/scheduled, Reject for draft/proposed (R12.7) */}
+                {/* Approve for draft/proposed/scheduled; Reject for draft/proposed with no executor run in flight or applied (R12.7) */}
                 {DISPATCHABLE_STATUSES.includes(p.status) && (
                   <button
                     onClick={(e) => {
@@ -2437,7 +2462,10 @@ function PlansTab() {
                     Approve
                   </button>
                 )}
-                {REJECTABLE_STATUSES.includes(p.status) && (
+                {isRejectable(
+                  p.status,
+                  (p as WithExecutionStatus).execution_status,
+                ) && (
                   <button
                     onClick={(e) => {
                       e.stopPropagation();

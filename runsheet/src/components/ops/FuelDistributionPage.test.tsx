@@ -37,6 +37,9 @@ jest.mock("../../services/fuelApi", () => {
     listPlans: jest.fn(),
     generatePlan: jest.fn(),
     listDeliveryDestinations: jest.fn(),
+    getPlan: jest.fn(),
+    getPlanCosts: jest.fn(),
+    getPlanOutcomes: jest.fn(),
   };
 });
 
@@ -83,6 +86,9 @@ import type {
 } from "../../services/fuelApi";
 import {
   generatePlan,
+  getPlan,
+  getPlanCosts,
+  getPlanOutcomes,
   listCombinableGroups,
   listDeliveryDestinations,
   listPlans,
@@ -106,6 +112,13 @@ const mockListDeliveryDestinations =
   listDeliveryDestinations as jest.MockedFunction<
     typeof listDeliveryDestinations
   >;
+const mockGetPlan = getPlan as jest.MockedFunction<typeof getPlan>;
+const mockGetPlanCosts = getPlanCosts as jest.MockedFunction<
+  typeof getPlanCosts
+>;
+const mockGetPlanOutcomes = getPlanOutcomes as jest.MockedFunction<
+  typeof getPlanOutcomes
+>;
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -494,6 +507,96 @@ describe("FuelDistributionPage — Plans tab", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("option", { name: "Scheduled" }),
+    ).toBeInTheDocument();
+  });
+
+  // Review pass 1, finding 2 (owner decision "hide"): a plan keeps
+  // draft/proposed until the executor finalizes it, so Reject must also
+  // follow execution_status. Approve stays as the recovery path.
+  function planRow(executionStatus: string | null) {
+    return {
+      plan_id: "plan-exec",
+      run_id: "run-exec",
+      status: "proposed",
+      truck_id: "truck-9",
+      created_at: "2026-10-04T12:00:00Z",
+      total_utilization_pct: 80,
+      execution_status: executionStatus,
+    };
+  }
+
+  function mockPlanList(executionStatus: string | null) {
+    mockListPlans.mockResolvedValue({
+      data: [planRow(executionStatus)],
+      pagination: { page: 1, size: 10, total: 1, total_pages: 1 },
+      request_id: "req-exec",
+    } as never);
+  }
+
+  it.each(["in_progress", "incomplete", "succeeded"])(
+    "hides Reject but keeps Approve in the plan list when execution_status is %s",
+    async (executionStatus) => {
+      mockPlanList(executionStatus);
+      render(<FuelDistributionPage />);
+      expect(
+        await screen.findByRole("button", { name: "Approve plan plan-exec" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Reject plan plan-exec" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([null, "failed"])(
+    "still offers Reject in the plan list when execution_status is %s",
+    async (executionStatus) => {
+      mockPlanList(executionStatus);
+      render(<FuelDistributionPage />);
+      expect(
+        await screen.findByRole("button", { name: "Reject plan plan-exec" }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  async function openDetail(executionStatus: string | null) {
+    mockPlanList(executionStatus);
+    mockGetPlan.mockResolvedValue({
+      plan_id: "plan-exec",
+      loading_plan: {
+        ...planRow(executionStatus),
+        assignments: [],
+        unserved_demand_liters: 0,
+        total_weight_kg: 0,
+        tenant_id: "dev-tenant",
+      },
+      route_plan: null,
+    } as never);
+    mockGetPlanCosts.mockRejectedValue(new Error("no costs"));
+    mockGetPlanOutcomes.mockRejectedValue(new Error("no outcomes"));
+    render(<FuelDistributionPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "View plan plan-exec" }),
+    );
+    await screen.findByText("Plan: plan-exec");
+  }
+
+  it.each(["in_progress", "incomplete", "succeeded"])(
+    "hides Reject but keeps Approve in the plan detail when execution_status is %s",
+    async (executionStatus) => {
+      await openDetail(executionStatus);
+      expect(
+        screen.getByRole("button", { name: /^Approve$/ }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: /^Reject$/ }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("still offers Reject in the plan detail when the executor never ran", async () => {
+    await openDetail(null);
+    expect(
+      screen.getByRole("button", { name: /^Reject$/ }),
     ).toBeInTheDocument();
   });
 });
