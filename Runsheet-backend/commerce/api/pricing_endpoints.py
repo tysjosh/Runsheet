@@ -34,6 +34,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from commerce.api._authz import commerce_staff_dependency
+from commerce.api.price_book_endpoints import require_pricing_enabled
 from commerce.models.pricing_rule import PricingRule
 from commerce.services.sales_pricing_engine import (
     PricingNoRuleMatchedError,
@@ -62,7 +63,13 @@ _es_service: Optional[Any] = None
 router = APIRouter(
     prefix="/api/commerce",
     tags=["Commerce - Pricing"],
-    dependencies=[Depends(commerce_staff_dependency)],
+    # Flag gate first (FastAPI resolves router dependencies in order) so a
+    # tenant without the pricing engine gets 404 before 403, as price books
+    # do (finding C-1).
+    dependencies=[
+        Depends(require_pricing_enabled),
+        Depends(commerce_staff_dependency),
+    ],
 )
 
 
