@@ -223,6 +223,9 @@ class ErrorCode(str, Enum):
     KFACTOR_VARIANCE_HISTORY_FAILED = "kfactor.variance_history_failed"
     """Per-tank K-factor variance history could not be loaded (HTTP 500)"""
 
+    PRICING_RACK_PRICE_UNAVAILABLE = "pricing.rack_price_unavailable"
+    """No rack price for the terminal/product and none supplied (HTTP 422)"""
+
     # Driver Mobile App errors (4xx / 202)
     #
     # Values are UPPER_SNAKE, matching the rest of the catalog rather than the
@@ -400,6 +403,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.TERMINAL_NOT_FOUND: 404,
     ErrorCode.SUPPLIER_CONTRACT_NOT_FOUND: 404,
     ErrorCode.KFACTOR_VARIANCE_HISTORY_FAILED: 500,
+    ErrorCode.PRICING_RACK_PRICE_UNAVAILABLE: 422,
     # Driver Mobile App error codes
     ErrorCode.SESSION_EXPIRED: 401,
     ErrorCode.DRIVER_IDENTITY_MISSING: 403,

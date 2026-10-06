@@ -579,22 +579,42 @@ class SalesPricingEngine:
         # contract price, contract id, contract type, and any split-line
         # fields exactly as the resolver computed them.
         if self._price_protection_service is not None:
-            if market_price_cents is None:
+            contract_market = market_price_cents
+            rack_error: Optional[PricingRackPriceUnavailableError] = None
+            if contract_market is None:
                 # Resolve the rack price from the rack_prices index so the
                 # price-protection resolver can dispatch on contract_type
-                # and build split-line outputs. Falls back to a typed
-                # PricingRackPriceUnavailableError when no rack row exists.
-                market_price_cents = await self.get_rack_price(
-                    product_code=product_code,
-                    terminal_id=terminal_id,
-                )
+                # and build split-line outputs.
+                try:
+                    contract_market = await self.get_rack_price(
+                        product_code=product_code,
+                        terminal_id=terminal_id,
+                    )
+                    # Rule strategies reuse the resolved rack price.
+                    market_price_cents = contract_market
+                except PricingRackPriceUnavailableError as exc:
+                    # Freeze decision D3 (N-CFV-4): probe the resolver
+                    # with a zero market. Only a single-price fixed_price
+                    # contract is independent of the market, so only
+                    # that result is used; any other contract re-raises,
+                    # and no contract falls through to the rules.
+                    rack_error = exc
+                    contract_market = 0
             resolution = await self._price_protection_service.resolve_price(
                 customer_id=customer_id,
                 product_code=product_code,
-                market_price_cents=market_price_cents,
+                market_price_cents=contract_market,
                 gallons=gallons,
                 effective_date=effective_date,
             )
+            if resolution.contract_id is not None and rack_error is not None:
+                market_independent = (
+                    resolution.contract_type == "fixed_price"
+                    and resolution.split_gallons_at_contract_price is None
+                    and resolution.split_gallons_at_market_price is None
+                )
+                if not market_independent:
+                    raise rack_error
             if resolution.contract_id is not None:
                 logger.debug(
                     "SalesPricingEngine: price-protection contract "

@@ -279,9 +279,11 @@ class TestFallThrough:
     ):
         # The resolver needs a market price to dispatch on
         # ``contract_type`` and to build split-line outputs. The engine
-        # now resolves it from the rack_prices index; when no rack row
-        # exists it raises PricingRackPriceUnavailableError rather than
-        # silently passing zero.
+        # resolves it from the rack_prices index; when no rack row exists
+        # and the matched contract depends on the market (cap_price here)
+        # it raises PricingRackPriceUnavailableError rather than pricing
+        # off zero. A single-price fixed_price contract does not depend on
+        # the market and now resolves without a rack price (N-CFV-4, D3).
         from commerce.services.sales_pricing_engine import (
             PricingRackPriceUnavailableError,
         )
@@ -289,7 +291,7 @@ class TestFallThrough:
         canned = PriceResolution(
             effective_price_cents=325,
             contract_id="contract-abc",
-            contract_type="fixed_price",
+            contract_type="cap_price",
             market_price_cents=0,
         )
         stub = _StubPriceProtectionService(canned)
@@ -309,6 +311,109 @@ class TestFallThrough:
                 effective_date=date(2026, 6, 1),
             )
 
-        # The resolver must not be consulted if we had to bail out
-        # before the dispatch.
-        assert stub.calls == []
+        # The resolver is probed with a zero market; its market-dependent
+        # result is discarded.
+        assert [c["market_price_cents"] for c in stub.calls] == [0]
+
+    @pytest.mark.asyncio
+    async def test_fixed_price_without_rack_price_resolves_to_contract(self):
+        canned = PriceResolution(
+            effective_price_cents=310,
+            contract_id="contract-fixed",
+            contract_type="fixed_price",
+            market_price_cents=0,
+        )
+        engine = SalesPricingEngine(
+            _SentinelESService(),
+            "tenant-1",
+            price_protection_service=_StubPriceProtectionService(canned),
+        )
+
+        result = await engine.resolve_price(
+            customer_id="cust-5",
+            product_code="DIESEL_2",
+            gallons=100.0,
+            terminal_id="TERMINAL-E",
+            route_miles=0.0,
+            effective_date=date(2026, 6, 1),
+        )
+
+        assert result.effective_price_cents == 310
+        assert result.contract_id == "contract-fixed"
+        assert result.contract_type == "fixed_price"
+
+    @pytest.mark.asyncio
+    async def test_fixed_price_split_without_rack_price_raises(self):
+        from commerce.services.sales_pricing_engine import (
+            PricingRackPriceUnavailableError,
+        )
+
+        canned = PriceResolution(
+            effective_price_cents=310,
+            contract_id="contract-fixed",
+            contract_type="fixed_price",
+            market_price_cents=0,
+            split_gallons_at_contract_price=40.0,
+            split_gallons_at_market_price=60.0,
+        )
+        engine = SalesPricingEngine(
+            _SentinelESService(),
+            "tenant-1",
+            price_protection_service=_StubPriceProtectionService(canned),
+        )
+
+        with pytest.raises(PricingRackPriceUnavailableError):
+            await engine.resolve_price(
+                customer_id="cust-5",
+                product_code="DIESEL_2",
+                gallons=100.0,
+                terminal_id="TERMINAL-E",
+                route_miles=0.0,
+                effective_date=date(2026, 6, 1),
+            )
+
+    @pytest.mark.asyncio
+    async def test_no_contract_without_rack_price_falls_through_to_rule(self):
+        class _PostedRuleES:
+            async def search_documents(self, index, query, size=100):
+                if index == "pricing_rules":
+                    return {"hits": {"hits": [{"_source": {
+                        "rule_id": "rule-posted",
+                        "tenant_id": "tenant-1",
+                        "product_code": "DIESEL_2",
+                        "strategy": "posted_price",
+                        "posted_price_cents": 333,
+                        "priority": 0,
+                        "effective_date": "2026-01-01",
+                        "status": "active",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    }}]}}
+                return {"hits": {"hits": []}}
+
+            async def index_document(self, index, doc_id, doc):
+                return {"result": "created"}
+
+        no_contract = PriceResolution(
+            effective_price_cents=0,
+            contract_id=None,
+            contract_type=None,
+            market_price_cents=0,
+        )
+        engine = SalesPricingEngine(
+            _PostedRuleES(),
+            "tenant-1",
+            price_protection_service=_StubPriceProtectionService(no_contract),
+        )
+
+        result = await engine.resolve_price(
+            customer_id="cust-5",
+            product_code="DIESEL_2",
+            gallons=100.0,
+            terminal_id="TERMINAL-E",
+            route_miles=0.0,
+            effective_date=date(2026, 6, 1),
+        )
+
+        assert result.effective_price_cents == 333
+        assert result.contract_id is None
