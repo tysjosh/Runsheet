@@ -138,6 +138,7 @@ class ConfirmationProtocol:
         actor_user_id: str,
         action_id: Optional[str],
         approved_at: Optional[str],
+        approval_attempt_id: Optional[str] = None,
     ):
         """Run the executor for an approved plan with the mode ``approve`` resolved.
 
@@ -166,6 +167,7 @@ class ConfirmationProtocol:
             action_id=action_id,
             approved_at=approved_at,
             mode=mode,
+            approval_attempt_id=approval_attempt_id,
         )
 
     async def _auto_execute_loading_plan(self, request: "MutationRequest", risk_level) -> "MutationResult":

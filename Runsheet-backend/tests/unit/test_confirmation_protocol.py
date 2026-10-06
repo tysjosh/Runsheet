@@ -1079,7 +1079,20 @@ class TestLoadingPlanExecutorRegistry:
             tenant_id="t1", plan_id="P1", expected_order_ids=["a", "b"], expected_truck_id="T1",
             order_snapshots={"a": {"gallons_requested": 1.0}}, actor_user_id="u1",
             action_id="act", approved_at="2026-07-29T00:00:00Z", mode="active_gated",
+            approval_attempt_id=None,
         )
+
+    async def test_execute_loading_plan_forwards_the_approval_attempt_id(self):
+        protocol = _make_protocol()
+        executor = MagicMock()
+        executor.execute = AsyncMock(return_value="result")
+        protocol.set_loading_plan_executor(executor)
+        await protocol.execute_loading_plan(
+            _make_request(tool_name="apply_loading_plan", parameters={"plan_id": "P1"}),
+            mode="active_gated", actor_user_id="u1", action_id="act", approved_at=None,
+            approval_attempt_id="appr-1",
+        )
+        assert executor.execute.await_args.kwargs["approval_attempt_id"] == "appr-1"
 
 
 class TestLoadingPlanExecutionErrorShape:

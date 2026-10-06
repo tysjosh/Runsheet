@@ -43,7 +43,9 @@ class _StubProtocol:
     async def resolve_loading_mode(self, tenant_id):
         return "active_gated"
 
-    async def execute_loading_plan(self, request, *, mode, actor_user_id, action_id, approved_at):
+    async def execute_loading_plan(
+        self, request, *, mode, actor_user_id, action_id, approved_at, approval_attempt_id=None
+    ):
         order_ids = sorted(request.parameters.get("order_ids") or [])
         return LoadingPlanExecutionResult(
             outcome="applied", success=True, replay=False,

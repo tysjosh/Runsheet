@@ -147,9 +147,18 @@ def _safe_ts(value: Any) -> Optional[datetime]:
 
 
 def build_loading_plan_execution_entry(
-    entry: dict, result: LoadingPlanExecutionResult, *, actor: str, duration_ms: int
+    entry: dict,
+    result: LoadingPlanExecutionResult,
+    *,
+    actor: str,
+    duration_ms: int,
+    executor_attempt_id: Optional[str] = None,
 ) -> dict:
-    """The one ``loading_plan_execution`` activity entry per invocation (K9, R10.1)."""
+    """The one ``loading_plan_execution`` activity entry per invocation (K9, R10.1).
+
+    ``details.attempt_id`` is the approval's attempt; ``executor_attempt_id``
+    is the executor's plan claim (``mvp_load_plans.execution_attempt_id``).
+    """
     params = entry.get("parameters") or {}
     plan_id = result.plan_id or params.get("plan_id")
     return {
@@ -175,6 +184,7 @@ def build_loading_plan_execution_entry(
             "retryable": result.retryable,
             "writes_made": result.writes_made,
             "attempt_id": result.attempt_id,
+            "executor_attempt_id": executor_attempt_id,
         },
     }
 
@@ -668,6 +678,7 @@ class ApprovalQueueService:
                 actor_user_id=actor,
                 action_id=action_id,
                 approved_at=entry.get("reviewed_at"),
+                approval_attempt_id=attempt_id,
             )
         except Exception:
             logger.exception(
@@ -690,9 +701,14 @@ class ApprovalQueueService:
                 result.writes_made or prev.get("writes_made") or result.outcome == "in_progress"
             )
         new_status = _status_for(result, writes_made)
+        # D10: attempt_id stays the approval's id (_holds_orders and the CAS
+        # guards read it); the executor's own id is recorded alongside.
+        executor_attempt_id = result.attempt_id
         recorded = dataclasses.replace(result, writes_made=writes_made, attempt_id=attempt_id)
         execution_result = {
             **recorded.as_dict(),
+            "approval_attempt_id": attempt_id,
+            "executor_attempt_id": executor_attempt_id,
             "actor_user_id": actor,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "auto_executed": prev.get("auto_executed"),
@@ -721,7 +737,9 @@ class ApprovalQueueService:
 
         # 6. Audit and broadcast (one loading_plan_execution entry per invocation).
         duration_ms = int((time.monotonic() - started) * 1000)
-        await self._log_loading_execution(entry, recorded, actor, duration_ms)
+        await self._log_loading_execution(
+            entry, recorded, actor, duration_ms, executor_attempt_id=executor_attempt_id
+        )
         if first_approval and self._activity_log:
             try:
                 await self._log_approved(
@@ -749,8 +767,10 @@ class ApprovalQueueService:
                 entry, REASON_APPROVAL_RELEASED_DURING_EXECUTION, retryable=False, writes_made=True
             )
         logger.info(
-            "loading approval %s: attempt %s by %s -> %s (outcome=%s reason=%s)",
-            action_id, attempt_id, actor, final, result.outcome, result.reason,
+            "loading approval %s: attempt %s (approval_attempt=%s executor_attempt=%s) "
+            "by %s -> %s (outcome=%s reason=%s)",
+            action_id, attempt_id, attempt_id, executor_attempt_id, actor, final,
+            result.outcome, result.reason,
         )
         if final in ("executed", "shadowed"):
             return entry
@@ -919,7 +939,13 @@ class ApprovalQueueService:
         })
 
     async def _log_loading_execution(
-        self, entry: dict, result: LoadingPlanExecutionResult, actor: str, duration_ms: int
+        self,
+        entry: dict,
+        result: LoadingPlanExecutionResult,
+        actor: str,
+        duration_ms: int,
+        *,
+        executor_attempt_id: Optional[str] = None,
     ) -> None:
         """Write the K9 entry; a logging failure never changes the outcome (R10.3)."""
         if not self._activity_log:
@@ -927,7 +953,8 @@ class ApprovalQueueService:
         try:
             await self._activity_log.log(
                 build_loading_plan_execution_entry(
-                    entry, result, actor=actor, duration_ms=duration_ms
+                    entry, result, actor=actor, duration_ms=duration_ms,
+                    executor_attempt_id=executor_attempt_id,
                 )
             )
         except Exception:

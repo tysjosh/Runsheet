@@ -789,3 +789,42 @@ async def test_t_u6_partial_then_shadow_then_active():
     await _raises(h.approve("R"), LoadingPlanOverlapError)
     ff.mode = "active_gated"
     assert (await h.approve("P"))["status"] == "executed"
+
+
+# ---------------------------------------------------------------------------
+# FEAT-002 part 2 (D10): approval and executor attempt ids are recorded together
+# ---------------------------------------------------------------------------
+
+
+async def test_approval_and_executor_attempt_ids_are_correlated(caplog):
+    h = ApprovalHarness(_orders("o1"))
+    h.add_plan("A", ["o1"])
+    with caplog.at_level(logging.INFO):
+        done = await h.approve("A")
+    assert done["status"] == "executed"
+
+    result = h.result("A")
+    approval_attempt = result["approval_attempt_id"]
+    executor_attempt = result["executor_attempt_id"]
+    # D10: attempt_id stays the approval's id (_holds_orders and the CAS guards read it).
+    assert approval_attempt == result["attempt_id"]
+    assert executor_attempt == h.store.doc(PLANS, "plan-A")["execution_attempt_id"]
+    assert approval_attempt and executor_attempt and approval_attempt != executor_attempt
+
+    starts = [
+        r.getMessage() for r in caplog.records
+        if r.name == "fuel.services.loading_plan_executor" and "loading plan: start" in r.getMessage()
+    ]
+    assert any(
+        f"attempt={executor_attempt}" in m and f"approval_attempt={approval_attempt}" in m
+        for m in starts
+    ), starts
+    finishes = [
+        r.getMessage() for r in caplog.records
+        if r.name == "fuel.services.loading_plan_executor" and "loading plan: finish" in r.getMessage()
+    ]
+    assert any(f"approval_attempt={approval_attempt}" in m for m in finishes), finishes
+
+    (logged,) = h.activity.of("loading_plan_execution")
+    assert logged["details"]["attempt_id"] == approval_attempt
+    assert logged["details"]["executor_attempt_id"] == executor_attempt

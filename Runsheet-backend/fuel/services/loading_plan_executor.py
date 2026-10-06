@@ -405,6 +405,7 @@ class LoadingPlanExecutor:
         action_id: Optional[str],
         approved_at: Optional[str],
         mode: Optional[str] = None,
+        approval_attempt_id: Optional[str] = None,
     ) -> LoadingPlanExecutionResult:
         snapshots = dict(order_snapshots or {})
         expected_ids = sorted({str(o) for o in (expected_order_ids or []) if o})
@@ -453,6 +454,7 @@ class LoadingPlanExecutor:
                     action_id=action_id,
                     approved_at=approved_at,
                     mode=mode,
+                    approval_attempt_id=approval_attempt_id,
                 )
         except PlanExecutionLockTimeout:
             if lock_held:
@@ -560,6 +562,7 @@ class LoadingPlanExecutor:
         action_id: Optional[str],
         approved_at: Optional[str],
         mode: str,
+        approval_attempt_id: Optional[str] = None,
     ) -> LoadingPlanExecutionResult:
         # 5. Claim the plan with a lease.
         now = self._clock()
@@ -622,8 +625,8 @@ class LoadingPlanExecutor:
         run_id = str(plan.get("run_id") or plan_id)
         truck_id = str(plan.get("truck_id") or "").strip()
         logger.info(
-            "loading plan: start tenant=%s plan=%s attempt=%s mode=%s action=%s",
-            tenant_id, plan_id, attempt_id, mode, action_id,
+            "loading plan: start tenant=%s plan=%s attempt=%s approval_attempt=%s mode=%s action=%s",
+            tenant_id, plan_id, attempt_id, approval_attempt_id, mode, action_id,
         )
         try:
             result, skipped = await self._run_claimed(
@@ -645,8 +648,9 @@ class LoadingPlanExecutor:
             # claim stays in_progress until its lease runs out; the retry
             # resumes from authoritative state.
             logger.exception(
-                "loading plan: unexpected error tenant=%s plan=%s action=%s attempt=%s",
-                tenant_id, plan_id, action_id, attempt_id,
+                "loading plan: unexpected error tenant=%s plan=%s action=%s attempt=%s "
+                "approval_attempt=%s",
+                tenant_id, plan_id, action_id, attempt_id, approval_attempt_id,
             )
             return LoadingPlanExecutionResult(
                 outcome="incomplete",
@@ -672,9 +676,10 @@ class LoadingPlanExecutor:
             approved_at=approved_at,
         )
         logger.info(
-            "loading plan: finish tenant=%s plan=%s attempt=%s outcome=%s applied=%d "
-            "skipped=%d settled=%d",
-            tenant_id, plan_id, attempt_id, result.outcome, len(result.applied_order_ids),
+            "loading plan: finish tenant=%s plan=%s attempt=%s approval_attempt=%s outcome=%s "
+            "applied=%d skipped=%d settled=%d",
+            tenant_id, plan_id, attempt_id, approval_attempt_id, result.outcome,
+            len(result.applied_order_ids),
             skipped, len(result.settled_order_ids),
         )
         return result
