@@ -48,6 +48,7 @@ from errors.exceptions import (
     channel_disabled,
     invalid_customer_tank_ref,
     missing_client_event_id,
+    order_intake_disabled,
     order_payload_invalid,
     security_tenant_id_mismatch,
     webhook_signature_invalid,
@@ -611,17 +612,7 @@ class OrderIntakePipeline:
         )
 
         # (i) Verify customer_tank_id ownership (when present)
-        if order_doc.get("customer_tank_id"):
-            tank_exists = await self._customer_tank_repo.get(
-                tenant_id, order_doc["customer_tank_id"]
-            )
-            if not tank_exists:
-                raise invalid_customer_tank_ref(
-                    details={
-                        "customer_tank_id": order_doc["customer_tank_id"],
-                        "tenant_id": tenant_id,
-                    },
-                )
+        await self._verify_customer_tank(order_doc, tenant_id)
 
         # (i2) Run registered IntakeHook.before_accept hooks.
         # Commerce hooks (PricingHook, CreditCheckHook) run here.
@@ -726,6 +717,85 @@ class OrderIntakePipeline:
             status="processed",
             order_id=order_doc["order_id"],
         )
+
+    # ------------------------------------------------------------------
+    # Dry-run validation (bulk ``dry_run``)
+    # ------------------------------------------------------------------
+
+    async def validate_dispatcher_payload(
+        self,
+        tenant: Any,
+        payload: Dict[str, Any],
+        request_id: str,
+    ) -> None:
+        """Run the dispatcher path's value checks with no side effects.
+
+        Used by the bulk endpoint's ``dry_run`` so a row is reported valid
+        only when the real run would accept it (finding F2, decision D11).
+        Runs, in order: the intake flag check, dispatcher channel resolution,
+        the schema whitelist and adapter transform, ``_complete_order_doc``,
+        the customer-tank ownership check and ``FuelOrder.model_validate``.
+
+        It deliberately skips idempotency, hooks, writes, events, broadcasts
+        and metrics: a dry run consumes no ``client_event_id`` and changes
+        nothing.
+
+        Raises:
+            AppException: ``ORDER_INTAKE_DISABLED`` when the flag is
+                disabled, ``ORDER_PAYLOAD_INVALID`` when the adapter or the
+                ``FuelOrder`` rules reject the payload, and
+                ``INVALID_CUSTOMER_TANK_REF`` for a tank the tenant does not
+                own. Channel resolution errors propagate unchanged.
+        """
+        tenant_id = getattr(tenant, "tenant_id", None) or tenant.get("tenant_id")
+        user_id = getattr(tenant, "user_id", None) or tenant.get("user_id")
+
+        if await self._get_overlay_state(tenant_id) == "disabled":
+            raise order_intake_disabled()
+
+        channel = await self._resolve_dispatcher_channel(tenant_id)
+        context = IntakeContext(
+            tenant_id=tenant_id,
+            channel=channel,
+            trace_id=request_id,
+            request_id=request_id,
+            actor_user_id=user_id,
+        )
+        schema_version = payload.get("schema_version", "1.0")
+        try:
+            self._assert_schema_supported(schema_version, channel)
+            adapter = self._adapter_registry.get(channel.channel_type, schema_version)
+            result = adapter.transform(payload, context)
+        except AdapterError as exc:
+            # The real run parks this payload in the poison queue; a dry run
+            # reports it as invalid instead, naming only the rule.
+            raise order_payload_invalid(invalid_fields=[exc.error_type]) from exc
+
+        order_doc = self._complete_order_doc(result.order_doc, context, "dry_run")
+        await self._verify_customer_tank(order_doc, tenant_id)
+        try:
+            FuelOrder.model_validate(order_doc)
+        except ValidationError as exc:
+            raise order_payload_invalid(
+                invalid_fields=extract_invalid_fields(exc),
+            ) from exc
+
+    async def _verify_customer_tank(
+        self, order_doc: Dict[str, Any], tenant_id: str
+    ) -> None:
+        """Refuse a ``customer_tank_id`` the tenant does not own (step (i))."""
+        if not order_doc.get("customer_tank_id"):
+            return
+        tank_exists = await self._customer_tank_repo.get(
+            tenant_id, order_doc["customer_tank_id"]
+        )
+        if not tank_exists:
+            raise invalid_customer_tank_ref(
+                details={
+                    "customer_tank_id": order_doc["customer_tank_id"],
+                    "tenant_id": tenant_id,
+                },
+            )
 
     # ------------------------------------------------------------------
     # Platform-assigned field stamping

@@ -118,6 +118,8 @@ class ErrorCode(str, Enum):
 
     CHANNEL_DISABLED = "CHANNEL_DISABLED"
     """Intake channel is disabled and cannot accept orders (HTTP 403)"""
+    ORDER_INTAKE_DISABLED = "ORDER_INTAKE_DISABLED"
+    """The tenant's order_intake_pipeline flag is disabled, so the order was not stored (HTTP 409)"""
 
     INSUFFICIENT_ROLE = "INSUFFICIENT_ROLE"
     """Caller lacks the required role for this operation (HTTP 403)"""
@@ -463,6 +465,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.LOADING_PLAN_EXECUTION_FAILED: 409,
     ErrorCode.APPROVAL_EXPIRED: 409,
     ErrorCode.CHANNEL_DISABLED: 403,
+    ErrorCode.ORDER_INTAKE_DISABLED: 409,
     ErrorCode.INSUFFICIENT_ROLE: 403,
     ErrorCode.DRIVER_UNAVAILABLE: 409,
     ErrorCode.LEGACY_ROUTE_SUNSET: 410,

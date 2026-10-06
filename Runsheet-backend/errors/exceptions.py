@@ -507,6 +507,23 @@ def channel_disabled(
     )
 
 
+def order_intake_disabled(
+    message: str = "Order intake isn't enabled for this account",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create the 409 for an order refused because intake is switched off.
+
+    Raised when the tenant's ``order_intake_pipeline`` flag is ``disabled``,
+    so a dispatcher create never reports success for an order that was not
+    stored.
+    """
+    return AppException(
+        error_code=ErrorCode.ORDER_INTAKE_DISABLED,
+        message=message,
+        details=details
+    )
+
+
 def insufficient_role(
     message: str = "Caller lacks the required role for this operation",
     details: Optional[dict[str, Any]] = None
