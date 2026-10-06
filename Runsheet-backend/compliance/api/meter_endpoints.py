@@ -38,6 +38,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
 from compliance.services.meter_audit_service import MeterAuditService
+from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
@@ -233,12 +234,10 @@ async def create_meter(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.METERS_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "meters.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(

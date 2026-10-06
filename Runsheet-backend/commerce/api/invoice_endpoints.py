@@ -17,11 +17,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_ops
+from commerce.models.invoice import InvoiceStatus
 from commerce.services.invoice_service import InvoiceService
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
@@ -169,7 +170,8 @@ def _get_request_id(request: Request) -> str:
 async def list_invoices(
     request: Request,
     tenant: TenantContext = Depends(require_invoicing_enabled),
-    status: Optional[str] = Query(
+    # Enum-typed so an unknown value is 422, not an empty 200 (N-CFV-5).
+    status: Optional[InvoiceStatus] = Query(
         default=None,
         description="Filter by status: draft|open|partial|paid|overdue|void",
     ),
@@ -203,7 +205,7 @@ async def list_invoices(
 
     result = await service.list(
         tenant_id=tenant.tenant_id,
-        status=status,
+        status=status.value if status else None,
         customer_id=customer_id,
         account_id=account_id,
         cursor=cursor,
@@ -332,12 +334,10 @@ async def void_invoice(
     """
     # Validate that authorized_by is provided when force=true
     if body.force and not body.authorized_by:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.MISSING_AUTHORIZED_BY,
+            "authorized_by is required when force=true",
             status_code=422,
-            detail={
-                "error_code": "MISSING_AUTHORIZED_BY",
-                "message": "authorized_by is required when force=true",
-            },
         )
 
     service = _get_invoice_service()
@@ -447,14 +447,14 @@ async def retry_qbo_push(
 
     current_push_state = invoice.get("qbo_push_state")
     if current_push_state != "dead_letter":
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.INVALID_QBO_PUSH_STATE,
+            (
+                f"Cannot retry QBO push: invoice qbo_push_state is "
+                f"'{current_push_state}', expected 'dead_letter'"
+            ),
             status_code=409,
-            detail={
-                "error_code": "INVALID_QBO_PUSH_STATE",
-                "message": (
-                    f"Cannot retry QBO push: invoice qbo_push_state is "
-                    f"'{current_push_state}', expected 'dead_letter'"
-                ),
+            details={
                 "invoice_id": invoice_id,
                 "current_qbo_push_state": current_push_state,
             },

@@ -53,6 +53,14 @@ MIN_DELIVERIES_FOR_CALIBRATION = 3
 # ---------------------------------------------------------------------------
 
 
+class DeliveryNotFoundError(ValueError):
+    """The delivery named for a variance computation does not exist.
+
+    A ``ValueError`` so existing ``except ValueError`` callers keep working;
+    the variance endpoint maps it to 404 (row 54).
+    """
+
+
 class KFactorVariance(BaseModel):
     """Result of comparing predicted vs actual gallons for a delivery.
 
@@ -236,7 +244,7 @@ class KFactorCalibrationService:
         # 1. Look up the delivery record from ES
         delivery = await self._get_delivery(delivery_id, tenant_id)
         if delivery is None:
-            raise ValueError(
+            raise DeliveryNotFoundError(
                 f"Delivery '{delivery_id}' not found for tenant '{tenant_id}'"
             )
 

@@ -38,9 +38,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
 from compliance.services.kfactor_calibration_service import (
+    DeliveryNotFoundError,
     KFactorCalibrationService,
 )
-from errors.exceptions import AppException, kfactor_variance_history_failed
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    kfactor_variance_history_failed,
+    resource_not_found,
+)
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -206,12 +212,10 @@ async def approve_kfactor_adjustment(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.KFACTOR_INVALID_ADJUSTMENT,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "kfactor.invalid_adjustment",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -277,13 +281,13 @@ async def get_variance(
         )
     except AppException:
         raise
+    except DeliveryNotFoundError as exc:
+        raise resource_not_found(str(exc), details={"delivery_id": delivery_id})
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.KFACTOR_VARIANCE_COMPUTATION_ERROR,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "kfactor.variance_computation_error",
-                "message": str(exc),
-            },
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -412,12 +416,10 @@ async def suggest_kfactor(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.KFACTOR_SUGGEST_ERROR,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "kfactor.suggest_error",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(

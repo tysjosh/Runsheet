@@ -1896,9 +1896,10 @@ class TestAssetCertificationServiceClearDispatchRestrictions:
         return_value=_FIXED_NOW,
     )
     async def test_create_non_valid_status_does_not_clear_restrictions(self, mock_utcnow):
-        """Creating a cert with non-valid status does NOT trigger clearing logic.
+        """Creating an already-expired cert does NOT trigger clearing logic.
 
-        Only certs with status "valid" should clear dispatch restrictions.
+        The stored status is derived from expiry_date (N-CFV-2); only a cert
+        still in force (valid / expiring_soon) clears dispatch restrictions.
         """
         es = _make_es_service()
         service = AssetCertificationService(es)
@@ -1907,15 +1908,14 @@ class TestAssetCertificationServiceClearDispatchRestrictions:
             _TENANT_ID,
             asset_id="truck_001",
             certification_type="V_test",
-            certification_date=date(2026, 6, 1),
-            expiry_date=date(2029, 6, 1),
+            certification_date=date(2020, 6, 1),
+            expiry_date=date(2021, 6, 1),
             inspector_name="Inspector Smith",
             certificate_number="DOT-2026-003",
-            status="expiring_soon",
         )
 
         # Verify the cert was created
-        assert result["status"] == "expiring_soon"
+        assert result["status"] == "expired"
         es.index_document.assert_called_once()
 
         # search_documents should NOT be called for clearing (only valid triggers it)
@@ -2125,7 +2125,7 @@ class TestAssetCertificationServiceCreateEachType:
             asset_id="truck_013",
             certification_type="meter_seal",
             certification_date=date(2024, 7, 1),
-            expiry_date=date(2025, 7, 1),
+            expiry_date=date(2099, 7, 1),
             inspector_name="Inspector Davis",
             certificate_number="MS-2024-001",
         )
@@ -2150,7 +2150,7 @@ class TestAssetCertificationServiceCreateEachType:
             asset_id="truck_014",
             certification_type="fire_extinguisher",
             certification_date=date(2024, 8, 15),
-            expiry_date=date(2025, 8, 15),
+            expiry_date=date(2099, 8, 15),
             inspector_name="Inspector Evans",
             certificate_number="FE-2024-001",
         )
@@ -2491,3 +2491,157 @@ class TestAssetCertificationServiceRetestClearance:
 
         assert result.eligible is True
         assert result.reasons == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: date order + derived status (N-CFV-1, N-CFV-2)
+# ---------------------------------------------------------------------------
+
+
+def _days(n: int) -> date:
+    from datetime import timedelta
+
+    return date.today() + timedelta(days=n)
+
+
+async def _create(service, expiry, **kw):
+    return await service.create(
+        _TENANT_ID,
+        asset_id="truck_cfv",
+        certification_type="V_test",
+        certification_date=date(2020, 1, 1),
+        expiry_date=expiry,
+        inspector_name="Inspector QA",
+        certificate_number="QA-CN",
+        **kw,
+    )
+
+
+class TestDerivedCertificationStatus:
+    """Stored and returned status follows the expiry date."""
+
+    def test_derive_window(self):
+        from compliance.services.asset_certification_service import (
+            derive_certification_status as derive,
+        )
+
+        today = date.today()
+        assert derive("valid", _days(-1), today) == "expired"
+        assert derive("valid", _days(0), today) == "expiring_soon"
+        assert derive("valid", _days(ALERT_THRESHOLD_WARNING_DAYS), today) == "expiring_soon"
+        assert derive("valid", _days(ALERT_THRESHOLD_WARNING_DAYS + 1), today) == "valid"
+        assert derive("expiring_soon", _days(400), today) == "valid"
+        assert derive("expired", _days(400), today) == "expired"
+        assert derive("superseded", _days(-30), today) == "superseded"
+
+    @pytest.mark.asyncio
+    async def test_create_past_expiry_stores_expired_and_does_not_clear(self):
+        es = _make_es_service()
+        result = await _create(AssetCertificationService(es), _days(-1))
+
+        assert result["status"] == "expired"
+        assert es.index_document.call_args.args[2]["status"] == "expired"
+        es.search_documents.assert_not_called()  # no clear-restrictions scan
+
+    @pytest.mark.asyncio
+    async def test_create_within_window_stores_expiring_soon_and_clears(self):
+        es = _make_es_service()
+        result = await _create(AssetCertificationService(es), _days(14))
+
+        assert result["status"] == "expiring_soon"
+        es.search_documents.assert_called_once()  # clear-restrictions scan
+
+    @pytest.mark.asyncio
+    async def test_create_far_expiry_stores_valid_even_if_client_says_expiring(self):
+        es = _make_es_service()
+        result = await _create(
+            AssetCertificationService(es), _days(400), status="expiring_soon"
+        )
+        assert result["status"] == "valid"
+
+    @pytest.mark.asyncio
+    async def test_update_with_reversed_merged_dates_is_400(self):
+        es = _make_es_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_search_response(
+                [_make_cert_doc(certification_date="2024-06-01", expiry_date="2027-06-01")]
+            )
+        )
+        service = AssetCertificationService(es)
+
+        with pytest.raises(AppException) as exc_info:
+            await service.update(_TENANT_ID, "cert_test123", expiry_date=date(2024, 1, 1))
+
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.error_code.value == "VALIDATION_ERROR"
+        es.update_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_new_expiry_rederives_status(self):
+        es = _make_es_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_search_response(
+                [_make_cert_doc(expiry_date=_days(-5).isoformat())]
+            )
+        )
+        result = await AssetCertificationService(es).update(
+            _TENANT_ID, "cert_test123", expiry_date=_days(400)
+        )
+        assert result["status"] == "valid"
+        assert es.update_document.call_args.args[2]["status"] == "valid"
+
+    @pytest.mark.asyncio
+    async def test_get_and_list_rederive_stale_stored_status(self):
+        stale = _make_cert_doc(status="valid", expiry_date=_days(-3).isoformat())
+        es = _make_es_service()
+        es.search_documents = AsyncMock(return_value=_es_search_response([stale]))
+        service = AssetCertificationService(es)
+
+        assert (await service.get(_TENANT_ID, "cert_test123"))["status"] == "expired"
+        listed = await service.list(_TENANT_ID)
+        assert [d["status"] for d in listed["items"]] == ["expired"]
+        assert stale["status"] == "valid"  # source doc not mutated
+
+    @pytest.mark.asyncio
+    async def test_get_and_list_rederive_on_postgres_read_path(self, monkeypatch):
+        import commerce.services.commerce_persistence_bridge as bridge
+
+        stale = _make_cert_doc(status="valid", expiry_date=_days(10).isoformat())
+
+        async def _get(*a, **k):
+            return dict(stale)
+
+        async def _list(*a, **k):
+            return {"items": [dict(stale)], "next_cursor": None, "limit": 50}
+
+        monkeypatch.setattr(bridge, "read_hybrid_get", _get)
+        monkeypatch.setattr(bridge, "read_hybrid_list_sorted", _list)
+        service = AssetCertificationService(_make_es_service())
+
+        assert (await service.get(_TENANT_ID, "cert_test123"))["status"] == "expiring_soon"
+        listed = await service.list(_TENANT_ID)
+        assert [d["status"] for d in listed["items"]] == ["expiring_soon"]
+
+    @pytest.mark.asyncio
+    async def test_superseded_is_preserved_on_read(self):
+        doc = _make_cert_doc(status="superseded", expiry_date=_days(-30).isoformat())
+        es = _make_es_service()
+        es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+
+        got = await AssetCertificationService(es).get(_TENANT_ID, "cert_test123")
+        assert got["status"] == "superseded"
+
+    @pytest.mark.asyncio
+    async def test_dashboard_counts_expired_expiring_valid(self):
+        docs = [
+            _make_cert_doc(cert_id="c_exp", status="valid", expiry_date=_days(-1).isoformat()),
+            _make_cert_doc(cert_id="c_soon", status="valid", expiry_date=_days(14).isoformat()),
+            _make_cert_doc(cert_id="c_ok", status="valid", expiry_date=_days(400).isoformat()),
+        ]
+        es = _make_es_service()
+        es.search_documents = AsyncMock(return_value=_es_search_response(docs))
+
+        summaries = await AssetCertificationService(es).get_fleet_dashboard(_TENANT_ID)
+
+        statuses = sorted(s.status for s in summaries)
+        assert statuses == ["expired", "expiring_soon", "valid"]

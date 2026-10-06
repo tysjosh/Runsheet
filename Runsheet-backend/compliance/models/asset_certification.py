@@ -18,7 +18,7 @@ from datetime import date, datetime
 from typing import Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.time_utils import utcnow
 
@@ -198,6 +198,13 @@ class AssetCertification(BaseModel):
         if not stripped:
             raise ValueError("certificate_number must not be empty or whitespace")
         return stripped
+
+    @model_validator(mode="after")
+    def expiry_not_before_certification(self) -> "AssetCertification":
+        """A certification cannot expire before it was issued (N-CFV-1)."""
+        if self.expiry_date < self.certification_date:
+            raise ValueError("expiry_date must be on or after certification_date")
+        return self
 
     # ------------------------------------------------------------------
     # Uniform cross-module subject reference (cross-module-entity-linkage

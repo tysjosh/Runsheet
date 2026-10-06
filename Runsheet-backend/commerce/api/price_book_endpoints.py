@@ -16,7 +16,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
 from config.settings import get_settings
@@ -432,12 +432,10 @@ async def resolve_pricing(
         try:
             moment = datetime.fromisoformat(body.moment.replace("Z", "+00:00"))
         except (ValueError, TypeError):
-            raise HTTPException(
+            raise AppException(
+                ErrorCode.INVALID_MOMENT,
+                f"moment must be a valid ISO 8601 datetime, got: {body.moment}",
                 status_code=422,
-                detail={
-                    "error_code": "INVALID_MOMENT",
-                    "message": f"moment must be a valid ISO 8601 datetime, got: {body.moment}",
-                },
             )
 
     # Fetch the account to pass to the resolver
@@ -481,13 +479,16 @@ async def resolve_pricing(
             "request_id": _get_request_id(request),
         }
     except PricingError as exc:
-        raise HTTPException(
+        # Same wire code as before, now at the top level of the envelope.
+        try:
+            code = ErrorCode(exc.code)
+        except ValueError:
+            code = ErrorCode.VALIDATION_ERROR
+        raise AppException(
+            code,
+            exc.message,
             status_code=422,
-            detail={
-                "error_code": exc.code,
-                "message": exc.message,
-                "details": exc.details,
-            },
+            details=exc.details,
         )
 
 

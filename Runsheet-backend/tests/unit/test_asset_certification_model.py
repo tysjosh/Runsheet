@@ -226,3 +226,33 @@ class TestSchemaHygiene:
     def test_invalid_status_rejected(self):
         with pytest.raises(ValidationError):
             AssetCertification(**_base_payload(status="inactive"))
+
+
+# ---------------------------------------------------------------------------
+# Date order (N-CFV-1)
+# ---------------------------------------------------------------------------
+
+
+class TestDateOrder:
+    """A certification cannot expire before it was issued."""
+
+    def test_expiry_before_certification_date_rejected(self):
+        with pytest.raises(ValidationError) as exc_info:
+            AssetCertification(
+                **_base_payload(
+                    certification_date=date(2026, 1, 15),
+                    expiry_date=date(2025, 1, 15),
+                )
+            )
+        assert "expiry_date must be on or after certification_date" in str(
+            exc_info.value
+        )
+
+    def test_equal_dates_accepted(self):
+        cert = AssetCertification(
+            **_base_payload(
+                certification_date=date(2026, 1, 15),
+                expiry_date=date(2026, 1, 15),
+            )
+        )
+        assert cert.expiry_date == cert.certification_date

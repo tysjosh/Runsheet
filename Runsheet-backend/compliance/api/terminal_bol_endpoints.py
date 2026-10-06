@@ -45,6 +45,7 @@ from compliance.services.compliance_es_mappings import TERMINAL_BOLS_INDEX
 from compliance.services.terminal_bol_ingestion_service import (
     TerminalBOLIngestionService,
 )
+from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from services.keyset_pagination import next_cursor_from_hits, search_after_for_cursor
 from ops.middleware.tenant_guard import (
@@ -226,12 +227,10 @@ async def ingest_edi(
     edi_payload = await request.body()
 
     if not edi_payload:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_EMPTY_PAYLOAD,
+            "EDI payload must not be empty.",
             status_code=400,
-            detail={
-                "error_code": "terminal_bols.empty_payload",
-                "message": "EDI payload must not be empty.",
-            },
         )
 
     try:
@@ -239,12 +238,10 @@ async def ingest_edi(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_EDI,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_edi",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -303,12 +300,10 @@ async def upload_manual_bol(
     file_bytes = await file.read()
 
     if not file_bytes:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_EMPTY_FILE,
+            "Uploaded file must not be empty.",
             status_code=400,
-            detail={
-                "error_code": "terminal_bols.empty_file",
-                "message": "Uploaded file must not be empty.",
-            },
         )
 
     try:
@@ -316,12 +311,10 @@ async def upload_manual_bol(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_UPLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_upload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -392,12 +385,10 @@ async def confirm_manual_bol(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_CONFIRM,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_confirm",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -455,12 +446,10 @@ async def link_bol_to_load_plan(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_LINK,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_link",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(

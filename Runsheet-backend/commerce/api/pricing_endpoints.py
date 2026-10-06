@@ -30,17 +30,21 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from commerce.api._authz import commerce_staff_dependency
 from commerce.api.price_book_endpoints import require_pricing_enabled
 from commerce.models.pricing_rule import PricingRule
+from commerce.services.price_protection_service import PriceProtectionService
 from commerce.services.sales_pricing_engine import (
     PricingNoRuleMatchedError,
+    PricingRackPriceUnavailableError,
     SalesPricingEngine,
 )
 from compliance.services.compliance_es_mappings import PRICING_RULES_INDEX
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -201,12 +205,10 @@ async def create_pricing_rule(
     try:
         rule = PricingRule.model_validate(payload)
     except Exception as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICING_RULE_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "pricing_rule.invalid_payload",
-                "message": str(exc),
-            },
         )
 
     document = rule.model_dump(mode="json")
@@ -339,7 +341,15 @@ async def resolve_price(
     Validates: Requirement 11.2
     """
     es = _get_es_service()
-    engine = SalesPricingEngine(es_service=es, tenant_id=tenant.tenant_id)
+    # An active price-protection contract is the first-priority price
+    # (Req 3.8); without the resolver it was never consulted (N-CFV-4).
+    engine = SalesPricingEngine(
+        es_service=es,
+        tenant_id=tenant.tenant_id,
+        price_protection_service=PriceProtectionService(
+            es, tenant_id=tenant.tenant_id
+        ),
+    )
 
     try:
         resolution = await engine.resolve_price(
@@ -353,20 +363,26 @@ async def resolve_price(
             account_id=body.account_id,
         )
     except PricingNoRuleMatchedError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICING_NO_RULE_MATCHED,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": exc.error_code,
-                "message": str(exc),
+        )
+    except PricingRackPriceUnavailableError as exc:
+        raise AppException(
+            ErrorCode.PRICING_RACK_PRICE_UNAVAILABLE,
+            str(exc),
+            status_code=422,
+            details={
+                "terminal_id": exc.terminal_id,
+                "product_code": exc.product_code,
             },
         )
     except NotImplementedError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICING_NOT_IMPLEMENTED,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "pricing.not_implemented",
-                "message": str(exc),
-            },
         )
 
     return {
