@@ -33,6 +33,8 @@ class ErrorCode(str, Enum):
     
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
     """Requested resource does not exist (HTTP 404)"""
+    RESOURCE_ALREADY_EXISTS = "RESOURCE_ALREADY_EXISTS"
+    """A create used an id that is already taken, in any tenant (HTTP 409)"""
     
     # Authentication errors (4xx)
     UNAUTHORIZED = "UNAUTHORIZED"
@@ -418,6 +420,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.VALIDATION_ERROR: 400,
     ErrorCode.INVALID_REQUEST: 400,
     ErrorCode.RESOURCE_NOT_FOUND: 404,
+    ErrorCode.RESOURCE_ALREADY_EXISTS: 409,
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.RATE_LIMITED: 429,

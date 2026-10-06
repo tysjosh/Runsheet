@@ -121,6 +121,22 @@ def resource_not_found(
     )
 
 
+def already_exists(
+    message: str,
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a 409 for a create whose id is already taken.
+
+    Ids are global across tenants, so the message must stay generic: it never
+    names the owning tenant or echoes the stored document.
+    """
+    return AppException(
+        error_code=ErrorCode.RESOURCE_ALREADY_EXISTS,
+        message=message,
+        details=details
+    )
+
+
 def legacy_ng_delivery_disabled(
     surface: Optional[str] = None,
 ) -> AppException:

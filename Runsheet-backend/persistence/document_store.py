@@ -238,6 +238,57 @@ class PostgresDocumentStore:
                 result = "updated"
         return {"_index": index, "_id": str(doc_id), "result": result}
 
+    async def create_document(
+        self,
+        index: str,
+        doc_id: str,
+        document: Dict[str, Any],
+    ) -> bool:
+        """Insert ``document`` only if ``(index, doc_id)`` is free. ``True`` if inserted.
+
+        The key carries no tenant, so :meth:`index_document` on an id another
+        tenant already owns replaces that tenant's body and rewrites its
+        ``tenant_id``. A creating endpoint must not do that, and a read-then-write
+        check would race. This is one ``INSERT … ON CONFLICT DO NOTHING``, so two
+        concurrent creates of one id insert exactly once and the loser sees
+        ``False`` without the stored row being touched.
+
+        Timestamps are stamped on the caller's dict exactly as
+        :meth:`index_document` stamps them.
+        """
+        if doc_id is None or str(doc_id) == "":
+            raise ValueError(f"create_document({index}) requires a non-empty doc_id")
+
+        from services.elasticsearch_service import TIMESTAMP_SKIP_INDICES
+
+        if index not in TIMESTAMP_SKIP_INDICES:
+            document["updated_at"] = self._clock()
+            if "created_at" not in document:
+                document["created_at"] = self._clock()
+
+        model = self._model()
+        async with self._session_scope() as session:
+            # The unit-test engines are SQLite, which has the same clause under its
+            # own dialect; production is always Postgres.
+            if session.get_bind().dialect.name == "sqlite":
+                from sqlalchemy.dialects.sqlite import insert as dialect_insert
+            else:
+                from sqlalchemy.dialects.postgresql import insert as dialect_insert
+
+            statement = (
+                dialect_insert(model)
+                .values(
+                    index_name=index,
+                    doc_id=str(doc_id),
+                    tenant_id=_tenant_of(document),
+                    document=dict(document),
+                )
+                .on_conflict_do_nothing(index_elements=["index_name", "doc_id"])
+                .returning(model.doc_id)
+            )
+            inserted = (await session.execute(statement)).first()
+        return inserted is not None
+
     async def update_document(
         self, index: str, doc_id: str, partial_doc: Dict[str, Any]
     ) -> Dict[str, Any]:

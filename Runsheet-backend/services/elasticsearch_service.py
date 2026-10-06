@@ -280,6 +280,21 @@ class ElasticsearchService:
             index, doc_id, document, stamp_timestamps=stamp_timestamps
         )
 
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[Any, Any]
+    ) -> bool:
+        """Create ``document`` only if no document holds ``doc_id``. ``True`` if created.
+
+        Document ids are global (the store key has no tenant), so a creating
+        endpoint uses this instead of :meth:`index_document` to avoid replacing a
+        row another tenant owns. A retired index takes no writes, so nothing is
+        created and the result is ``False``.
+        """
+        if self._is_retired_index(index):
+            return False
+        store = self._pg_store()
+        return await store.create_document(index, doc_id, document)
+
     async def update_document(self, index: str, doc_id: str, partial_doc: Dict[Any, Any]):
         """
         Partially update a document using the ES _update API with circuit breaker protection.
