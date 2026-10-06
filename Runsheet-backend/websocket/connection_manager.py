@@ -71,10 +71,15 @@ class ConnectionManager(BaseWSManager):
         heading: Optional[float] = None,
         asset_type: Optional[str] = None,
         asset_subtype: Optional[str] = None,
+        tenant_id: str = "",
         **extra_data: Any,
     ) -> int:
         """
-        Broadcast a location update to all connected clients.
+        Broadcast a location update to the asset's tenant only.
+
+        The fleet socket is shared by every tenant, so a plain ``broadcast``
+        put each tenant's truck positions on every other tenant's live map.
+        A blank ``tenant_id`` reaches nobody.
 
         Validates:
         - Requirement 6.7: Push real-time updates to connected clients
@@ -89,6 +94,7 @@ class ConnectionManager(BaseWSManager):
             heading: Optional heading in degrees
             asset_type: Optional asset type classification
             asset_subtype: Optional asset subtype
+            tenant_id: The asset's tenant; only its clients receive the update
             **extra_data: Additional data to include in the message
 
         Returns:
@@ -118,14 +124,15 @@ class ConnectionManager(BaseWSManager):
         if extra_data:
             message["data"].update(extra_data)
 
-        return await self.broadcast(message)
+        return await self.broadcast_to_tenant(tenant_id, message)
 
-    async def broadcast_batch_update(self, updates: List[dict]) -> int:
+    async def broadcast_batch_update(self, updates: List[dict], tenant_id: str = "") -> int:
         """
-        Broadcast multiple location updates in a single message.
+        Broadcast multiple location updates for one tenant in a single message.
 
         Args:
-            updates: List of location update dictionaries
+            updates: List of location update dictionaries, all for ``tenant_id``
+            tenant_id: Only this tenant's clients receive the batch (blank: nobody)
 
         Returns:
             Number of clients that successfully received the batch
@@ -138,7 +145,7 @@ class ConnectionManager(BaseWSManager):
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        return await self.broadcast(message)
+        return await self.broadcast_to_tenant(tenant_id, message)
 
     async def send_heartbeat(self) -> int:
         """

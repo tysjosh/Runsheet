@@ -67,9 +67,9 @@ class TestFleetManagerMetrics:
         manager = ConnectionManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         count = await manager.broadcast_location_update(
-            truck_id="T-1", latitude=1.0, longitude=2.0
+            truck_id="T-1", latitude=1.0, longitude=2.0, tenant_id="t1"
         )
 
         assert count == 1
@@ -124,8 +124,8 @@ class TestFleetManagerMetrics:
         manager = ConnectionManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
-        count = await manager.broadcast_batch_update([{"truck_id": "T-1"}])
+        await manager.connect(ws, tenant_id="t1")
+        count = await manager.broadcast_batch_update([{"truck_id": "T-1"}], tenant_id="t1")
 
         assert count == 1
 

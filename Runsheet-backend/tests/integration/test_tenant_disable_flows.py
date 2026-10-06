@@ -258,12 +258,13 @@ class TestFleetWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_fleet_ws_broadcast_location_update(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="tenant-fleet")
 
         count = await self.manager.broadcast_location_update(
             truck_id="TRUCK-001",
             latitude=37.7749,
             longitude=-122.4194,
+            tenant_id="tenant-fleet",
         )
         assert count == 1
         location_msgs = [m for m in ws.messages if m.get("type") == "location_update"]
@@ -463,7 +464,7 @@ class TestFullDisableEnableCycleAllManagers:
         assert manager.get_connection_count() == 1
 
         count = await manager.broadcast_location_update(
-            truck_id="TRUCK-001", latitude=37.7, longitude=-122.4
+            truck_id="TRUCK-001", latitude=37.7, longitude=-122.4, tenant_id="fleet-cycle"
         )
         assert count == 1
 

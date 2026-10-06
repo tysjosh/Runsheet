@@ -469,10 +469,10 @@ class DataIngestionService:
     
     async def _broadcast_location_update(self, sanitized_data: dict) -> None:
         """
-        Broadcast a location update to all connected WebSocket clients.
+        Broadcast a location update to the asset tenant's WebSocket clients.
 
-        This method sends the location update to all connected clients
-        via the WebSocket connection manager. If no connection manager
+        This method sends the location update to the clients of the update's
+        ``tenant_id`` via the WebSocket connection manager. If no connection manager
         is configured, the broadcast is silently skipped.
 
         Uses asset_id for the broadcast, falling back to truck_id for
@@ -521,7 +521,9 @@ class DataIngestionService:
                 heading=sanitized_data.get("heading"),
                 accuracy_meters=sanitized_data.get("accuracy_meters"),
                 asset_type=asset_type,
-                asset_subtype=asset_subtype
+                asset_subtype=asset_subtype,
+                # Only the asset's tenant sees it on the live map.
+                tenant_id=sanitized_data.get("tenant_id") or "",
             )
 
             if clients_notified > 0:

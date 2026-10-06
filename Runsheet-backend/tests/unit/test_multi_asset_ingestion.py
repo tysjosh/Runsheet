@@ -180,12 +180,14 @@ class TestBroadcastIncludesAssetType:
             "timestamp": NOW.isoformat(),
             "asset_type": "vessel",
             "asset_subtype": "boat",
+            "tenant_id": "tenant-sea",
         }
 
         await service._broadcast_location_update(sanitized)
 
         cm.broadcast_location_update.assert_called_once()
         call_kwargs = cm.broadcast_location_update.call_args
+        assert call_kwargs.kwargs.get("tenant_id") == "tenant-sea"
         # Check keyword args
         assert call_kwargs.kwargs.get("asset_type") == "vessel" or \
                call_kwargs[1].get("asset_type") == "vessel"

@@ -1,4 +1,4 @@
-"""WS payloads never carry the delivery OTP, and inventory alerts stay in their tenant.
+"""WS payloads never carry the delivery OTP; inventory alerts and fleet positions stay in their tenant.
 
 * ``/ws/orders`` sends the stored order document, and every dispatcher socket in
   the tenant receives it. The POD OTP (``pod_otp``) is the customer's
@@ -118,3 +118,53 @@ async def test_inventory_alert_without_tenant_reaches_nobody():
     )
 
     assert _received(client) == []
+
+
+async def test_location_update_reaches_only_the_assets_tenant():
+    """Fleet positions went to every tenant's live map (plain broadcast)."""
+    manager = ConnectionManager()
+    same_tenant = _socket()
+    other_tenant = _socket()
+    await manager.connect(same_tenant, tenant_id="tenant_1")
+    await manager.connect(other_tenant, tenant_id="tenant_2")
+
+    sent = await manager.broadcast_location_update(
+        truck_id="TRUCK-1", latitude=29.7, longitude=-95.3, tenant_id="tenant_1",
+    )
+    batch = await manager.broadcast_batch_update([{"truck_id": "TRUCK-1"}], tenant_id="tenant_1")
+
+    assert (sent, batch) == (1, 1)
+    assert [m["type"] for m in _received(same_tenant)] == ["location_update", "batch_location_update"]
+    assert _received(other_tenant) == []
+
+
+async def test_location_update_without_tenant_reaches_nobody():
+    manager = ConnectionManager()
+    client = _socket()
+    await manager.connect(client, tenant_id="tenant_1")
+
+    assert await manager.broadcast_location_update(truck_id="T", latitude=0.0, longitude=0.0) == 0
+    assert await manager.broadcast_batch_update([{"truck_id": "T"}]) == 0
+    assert _received(client) == []
+
+
+async def test_ingestion_broadcasts_to_the_updates_tenant():
+    from ingestion.service import DataIngestionService
+
+    manager = ConnectionManager()
+    same_tenant = _socket()
+    other_tenant = _socket()
+    await manager.connect(same_tenant, tenant_id="tenant_1")
+    await manager.connect(other_tenant, tenant_id="tenant_2")
+    es = MagicMock()
+    es.get_document = AsyncMock(return_value={"asset_type": "vehicle", "asset_subtype": "truck"})
+    service = DataIngestionService(es_service=es, connection_manager=manager)
+
+    await service._broadcast_location_update({
+        "asset_id": "TRUCK-1", "tenant_id": "tenant_1", "latitude": 29.7, "longitude": -95.3,
+        "timestamp": "2026-10-06T12:00:00+00:00",
+    })
+
+    (message,) = _received(same_tenant)
+    assert message["data"]["truck_id"] == "TRUCK-1"
+    assert _received(other_tenant) == []
