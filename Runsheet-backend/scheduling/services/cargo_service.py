@@ -174,36 +174,28 @@ class CargoService:
                 details={"job_id": job_id, "item_id": item_id},
             )
 
-        # Use painless script to update the specific item in the nested array
-        painless_script = """
-            for (int i = 0; i < ctx._source.cargo_manifest.size(); i++) {
-                if (ctx._source.cargo_manifest[i].item_id == params.item_id) {
-                    ctx._source.cargo_manifest[i].item_status = params.new_status;
-                    break;
-                }
-            }
-            ctx._source.updated_at = params.now;
-        """
-
+        # Set the item's status under a row lock. This replaces a painless
+        # script sent to ``es.client``, which has no cluster behind it (B3). A
+        # locked read-modify-write can't lose a concurrent change to another
+        # item, which a read-then-update_document could.
         now = datetime.now(timezone.utc).isoformat()
 
-        es_client = self._es.client
-        es_client.update(
-            index=JOBS_CURRENT_INDEX,
-            id=job_id,
-            body={
-                "script": {
-                    "source": painless_script,
-                    "lang": "painless",
-                    "params": {
-                        "item_id": item_id,
-                        "new_status": new_status.value,
-                        "now": now,
-                    },
-                }
-            },
-            refresh=True,
+        def _set_item_status(doc: dict) -> Optional[dict]:
+            for entry in doc.get("cargo_manifest") or []:
+                if entry.get("item_id") == item_id:
+                    entry["item_status"] = new_status.value
+                    doc["updated_at"] = now
+                    return doc
+            return None  # removed since the read: leave the doc unchanged
+
+        updated_job, applied = await self._es.atomic_update(
+            JOBS_CURRENT_INDEX, job_id, _set_item_status
         )
+        if not applied:
+            raise resource_not_found(
+                f"Cargo item '{item_id}' not found in job '{job_id}'",
+                details={"job_id": job_id, "item_id": item_id},
+            )
 
         # Append cargo_status_changed event
         await self._append_event(
@@ -246,8 +238,12 @@ class CargoService:
                     job_id, item_id, exc,
                 )
 
-        # Check if all items are now delivered
-        all_delivered = await self._check_all_delivered(job_id, tenant_id)
+        # Check if all items are now delivered, on the state just written
+        updated_manifest = (updated_job or {}).get("cargo_manifest") or []
+        all_delivered = bool(updated_manifest) and all(
+            entry.get("item_status") == CargoItemStatus.DELIVERED.value
+            for entry in updated_manifest
+        )
         if all_delivered:
             await self._broadcast_cargo_complete(job_id, job_doc)
 
@@ -417,31 +413,6 @@ class CargoService:
             )
 
         return hits[0]["_source"]
-
-    async def _check_all_delivered(
-        self, job_id: str, tenant_id: str
-    ) -> bool:
-        """Check if every item in the manifest has item_status=delivered.
-
-        Re-fetches the job to get the latest state after the painless update.
-
-        Args:
-            job_id: The job to check.
-            tenant_id: Tenant scope.
-
-        Returns:
-            True if all items are delivered, False otherwise.
-        """
-        job_doc = await self._get_job_doc(job_id, tenant_id)
-        manifest = job_doc.get("cargo_manifest") or []
-
-        if not manifest:
-            return False
-
-        return all(
-            item.get("item_status") == CargoItemStatus.DELIVERED.value
-            for item in manifest
-        )
 
     async def _append_event(
         self,

@@ -27,10 +27,30 @@ def _make_es_mock() -> MagicMock:
         return_value={"hits": {"hits": [], "total": {"value": 0}}}
     )
     es.update_document = AsyncMock(return_value={"result": "updated"})
-    # Mock the raw client for painless script updates
+    # There is no cluster behind ``.client``; any data-plane call on it is a bug.
     es.client = MagicMock()
-    es.client.update = MagicMock(return_value={"result": "updated"})
+    es.client.update = MagicMock(side_effect=AssertionError("raw client used"))
     return es
+
+
+def _wire_atomic_update(es: MagicMock, stored: dict) -> dict:
+    """Back ``es.atomic_update`` with ``stored``, applying the transform like the store.
+
+    Returns the live dict so a test can read what was written.
+    """
+    import copy
+
+    state = {"doc": copy.deepcopy(stored)}
+
+    async def _atomic(index, doc_id, transform, *, upsert=None, **kw):
+        updated = transform(copy.deepcopy(state["doc"]))
+        if updated is None:
+            return (copy.deepcopy(state["doc"]), False)
+        state["doc"] = updated
+        return (copy.deepcopy(updated), True)
+
+    es.atomic_update = AsyncMock(side_effect=_atomic)
+    return state
 
 
 def _make_service(es_mock: MagicMock) -> CargoService:
@@ -195,7 +215,7 @@ async def test_update_cargo_item_status_updates_item():
     es = _make_es_mock()
     job_doc = _job_doc_with_manifest()
     # First call: _get_job_doc for the update
-    # Second call: _check_all_delivered re-fetches the job
+    # (The all-delivered check now reads the locked write's result, not a re-fetch.)
     refetched_doc = _job_doc_with_manifest([
         {**job_doc["cargo_manifest"][0], "item_status": "loaded"},
         job_doc["cargo_manifest"][1],
@@ -203,6 +223,7 @@ async def test_update_cargo_item_status_updates_item():
     es.search_documents = AsyncMock(
         side_effect=[_es_hit(job_doc), _es_hit(refetched_doc)]
     )
+    state = _wire_atomic_update(es, job_doc)
     svc = _make_service(es)
 
     result = await svc.update_cargo_item_status(
@@ -211,8 +232,35 @@ async def test_update_cargo_item_status_updates_item():
 
     assert result["item_id"] == "CARGO_aaa"
     assert result["item_status"] == "loaded"
-    # Verify painless script was called on the ES client
-    es.client.update.assert_called_once()
+    # Written through the row-locked facade call, never the raw client (B3).
+    es.atomic_update.assert_awaited_once()
+    assert es.atomic_update.await_args.args[:2] == ("jobs_current", "JOB_1")
+    es.client.update.assert_not_called()
+    statuses = [i["item_status"] for i in state["doc"]["cargo_manifest"]]
+    assert statuses == ["loaded", "loaded"]
+    assert state["doc"]["cargo_manifest"][1]["description"] == "Cement bags"
+    assert state["doc"]["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_update_cargo_item_status_item_removed_before_write_is_404():
+    """An item that vanishes between the read and the locked write is a 404."""
+    es = _make_es_mock()
+    job_doc = _job_doc_with_manifest()
+    es.search_documents = AsyncMock(return_value=_es_hit(job_doc))
+    # The stored doc no longer carries CARGO_aaa by the time the lock is taken.
+    _wire_atomic_update(
+        es, _job_doc_with_manifest([job_doc["cargo_manifest"][1]])
+    )
+    svc = _make_service(es)
+
+    with pytest.raises(AppException) as exc_info:
+        await svc.update_cargo_item_status(
+            "JOB_1", "CARGO_aaa", CargoItemStatus.LOADED, "tenant_a"
+        )
+
+    assert exc_info.value.status_code == 404
+    es.index_document.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +283,7 @@ async def test_update_cargo_item_status_appends_event():
     es.search_documents = AsyncMock(
         side_effect=[_es_hit(job_doc), _es_hit(refetched_doc)]
     )
+    _wire_atomic_update(es, job_doc)
     svc = _make_service(es)
 
     await svc.update_cargo_item_status(
@@ -303,6 +352,7 @@ async def test_all_delivered_triggers_cargo_complete_broadcast():
     es.search_documents = AsyncMock(
         side_effect=[_es_hit(job_doc), _es_hit(refetched_doc)]
     )
+    _wire_atomic_update(es, job_doc)
     svc = _make_service(es)
 
     # Wire a mock WebSocket manager to verify broadcast
@@ -348,6 +398,7 @@ async def test_not_all_delivered_does_not_trigger_cargo_complete():
     es.search_documents = AsyncMock(
         side_effect=[_es_hit(job_doc), _es_hit(refetched_doc)]
     )
+    _wire_atomic_update(es, job_doc)
     svc = _make_service(es)
     ws_mock = AsyncMock()
     svc._ws_manager = ws_mock

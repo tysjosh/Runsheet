@@ -498,7 +498,8 @@ class InspectionService:
         """
         try:
             query = inject_tenant_filter(
-                {"query": {"bool": {"filter": [{"term": {"_id": asset_id}}]}}},
+                # ``ids`` maps to the store's doc id; ``term _id`` matches nothing.
+                {"query": {"ids": {"values": [asset_id]}}},
                 tenant_id,
             )
             query["size"] = 1

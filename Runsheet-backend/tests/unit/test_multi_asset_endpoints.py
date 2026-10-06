@@ -222,14 +222,14 @@ class TestGetFleetAssets:
         inner = _extract_inner_query(query)
         assert "match_all" in inner
 
-    def test_queries_assets_alias(self, client):
-        """GET /fleet/assets queries the 'assets' alias, not 'trucks' directly."""
+    def test_queries_the_trucks_index(self, client):
+        """GET /fleet/assets reads 'trucks': the store has no 'assets' alias."""
         c, mock_es = client
         mock_es.search_documents = AsyncMock(return_value=_es_search_response([]))
 
         c.get("/api/fleet/assets")
         call_args = mock_es.search_documents.call_args
-        assert call_args[0][0] == "assets"
+        assert call_args[0][0] == "trucks"
 
     def test_response_includes_type_fields(self, client):
         """Each asset in the response includes asset_type and asset_subtype."""
@@ -347,6 +347,10 @@ class TestUpdateFleetAsset:
         """Helper: mock search_documents to return doc for verify + re-fetch steps."""
         mock_es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
         mock_es.update_document = AsyncMock(return_value={"result": "updated"})
+        # The updated document is read back by id from the store just written.
+        mock_es.get_document = AsyncMock(
+            return_value={**doc, "tenant_id": "test-tenant"}
+        )
 
     def test_partial_update_status(self, client):
         """PATCH /fleet/assets/{id} updates only the provided fields."""
@@ -595,18 +599,17 @@ class TestGetFleetSummary:
         assert data["byType"] == {}
         assert data["bySubtype"] == {}
 
-    def test_summary_queries_assets_alias(self, client):
-        """GET /fleet/summary aggregation queries the 'assets' alias."""
+    def test_summary_aggregates_the_trucks_index(self, client):
+        """GET /fleet/summary aggregates 'trucks': the store has no 'assets' alias."""
         c, mock_es = client
         trucks_resp = _es_search_response([])
         agg_resp = _es_agg_response(0, 0, 0, [], [])
         mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
 
         c.get("/api/fleet/summary")
-        # The second call should be to the 'assets' alias
         calls = mock_es.search_documents.call_args_list
         assert len(calls) == 2
-        assert calls[1][0][0] == "assets"
+        assert calls[1][0][0] == "trucks"
 
 
 # ---------------------------------------------------------------------------

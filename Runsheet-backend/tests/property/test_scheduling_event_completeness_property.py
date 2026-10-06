@@ -61,9 +61,14 @@ def _make_es_mock() -> MagicMock:
         return_value={"hits": {"hits": [], "total": {"value": 0}}}
     )
     es.get_document = AsyncMock(return_value=None)
-    # For CargoService painless script updates
-    es.client = MagicMock()
-    es.client.update = MagicMock(return_value={"result": "updated"})
+    # CargoService writes item status through the row-locked atomic_update;
+    # apply the transform to a copy so the service sees the written state.
+    async def _atomic(index, doc_id, transform, *, upsert=None, **kw):
+        current = _build_in_progress_job_doc()
+        updated = transform(current)
+        return (updated if updated is not None else current, updated is not None)
+
+    es.atomic_update = AsyncMock(side_effect=_atomic)
     return es
 
 

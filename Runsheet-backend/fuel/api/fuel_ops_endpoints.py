@@ -315,6 +315,7 @@ from services.reconciliation_service import (
     ReconciliationRecord,
     ReconciliationService,
 )
+from services.ref_loaders import ASSETS_INDEX
 from services.ref_resolver import get_ref_resolver
 from services.unit_conversion import GAL_TO_L
 
@@ -1933,7 +1934,7 @@ async def _enumerate_depot_assets(
 ) -> List[DepotAssetSummary]:
     """Return the tenant's assets whose ``assigned_depot_id`` is ``depot_id``.
 
-    Queries the ``assets`` alias (→ ``trucks`` index) tenant-scoped two ways for
+    Queries the ``trucks`` index (``ASSETS_INDEX``) tenant-scoped two ways for
     defense-in-depth: the ES query filters on ``tenant_id`` *and* every returned
     source is re-validated against the caller's ``tenant_id`` before it is
     summarised, so a mis-labelled document can never leak across tenants
@@ -1956,7 +1957,7 @@ async def _enumerate_depot_assets(
         "size": size,
     }
     try:
-        resp = await es.search_documents("assets", query, size)
+        resp = await es.search_documents(ASSETS_INDEX, query, size)
     except Exception as exc:  # noqa: BLE001 — never 500 the depot read
         logger.warning(
             "fuel_ops.depots.get: asset enumeration failed for depot=%s "

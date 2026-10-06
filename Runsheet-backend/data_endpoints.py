@@ -14,6 +14,7 @@ from enum import Enum
 from datetime import datetime
 import logging
 from services.elasticsearch_service import elasticsearch_service
+from services.ref_loaders import ASSETS_INDEX
 from services.time_utils import utcnow
 from middleware.rate_limiter import limiter
 from config.legacy_flags import is_legacy_ng_delivery_enabled
@@ -384,7 +385,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         }
 
         try:
-            agg_result = await elasticsearch_service.search_documents("assets", agg_query)
+            agg_result = await elasticsearch_service.search_documents(ASSETS_INDEX, agg_query)
             aggs = agg_result.get("aggregations", {})
 
             total_assets = agg_result.get("hits", {}).get("total", {}).get("value", 0)
@@ -533,9 +534,10 @@ async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext
                 raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
             truck = pg
         else:
-            # Tenant-scoped lookup by truck_id
+            # Tenant-scoped lookup by doc id (== truck_id). ``ids`` is the
+            # clause the store maps to its doc id; ``term _id`` matches nothing.
             query = inject_tenant_filter(
-                {"query": {"term": {"_id": truck_id}}},
+                {"query": {"ids": {"values": [truck_id]}}},
                 tenant.tenant_id,
             )
             query["size"] = 1
@@ -734,8 +736,8 @@ async def get_fleet_assets(
         query = inject_tenant_filter(inner_query, tenant.tenant_id)
         query["sort"] = [{"created_at": {"order": "desc"}}]
 
-        # Query the assets alias (points to trucks index)
-        response = await elasticsearch_service.search_documents("assets", query, size=1000)
+        # Assets live in the trucks index; the store has no ``assets`` alias.
+        response = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1000)
         docs = [hit["_source"] for hit in response["hits"]["hits"]]
         docs = [d for d in docs if _matches_search(d)]
 
@@ -780,13 +782,13 @@ async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext
                 "timestamp": utcnow().isoformat(),
             }
 
-        # Tenant-scoped lookup by asset_id
+        # Tenant-scoped lookup by doc id (== asset_id)
         query = inject_tenant_filter(
-            {"query": {"term": {"_id": asset_id}}},
+            {"query": {"ids": {"values": [asset_id]}}},
             tenant.tenant_id,
         )
         query["size"] = 1
-        result = await elasticsearch_service.search_documents("assets", query, size=1)
+        result = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1)
         hits = result["hits"]["hits"]
         if not hits:
             raise resource_not_found(message="Asset not found", details={"asset_id": asset_id})
@@ -877,6 +879,31 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
         raise internal_error(message="Failed to create asset", details={"error": str(e)})
 
 
+async def _get_tenant_asset_doc(asset_id: str, tenant_id: str) -> Optional[dict]:
+    """The caller's asset document by id, or ``None`` if absent or another tenant's.
+
+    Served from Postgres when the truck aggregate is cut over, otherwise from
+    the document store with an ``ids`` lookup (``term _id`` matches nothing
+    there, B1). ``truck`` is tenant-optional in the hybrid read, so the tenant
+    is checked here, as the GET routes do.
+    """
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_get,
+    )
+
+    pg = await read_hybrid_get("truck", tenant_id, asset_id)
+    if pg is not _NOT_CUT_OVER:
+        return pg if pg is not None and pg.get("tenant_id") == tenant_id else None
+    query = inject_tenant_filter(
+        {"query": {"ids": {"values": [asset_id]}}}, tenant_id
+    )
+    query["size"] = 1
+    result = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1)
+    hits = result["hits"]["hits"]
+    return hits[0]["_source"] if hits else None
+
+
 @router.patch("/fleet/assets/{asset_id}")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request, tenant: TenantContext = Depends(get_tenant_context)):
@@ -923,26 +950,19 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         partial_doc["last_update"] = utcnow().isoformat()
 
         # Verify the asset belongs to this tenant before updating
-        verify_query = inject_tenant_filter(
-            {"query": {"term": {"_id": asset_id}}},
-            tenant.tenant_id,
-        )
-        verify_query["size"] = 1
-        verify_result = await elasticsearch_service.search_documents("trucks", verify_query, size=1)
-        if not verify_result["hits"]["hits"]:
+        if await _get_tenant_asset_doc(asset_id, tenant.tenant_id) is None:
             raise resource_not_found(message="Asset not found", details={"asset_id": asset_id})
 
-        # Partial update via ES _update API
-        await elasticsearch_service.update_document("trucks", asset_id, partial_doc)
+        # Partial update; the doc id is the asset id.
+        await elasticsearch_service.update_document(ASSETS_INDEX, asset_id, partial_doc)
 
-        # Return the full updated document (tenant-scoped)
-        updated_query = inject_tenant_filter(
-            {"query": {"term": {"_id": asset_id}}},
-            tenant.tenant_id,
-        )
-        updated_query["size"] = 1
-        updated_result = await elasticsearch_service.search_documents("trucks", updated_query, size=1)
-        updated_doc = updated_result["hits"]["hits"][0]["_source"] if updated_result["hits"]["hits"] else {}
+        # Return the full updated document. Read it back from the store that was
+        # just written, never the hybrid Postgres read: the PG row is refreshed
+        # by the mirror below, so reading it first would mirror the stale row
+        # back over this update.
+        updated_doc = await elasticsearch_service.get_document(ASSETS_INDEX, asset_id) or {}
+        if updated_doc.get("tenant_id") != tenant.tenant_id:
+            updated_doc = {}
 
         # Dual-write the updated truck/asset to the Postgres source-of-truth so
         # the PG row stays current (the create path mirrors too; without this
@@ -1267,7 +1287,7 @@ async def _universal_search_assets(tenant_id: str, q: str, limit: int) -> List[d
         docs = [d for d in pg_assets if d.get("tenant_id") == tenant_id]
     else:
         query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
-        resp = await elasticsearch_service.search_documents("assets", query, size=1000)
+        resp = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1000)
         docs = [hit["_source"] for hit in resp["hits"]["hits"]]
 
     matched = [d for d in docs if _matches(d)][:limit]
