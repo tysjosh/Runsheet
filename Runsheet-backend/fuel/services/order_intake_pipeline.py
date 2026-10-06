@@ -783,18 +783,34 @@ class OrderIntakePipeline:
     async def _verify_customer_tank(
         self, order_doc: Dict[str, Any], tenant_id: str
     ) -> None:
-        """Refuse a ``customer_tank_id`` the tenant does not own (step (i))."""
-        if not order_doc.get("customer_tank_id"):
+        """Refuse a ``customer_tank_id`` the order may not use (step (i)).
+
+        The tank must exist in the tenant and, when both sides name a
+        customer, belong to the order's customer (finding F3). The mismatch
+        error carries only the caller's own ``customer_tank_id``, never the
+        tank's owning customer.
+        """
+        tank_id = order_doc.get("customer_tank_id")
+        if not tank_id:
             return
-        tank_exists = await self._customer_tank_repo.get(
-            tenant_id, order_doc["customer_tank_id"]
-        )
-        if not tank_exists:
+        tank = await self._customer_tank_repo.get(tenant_id, tank_id)
+        if not tank:
             raise invalid_customer_tank_ref(
                 details={
-                    "customer_tank_id": order_doc["customer_tank_id"],
+                    "customer_tank_id": tank_id,
                     "tenant_id": tenant_id,
                 },
+            )
+        # The repository returns a CustomerTank model; older fakes return dicts.
+        tank_customer = (
+            tank.get("customer_id") if isinstance(tank, dict)
+            else getattr(tank, "customer_id", None)
+        )
+        order_customer = order_doc.get("customer_id")
+        if order_customer and tank_customer and order_customer != tank_customer:
+            raise invalid_customer_tank_ref(
+                message="Referenced customer tank belongs to a different customer",
+                details={"customer_tank_id": tank_id},
             )
 
     # ------------------------------------------------------------------

@@ -47,6 +47,7 @@ from typing import (
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
     app_access_already_linked,
@@ -224,6 +225,38 @@ def _get_driver_repository():
 def _get_ref_resolver():
     """Return the resolver used to resolve the truck → asset link."""
     return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
+
+
+async def _validate_assigned_truck(tenant_id: str, truck_id: Optional[str]) -> None:
+    """Refuse an ``assigned_truck_id`` that isn't a truck in this tenant (B15).
+
+    Resolves through the same tenant-scoped ``asset`` loader the profile read
+    uses (``make_asset_loader``: the ``trucks`` index, matching ``asset_id`` or
+    ``truck_id``). Like the customer-tank customer check, it is only enforced
+    when an ``asset`` loader is registered, so a partially-wired app stays
+    additive. Clearing the truck (``None``) is always allowed.
+
+    Raises:
+        AppException: 422 ``VALIDATION_ERROR`` with ``details.assigned_truck_id``
+            when the id is unknown or belongs to another tenant.
+    """
+    if not truck_id:
+        return
+    resolver = _get_ref_resolver()
+    try:
+        registered = "asset" in resolver.registered_types()
+    except Exception:  # noqa: BLE001 - defensive; never block a write on this
+        registered = False
+    if not registered:
+        return
+    ref = await resolver.resolve(tenant_id, "asset", truck_id)
+    if not ref.is_resolved:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Assigned truck was not found in this tenant",
+            status_code=422,
+            details={"assigned_truck_id": truck_id},
+        )
 
 
 def _get_app_access_service() -> "AppAccessService":
@@ -732,6 +765,7 @@ async def create_driver(
     """
     _require_admin_role(tenant)
     repo = _get_driver_repository()
+    await _validate_assigned_truck(tenant.tenant_id, body.assigned_truck_id)
 
     now = utcnow()
     driver_data: Dict[str, Any] = {
@@ -850,6 +884,9 @@ async def update_driver(
             message=f"Driver '{driver_id}' not found",
             details={"driver_id": driver_id},
         )
+
+    if "assigned_truck_id" in updates:
+        await _validate_assigned_truck(tenant.tenant_id, updates["assigned_truck_id"])
 
     if updates:
         updated = await repo.update(tenant.tenant_id, driver_id, updates)

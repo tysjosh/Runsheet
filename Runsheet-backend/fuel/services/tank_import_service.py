@@ -7,8 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from errors.exceptions import AppException
 from fuel.customer_tank_models import CustomerTank, CustomerTankRepository
+from fuel.services.customer_ref import validate_customer_ref
 from fuel.services.fuel_ops_es_mappings import ATG_READINGS_INDEX
+from services.ref_resolver import get_ref_resolver
 from services.time_utils import utcnow
 
 
@@ -54,6 +57,7 @@ class TankImportService:
         es_service: Any,
         customer_tank_repository: CustomerTankRepository,
         readings_index: str = ATG_READINGS_INDEX,
+        ref_resolver: Any = None,
     ) -> None:
         if es_service is None:
             raise ValueError("es_service must not be None")
@@ -62,6 +66,21 @@ class TankImportService:
         self._es = es_service
         self._tanks = customer_tank_repository
         self._readings_index = readings_index
+        # ``None`` → the process-wide resolver, read at call time so loaders
+        # registered after construction still apply (as the REST path does).
+        self._ref_resolver = ref_resolver
+
+    async def _validate_customer(self, tenant_id: str, customer_id: Any) -> None:
+        """Refuse a tank whose customer doesn't exist in the tenant (F7).
+
+        Same rule as the REST customer-tank write. The importer reports a
+        ``ValueError`` per row, so the AppException is re-raised as one.
+        """
+        resolver = self._ref_resolver or get_ref_resolver()
+        try:
+            await validate_customer_ref(resolver, tenant_id, customer_id)
+        except AppException as exc:
+            raise ValueError(exc.message) from exc
 
     async def import_tank(
         self,
@@ -83,6 +102,7 @@ class TankImportService:
         clean["external_tank_id"] = external_tank_id
 
         if existing is None:
+            await self._validate_customer(tenant_id, clean.get("customer_id"))
             created = await self._tanks.create(tenant_id, clean)
             return TankImportOutcome("created", created.customer_tank_id)
 
@@ -92,6 +112,8 @@ class TankImportService:
                 "external tank identity is already linked to "
                 f"{existing.customer_tank_id}"
             )
+        if clean.get("customer_id") and clean["customer_id"] != existing.customer_id:
+            await self._validate_customer(tenant_id, clean["customer_id"])
 
         clean.pop("customer_tank_id", None)
         incoming_reading = clean.get("last_reading_at")

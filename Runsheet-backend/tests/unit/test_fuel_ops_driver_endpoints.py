@@ -927,3 +927,84 @@ class TestCounterIncrementAtomicity:
             delta_completed=0,
         )
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Tests — assigned_truck_id must resolve to a truck in the tenant (B15)
+# ---------------------------------------------------------------------------
+
+
+class TestAssignedTruckMustResolve:
+    """POST/PATCH /api/ops/drivers refuse an ``assigned_truck_id`` that isn't a
+    truck in the caller's tenant with 422 ``VALIDATION_ERROR``."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        import fuel.api.driver_endpoints as driver_endpoints
+
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-001", tenant_id="tenant-A"))
+        _, client, _ = _build_app(roles=["admin"], repo=repo)
+        # monkeypatch restores the module global, so the resolver can't leak.
+        monkeypatch.setattr(
+            driver_endpoints,
+            "_ref_resolver",
+            _make_asset_resolver({"truck-1": "tenant-A", "truck-b": "tenant-B"}),
+        )
+        return client, repo
+
+    _BODY = {"driver_id": "drv-new", "driver_name": "New Driver", "status": "active"}
+
+    @pytest.mark.parametrize("truck_id", ["truck-nope", "truck-b"])
+    def test_create_with_unknown_or_other_tenant_truck_is_422(self, client, truck_id):
+        client, repo = client
+        resp = client.post(
+            "/api/ops/drivers", json={**self._BODY, "assigned_truck_id": truck_id}
+        )
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error_code"] == "VALIDATION_ERROR"
+        assert detail["details"] == {"assigned_truck_id": truck_id}
+        assert "tenant-B" not in resp.text
+        assert repo._drivers.get("tenant-A::drv-new") is None
+
+    def test_create_with_known_truck_is_201(self, client):
+        client, _ = client
+        resp = client.post(
+            "/api/ops/drivers", json={**self._BODY, "assigned_truck_id": "truck-1"}
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["assigned_truck_id"] == "truck-1"
+
+    def test_create_without_truck_is_201(self, client):
+        client, _ = client
+        assert client.post("/api/ops/drivers", json=self._BODY).status_code == 201
+
+    def test_patch_with_unknown_truck_is_422_and_unchanged(self, client):
+        client, repo = client
+        resp = client.patch(
+            "/api/ops/drivers/drv-001", json={"assigned_truck_id": "truck-nope"}
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["details"] == {"assigned_truck_id": "truck-nope"}
+        assert repo._drivers["tenant-A::drv-001"].assigned_truck_id == "truck-1"
+
+    def test_patch_with_known_truck_is_200(self, client):
+        client, repo = client
+        repo.seed_driver(
+            _make_driver(driver_id="drv-001", tenant_id="tenant-A").model_copy(
+                update={"assigned_truck_id": None}
+            )
+        )
+        resp = client.patch(
+            "/api/ops/drivers/drv-001", json={"assigned_truck_id": "truck-1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["assigned_truck_id"] == "truck-1"
+
+    def test_patch_clearing_the_truck_is_allowed(self, client):
+        client, _ = client
+        resp = client.patch(
+            "/api/ops/drivers/drv-001", json={"assigned_truck_id": None}
+        )
+        assert resp.status_code == 200, resp.text

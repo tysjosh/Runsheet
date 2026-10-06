@@ -241,6 +241,7 @@ from fuel.services.delivery_destination_service import (
     DeliveryDestinationFilters,
     DeliveryDestinationService,
 )
+from fuel.services.customer_ref import validate_customer_ref
 from fuel.services.fuel_planning_ws_manager import FuelPlanningWSManager
 from fuel.services.fuel_product_catalog import (
     FuelProduct,
@@ -1324,23 +1325,11 @@ async def _validate_customer_ref(tenant_id: str, customer_id: Optional[str]) -> 
 
     Enforces that the tank's ``customer_id`` references an existing commerce
     customer in the same tenant at write time (cross-module-entity-linkage
-    Req 7.1). Validation is delegated to the shared ``RefResolver`` and is only
-    enforced when a ``customer`` loader is registered, so a partially-wired
-    environment (e.g. a focused unit test that injects no resolver) stays
-    additive/backward-compatible rather than rejecting every write. Raises
-    ``validation_error`` (HTTP 400, ``details.reason = customer_not_found``)
-    when the reference is non-existent or cross-tenant.
+    Req 7.1). The rule lives in :func:`fuel.services.customer_ref.validate_customer_ref`,
+    which the CSV tank importer shares; this wrapper supplies the module's
+    resolver.
     """
-    if not customer_id:
-        return
-    resolver = _get_ref_resolver()
-    try:
-        registered = "customer" in resolver.registered_types()
-    except Exception:  # noqa: BLE001 - defensive; never block a write on this
-        registered = False
-    if not registered:
-        return
-    await resolver.validate_ref(tenant_id, "customer", customer_id, required=True)
+    await validate_customer_ref(_get_ref_resolver(), tenant_id, customer_id)
 
 
 # ---------------------------------------------------------------------------
