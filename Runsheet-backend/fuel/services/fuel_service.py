@@ -20,7 +20,7 @@ from commerce.services.commerce_persistence_bridge import (
     mirror_current_state_upsert,
 )
 from config.settings import get_settings
-from errors.exceptions import resource_not_found, validation_error
+from errors.exceptions import already_exists, resource_not_found, validation_error
 from fuel.models import (
     BatchResult,
     ConsumptionEvent,
@@ -333,7 +333,18 @@ class FuelService:
         }
 
         doc_id = self._make_doc_id(station.station_id, canonical_fuel_type)
-        await self._es.index_document(FUEL_STATIONS_INDEX, doc_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a station another tenant owns (S7). Refused before the mirror
+        # write so the relational row can't be overwritten either.
+        created = await self._es.create_document(FUEL_STATIONS_INDEX, doc_id, doc)
+        if not created:
+            raise already_exists(
+                "A station with this id and fuel type already exists",
+                details={
+                    "station_id": station.station_id,
+                    "fuel_type": canonical_fuel_type,
+                },
+            )
         # Postgres source of truth. ``fuel_stations`` existed only in
         # Elasticsearch, so recreating the cluster destroyed retail tank
         # inventory outright. ``doc_id`` is passed explicitly because the

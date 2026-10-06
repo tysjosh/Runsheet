@@ -299,7 +299,7 @@ class DepotRepository:
     trivially testable with a recording mock. The only interface the
     repository relies on is:
 
-        * ``await es.index_document(index, doc_id, document)``
+        * ``await es.create_document(index, doc_id, document)`` → bool
         * ``await es.search_documents(index, query, size)``
         * ``await es.update_document(index, doc_id, partial_doc)``
         * ``await es.delete_document(index, doc_id)`` → bool
@@ -386,7 +386,17 @@ class DepotRepository:
         model = Depot(**payload)
 
         doc = model.model_dump(mode="json", exclude_none=False)
-        await self._es.index_document(self._index, model.depot_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a depot another tenant owns (S7). Refused before the mirror
+        # write so the relational row can't be overwritten either.
+        created = await self._es.create_document(self._index, model.depot_id, doc)
+        if not created:
+            from errors.exceptions import already_exists
+
+            raise already_exists(
+                "A depot with this id already exists",
+                details={"depot_id": model.depot_id},
+            )
 
         # Dual-write the depot to the Postgres source-of-truth.
         from commerce.services.commerce_persistence_bridge import (

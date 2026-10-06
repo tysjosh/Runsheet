@@ -89,6 +89,7 @@ class TestFuelServiceCanonicalization:
 
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=True)
         es.update_document = AsyncMock()
         es.search_documents = AsyncMock(
             return_value={"hits": {"hits": [], "total": {"value": 0}}}
@@ -112,8 +113,8 @@ class TestFuelServiceCanonicalization:
 
         result = await svc.create_station(payload, TENANT_ID)
 
-        es.index_document.assert_awaited_once()
-        _, doc_id, doc = es.index_document.await_args.args
+        es.create_document.assert_awaited_once()
+        _, doc_id, doc = es.create_document.await_args.args
         assert doc["fuel_type"] == "DIESEL_2"
         # Composite doc_id uses the canonical code so writes are idempotent
         # across alias/canonical variants of the same station.

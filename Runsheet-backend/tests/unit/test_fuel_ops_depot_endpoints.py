@@ -62,6 +62,16 @@ class _FakeESService:
     ) -> None:
         self.docs[doc_id] = dict(document)
 
+    # -------- create_document --------------------------------------------
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Ids are global, like the real store key: no tenant in it.
+        if doc_id in self.docs:
+            return False
+        self.docs[doc_id] = dict(document)
+        return True
+
     # -------- search_documents -------------------------------------------
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int
@@ -220,6 +230,40 @@ class TestCreateDepot:
         assert data["fuel_types_supported"] == ["DIESEL_2", "GASOLINE_REG"]
         # The repository must have persisted the record under its id.
         assert "depot_001" in es.docs
+        assert es.docs["depot_001"]["tenant_id"] == "tenant-1"
+
+    def test_duplicate_id_in_same_tenant_is_409(self):
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        assert client.post("/api/fuel/mvp/depots", json=_base_create_payload()).status_code == 201
+        before = dict(es.docs["depot_001"])
+
+        resp = client.post(
+            "/api/fuel/mvp/depots", json=_base_create_payload(name="Renamed")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert es.docs["depot_001"] == before
+
+    def test_other_tenant_cannot_take_over_an_existing_id(self):
+        """S7: tenant-2 posting tenant-1's depot id must not overwrite it."""
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        assert client.post("/api/fuel/mvp/depots", json=_base_create_payload()).status_code == 201
+        before = dict(es.docs["depot_001"])
+
+        app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
+            tenant_id="tenant-2"
+        )
+        resp = client.post(
+            "/api/fuel/mvp/depots", json=_base_create_payload(name="Takeover")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert "tenant-1" not in resp.text
+        assert es.docs["depot_001"] == before
         assert es.docs["depot_001"]["tenant_id"] == "tenant-1"
 
     def test_mints_id_when_omitted(self):

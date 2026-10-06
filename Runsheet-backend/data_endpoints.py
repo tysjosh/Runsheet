@@ -22,6 +22,7 @@ from ops.middleware.tenant_guard import TenantContext, get_tenant_context, injec
 from auth.authorization import require_role
 from errors.exceptions import (
     AppException,
+    already_exists,
     forbidden,
     internal_error,
     legacy_ng_delivery_disabled,
@@ -845,8 +846,18 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
         now = utcnow().isoformat()
         doc["last_update"] = now
 
-        # Index into the trucks index using asset_id as the document ID
-        await elasticsearch_service.index_document("trucks", body.asset_id, doc)
+        # Create in the trucks index using asset_id as the document ID. Ids are
+        # global in the store, so this is create-if-absent: an upsert would
+        # replace an asset another tenant owns (B8/S7). Refused before the
+        # mirror write so the relational row can't be overwritten either.
+        created = await elasticsearch_service.create_document(
+            "trucks", body.asset_id, doc
+        )
+        if not created:
+            raise already_exists(
+                "An asset with this id already exists",
+                details={"asset_id": body.asset_id},
+            )
 
         # Dual-write the truck/asset to the Postgres source-of-truth.
         from commerce.services.commerce_persistence_bridge import (
@@ -859,6 +870,8 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
             "success": True,
             "timestamp": now,
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.exception("Error creating asset")
         raise internal_error(message="Failed to create asset", details={"error": str(e)})

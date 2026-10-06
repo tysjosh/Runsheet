@@ -119,6 +119,7 @@ class TestCreateStation:
         """Req 1.3: Registers a new station and returns FuelStation."""
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=True)
         svc = FuelService(es)
 
         payload = CreateFuelStation(
@@ -144,6 +145,7 @@ class TestCreateStation:
         """Station doc is indexed with composite ID station_id::fuel_type."""
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=True)
         svc = FuelService(es)
 
         payload = CreateFuelStation(
@@ -155,12 +157,41 @@ class TestCreateStation:
         )
         await svc.create_station(payload, TENANT_ID)
 
-        es.index_document.assert_called_once()
-        call_args = es.index_document.call_args
+        # Created with create-if-absent, never upserted over an existing id.
+        es.index_document.assert_not_called()
+        es.create_document.assert_called_once()
+        call_args = es.create_document.call_args
         assert call_args[0][0] == FUEL_STATIONS_INDEX
         # Per Req 6.1.4, the legacy NG alias "PMS" canonicalizes to
         # "GASOLINE_REG" before the composite doc_id is built.
         assert call_args[0][1] == "ST-001::GASOLINE_REG"
+
+    @pytest.mark.asyncio
+    async def test_taken_id_is_409_with_no_overwrite_or_mirror_write(self, settings_mock):
+        """F5/S7: a station id already stored (any tenant) is refused with 409."""
+        es = MagicMock()
+        es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=False)
+        svc = FuelService(es)
+        payload = CreateFuelStation(
+            station_id="ST-001",
+            name="Station",
+            fuel_type="AGO",
+            capacity_liters=10000.0,
+            initial_stock_liters=5000.0,
+        )
+
+        with patch(
+            "fuel.services.fuel_service.mirror_current_state_upsert", new=AsyncMock()
+        ) as mirror:
+            with pytest.raises(AppException) as exc_info:
+                await svc.create_station(payload, TENANT_ID)
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.error_code.value == "RESOURCE_ALREADY_EXISTS"
+        assert TENANT_ID not in repr(exc_info.value.to_dict())
+        es.index_document.assert_not_called()
+        mirror.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_rejects_initial_stock_exceeding_capacity(self, settings_mock):
@@ -186,6 +217,7 @@ class TestCreateStation:
         """Edge case: initial_stock == capacity should succeed."""
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=True)
         svc = FuelService(es)
 
         payload = CreateFuelStation(
@@ -204,6 +236,7 @@ class TestCreateStation:
         """New station with stock above threshold gets status 'normal'."""
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=True)
         svc = FuelService(es)
 
         payload = CreateFuelStation(
@@ -222,6 +255,7 @@ class TestCreateStation:
         """New station with 0 stock gets status 'empty'."""
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.create_document = AsyncMock(return_value=True)
         svc = FuelService(es)
 
         payload = CreateFuelStation(

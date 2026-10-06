@@ -57,6 +57,7 @@ class _FakeESService:
     :class:`DepotRepository`:
 
         * ``index_document``
+        * ``create_document``
         * ``update_document``
         * ``delete_document``
         * ``search_documents``
@@ -75,6 +76,17 @@ class _FakeESService:
         self.index_calls.append({"index": index, "id": doc_id, "doc": dict(document)})
         self.docs[doc_id] = dict(document)
         return {"_id": doc_id, "result": "created"}
+
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent on a global id, like the real store. Recorded in
+        # ``index_calls`` because that's where the assertions read writes from.
+        if doc_id in self.docs:
+            return False
+        self.index_calls.append({"index": index, "id": doc_id, "doc": dict(document)})
+        self.docs[doc_id] = dict(document)
+        return True
 
     async def update_document(
         self, index: str, doc_id: str, partial_doc: Dict[str, Any]

@@ -393,6 +393,71 @@ class TestAdminGatedWrites:
 # ---------------------------------------------------------------------------
 
 
+class _GlobalIdES:
+    """Minimal document store keyed by doc id alone, like the real store key."""
+
+    def __init__(self) -> None:
+        self.docs: Dict[str, Dict[str, Any]] = {}
+
+    async def index_document(self, index: str, doc_id: str, document: Dict[str, Any]):
+        self.docs[doc_id] = dict(document)
+        return {"result": "created"}
+
+    async def create_document(self, index: str, doc_id: str, document: Dict[str, Any]) -> bool:
+        if doc_id in self.docs:
+            return False
+        self.docs[doc_id] = dict(document)
+        return True
+
+
+class TestCreateIfAbsent:
+    """POST /api/ops/drivers with a taken id → 409, never an overwrite (B9, S7).
+
+    Runs the real ``DriverRepository`` so the repository's write is exercised,
+    not the fake's.
+    """
+
+    _BODY = {"driver_id": "drv-dup", "driver_name": "First", "status": "active"}
+
+    def _app(self, es: _GlobalIdES, tenant_id: str):
+        from fuel.driver_repository import DriverRepository
+
+        return _build_app(
+            tenant_id=tenant_id, roles=["admin"], repo=DriverRepository(es)
+        )
+
+    def test_duplicate_id_in_same_tenant_is_409(self):
+        es = _GlobalIdES()
+        _, client, _ = self._app(es, "tenant-A")
+        assert client.post("/api/ops/drivers", json=self._BODY).status_code == 201
+        before = dict(es.docs["drv-dup"])
+
+        resp = client.post(
+            "/api/ops/drivers", json=dict(self._BODY, driver_name="Second")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert es.docs["drv-dup"] == before
+
+    def test_other_tenant_cannot_take_over_an_existing_id(self):
+        es = _GlobalIdES()
+        _, client_a, _ = self._app(es, "tenant-A")
+        assert client_a.post("/api/ops/drivers", json=self._BODY).status_code == 201
+        before = dict(es.docs["drv-dup"])
+
+        _, client_b, _ = self._app(es, "tenant-B")
+        resp = client_b.post(
+            "/api/ops/drivers", json=dict(self._BODY, driver_name="Takeover")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert "tenant-A" not in resp.text
+        assert es.docs["drv-dup"] == before
+        assert es.docs["drv-dup"]["tenant_id"] == "tenant-A"
+
+
 class TestQualificationWarnings:
     """medical_card_expiry within 30 days → "medical_card_expiring_soon",
     expired → "medical_card_expired"."""
