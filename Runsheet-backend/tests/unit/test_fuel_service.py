@@ -305,6 +305,20 @@ class TestListStations:
         assert fuel_filter[0]["term"]["fuel_type"] == "PMS"
 
     @pytest.mark.asyncio
+    async def test_filters_by_a_resolved_code_list_including_aliases(self, settings_mock):
+        """F12/S6: a resolved code list matches canonical rows and legacy alias rows."""
+        es = MagicMock()
+        es.search_documents = AsyncMock(return_value=_es_search_response([], total=0))
+        svc = FuelService(es)
+
+        await svc.list_stations(TENANT_ID, fuel_type=["DIESEL_2"])
+
+        filters = es.search_documents.call_args[0][1]["query"]["bool"]["must"]
+        terms = [f["terms"]["fuel_type"] for f in filters if "terms" in f]
+        assert len(terms) == 1
+        assert sorted(terms[0]) == ["AGO", "DIESEL_2"]
+
+    @pytest.mark.asyncio
     async def test_filters_by_status(self, settings_mock):
         """Req 1.6: Supports filtering by status."""
         es = MagicMock()
@@ -468,6 +482,48 @@ class TestUpdateStation:
         result = await svc.update_station("STATION-001", update, TENANT_ID)
 
         assert result.status == "normal"
+
+    @pytest.mark.asyncio
+    async def test_capacity_below_current_stock_is_rejected_without_a_write(
+        self, settings_mock
+    ):
+        """F6: capacity can't drop below stock (create has the same rule)."""
+        doc = _station_doc(current_stock=25000.0, capacity=50000.0)
+        es = MagicMock()
+        es.search_documents = AsyncMock(return_value=_es_search_response(
+            [("STATION-001::AGO", doc)]
+        ))
+        es.update_document = AsyncMock()
+        svc = FuelService(es)
+
+        with pytest.raises(AppException) as exc_info:
+            await svc.update_station(
+                "STATION-001", UpdateFuelStation(capacity_liters=20000.0), TENANT_ID
+            )
+
+        assert exc_info.value.error_code.value == "VALIDATION_ERROR"
+        assert exc_info.value.details == {
+            "capacity_liters": 20000.0,
+            "current_stock_liters": 25000.0,
+        }
+        es.update_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_capacity_equal_to_current_stock_is_allowed(self, settings_mock):
+        doc = _station_doc(current_stock=25000.0, capacity=50000.0)
+        es = MagicMock()
+        es.search_documents = AsyncMock(return_value=_es_search_response(
+            [("STATION-001::AGO", doc)]
+        ))
+        es.update_document = AsyncMock()
+        svc = FuelService(es)
+
+        result = await svc.update_station(
+            "STATION-001", UpdateFuelStation(capacity_liters=25000.0), TENANT_ID
+        )
+
+        assert result.capacity_liters == 25000.0
+        es.update_document.assert_called_once()
 
 
 # =========================================================================

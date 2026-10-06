@@ -30,13 +30,16 @@ Validates: Requirements 2.4, 2.5, 2.5.7, 2.5.8, 10.1.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth.authorization import require_role
+from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
     insufficient_role,
@@ -720,6 +723,56 @@ async def create_orders_bulk(
 # ---------------------------------------------------------------------------
 
 
+#: Fields ``GET /api/orders?sort=`` may order by (decision D10). The repository
+#: passes the field straight to the store, so anything else was silently
+#: accepted. ``priority`` is listed per D10; orders don't carry it today, so it
+#: sorts as missing.
+ORDER_SORT_FIELDS = frozenset({
+    "created_at",
+    "updated_at",
+    "last_event_timestamp",
+    "delivery_window_start",
+    "delivery_window_end",
+    "priority",
+    "status",
+})
+
+_SORT_PATTERN = re.compile(r"^([a-z_]+)(?::(asc|desc))?$")
+
+
+def _list_param_error(field: str, message: str, value: str) -> AppException:
+    return AppException(
+        error_code=ErrorCode.VALIDATION_ERROR,
+        message=message,
+        status_code=422,
+        details={"field": field, "value": value},
+    )
+
+
+def _validate_list_params(
+    *, sort: Optional[str], start_date: Optional[str], end_date: Optional[str]
+) -> None:
+    """422 on a malformed ``sort`` or date before the repository runs (F8, D10)."""
+    if sort is not None:
+        match = _SORT_PATTERN.match(sort)
+        if match is None or match.group(1) not in ORDER_SORT_FIELDS:
+            raise _list_param_error(
+                "sort",
+                "sort must be <field> or <field>:asc|desc, with field one of "
+                + ", ".join(sorted(ORDER_SORT_FIELDS)),
+                sort,
+            )
+    for field, value in (("start_date", start_date), ("end_date", end_date)):
+        if value is None:
+            continue
+        try:
+            datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise _list_param_error(
+                field, f"{field} must be an ISO-8601 date or timestamp", value
+            ) from None
+
+
 @router.get("", response_model=OrderListResponse)
 async def list_orders(
     tenant: TenantContext = Depends(get_tenant_context),
@@ -754,6 +807,7 @@ async def list_orders(
     Validates: Requirements 2.5, 3.13.
     """
     require_role(tenant, "dispatcher", "admin")
+    _validate_list_params(sort=sort, start_date=start_date, end_date=end_date)
     repo = _get_repository()
     result = await repo.search(
         tenant_id=tenant.tenant_id,

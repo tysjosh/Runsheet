@@ -1279,3 +1279,59 @@ class TestIntakeDisabledAndBulkErrors:
         assert body["results"][0]["status"] == "dry_run_valid"
         assert body["processed"] == 1
         assert "client_event_id" not in pipeline.validated[0]
+
+
+# ---------------------------------------------------------------------------
+# Tests — GET /api/orders sort/date validation (finding F8, decision D10)
+# ---------------------------------------------------------------------------
+
+
+class _CountingOrderRepository(FakeOrderRepository):
+    def __init__(self):
+        super().__init__()
+        self.search_calls: List[Dict[str, Any]] = []
+
+    async def search(self, *, tenant_id: str, **kwargs) -> Dict[str, Any]:
+        self.search_calls.append(kwargs)
+        return await super().search(tenant_id=tenant_id, **kwargs)
+
+
+class TestListOrdersParamValidation:
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"sort": "-created_at"},
+            {"sort": "created_at:sideways"},
+            {"sort": "secret_field:asc"},
+            {"sort": "created_at:asc:extra"},
+            {"start_date": "notadate"},
+            {"end_date": "2026-13-40"},
+        ],
+    )
+    def test_bad_sort_or_date_is_422_before_the_repository(self, params):
+        repo = _CountingOrderRepository()
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.get("/api/orders", params=params)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["error_code"] == "VALIDATION_ERROR"
+        assert repo.search_calls == []
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"sort": "created_at"},
+            {"sort": "updated_at:asc"},
+            {"sort": "delivery_window_start:desc"},
+            {"sort": "status:asc"},
+            {"start_date": "2026-01-01", "end_date": "2026-01-31T23:59:59Z"},
+            {"start_date": "2026-01-01T00:00:00+00:00"},
+        ],
+    )
+    def test_valid_sort_and_dates_pass_through_unchanged(self, params):
+        repo = _CountingOrderRepository()
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.get("/api/orders", params=params)
+        assert resp.status_code == 200, resp.text
+        call = repo.search_calls[0]
+        for key, value in params.items():
+            assert call[key] == value

@@ -13,7 +13,7 @@ Requirements covered:
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 from commerce.services.commerce_persistence_bridge import (
     mirror_current_state_fields,
@@ -43,6 +43,7 @@ from services.elasticsearch_service import ElasticsearchService
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
+    get_product,
 )
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ class FuelService:
     async def list_stations(
         self,
         tenant_id: str,
-        fuel_type: Optional[str] = None,
+        fuel_type: Optional[Union[str, Sequence[str]]] = None,
         status: Optional[str] = None,
         location: Optional[str] = None,
         page: int = 1,
@@ -156,12 +157,24 @@ class FuelService:
         """
         List fuel stations with optional filtering and pagination.
 
+        ``fuel_type`` is either one stored value (exact match) or a list of
+        catalog codes from ``resolve_product_filter``. A list also matches
+        each code's legacy aliases, because stations are stored under the
+        canonical code since Req 6.1.4 but older rows may still hold
+        ``AGO``/``PMS``/``ATK``/``LPG`` (F12/S6).
+
         Validates: Requirement 1.1, 1.6
         """
         filters: list[dict] = [{"term": {"tenant_id": tenant_id}}]
 
-        if fuel_type:
+        if isinstance(fuel_type, str) and fuel_type:
             filters.append({"term": {"fuel_type": fuel_type}})
+        elif fuel_type:
+            values: list[str] = []
+            for code in fuel_type:
+                values.append(code)
+                values.extend(get_product(code).aliases)
+            filters.append({"terms": {"fuel_type": values}})
         if status:
             filters.append({"term": {"status": status}})
         if location:
@@ -393,6 +406,22 @@ class FuelService:
 
         existing = hits[0]["_source"]
         doc_id = hits[0]["_id"]
+
+        # Same invariant create enforces (stock <= capacity). Without it a
+        # shrunk capacity left stock above 100% and the status math kept the
+        # station "normal", so no low-stock alert could fire (F6).
+        current_stock_liters = existing.get("current_stock_liters", 0.0)
+        if (
+            update.capacity_liters is not None
+            and update.capacity_liters < current_stock_liters
+        ):
+            raise validation_error(
+                "capacity_liters cannot be below current_stock_liters",
+                details={
+                    "capacity_liters": update.capacity_liters,
+                    "current_stock_liters": current_stock_liters,
+                },
+            )
 
         # Build partial update from non-None fields
         partial: dict = {}

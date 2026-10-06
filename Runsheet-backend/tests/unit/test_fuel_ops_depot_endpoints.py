@@ -79,10 +79,14 @@ class _FakeESService:
         must = query.get("query", {}).get("bool", {}).get("must", [])
         tenant_id: str | None = None
         equality: Dict[str, Any] = {}
-        fuel_type_filter: str | None = None
+        fuel_type_filter: List[str] | None = None
         id_lookup: str | None = None
 
         for clause in must:
+            terms = clause.get("terms") if isinstance(clause, dict) else None
+            if terms and "fuel_types_supported" in terms:
+                fuel_type_filter = list(terms["fuel_types_supported"])
+                continue
             term = clause.get("term") if isinstance(clause, dict) else None
             if not term:
                 continue
@@ -92,7 +96,7 @@ class _FakeESService:
                 elif field == "depot_id":
                     id_lookup = value
                 elif field == "fuel_types_supported":
-                    fuel_type_filter = value
+                    fuel_type_filter = [value]
                 else:
                     equality[field] = value
 
@@ -115,7 +119,7 @@ class _FakeESService:
                 continue
             if fuel_type_filter is not None:
                 supported = doc.get("fuel_types_supported") or []
-                if fuel_type_filter not in supported:
+                if not any(code in supported for code in fuel_type_filter):
                     continue
             matches.append({"_source": dict(doc)})
 
@@ -427,18 +431,38 @@ class TestListDepots:
         data = resp.json()
         assert [d["depot_id"] for d in data["items"]] == ["p"]
 
-    def test_fuel_type_filter_unknown_returns_empty(self):
-        """An unknown fuel-type filter is a miss, not a 400."""
-
+    @pytest.mark.parametrize("value", ["UNOBTAINIUM", "bogus"])
+    def test_fuel_type_filter_unknown_is_422(self, value):
+        """F12: an unknown fuel-type filter is a 422, not an empty 200."""
         app, es = _build_app()
         client = TestClient(app)
         _seed_depot(es)
+        resp = client.get("/api/fuel/mvp/depots", params={"fuel_type": value})
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["details"] == {"fuel_type": value}
 
-        resp = client.get(
-            "/api/fuel/mvp/depots", params={"fuel_type": "UNOBTAINIUM"}
-        )
-        assert resp.status_code == 200
-        assert resp.json()["items"] == []
+    def test_fuel_type_filter_accepts_a_category_name(self):
+        """S6: ``diesel`` matches the DIESEL_2 depot, not the gasoline one."""
+        app, es = _build_app()
+        client = TestClient(app)
+        _seed_depot(es, depot_id="d", fuel_types_supported=["DIESEL_2"])
+        _seed_depot(es, depot_id="g", fuel_types_supported=["GASOLINE_PREM"])
+        resp = client.get("/api/fuel/mvp/depots", params={"fuel_type": "diesel"})
+        assert resp.status_code == 200, resp.text
+        assert [d["depot_id"] for d in resp.json()["items"]] == ["d"]
+
+    def test_fuel_type_category_matches_any_code_in_it(self):
+        """``gasoline`` covers GASOLINE_REG and GASOLINE_PREM depots."""
+        app, es = _build_app()
+        client = TestClient(app)
+        _seed_depot(es, depot_id="reg", fuel_types_supported=["GASOLINE_REG"])
+        _seed_depot(es, depot_id="prem", fuel_types_supported=["GASOLINE_PREM"])
+        _seed_depot(es, depot_id="d", fuel_types_supported=["DIESEL_2"])
+        resp = client.get("/api/fuel/mvp/depots", params={"fuel_type": "gasoline"})
+        assert resp.status_code == 200, resp.text
+        assert sorted(d["depot_id"] for d in resp.json()["items"]) == ["prem", "reg"]
 
     def test_rejects_invalid_status_filter(self):
         app, _ = _build_app()

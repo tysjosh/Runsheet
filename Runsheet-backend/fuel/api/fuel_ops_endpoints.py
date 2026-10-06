@@ -174,7 +174,9 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
+    AppException,
     depot_not_found,
     driver_not_found,
     internal_error,
@@ -248,6 +250,7 @@ from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
     get_products_for_region,
+    resolve_product_filter,
 )
 from fuel.services.prioritization_helpers import (
     PriorityCluster,
@@ -706,6 +709,21 @@ def _get_depot_repository() -> DepotRepository:
             "Call configure_fuel_ops_endpoints() during startup."
         )
     return _depot_repository
+
+
+def _resolve_product_filter_or_422(value: Optional[str]) -> Optional[List[str]]:
+    """Resolve a ``fuel_type`` list filter, or 422 on an unknown value (F12/S6)."""
+    if not value:
+        return None
+    try:
+        return resolve_product_filter(value)
+    except ValueError:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Unknown fuel product, alias or category",
+            status_code=422,
+            details={"fuel_type": value},
+        ) from None
 
 
 def _get_terminal_repository() -> TerminalRepository:
@@ -1853,9 +1871,10 @@ async def list_depots(
         default=None,
         description=(
             "Filter by supported fuel product. Accepts the canonical "
-            "product_code (e.g. DIESEL_2) or a legacy alias (e.g. AGO); "
-            "aliases are resolved via the fuel product catalog before the "
-            "ES query is issued."
+            "product_code (e.g. DIESEL_2), a legacy alias (e.g. AGO) or a "
+            "category name (e.g. diesel, gasoline), resolved via the fuel "
+            "product catalog; a depot supporting any resolved code matches. "
+            "Anything else is 422."
         ),
     ),
     page: int = Query(1, ge=1, description="Page number, 1-indexed."),
@@ -1872,6 +1891,7 @@ async def list_depots(
     """
 
     repo = _get_depot_repository()
+    fuel_codes = _resolve_product_filter_or_422(fuel_type)
 
     # Fetch a slightly larger window so we can paginate deterministically
     # without an extra round-trip — ``size`` is capped at 500 so
@@ -1880,7 +1900,7 @@ async def list_depots(
         window = await repo.list_for_tenant(
             tenant_id=tenant.tenant_id,
             status=status_filter,
-            fuel_type=fuel_type,
+            fuel_type=fuel_codes,
             size=page * size + 1,
         )
     except ValueError as exc:

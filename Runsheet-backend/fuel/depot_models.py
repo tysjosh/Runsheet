@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone as _dt_timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -456,7 +456,7 @@ class DepotRepository:
         tenant_id: str,
         *,
         status: Optional[DepotStatus] = None,
-        fuel_type: Optional[str] = None,
+        fuel_type: Optional[Union[str, Sequence[str]]] = None,
         size: int = DEFAULT_LIST_SIZE,
     ) -> List[Depot]:
         """List depots for the tenant with optional filters.
@@ -468,8 +468,11 @@ class DepotRepository:
         are logged and dropped rather than raising, so a single corrupt
         record does not take out the whole list endpoint.
 
-        ``fuel_type`` is canonicalized before querying so a caller
-        filtering on ``"LPG"`` matches depots that persist ``"PROPANE"``.
+        ``fuel_type`` is either one code or alias, canonicalized before
+        querying so a caller filtering on ``"LPG"`` matches depots that
+        persist ``"PROPANE"`` (an unknown one returns ``[]``), or a list of
+        canonical codes (from ``resolve_product_filter``), any of which
+        matches.
         """
 
         self._require_tenant(tenant_id)
@@ -501,13 +504,22 @@ class DepotRepository:
         if status is not None:
             must.append({"term": {"status": status}})
         if fuel_type:
-            try:
-                canonical_fuel = canonicalize(fuel_type)
-            except UnknownFuelProductError:
-                # Unknown filter → empty result set; persist the query
-                # shape so callers see a stable error-vs-empty distinction.
-                return []
-            must.append({"term": {"fuel_types_supported": canonical_fuel}})
+            if isinstance(fuel_type, str):
+                try:
+                    codes = [canonicalize(fuel_type)]
+                except UnknownFuelProductError:
+                    # Unknown filter → empty result set; persist the query
+                    # shape so callers see a stable error-vs-empty distinction.
+                    return []
+            else:
+                codes = list(fuel_type)
+            # One code keeps the original ``term``; several use ``terms``, which
+            # matches a depot supporting any of them on ES and on the Postgres
+            # translator (array containment per value).
+            if len(codes) == 1:
+                must.append({"term": {"fuel_types_supported": codes[0]}})
+            else:
+                must.append({"terms": {"fuel_types_supported": codes}})
 
         query = {
             "query": {"bool": {"must": must}},
