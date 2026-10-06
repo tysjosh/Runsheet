@@ -25,6 +25,7 @@ still valid JSON.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Mapping
@@ -93,6 +94,36 @@ _GOOGLE_KEY_RE = re.compile(r"AIza[0-9A-Za-z_-]{35}")
 _JWT_RE = re.compile(r"eyJ[\w-]+\.[\w-]+\.[\w-]+")
 
 
+# A quoted sensitive name whose JSON value is an object or array. _KV_RE alone
+# would mask only the opening bracket, breaking the JSON and leaving nested
+# credentials in clear text, so the whole value becomes the string placeholder.
+_SENSITIVE_JSON_STRUCT_RE = re.compile(
+    r'"(?:api_key|apikey|api-key|access_token|refresh_token|password|secret'
+    r'|client_secret|token|authorization)"\s*:\s*(?=[\[{])',
+    re.IGNORECASE,
+)
+_JSON_DECODER = json.JSONDecoder()
+_REDACTED_JSON = json.dumps(REDACTED)
+
+
+def _redact_structured_values(text: str) -> str:
+    """Replace each object/array value under a sensitive JSON key with ``"***REDACTED***"``."""
+    pos = 0
+    while True:
+        match = _SENSITIVE_JSON_STRUCT_RE.search(text, pos)
+        if match is None:
+            return text
+        start = match.end()
+        try:
+            end = _JSON_DECODER.raw_decode(text, start)[1]
+        except ValueError:
+            # Not JSON (truncated or escaped); leave it to the regexes below.
+            pos = start
+            continue
+        text = text[:start] + _REDACTED_JSON + text[end:]
+        pos = start + len(_REDACTED_JSON)
+
+
 def _kv_sub(match: "re.Match[str]") -> str:
     if (
         match.group("name_quote")
@@ -114,6 +145,7 @@ def redact_secrets(text: str) -> str:
     text = _GOOGLE_KEY_RE.sub(REDACTED, text)
     text = _JWT_RE.sub(REDACTED, text)
     text = _QUERY_PARAM_RE.sub(lambda m: m.group(1) + REDACTED, text)
+    text = _redact_structured_values(text)
     text = _KV_RE.sub(_kv_sub, text)
     text = _BEARER_RE.sub(lambda m: m.group(1) + REDACTED, text)
     text = _BASIC_RE.sub(lambda m: m.group(1) + REDACTED, text)

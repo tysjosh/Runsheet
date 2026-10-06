@@ -318,3 +318,42 @@ def test_http_client_log_level_rejects_unknown_values():
     with patch.dict(os.environ, {**_SETTINGS_ENV, "HTTP_CLIENT_LOG_LEVEL": "nonsense"}, clear=True):
         with pytest.raises(ValidationError, match="http_client_log_level"):
             Settings()
+
+
+# (8) Structured values under a sensitive key (review LOW 1) ----------------
+# The old regex masked only the opening ``{`` / ``[`` and left the rest, which
+# broke the JSON and kept nested credentials in clear text. The whole value is
+# now replaced with the JSON string placeholder.
+
+
+@pytest.mark.parametrize(
+    "text, key",
+    [
+        ('{"token": {"a": 1}}', "token"),
+        ('{"password": ["x", "y"]}', "password"),
+        ('{"authorization": {"scheme": "Bearer", "credentials": "abc"}}', "authorization"),
+    ],
+)
+def test_structured_secret_value_is_redacted_to_a_json_string(text, key):
+    from telemetry.log_safety import REDACTED, redact_secrets
+
+    redacted = redact_secrets(text)
+    assert json.loads(redacted)[key] == REDACTED
+    assert "abc" not in redacted
+
+
+def test_json_formatter_keeps_structured_extra_data_valid(restore_logging):
+    record = logging.LogRecord("n1.test", logging.INFO, __file__, 1, "outbound", (), None)
+    record.extra_data = {"token": {"a": 1}, "password": ["x"], "tokens": {"n": 2}}
+    line = json.loads(JSONFormatter().format(record))
+    assert line["token"] == "***REDACTED***"
+    assert line["password"] == "***REDACTED***"
+    assert line["tokens"] == {"n": 2}
+
+
+def test_structured_secret_in_a_message_is_redacted_whole(capsys, restore_logging):
+    _telemetry(capsys)
+    logging.getLogger("n1.test").info("config %s", json.dumps({"secret": {"k": "v"}}))
+    out = capsys.readouterr().out
+    (line,) = _json_lines(out)
+    assert json.loads(line["message"][len("config "):]) == {"secret": "***REDACTED***"}
