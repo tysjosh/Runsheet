@@ -24,6 +24,12 @@
 #
 #   DOMAIN=runsheetops.com ./scripts/staging_aws.sh up
 #
+# When DOMAIN is unset it defaults to STAGING_DOMAIN from .env.staging (gitignored,
+# so a worktree deploy will not have it). `deploy` and `deploy-ui` then refuse to run
+# if DOMAIN is still unset but the ALB has an HTTPS listener, because they would
+# register plaintext CORS_ORIGINS / SUPERTOKENS_*_DOMAIN; the message names the
+# DOMAIN= to pass. plan/status/verify/logs/frontend-env never check.
+#
 # Idempotent: every step checks for the resource before creating it, so a re-run
 # after a failure continues rather than duplicating. Safe to run repeatedly.
 #
@@ -201,6 +207,19 @@ SG_DB="${PREFIX}-db-sg"
 #: names, and an environment whose own header says not to put real customer data in it
 #: should not be the thing answering on them.
 DOMAIN="${DOMAIN:-}"
+#: Unset DOMAIN falls back to STAGING_DOMAIN in the gitignored .env.${ENV_NAME}, so a
+#: bare `deploy` from the main checkout keeps the HTTPS origins. log() is not defined
+#: yet, hence the direct printf.
+DOMAIN_SOURCE=""
+_env_file="$(dirname "$0")/../.env.${ENV_NAME}"
+if [ -z "$DOMAIN" ] && [ -f "$_env_file" ]; then
+  DOMAIN="$(grep -E '^STAGING_DOMAIN=' "$_env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"\047\r ' || true)"
+  if [ -n "$DOMAIN" ]; then
+    DOMAIN_SOURCE=".env.${ENV_NAME}"
+    printf '  .. DOMAIN=%s (from STAGING_DOMAIN in %s)\n' "$DOMAIN" "$DOMAIN_SOURCE" >&2
+  fi
+fi
+unset _env_file
 #: Last two labels of DOMAIN. Override for a multi-part public suffix (.co.uk etc.),
 #: where the registrable domain is three labels rather than two.
 ZONE_DOMAIN="${ZONE_DOMAIN:-$(echo "${DOMAIN}" | awk -F. 'NF>1{print $(NF-1)"."$NF}')}"
@@ -397,6 +416,32 @@ alb_arn() {
 https_listener_arn() {
   aws elbv2 describe-listeners --load-balancer-arn "$(alb_arn)" \
     --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text 2>/dev/null | grep -v '^None$' || true
+}
+
+#: N-new-4. Refuse to build when DOMAIN is unset but the ALB already serves HTTPS:
+#: the task definition would get CORS_ORIGINS / SUPERTOKENS_*_DOMAIN = http://<alb>,
+#: which is how api:18 shipped. The listener is the signal, not a hard-coded host,
+#: because it is what makes a plaintext origin wrong.
+require_tls_domain() {
+  [ -n "$DOMAIN" ] && return 0
+  local listener cert host suggest
+  listener="$(https_listener_arn)"
+  if [ -z "$listener" ]; then
+    warn "no HTTPS listener on ${ALB_NAME}; $1 will use plaintext origins"
+    return 0
+  fi
+  cert="$(aws elbv2 describe-listeners --listener-arns "$listener" \
+    --query 'Listeners[0].Certificates[0].CertificateArn' --output text 2>/dev/null || true)"
+  [ "$cert" = "None" ] && cert=""
+  host=""
+  if [ -n "$cert" ]; then
+    host="$(aws acm describe-certificate --certificate-arn "$cert" \
+      --query 'Certificate.DomainName' --output text 2>/dev/null || true)"
+    [ "$host" = "None" ] && host=""
+  fi
+  suggest="${host#api.}"
+  suggest="${suggest:-staging.runsheetops.com}"
+  die "$1 refused: ${ALB_NAME} serves HTTPS (${host:-a certificate}) but DOMAIN is unset, so the task definition would get CORS_ORIGINS / SUPERTOKENS_*_DOMAIN = http://$(alb_dns). Re-run with DOMAIN=${suggest} ./scripts/staging_aws.sh $1, or add STAGING_DOMAIN=${suggest} to .env.${ENV_NAME}."
 }
 
 secret_value() {
@@ -1305,6 +1350,7 @@ PY
 }
 
 cmd_deploy_ui() {
+  require_tls_domain deploy-ui
   [ -n "$DOMAIN" ] || die "deploy-ui needs DOMAIN: the build refuses a non-https API origin"
   local sha image api app
   sha="$(git rev-parse --short HEAD)"
@@ -1396,6 +1442,7 @@ cmd_deploy_ui() {
 # deploy: build, push, register, roll
 # ---------------------------------------------------------------------------
 cmd_deploy() {
+  require_tls_domain deploy
   local sha image
   sha="$(git rev-parse --short HEAD)"
   [ -n "$(alb_dns)" ] || die "no ALB — run 'up' first"
