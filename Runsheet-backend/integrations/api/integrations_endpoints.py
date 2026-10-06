@@ -91,6 +91,7 @@ from integrations.provider_catalog import (
     ProviderCatalogEntry,
     list_providers as list_catalog_providers,
 )
+from integrations.api._authz import integration_admin_dependency
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -560,6 +561,7 @@ async def list_integration_instances(
 
 @router.post(
     "",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
     status_code=status.HTTP_201_CREATED,
 )
@@ -636,6 +638,7 @@ async def create_integration_instance(
 
 @router.patch(
     "/{instance_id}",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
 )
 async def update_integration_instance(
@@ -740,6 +743,7 @@ async def update_integration_instance(
 
 @router.delete(
     "/{instance_id}",
+    dependencies=[Depends(integration_admin_dependency)],
     status_code=status.HTTP_204_NO_CONTENT,
     response_model=None,
 )
@@ -788,6 +792,7 @@ async def delete_integration_instance(
 
 @router.post(
     "/{instance_id}/enable",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
 )
 async def enable_integration_instance(
@@ -829,6 +834,7 @@ async def enable_integration_instance(
 
 @router.post(
     "/{instance_id}/disable",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
 )
 async def disable_integration_instance(
@@ -887,6 +893,7 @@ async def _flip_enabled(
 
 @router.post(
     "/{instance_id}/sync-now",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=SyncRunView,
 )
 async def sync_integration_now(

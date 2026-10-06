@@ -30,6 +30,7 @@ from errors.exceptions import (
     validation_error,
 )
 from middleware.rate_limiter import limiter
+from notifications.api._authz import notification_write_dependency
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -309,7 +310,7 @@ async def list_rules(
         )
 
 
-@router.patch("/rules/{rule_id}")
+@router.patch("/rules/{rule_id}", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def update_rule(
     rule_id: str,
@@ -407,7 +408,7 @@ async def get_preference(
         )
 
 
-@router.put("/preferences/{customer_id}")
+@router.put("/preferences/{customer_id}", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def upsert_preference(
     customer_id: str,
@@ -435,7 +436,7 @@ async def upsert_preference(
         )
 
 
-@router.put("/preferences/{customer_id}/template-opt-outs")
+@router.put("/preferences/{customer_id}/template-opt-outs", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def update_template_opt_outs(
     customer_id: str,
@@ -543,7 +544,7 @@ async def list_templates(
         )
 
 
-@router.put("/templates/{template_id}")
+@router.put("/templates/{template_id}", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def update_template(
     template_id: str,
@@ -608,7 +609,7 @@ async def get_notification(
         )
 
 
-@router.post("/{notification_id}/retry")
+@router.post("/{notification_id}/retry", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def retry_notification(
     notification_id: str,
