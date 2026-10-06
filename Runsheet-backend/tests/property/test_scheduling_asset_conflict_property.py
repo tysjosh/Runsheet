@@ -192,7 +192,7 @@ class TestAssetConflictOnAssign:
         """
         job_type, asset_type = job_type_asset
         asset_id = f"ASSET_{asset_type.upper()}_001"
-        scheduled_time = f"2026-03-{12 + (hour_offset % 28):02d}T{hour_offset % 24:02d}:00:00Z"
+        scheduled_time = f"2026-03-{12 + (hour_offset % 20):02d}T{hour_offset % 24:02d}:00:00Z"
 
         # Build the existing active job that already has this asset
         existing_job = _build_existing_active_job(
@@ -269,7 +269,7 @@ class TestAssetConflictOnCreate:
         """
         job_type, asset_type = job_type_asset
         asset_id = f"ASSET_{asset_type.upper()}_001"
-        scheduled_time = f"2026-03-{12 + (hour_offset % 28):02d}T{hour_offset % 24:02d}:00:00Z"
+        scheduled_time = f"2026-03-{12 + (hour_offset % 20):02d}T{hour_offset % 24:02d}:00:00Z"
 
         # Build the existing active job that already has this asset
         existing_job = _build_existing_active_job(
@@ -348,7 +348,7 @@ class TestNoConflictWhenAssetFree:
         """
         job_type, asset_type = job_type_asset
         asset_id = f"ASSET_{asset_type.upper()}_002"
-        scheduled_time = f"2026-03-{12 + (hour_offset % 28):02d}T{hour_offset % 24:02d}:00:00Z"
+        scheduled_time = f"2026-03-{12 + (hour_offset % 20):02d}T{hour_offset % 24:02d}:00:00Z"
 
         new_job = _build_scheduled_job(
             job_id="JOB_2",

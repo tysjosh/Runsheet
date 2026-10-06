@@ -188,7 +188,8 @@ class JobService:
             "completed_at": None,
             "created_at": now,
             "updated_at": now,
-            "created_by": data.created_by or actor_id,
+            # Always the authenticated actor; a body ``created_by`` is ignored.
+            "created_by": actor_id,
             "priority": data.priority.value,
             "delayed": False,
             "delay_duration_minutes": None,
@@ -1464,7 +1465,7 @@ class JobService:
         if total > 0:
             conflicting = response["hits"]["hits"][0]["_source"]
             raise AppException(
-                error_code=ErrorCode.DRIFT_THRESHOLD_EXCEEDED,
+                error_code=ErrorCode.ASSET_CONFLICT,
                 message=(
                     f"Asset '{asset_id}' is already assigned to active job "
                     f"'{conflicting['job_id']}' (status: {conflicting['status']})"

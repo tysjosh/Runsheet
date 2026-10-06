@@ -342,6 +342,24 @@ class TestInputValidation:
 
         assert resp.status_code == 422
 
+    def test_post_job_non_iso_scheduled_time_returns_422(self):
+        """POST /scheduling/jobs with scheduled_time='tomorrow' returns 422 (B12)."""
+        es = _make_es_mock()
+        _, client = _build_app(es)
+        with _SETTINGS_PATCH:
+            resp = client.post(
+                "/api/scheduling/jobs",
+                headers=_auth_headers(),
+                json={
+                    "job_type": "passenger_transport",
+                    "origin": "Port Harcourt",
+                    "destination": "Lagos",
+                    "scheduled_time": "tomorrow",
+                },
+            )
+        assert resp.status_code == 422
+        es.index_document.assert_not_called()
+
     def test_post_job_invalid_job_type_returns_422(self):
         """POST /scheduling/jobs with invalid job_type returns 422."""
         es = _make_es_mock()
