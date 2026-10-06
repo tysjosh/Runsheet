@@ -11,11 +11,13 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 from strands import tool
 
 from ops.middleware.tenant_guard import inject_tenant_filter
 
+from ._tenant_context import resolve_tool_tenant
 from .ops_feature_guard import check_ops_feature_flag
 
 logger = logging.getLogger(__name__)
@@ -77,7 +79,7 @@ def _total_hits(response: dict) -> int:
 
 @tool
 async def get_ops_metrics(
-    tenant_id: str,
+    tenant_id: Optional[str] = None,
     metric_type: str = "orders",
     bucket: str = "hourly",
     start_date: str = None,
@@ -90,6 +92,8 @@ async def get_ops_metrics(
     AI agent to interpret.
     """
     start_time = time.time()
+    # The bound tenant wins over a model-supplied tenant_id.
+    tenant_id = resolve_tool_tenant(tenant_id)
     params = {
         "metric_type": metric_type,
         "bucket": bucket,

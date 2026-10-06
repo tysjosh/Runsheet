@@ -145,13 +145,12 @@ class SpecialistAgent:
 
     @staticmethod
     def _prompt(task: str, context: Optional[dict]) -> Tuple[str, str]:
-        """The prompt sent to the model and the tenant it is scoped to."""
-        prompt = task
+        """The prompt sent to the model and the tenant it is scoped to.
+
+        The tenant id is NOT put in the prompt. Tools take it from the bound
+        ContextVar (``resolve_tool_tenant``), so the model has no use for it,
+        and putting it there made answers quote the internal tenant id to the
+        user ("for 'demo-tenant'").
+        """
         tenant_id = require_tenant_id((context or {}).get("tenant_id"))
-        if context:
-            ctx_parts = []
-            if tenant_id:
-                ctx_parts.append(f"Tenant: {tenant_id}")
-            if ctx_parts:
-                prompt = f"[Context: {', '.join(ctx_parts)}]\n{task}"
-        return prompt, tenant_id
+        return task, tenant_id

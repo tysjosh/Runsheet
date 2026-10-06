@@ -22,7 +22,7 @@ import logging
 import time
 from strands import tool
 from Agents.confirmation_protocol import MutationRequest
-from ._tenant_context import get_current_tenant
+from ._tenant_context import resolve_tool_tenant
 from .logging_wrapper import get_telemetry_service
 from .scheduling_tools import JOB_TYPE_VALUES
 
@@ -61,7 +61,8 @@ def _get_protocol():
 
 
 def _resolve_tenant_id(tenant_id: str | None) -> str:
-    return tenant_id or get_current_tenant()
+    # The bound tenant wins over a model-supplied tenant_id.
+    return resolve_tool_tenant(tenant_id)
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,

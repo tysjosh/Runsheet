@@ -236,10 +236,10 @@ class LogisticsAgent:
             - `generate_incident_analysis(issue)` - Analyze incidents across multiple data sources
 
             **Legacy Ops Tools:**
-            - `get_ops_metrics(metric_type, bucket, start_date, end_date, tenant_id)` - Get aggregated operational metrics
-            - `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA violations report
-            - `generate_failure_report(start_date, end_date, tenant_id, intake_channel=None)` - Generate failure root-cause analysis report. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to compare failure rates across channels.
-            - `generate_driver_productivity_report(start_date, end_date, tenant_id)` - Generate driver productivity report
+            - `get_ops_metrics(metric_type, bucket, start_date, end_date)` - Get aggregated operational metrics
+            - `generate_sla_report(start_date, end_date)` - Generate SLA violations report
+            - `generate_failure_report(start_date, end_date, intake_channel=None)` - Generate failure root-cause analysis report. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to compare failure rates across channels.
+            - `generate_driver_productivity_report(start_date, end_date)` - Generate driver productivity report
 
             **IMPORTANT - Read-Only Guardrail:**
             All ops intelligence tools are strictly read-only. You must NEVER modify order, driver, or event data.
@@ -259,11 +259,11 @@ class LogisticsAgent:
             present the suggestion to the user as a recommendation but do NOT execute it.
 
             **Scheduling & Dispatch Tools (read-only):**
-            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: {', '.join(JOB_TYPE_VALUES)}. Statuses: {', '.join(JOB_STATUS_VALUES)}.
-            - `get_job_details(job_id, tenant_id=None)` - Get full details of a job including event history and cargo manifest using the authenticated tenant context.
-            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id=None)` - Find assets not assigned to active jobs within a time window using the authenticated tenant context. Filter by asset_type: vehicle, vessel, equipment, container.
-            - `get_scheduling_summary(tenant_id=None)` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs using the authenticated tenant context.
-            - `generate_dispatch_report(days=7, tenant_id=None, intake_channel=None)` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations using the authenticated tenant context. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to see channel-specific dispatch metrics.
+            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: {', '.join(JOB_TYPE_VALUES)}. Statuses: {', '.join(JOB_STATUS_VALUES)}.
+            - `get_job_details(job_id)` - Get full details of a job including event history and cargo manifest using the authenticated tenant context.
+            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None)` - Find assets not assigned to active jobs within a time window using the authenticated tenant context. Filter by asset_type: vehicle, vessel, equipment, container.
+            - `get_scheduling_summary()` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs using the authenticated tenant context.
+            - `generate_dispatch_report(days=7, intake_channel=None)` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations using the authenticated tenant context. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to see channel-specific dispatch metrics.
 
             **IMPORTANT - Scheduling Tools Read-Only Guardrail:**
             All scheduling tools are strictly read-only. You must NEVER modify job data, assignments, or status.

@@ -20,13 +20,14 @@ import time
 from datetime import datetime, timedelta, timezone
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
-from ._tenant_context import get_current_tenant
+from ._tenant_context import resolve_tool_tenant
 from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
 def _resolve_tenant_id(tenant_id: str | None) -> str:
-    return tenant_id or get_current_tenant()
+    # The bound tenant wins over a model-supplied tenant_id.
+    return resolve_tool_tenant(tenant_id)
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,

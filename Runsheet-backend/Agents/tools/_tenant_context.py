@@ -30,8 +30,11 @@ when a tool tries to read the tenant without one being bound.
 from __future__ import annotations
 
 import contextlib
+import logging
 from contextvars import ContextVar
 from typing import Iterator, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # Default ``None`` keeps module import + tests-that-never-bind-it safe.
@@ -75,6 +78,29 @@ def require_tenant_id(tenant_id: Optional[str]) -> str:
             "against an implicit or default tenant."
         )
     return tenant_id
+
+
+def resolve_tool_tenant(requested: Optional[str]) -> str:
+    """The tenant a tool runs for: the bound tenant always wins.
+
+    Several tools expose a ``tenant_id`` argument, so the model fills it in.
+    The old ``requested or get_current_tenant()`` let a model-supplied value
+    (a prompt injection, or a guess) override the request's verified tenant,
+    reading or queueing mutations in another tenant. Inside a tenant scope the
+    argument is ignored; a different value is logged. Outside any scope
+    (direct internal callers and tests) the argument is used, and an empty
+    one still raises.
+    """
+    bound = current_tenant_id_var.get()
+    if bound:
+        if requested and requested != bound:
+            logger.warning(
+                "AI tool asked for a different tenant; using the bound tenant "
+                "(requested=%r)",
+                requested[:64],
+            )
+        return bound
+    return require_tenant_id(requested)
 
 
 @contextlib.contextmanager
