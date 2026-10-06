@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_ops
+from commerce.models.invoice import InvoiceStatus
 from commerce.services.invoice_service import InvoiceService
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
@@ -169,7 +170,8 @@ def _get_request_id(request: Request) -> str:
 async def list_invoices(
     request: Request,
     tenant: TenantContext = Depends(require_invoicing_enabled),
-    status: Optional[str] = Query(
+    # Enum-typed so an unknown value is 422, not an empty 200 (N-CFV-5).
+    status: Optional[InvoiceStatus] = Query(
         default=None,
         description="Filter by status: draft|open|partial|paid|overdue|void",
     ),
@@ -203,7 +205,7 @@ async def list_invoices(
 
     result = await service.list(
         tenant_id=tenant.tenant_id,
-        status=status,
+        status=status.value if status else None,
         customer_id=customer_id,
         account_id=account_id,
         cursor=cursor,
