@@ -1,12 +1,13 @@
 /**
- * Regression test for the DQF dashboard stats (C10).
+ * Regression test for C10: the DQF dashboard cards.
  *
- * The page used to read `total_active` / `total_suspended` /
- * `total_expiring_soon`, which the backend never sends, so every stat
- * rendered 0. It now reads the backend's field names and shows expired
- * drivers separately from expiring ones.
+ * ``GET /compliance/drivers/dashboard`` returns ``active_drivers``,
+ * ``suspended_drivers``, ``expired_drivers`` and ``expiring_drivers`` (see
+ * ``DQFDashboard`` in ``compliance/services/driver_qualification_service.py``).
+ * An earlier client type read ``total_active`` / ``total_suspended`` /
+ * ``total_expiring_soon``, which the backend never sends, so every card
+ * showed 0. These tests pin the backend shape.
  */
-
 import { fireEvent, render, screen } from "@testing-library/react";
 
 jest.mock("../../services/complianceApi", () => {
@@ -30,51 +31,48 @@ const mockGetDashboard = getDriversDashboard as jest.MockedFunction<
   typeof getDriversDashboard
 >;
 
-/** Mirrors the backend `DQFDashboard` payload. */
-function dashboardFixture(): DQFDashboard {
-  return {
-    tenant_id: "demo-tenant",
-    total_drivers: 7,
-    active_drivers: 4,
-    suspended_drivers: 1,
-    expired_drivers: 2,
-    expiring_within_60_days: 3,
-    expiring_within_30_days: 1,
-    expiring_within_7_days: 0,
-    drug_test_overdue: 0,
-    drivers: [],
-  };
+// Exactly the fields the backend model emits (plus generated_at).
+const backendDashboard = {
+  tenant_id: "tenant-1",
+  total_drivers: 9,
+  active_drivers: 4,
+  suspended_drivers: 1,
+  expired_drivers: 3,
+  expiring_within_60_days: 2,
+  expiring_within_30_days: 2,
+  expiring_within_7_days: 1,
+  drug_test_overdue: 0,
+  expiring_drivers: 2,
+  drivers: [],
+  generated_at: "2026-10-05T00:00:00Z",
+} as DQFDashboard;
+
+function statValue(label: string): string | null {
+  const labelEl = screen.getByText(label);
+  // StatsBar grid: <div><div>{value}</div><div>{label}</div></div>
+  return labelEl.previousElementSibling?.textContent ?? null;
 }
 
-afterEach(() => {
-  jest.clearAllMocks();
-});
-
-describe("DriverQualificationsView — DQF dashboard stats", () => {
-  it("renders backend counts with expired separate from expiring", async () => {
+describe("DriverQualificationsView DQF dashboard", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
     mockGetDrivers.mockResolvedValue({
       data: [],
-      request_id: "drivers",
+      pagination: { page: 1, size: 20, total: 0, total_pages: 1 },
     } as unknown as Awaited<ReturnType<typeof getDrivers>>);
     mockGetDashboard.mockResolvedValue({
-      data: dashboardFixture(),
-      request_id: "dash",
-    });
+      data: backendDashboard,
+    } as Awaited<ReturnType<typeof getDriversDashboard>>);
+  });
 
+  it("shows active, suspended, expired and expiring counts from the backend payload", async () => {
     render(<DriverQualificationsView />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: /DQF Dashboard/i }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "DQF Dashboard" }));
 
-    const expiredLabel = await screen.findByText("Expired");
-    const expiringLabel = screen.getByText("Expiring ≤30 days");
-    const activeLabel = screen.getByText("Active Drivers");
-    const suspendedLabel = screen.getByText("Suspended");
-
-    // Each stat's value is rendered alongside its label in the same card.
-    expect(expiredLabel.parentElement).toHaveTextContent("2");
-    expect(expiringLabel.parentElement).toHaveTextContent("1");
-    expect(activeLabel.parentElement).toHaveTextContent("4");
-    expect(suspendedLabel.parentElement).toHaveTextContent("1");
+    await screen.findByText("Active Drivers");
+    expect(statValue("Active Drivers")).toBe("4");
+    expect(statValue("Suspended")).toBe("1");
+    expect(statValue("Expired")).toBe("3");
+    expect(statValue("Expiring Soon")).toBe("2");
   });
 });

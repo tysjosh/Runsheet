@@ -187,8 +187,8 @@ export default function DriverQualificationsView() {
             variant: "error",
           },
           {
-            label: "Expiring ≤30 days",
-            value: (dashboard.expiring_within_30_days ?? 0).toString(),
+            label: "Expiring Soon",
+            value: (dashboard.expiring_drivers ?? 0).toString(),
             variant: "warning",
           },
         ]}
