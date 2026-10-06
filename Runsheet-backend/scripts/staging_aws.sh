@@ -1020,11 +1020,11 @@ ensure_task_role() {
     ok "role $role"
     return
   fi
-  # Empty by design. The task needs no AWS API access in staging: the three
-  # AWS-backed surfaces (S3 proof-of-delivery, KMS credentials vault, Textract
-  # OCR) are read straight from the environment by bootstrap/agents.py and are
-  # simply skipped when unset — logged at INFO, no startup failure. Granting
-  # nothing keeps that honest rather than half-wiring them.
+  # Created with no policies. Its only grants are the inline policies added by
+  # ensure_vault_kms (the credentials-vault key) and ensure_files_bucket (the
+  # file-storage bucket's tenants/ prefix). Textract OCR is not granted; it is
+  # read from the environment by bootstrap/agents.py and degrades to manual
+  # entry on AccessDenied.
   aws iam create-role --role-name "$role" \
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
     --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" >/dev/null
@@ -1096,15 +1096,23 @@ ensure_files_bucket() {
   aws s3api put-bucket-encryption --bucket "${FILES_BUCKET}" \
     --server-side-encryption-configuration \
     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+  aws s3api put-bucket-lifecycle-configuration --bucket "${FILES_BUCKET}" \
+    --lifecycle-configuration '{"Rules":[
+      {"ID":"expire-tenant-objects","Status":"Enabled","Filter":{"Prefix":"tenants/"},"Expiration":{"Days":90}},
+      {"ID":"abort-mpu","Status":"Enabled","Filter":{"Prefix":""},"AbortIncompleteMultipartUpload":{"DaysAfterInitiation":7}}]}'
+  aws s3api put-bucket-policy --bucket "${FILES_BUCKET}" --policy "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"DenyInsecureTransport","Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"],"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}' "${FILES_BUCKET}" "${FILES_BUCKET}")"
   aws s3api put-bucket-tagging --bucket "${FILES_BUCKET}" \
     --tagging "TagSet=[{Key=Project,Value=${PROJECT}},{Key=Environment,Value=${ENV_NAME}}]"
   # Presigned PUT/GET URLs are used straight from the browser and driver app.
   aws s3api put-bucket-cors --bucket "${FILES_BUCKET}" --cors-configuration \
     "$(printf '{"CORSRules":[{"AllowedOrigins":["%s"],"AllowedMethods":["GET","PUT"],"AllowedHeaders":["*"],"MaxAgeSeconds":3000}]}' "$(app_origin)")"
-  ok "s3 ${FILES_BUCKET}: private, SSE-S3, owner-enforced, CORS $(app_origin)"
+  ok "s3 ${FILES_BUCKET}: private, SSE-S3, owner-enforced, TLS only, tenants/ expire after 90 days, CORS $(app_origin)"
+  # ListBucket lets a missing key come back as NoSuchKey instead of AccessDenied.
+  # Textract is deliberately NOT granted: OCR then degrades to manual gallons
+  # entry (MeterTicketOCRService logs the provider error and never raises).
   aws iam put-role-policy --role-name "${PREFIX}-task" --policy-name "${PREFIX}-files-s3" \
-    --policy-document "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"FileStorageObjects","Effect":"Allow","Action":["s3:PutObject","s3:GetObject"],"Resource":"arn:aws:s3:::%s/tenants/*"}]}' "${FILES_BUCKET}")" >/dev/null
-  ok "task role may Put/Get ${FILES_BUCKET}/tenants/*"
+    --policy-document "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"FileStorageObjects","Effect":"Allow","Action":["s3:PutObject","s3:GetObject"],"Resource":"arn:aws:s3:::%s/tenants/*"},{"Sid":"ListTenantPrefix","Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::%s","Condition":{"StringLike":{"s3:prefix":"tenants/*"}}}]}' "${FILES_BUCKET}" "${FILES_BUCKET}")" >/dev/null
+  ok "task role may Put/Get ${FILES_BUCKET}/tenants/* (no Textract)"
 }
 
 cmd_files_bucket() {
@@ -1487,6 +1495,9 @@ cmd_deploy() {
   else
     warn "no ${VAULT_KMS_ALIAS} — credential writes (and dispatcher order intake) will fail; run 'up'"
   fi
+  # Idempotent, and run here as well as in 'up' because 'deploy' is what the
+  # release flow runs: without the bucket raw BOL uploads are dropped (C9).
+  ensure_files_bucket
   export FILES_BUCKET_NAME="$(files_bucket)"
   if [ -n "$FILES_BUCKET_NAME" ]; then
     ok "files bucket ${FILES_BUCKET_NAME}"
@@ -1838,6 +1849,7 @@ This DESTROYS the Runsheet staging environment in ${AWS_REGION}:
   ALB ${ALB_NAME}, target group ${TG_NAME}
   Secrets ${SECRET_DB}, ${SECRET_GEMINI}, ${SECRET_ST}, ${SECRET_REDIS} (+ password, + auth token)
   IAM roles ${PREFIX}-execution, ${PREFIX}-task
+  S3 bucket ${FILES_BUCKET} and every object in it (raw BOL / POD uploads)
   Security groups, subnet group, log group, ECR repo ${ECR_REPO} and its images
 
 It does NOT touch the default VPC, its subnets, or anything belonging to the
