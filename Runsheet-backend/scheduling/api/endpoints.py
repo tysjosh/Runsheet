@@ -12,7 +12,7 @@ Validates: Requirements 2.1, 3.1-3.6, 4.1-4.8, 5.1-5.7, 6.1-6.6,
 
 import logging
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 
@@ -46,6 +46,9 @@ _delay_service: Optional[DelayDetectionService] = None
 #: Resolver used to expand cross-module references on reads. Defaults to the
 #: process-wide resolver; tests may inject one pre-loaded with fake loaders.
 _ref_resolver: Any = None
+#: Read of driver messages and exceptions for a job (G1), wired by
+#: bootstrap/scheduling.py via :func:`set_driver_activity_service`.
+_driver_activity_service: Any = None
 
 router = APIRouter(prefix="/api/scheduling", tags=["scheduling"])
 
@@ -82,6 +85,25 @@ def configure_scheduling_api(
     _cargo_service = cargo_service
     _delay_service = delay_service
     _ref_resolver = ref_resolver
+
+
+def set_driver_activity_service(service: Any) -> None:
+    """Wire the ``DriverActivityService`` behind ``/jobs/{id}/driver-activity`` (G1).
+
+    A separate setter, like ``set_driver_qualification_service`` on the ops
+    driver router, so :func:`configure_scheduling_api` callers are unchanged.
+    """
+    global _driver_activity_service
+    _driver_activity_service = service
+
+
+def _get_driver_activity_service():
+    """Return the configured DriverActivityService or raise."""
+    if _driver_activity_service is None:
+        raise RuntimeError(
+            "Driver activity not configured. Call set_driver_activity_service() during startup."
+        )
+    return _driver_activity_service
 
 
 def _get_ref_resolver():
@@ -439,6 +461,49 @@ async def get_job_events(
         total=len(events),
         page=1,
         page_size=len(events) if events else 1,
+        request_id=_get_request_id(request),
+    )
+
+
+@router.get("/jobs/{job_id}/driver-activity")
+@limiter.limit(_scheduling_rate)
+async def get_job_driver_activity(
+    job_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    activity_type: Optional[Literal["message", "exception"]] = Query(
+        None, alias="type", description="Only messages or only exceptions"
+    ),
+    start_date: Optional[datetime] = Query(None, description="Earliest timestamp (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="Latest timestamp (ISO 8601)"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(20, ge=1, le=100, description="Page size"),
+) -> dict:
+    """
+    Driver messages and exceptions on a job, newest first (G1).
+
+    Read-only and tenant-scoped over the existing ``job_messages`` and
+    ``driver_exceptions`` stores. Admins and dispatchers only: a driver gets
+    403 ``INSUFFICIENT_ROLE``. An unknown or other-tenant job is 404.
+    """
+    require_role(tenant, "admin", "dispatcher")
+    await _get_job_service()._get_job_doc(job_id, tenant.tenant_id)
+    result = await _get_driver_activity_service().list_for_job(
+        tenant.tenant_id,
+        job_id,
+        types=[activity_type] if activity_type else None,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        size=size,
+    )
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=result["items"],
+        total=result["total"],
+        page=page,
+        page_size=size,
         request_id=_get_request_id(request),
     )
 
