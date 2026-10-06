@@ -205,6 +205,52 @@ def test_decision_after_expiry_is_409_approval_expired(make_client, path, body):
     assert service._es.stored_document["status"] == "expired"
 
 
+@pytest.mark.parametrize(
+    "path, body",
+    [
+        ("/api/agent/approvals/nope-1/approve", None),
+        ("/api/agent/approvals/nope-1/reject", {"reason": "no"}),
+    ],
+)
+@pytest.mark.parametrize("stored", [None, "foreign"])
+def test_unknown_or_foreign_approval_is_404(make_client, path, body, stored):
+    """An id that doesn't exist, or belongs to another tenant, is 404, not
+    400 VALIDATION_ERROR, and both look the same so existence never leaks."""
+    from unittest.mock import AsyncMock
+
+    from tests.unit.test_approval_queue_service import _make_service
+
+    service = _make_service()
+    service._es.get_document = AsyncMock(return_value=None if stored is None else {
+        "action_id": "nope-1", "tool_name": "cancel_job", "parameters": {},
+        "status": "pending", "tenant_id": "tenant-B",
+    })
+
+    response = make_client(service).post(path, json=body)
+
+    assert response.status_code == 404, response.text
+    payload = response.json()
+    assert payload["error_code"] == "RESOURCE_NOT_FOUND"
+    assert payload["message"] == "Approval not found"
+    assert payload["details"] == {"action_id": "nope-1"}
+    assert "tenant-B" not in response.text
+
+
+def test_decided_entry_replay_stays_400(make_client):
+    from unittest.mock import AsyncMock
+
+    from tests.unit.test_approval_queue_service import _make_service
+
+    service = _make_service()
+    service._es.get_document = AsyncMock(return_value={
+        "action_id": "done-1", "tool_name": "cancel_job", "parameters": {},
+        "status": "executed", "tenant_id": "tenant-A",
+    })
+    response = make_client(service).post("/api/agent/approvals/done-1/approve")
+    assert response.status_code == 400, response.text
+    assert response.json()["error_code"] == "VALIDATION_ERROR"
+
+
 def test_forbidden_maps_to_403(make_client):
     response = make_client(_Recording(exc=ApprovalForbiddenError("act-1"))).post("/api/agent/approvals/act-1/approve")
     assert response.status_code == 403

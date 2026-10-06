@@ -232,6 +232,19 @@ class LoadingPlanExecutionError(Exception):
         return cls(entry, LoadingPlanExecutionResult.from_dict(entry.get("execution_result") or {}))
 
 
+class ApprovalNotFoundError(ValueError):
+    """No approval with this id in the caller's tenant.
+
+    A ``ValueError`` so existing callers keep working; the endpoints catch it
+    first and answer 404 ``RESOURCE_NOT_FOUND`` instead of 400. A foreign
+    tenant's entry is reported the same way, so existence never leaks.
+    """
+
+    def __init__(self, action_id: str):
+        super().__init__(f"Approval entry {action_id} not found")
+        self.action_id = action_id
+
+
 class ApprovalExpiredError(Exception):
     """A decision arrived after the approval's ``expiry_time`` (R11.4, N7).
 
@@ -410,7 +423,7 @@ class ApprovalQueueService:
         """
         entry = await self._get_entry(action_id)
         if tenant_id is not None and entry.get("tenant_id") != tenant_id:
-            raise ValueError(f"Approval entry {action_id} not found")
+            raise ApprovalNotFoundError(action_id)
 
         if entry.get("tool_name") == LOADING_PLAN_TOOL:
             # The loading path checks expiry itself, after its actor check and
@@ -1194,7 +1207,7 @@ class ApprovalQueueService:
         """
         entry = await self._get_entry(action_id)
         if tenant_id is not None and entry.get("tenant_id") != tenant_id:
-            raise ValueError(f"Approval entry {action_id} not found")
+            raise ApprovalNotFoundError(action_id)
 
         loading = entry.get("tool_name") == LOADING_PLAN_TOOL
         # N7: a rejection after expiry_time expires the entry instead. A
@@ -1522,7 +1535,7 @@ class ApprovalQueueService:
         """
         entry = await self._es.get_document(self.INDEX, action_id)
         if entry is None:
-            raise ValueError(f"Approval entry {action_id} not found")
+            raise ApprovalNotFoundError(action_id)
         return entry
 
     async def _update_with_concurrency(

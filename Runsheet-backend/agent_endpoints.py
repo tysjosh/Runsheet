@@ -30,6 +30,7 @@ from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from Agents.approval_queue_service import (
     ApprovalExpiredError,
     ApprovalForbiddenError,
+    ApprovalNotFoundError,
     LoadingPlanExecutionError,
 )
 
@@ -293,6 +294,8 @@ async def approve_action(
             message="A signed-in user is required to approve a loading plan",
             status_code=403,
         )
+    except ApprovalNotFoundError:
+        raise resource_not_found(message="Approval not found", details={"action_id": action_id})
     except ValueError as e:
         raise validation_error(message=str(e))
     except RuntimeError as e:
@@ -332,6 +335,8 @@ async def reject_action(
         return result
     except ApprovalExpiredError as exc:
         raise _approval_expired(exc)
+    except ApprovalNotFoundError:
+        raise resource_not_found(message="Approval not found", details={"action_id": action_id})
     except ValueError as e:
         raise validation_error(message=str(e))
     except RuntimeError as e:
