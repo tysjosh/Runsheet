@@ -51,8 +51,8 @@ CALL_SITES: Dict[Tuple[str, str], Type] = {
     ("driver/services/message_service.py", "self._scheduling_ws_manager"): SchedulingWebSocketManager,
     ("driver/services/order_transition_service.py", "self._scheduling_ws_manager"): SchedulingWebSocketManager,
     ("driver/services/pod_service.py", "self._scheduling_ws_manager"): SchedulingWebSocketManager,
-    # Fleet socket (inventory alerts)
-    ("inventory/service.py", "self._ws_manager"): ConnectionManager,
+    # inventory/service.py sends alerts with broadcast_to_tenant; a plain
+    # .broadcast( there would reach every tenant and fails registration.
     # Each manager calling its own broadcast
     ("websocket/connection_manager.py", "self"): ConnectionManager,
     ("fuel/services/fuel_planning_ws_manager.py", "self"): FuelPlanningWSManager,

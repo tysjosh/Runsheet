@@ -36,6 +36,12 @@ VALID_SUBSCRIPTIONS: Set[str] = {
 
 HEARTBEAT_INTERVAL_SECONDS = 30
 
+#: Order fields that never go over this socket. The delivery OTP is the
+#: customer's proof-of-delivery code: REST and the driver API strip it
+#: (R5.26), and every dispatcher socket in the tenant receives these events.
+#: Same keys ``PODSubmissionService`` reads the OTP from.
+NEVER_BROADCAST_FIELDS = frozenset({"pod_otp", "delivery_otp", "otp_code", "expected_otp"})
+
 
 class OrdersWSManager(BaseWSManager):
     """
@@ -242,6 +248,7 @@ class OrdersWSManager(BaseWSManager):
                 "OrdersWSManager broadcasts require tenant_id in the payload"
             )
 
+        data = {k: v for k, v in data.items() if k not in NEVER_BROADCAST_FIELDS}
         message = {
             "type": event_type,
             "data": data,

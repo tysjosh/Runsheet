@@ -566,7 +566,9 @@ class InventoryService:
         }
 
         try:
-            await self._ws_manager.broadcast(message)
+            # Tenant-scoped: the fleet socket is shared by every tenant, and a
+            # plain broadcast() would push this item to all of them.
+            await self._ws_manager.broadcast_to_tenant(tenant_id, message)
             logger.info(
                 "Broadcast inventory alert: item=%s status=%s",
                 item_id, new_status,
