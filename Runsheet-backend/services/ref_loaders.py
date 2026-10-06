@@ -38,9 +38,7 @@ EntityLoader = Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
 
 # Canonical ES indices the loaders read from.
 CUSTOMERS_INDEX = "customers_current"
-# The PG document-store index real trucks live in. There is no ``assets``
-# alias in the document store, so reading "assets" found nothing (C3).
-ASSETS_INDEX = "trucks"
+ASSETS_INDEX = "trucks"  # where trucks live; no "assets" alias exists (C3)
 DRIVERS_INDEX = "drivers_current"
 # Commerce billing projections (cross-module-entity-linkage Phase G, Req 12).
 INVOICES_INDEX = "invoices_current"
