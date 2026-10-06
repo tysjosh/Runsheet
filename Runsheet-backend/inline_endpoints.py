@@ -14,8 +14,9 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
     internal_error,
@@ -335,14 +336,44 @@ async def upload_sheets_temporal(
 # Location endpoints
 # ---------------------------------------------------------------------------
 
+def _invalid_location_payload(details: Optional[dict] = None) -> AppException:
+    return AppException(
+        error_code=ErrorCode.VALIDATION_ERROR,
+        message="Invalid location payload",
+        status_code=422,
+        details=details,
+    )
+
+
+async def _parse_location_body(request: Request, model):
+    """Parse the JSON body into ``model``; any bad input is a 422.
+
+    A non-JSON body, a non-object body, or a pydantic validation failure
+    (missing fields, out-of-range coordinates, an empty batch) raises a
+    ``VALIDATION_ERROR`` instead of escaping as a 500. Field errors are
+    reported without echoing the submitted input.
+    """
+    try:
+        body = await request.json()
+    except ValueError:  # json.JSONDecodeError / UnicodeDecodeError
+        raise _invalid_location_payload()
+    if not isinstance(body, dict):
+        raise _invalid_location_payload()
+    try:
+        return model(**body)
+    except ValidationError as exc:
+        raise _invalid_location_payload(
+            {"errors": exc.errors(include_url=False, include_input=False, include_context=False)}
+        )
+
+
 @router.post("/api/locations/webhook")
 async def location_webhook(
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
     from ingestion.service import LocationUpdate
-    body = await request.json()
-    update = LocationUpdate(**body)
+    update = await _parse_location_body(request, LocationUpdate)
     # Stamp the authenticated tenant on the update so the ingestion
     # service writes tenant-scoped docs to both ``trucks`` and
     # ``locations``, and verify the referenced truck belongs to the
@@ -365,8 +396,7 @@ async def batch_location_updates(
     tenant: TenantContext = Depends(get_tenant_context),
 ):
     from ingestion.service import BatchLocationUpdate
-    body = await request.json()
-    batch = BatchLocationUpdate(**body)
+    batch = await _parse_location_body(request, BatchLocationUpdate)
     # Stamp the authenticated tenant on every update so the ingestion
     # service writes tenant-scoped docs and per-truck ownership checks
     # run against the correct tenant.
