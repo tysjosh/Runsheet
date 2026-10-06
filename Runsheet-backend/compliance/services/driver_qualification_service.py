@@ -154,8 +154,30 @@ class DQFDashboard(BaseModel):
     expiring_within_30_days: int = 0
     expiring_within_7_days: int = 0
     drug_test_overdue: int = 0
+    #: Drivers with a qualification expiring within 60 days and none past due
+    #: (the 60-day window; an expired driver is in ``expired_drivers``). C10.
+    expiring_drivers: int = 0
     drivers: List[DriverDashboardEntry] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=utcnow)
+
+
+def _effective_status(
+    status: str,
+    cdl_expiry: Optional[date],
+    medical_expiry: Optional[date],
+    today: date,
+) -> str:
+    """Return ``expired`` for an active driver whose CDL or medical card is past due.
+
+    Any other status (``suspended``, ``expired``) is returned unchanged, so a
+    suspension is never overwritten. Expiring today is still valid (C10, D4).
+    """
+    if status != "active":
+        return status
+    for expiry in (cdl_expiry, medical_expiry):
+        if expiry is not None and expiry < today:
+            return "expired"
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -205,17 +227,18 @@ class DriverQualificationService:
         """Create a new Driver record in the drivers index.
 
         Validates the input via the Driver Pydantic model, assigns a
-        server-generated ``driver_id``, and persists to ES.
+        server-generated ``driver_id``, and persists to ES. An ``active``
+        driver whose CDL or medical card is already past due is stored as
+        ``expired`` (C10).
 
         Validates: Requirement 5.1
         """
-        # C10: a driver whose CDL or medical card has already expired is
-        # stored ``expired`` rather than ``active``. An explicit
-        # ``suspended`` is left alone.
-        status = self._status_for_expiry(
-            status, cdl_expiry_date, medical_card_expiry_date
+        status = _effective_status(
+            status,
+            self._parse_date(cdl_expiry_date),
+            self._parse_date(medical_card_expiry_date),
+            date.today(),
         )
-
         # Validate via Pydantic model (raises ValueError on invalid input)
         driver = Driver(
             tenant_id=tenant_id,
@@ -412,7 +435,8 @@ class DriverQualificationService:
 
         Only non-sentinel fields are applied. Uses the sentinel pattern
         (``...``) to distinguish "not provided" from "set to None" for
-        optional date fields.
+        optional date fields. If the merged record is ``active`` with a
+        past-due CDL or medical card, ``expired`` is stored (C10).
 
         Validates: Requirement 5.1, Constraint C3
         """
@@ -512,21 +536,22 @@ class DriverQualificationService:
         if not partial:
             return existing
 
-        # C10: re-derive status from the effective expiry dates so an
-        # update can't leave (or put) an already-expired driver ``active``.
-        effective_status = partial.get("status", existing.get("status", "active"))
-        derived_status = self._status_for_expiry(
-            effective_status,
+        # An update that leaves an active driver with a past-due CDL or
+        # medical card (moved date, or status set back to active) stores
+        # ``expired`` (C10). Evaluated on the merged record.
+        merged_status = partial.get("status", existing.get("status", "active"))
+        effective = _effective_status(
+            merged_status,
             self._parse_date(partial.get("cdl_expiry_date", existing.get("cdl_expiry_date"))),
             self._parse_date(
                 partial.get(
-                    "medical_card_expiry_date",
-                    existing.get("medical_card_expiry_date"),
+                    "medical_card_expiry_date", existing.get("medical_card_expiry_date")
                 )
             ),
+            date.today(),
         )
-        if derived_status != effective_status:
-            partial["status"] = derived_status
+        if effective != merged_status:
+            partial["status"] = effective
 
         partial["updated_at"] = utcnow().isoformat()
 
@@ -807,21 +832,6 @@ class DriverQualificationService:
             except (ValueError, TypeError):
                 return None
         return None
-
-    @classmethod
-    def _status_for_expiry(
-        cls, status: str, cdl_expiry: Any, medical_expiry: Any
-    ) -> str:
-        """Return ``expired`` for an ``active`` driver whose CDL or medical
-        card expiry date is already in the past; otherwise ``status``."""
-        if status != "active":
-            return status
-        today = date.today()
-        for value in (cdl_expiry, medical_expiry):
-            parsed = cls._parse_date(value)
-            if parsed is not None and parsed < today:
-                return "expired"
-        return status
 
     @staticmethod
     def _cdl_class_meets_minimum(driver_class: str, min_class: str) -> bool:
@@ -1174,6 +1184,12 @@ class DriverQualificationService:
         The expiry threshold counts only consider active drivers, since
         suspended/expired drivers are already flagged.
 
+        An ``active`` driver with any tracked qualification past due counts
+        once in ``expired_drivers`` (not in ``active_drivers``) and appears in
+        the list with status ``expired``. The expiring windows count only
+        ``0 <= days <= threshold``; ``expiring_drivers`` is the 60-day window
+        (C10, D4).
+
         Validates: Requirement 5.9
         """
         today = date.today()
@@ -1200,7 +1216,17 @@ class DriverQualificationService:
         for driver_doc in all_drivers:
             driver_id = driver_doc.get("driver_id", "")
             full_name = driver_doc.get("full_name", "")
-            status = driver_doc.get("status", "active")
+            stored_status = driver_doc.get("status", "active")
+            status = stored_status
+
+            # An active driver with any tracked qualification past due is
+            # reported as expired, once, and not as active (C10, D4).
+            if stored_status == "active" and any(
+                (expiry := self._parse_date(driver_doc.get(field_name))) is not None
+                and expiry < today
+                for field_name, _ in self._QUALIFICATION_FIELDS
+            ):
+                status = "expired"
 
             # Count by status
             if status == "active":
@@ -1213,8 +1239,10 @@ class DriverQualificationService:
             # Build qualification alerts for this driver
             qualifications: List[QualificationAlert] = []
 
-            # Only check expiry thresholds for active drivers
-            if status == "active":
+            # Only check expiry thresholds for drivers stored as active; one
+            # that is expired by date still gets its alert list, but isn't
+            # counted in the expiring windows.
+            if stored_status == "active":
                 # Check qualification expiry dates
                 for field_name, qualification_type in self._QUALIFICATION_FIELDS:
                     expiry_raw = driver_doc.get(field_name)
@@ -1255,18 +1283,15 @@ class DriverQualificationService:
                         status=qual_status,
                     ))
 
-                    # Track for aggregate counts (C10): an already-expired
-                    # qualification counts the driver as expired, never as
-                    # "expiring".
-                    if days_until_expiry < 0:
-                        expired_ids.add(driver_id)
-                        continue
-                    if days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
-                        expiring_60.add(driver_id)
-                    if days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
-                        expiring_30.add(driver_id)
-                    if days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
-                        expiring_7.add(driver_id)
+                    # Track for aggregate counts: only not-yet-expired
+                    # qualifications of drivers that aren't expired (D4).
+                    if status == "active" and days_until_expiry >= 0:
+                        if days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
+                            expiring_60.add(driver_id)
+                        if days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
+                            expiring_30.add(driver_id)
+                        if days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
+                            expiring_7.add(driver_id)
 
                 # Check drug test overdue (same logic as check_drug_test_overdue)
                 last_drug_test_raw = driver_doc.get("last_drug_test_date")
@@ -1333,6 +1358,7 @@ class DriverQualificationService:
             expiring_within_30_days=len(expiring_30),
             expiring_within_7_days=len(expiring_7),
             drug_test_overdue=drug_test_overdue_count,
+            expiring_drivers=len(expiring_60),
             drivers=driver_entries,
         )
 
