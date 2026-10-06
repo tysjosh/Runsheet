@@ -209,6 +209,73 @@ async def test_validate_skips_lookup_for_existing_tank_with_same_customer():
     assert result.valid_rows == 2
 
 
+TANK_HEADER = (
+    "source_system,external_tank_id,customer_tank_id,customer_id,customer_type,"
+    "fuel_type,fuel_product_code,capacity_gallons,current_level_gallons,"
+    "last_reading_at,location_lat,location_lon,zip_code,k_factor,use_case,status\n"
+)
+
+
+async def _validate_tank_rows(rows, tenant_id="tenant-a"):
+    service = _tank_service_with(_customer_resolver({}, register=False))
+    parsed = await service.parse_csv(
+        (TANK_HEADER + "".join(rows)).encode(),
+        "customer_tanks",
+        tenant_id=tenant_id,
+        source_name="tanks.csv",
+    )
+    return await service.validate(
+        parsed.session_id, parsed.suggested_mapping, tenant_id=tenant_id
+    )
+
+
+def _tank_row(fuel_type="diesel", product="DIESEL_2", capacity=1000, level=275):
+    return (
+        f"sample_erp,T-1,tank-1,CUST-1,commercial,{fuel_type},{product},"
+        f"{capacity},{level},2026-07-29T12:00:00Z,39.7,-86.1,46201,,farm,active\n"
+    )
+
+
+async def test_validate_rejects_product_outside_the_tank_fuel_family():
+    result = await _validate_tank_rows([_tank_row("propane", "DIESEL_2")])
+
+    assert result.valid_rows == 0
+    assert len(result.errors) == 1
+    issue = result.errors[0]
+    assert issue.field_name == "fuel_product_code"
+    assert "DIESEL_2" in issue.description
+    assert "propane" in issue.description
+
+
+async def test_validate_accepts_product_inside_the_tank_fuel_family():
+    result = await _validate_tank_rows(
+        [_tank_row("diesel", "DIESEL_2"), _tank_row("farm_fuel", "OFF_ROAD_DIESEL")]
+    )
+
+    assert result.valid_rows == 2
+    assert result.errors == []
+
+
+async def test_validation_messages_are_field_level_without_placeholders_or_urls():
+    result = await _validate_tank_rows([_tank_row(capacity=100, level=500)])
+
+    assert result.valid_rows == 0
+    assert result.errors
+    for issue in result.errors:
+        assert "validation-tenant" not in issue.description
+        assert "errors.pydantic.dev" not in issue.description
+        assert "https://" not in issue.description
+        assert not issue.description.startswith("Value error,")
+
+
+async def test_unknown_field_value_names_the_field():
+    result = await _validate_tank_rows([_tank_row(fuel_type="jet_fuel")])
+
+    assert result.valid_rows == 0
+    assert [issue.field_name for issue in result.errors] == ["fuel_type"]
+    assert "https://" not in result.errors[0].description
+
+
 async def test_validate_without_customer_loader_stays_additive():
     resolver = _customer_resolver({}, register=False)
 

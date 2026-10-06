@@ -17,6 +17,8 @@ from typing import Any, Optional
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 
+from pydantic import ValidationError as PydanticValidationError
+
 from services.elasticsearch_service import ElasticsearchService
 from services.field_mapper import FieldMapper
 from services.import_models import (
@@ -44,6 +46,45 @@ NON_CANONICAL_ID_FIELDS = {
     "fuel_stations": "station_id",
     "jobs": "job_id",
 }
+
+
+#: Catalog categories (``fuel_product_catalog.FuelCategory``) a tank of each
+#: ``CustomerTank.fuel_type`` may hold. Checked on import only (B7); the model
+#: itself doesn't enforce it, so stored tanks still load.
+_TANK_FUEL_FAMILIES: dict[str, frozenset[str]] = {
+    "propane": frozenset({"propane"}),
+    "heating_oil": frozenset({"heating_oil", "kerosene"}),
+    "diesel": frozenset({"diesel", "off_road"}),
+    "gasoline": frozenset({"gasoline", "ethanol"}),
+    "farm_fuel": frozenset({"off_road", "diesel", "gasoline"}),
+    "generator_fuel": frozenset({"diesel", "off_road", "propane", "gasoline"}),
+}
+
+
+class _RowFieldError(ValueError):
+    """A row validation failure attributable to one field."""
+
+    def __init__(self, field_name: str, message: str):
+        super().__init__(message)
+        self.field_name = field_name
+
+
+def _check_fuel_family(fuel_type: Optional[str], product_code: Optional[str]) -> None:
+    """Refuse a tank whose catalog product isn't in its fuel family (B7)."""
+    if not fuel_type or not product_code:
+        return
+    allowed = _TANK_FUEL_FAMILIES.get(fuel_type)
+    if allowed is None:
+        return
+    from fuel.services.fuel_product_catalog import get_product
+
+    category = get_product(product_code).category
+    if category not in allowed:
+        raise _RowFieldError(
+            "fuel_product_code",
+            f"fuel_product_code '{product_code}' ({category}) does not match "
+            f"fuel_type '{fuel_type}'",
+        )
 
 
 class _ActiveSession:
@@ -697,7 +738,9 @@ class ImportService:
                 document = self._map_and_coerce_row(
                     row, field_mapping, session.data_type
                 )
-                self._validate_canonical_document(session.data_type, document)
+                self._validate_canonical_document(
+                    session.data_type, document, tenant_id=session.tenant_id
+                )
                 if session.data_type == "customer_tanks" and session.tenant_id:
                     issue = await self._customer_ref_issue(
                         session.tenant_id, row_index, document
@@ -714,6 +757,32 @@ class ImportService:
                     await self._tank_import_service.validate_reading(
                         session.tenant_id, document
                     )
+            except PydanticValidationError as exc:
+                # One readable issue per field. ``include_url=False`` and
+                # dropping ``input`` keep pydantic doc links and the
+                # placeholder ids out of the message (B7).
+                for err in exc.errors(include_url=False):
+                    field = ".".join(str(part) for part in err.get("loc") or ())
+                    message = str(err.get("msg") or "invalid value")
+                    if message.startswith("Value error, "):
+                        message = message[len("Value error, "):]
+                    result.errors.append(
+                        ValidationIssue(
+                            row_number=row_index,
+                            field_name=field or "record",
+                            description=message,
+                        )
+                    )
+                rows_with_errors.add(row_index)
+            except _RowFieldError as exc:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name=exc.field_name,
+                        description=str(exc),
+                    )
+                )
+                rows_with_errors.add(row_index)
             except Exception as exc:
                 result.errors.append(
                     ValidationIssue(
@@ -773,6 +842,7 @@ class ImportService:
     def _validate_canonical_document(
         data_type: str,
         document: dict[str, Any],
+        tenant_id: str = "",
     ) -> None:
         if data_type == "orders":
             from fuel.api.order_endpoints import BulkOrderRow
@@ -801,14 +871,15 @@ class ImportService:
         if data_type == "customer_tanks":
             from fuel.customer_tank_models import CustomerTank
 
-            CustomerTank.model_validate(
+            tank = CustomerTank.model_validate(
                 {
                     **document,
                     "customer_tank_id": document.get("customer_tank_id")
-                    or "validation-tank",
-                    "tenant_id": "validation-tenant",
+                    or "import-tank",
+                    "tenant_id": tenant_id or "import",
                 }
             )
+            _check_fuel_family(tank.fuel_type, tank.fuel_product_code)
             return
 
         if data_type == "tank_readings":
