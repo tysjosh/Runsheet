@@ -864,6 +864,16 @@ class RoutePlanningAgent(OverlayAgentBase):
         # Step 1: Collect buffered proposals
         proposals = list(self._proposal_buffer)
         self._proposal_buffer.clear()
+        # N-new-2: on the pipeline path each loading proposal arrives twice
+        # (SignalBus subscription + FuelDistributionPipeline injection).
+        deduped = self._dedupe_loading_proposals(proposals)
+        if len(deduped) != len(proposals):
+            logger.info(
+                "RoutePlanningAgent: dropped %d duplicate loading proposal(s) "
+                "(same tenant and plan_id)",
+                len(proposals) - len(deduped),
+            )
+        proposals = deduped
 
         # Structured skip reasons for this evaluation. Reset here (not at
         # the early return above) so ``last_route_skips`` from the previous
@@ -1427,6 +1437,31 @@ class RoutePlanningAgent(OverlayAgentBase):
             if action.get("tool_name") == "apply_loading_plan":
                 return action.get("parameters", {})
         return None
+
+    @staticmethod
+    def _dedupe_loading_proposals(
+        proposals: List[InterventionProposal],
+    ) -> List[InterventionProposal]:
+        """Keep the first proposal per ``(tenant_id, plan_id)`` (N-new-2).
+
+        Proposals without an extractable ``plan_id`` pass through unchanged;
+        the per-proposal skip logic still handles them.
+        """
+        seen: set = set()
+        kept: List[InterventionProposal] = []
+        for proposal in proposals:
+            plan_id = None
+            for action in getattr(proposal, "actions", None) or []:
+                if action.get("tool_name") == "apply_loading_plan":
+                    plan_id = (action.get("parameters") or {}).get("plan_id")
+                    break
+            if plan_id:
+                key = (getattr(proposal, "tenant_id", None), plan_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+            kept.append(proposal)
+        return kept
 
     # ------------------------------------------------------------------
     # Driver eligibility check (Task 6.9, Req 5.5, 5.6, 5.7)

@@ -65,6 +65,35 @@ APPROVAL_LEASE_SECONDS = 120
 #: Page size of the supersede guard's search (paged with ``search_after``).
 _OVERLAP_PAGE_SIZE = 500
 
+#: Route approvals queued once per (tenant, plan_id, truck_id) (N-new-2). Literal
+#: names (importing route_planning_agent here would pull the overlay stack in);
+#: a test pins them to APPLY_ROUTE_PLAN_TOOL / APPLY_ROUTE_PLAN_STORM_MODE_TOOL.
+ROUTE_APPROVAL_TOOLS = frozenset({"apply_route_plan", "apply_route_plan_storm_mode"})
+#: Fixed namespace for the deterministic route approval action ids.
+_ROUTE_APPROVAL_NS = uuid.UUID("5d0c7a3e-8f41-4b9a-9c2e-1f6b2d7e4a90")
+
+
+def _idempotent_action_id(request) -> Optional[str]:
+    """Deterministic action id for a route approval, else ``None`` (N-new-2).
+
+    Storm and non-storm share one key, so the first proposal for a plan and
+    truck wins. ``plan_id`` is minted per loading run, so a later run never
+    collides with an earlier entry.
+    """
+    if request.tool_name not in ROUTE_APPROVAL_TOOLS:
+        return None
+    params = request.parameters or {}
+    plan_id = params.get("plan_id")
+    truck_id = params.get("truck_id")
+    if not plan_id or not truck_id:
+        return None
+    return str(
+        uuid.uuid5(
+            _ROUTE_APPROVAL_NS, f"route|{request.tenant_id}|{plan_id}|{truck_id}"
+        )
+    )
+
+
 #: Executor outcome -> ``loading_plan_execution`` activity outcome (K9).
 _ACTIVITY_OUTCOMES = {
     "applied": "executed",
@@ -275,10 +304,16 @@ class ApprovalQueueService:
             risk_level: The classified RiskLevel for the action.
             expiry_minutes: Minutes until the approval expires (default 60).
 
+        Route approvals (:data:`ROUTE_APPROVAL_TOOLS`) are idempotent per
+        (tenant, plan_id, truck_id) (N-new-2): the id is deterministic and the
+        entry is written create-if-absent, so an existing entry in any status
+        is returned as is, never reset and never re-broadcast.
+
         Returns:
-            The generated action_id (UUID string).
+            The action_id (UUID string).
         """
-        action_id = str(uuid.uuid4())
+        idempotent_id = _idempotent_action_id(request)
+        action_id = idempotent_id or str(uuid.uuid4())
         now = datetime.now(timezone.utc)
         risk_value = risk_level.value if hasattr(risk_level, "value") else str(risk_level)
 
@@ -298,7 +333,21 @@ class ApprovalQueueService:
             "tenant_id": request.tenant_id,
         }
 
-        await self._es.index_document(self.INDEX, action_id, doc)
+        if idempotent_id is not None:
+            # Row-locked create-if-absent: the transform leaves an existing entry alone.
+            _doc, created = await self._es.atomic_update(
+                self.INDEX, action_id, lambda current: None, upsert=doc
+            )
+            if not created:
+                params = request.parameters or {}
+                logger.info(
+                    "route approval for plan %s truck %s already queued as %s (tenant=%s)",
+                    params.get("plan_id"), params.get("truck_id"), action_id,
+                    request.tenant_id,
+                )
+                return action_id
+        else:
+            await self._es.index_document(self.INDEX, action_id, doc)
 
         # Broadcast creation event via WebSocket
         await self._broadcast("approval_created", doc)
