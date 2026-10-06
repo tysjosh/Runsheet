@@ -1576,6 +1576,9 @@ containers = [
             # tables are empty in a brand-new environment.
             {"name": "RETIRED_ES_INDICES", "value": ""},
             {"name": "AWS_REGION", "value": region},
+            # Seeds the default notification rules/templates at startup
+            # (idempotent; bootstrap/notifications.py). Data finding B2.
+            {"name": "SEED_TENANT_ID", "value": "demo-tenant"},
         ] + (
             # The TenantCredentialsVault's envelope-encryption key (see
             # ensure_vault_kms). Without it every credential write raises
