@@ -14,6 +14,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Request
 
+from auth.authorization import require_driver_identity
 from config.settings import get_settings
 from driver.middleware.idempotency import (
     IdempotencyResult,
@@ -105,31 +106,44 @@ def _get_request_id(request: Request) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _check_driver_assignment(job_doc: dict, driver_id: str, job_id: str) -> None:
-    """Reject requests from a driver who is not the current assignee.
+def _authorize_driver(job_doc: dict, tenant: TenantContext, job_id: str) -> None:
+    """Reject a driver who is not this job's driver.
 
-    After a job is reassigned, the previous driver must receive a 403
-    "Assignment revoked" error on any subsequent action.
+    The caller has already passed :func:`require_driver_identity`, so
+    ``tenant.driver_id`` is set. The job's named driver is
+    ``assigned_driver_id`` (stamped on accept) or ``driver_id`` (the
+    dispatcher-set linkage). When one is named it must be the caller.
 
-    Validates: Requirement 11.2
+    With no named driver, ``asset_assigned`` decides: empty means an
+    unclaimed job anyone in the tenant's driver pool may accept; the
+    caller's ``user_id`` is a pre-migration document that stored the
+    SuperTokens id there. Anything else is a truck id that is not the
+    caller's claim, so it is refused.
+
+    After a reassignment the previous driver therefore gets 403
+    "Assignment revoked" on every action.
+
+    Validates: Requirement 11.2, 15.14 (B5)
 
     Args:
-        job_doc: The raw job document from Elasticsearch.
-        driver_id: The requesting driver's user_id.
-        job_id: The job identifier (for error messages).
+        job_doc: The raw job document.
+        tenant: The verified driver context.
+        job_id: The job identifier (the only value echoed in the error).
 
     Raises:
-        AppException: 403 if the driver is not the current assignee.
+        AppException: 403 "Assignment revoked" with details ``{job_id}``
+            only, never either driver's identity (R15.14).
     """
-    assigned_driver = job_doc.get("asset_assigned")
-    if assigned_driver and assigned_driver != driver_id:
+    named_driver = job_doc.get("assigned_driver_id") or job_doc.get("driver_id")
+    if named_driver:
+        allowed = named_driver == tenant.driver_id
+    else:
+        asset_assigned = job_doc.get("asset_assigned")
+        allowed = not asset_assigned or asset_assigned == tenant.user_id
+    if not allowed:
         raise forbidden(
             message="Assignment revoked",
-            details={
-                "job_id": job_id,
-                "requesting_driver": driver_id,
-                "assigned_driver": assigned_driver,
-            },
+            details={"job_id": job_id},
         )
 
 
@@ -230,19 +244,24 @@ async def ack_job(
     """
     Record driver acknowledgment of a job assignment.
 
-    The job must be in ``assigned`` status. Appends an ``ack`` event
-    to the job event timeline with timestamp, actor_id, and device_id.
+    The caller must hold the ``driver`` role and a ``driver_id``, and be
+    the job's driver (:func:`_authorize_driver`). The job must be in
+    ``assigned`` status. Appends an ``ack`` event to the job event
+    timeline with timestamp, actor_id, and device_id.
 
-    Validates: Requirements 5.1, 5.4, 5.5, 14.1, 14.3, 14.4
+    Validates: Requirements 5.1, 5.4, 5.5, 11.2, 14.1, 14.3, 14.4 (B5)
     """
+    # Driver gate runs before replay so a cached body is never served to a
+    # non-driver (B5).
+    require_driver_identity(tenant)
     if idempotency.is_replay:
         return idempotency.replay_response()
 
     svc = _get_job_service()
     job_doc = await svc._get_job_doc(job_id, tenant.tenant_id)
 
-    # Access control: reject requests from non-assigned driver (Req 11.2)
-    _check_driver_assignment(job_doc, tenant.user_id, job_id)
+    # Access control: only the job's driver may act (Req 11.2, B5)
+    _authorize_driver(job_doc, tenant, job_id)
 
     # Validate state
     _validate_job_state(job_doc, "ack", job_id)
@@ -306,29 +325,33 @@ async def accept_job(
     """
     Driver accepts a job assignment.
 
+    The caller must hold the ``driver`` role and a ``driver_id``, and be
+    the job's driver or the job must be unclaimed (:func:`_authorize_driver`).
     If the job is ``scheduled``, transitions to ``assigned``.
     If the job is already ``assigned``, confirms the assignment.
     Appends an ``accept`` event to the job event timeline.
 
-    Records both driver identifier namespaces on the job document: the
-    SuperTokens ``user_id`` in ``asset_assigned`` (unchanged, so every
-    existing reader keeps working) and the canonical ``drivers_current``
-    identifier in ``assigned_driver_id``. Historical documents are not
-    backfilled — an absent ``assigned_driver_id`` means a pre-migration
-    document (Requirements 1.13, 1.14).
+    Records the canonical ``drivers_current`` identifier in
+    ``assigned_driver_id``. ``asset_assigned`` is never written: it holds
+    the dispatcher's truck, which accepting must not overwrite (B5).
+    Historical documents are not backfilled — an absent
+    ``assigned_driver_id`` means a pre-migration document
+    (Requirements 1.13, 1.14).
 
-    Validates: Requirements 5.2, 5.4, 5.5, 14.1, 14.3, 14.4, 1.13, 1.14
+    Validates: Requirements 5.2, 5.4, 5.5, 11.2, 14.1, 14.3, 14.4, 1.13, 1.14 (B5)
     """
+    # Driver gate runs before replay so a cached body is never served to a
+    # non-driver (B5).
+    driver_id = require_driver_identity(tenant)
     if idempotency.is_replay:
         return idempotency.replay_response()
 
     svc = _get_job_service()
     job_doc = await svc._get_job_doc(job_id, tenant.tenant_id)
 
-    # Access control: reject requests from non-assigned driver (Req 11.2)
-    # Skip for accept on scheduled jobs (no driver assigned yet)
-    if job_doc.get("asset_assigned"):
-        _check_driver_assignment(job_doc, tenant.user_id, job_id)
+    # Access control: only the job's driver, or anyone on an unclaimed job
+    # (Req 11.2, B5)
+    _authorize_driver(job_doc, tenant, job_id)
 
     # Validate state
     _validate_job_state(job_doc, "accept", job_id)
@@ -343,15 +366,12 @@ async def accept_job(
         update_fields = {
             "status": JobStatus.ASSIGNED.value,
             "updated_at": now,
-            "asset_assigned": tenant.user_id,
         }
 
-    # Stamp the canonical driver identifier alongside the SuperTokens user id
-    # (Req 1.13). Written only when the session carries a driver_id and the
+    # Stamp the canonical driver identifier (Req 1.13). Written only when the
     # stored value is not already that driver, so a confirmation of an
     # already-linked assignment stays a read.
-    driver_id = (tenant.driver_id or "").strip()
-    if driver_id and (job_doc.get("assigned_driver_id") or "").strip() != driver_id:
+    if (job_doc.get("assigned_driver_id") or "").strip() != driver_id:
         update_fields["assigned_driver_id"] = driver_id
         update_fields.setdefault("updated_at", now)
 
@@ -422,20 +442,24 @@ async def reject_job(
     """
     Driver rejects a job assignment.
 
-    Requires a ``reason`` in the request body. If the job is ``assigned``,
-    reverts to ``scheduled``. Appends a ``reject`` event to the job
-    event timeline.
+    The caller must hold the ``driver`` role and a ``driver_id``, and be
+    the job's driver (:func:`_authorize_driver`). Requires a ``reason`` in
+    the request body. If the job is ``assigned``, reverts to ``scheduled``.
+    Appends a ``reject`` event to the job event timeline.
 
-    Validates: Requirements 5.3, 5.4, 5.5, 14.1, 14.3, 14.4
+    Validates: Requirements 5.3, 5.4, 5.5, 11.2, 14.1, 14.3, 14.4 (B5)
     """
+    # Driver gate runs before replay so a cached body is never served to a
+    # non-driver (B5).
+    require_driver_identity(tenant)
     if idempotency.is_replay:
         return idempotency.replay_response()
 
     svc = _get_job_service()
     job_doc = await svc._get_job_doc(job_id, tenant.tenant_id)
 
-    # Access control: reject requests from non-assigned driver (Req 11.2)
-    _check_driver_assignment(job_doc, tenant.user_id, job_id)
+    # Access control: only the job's driver may act (Req 11.2, B5)
+    _authorize_driver(job_doc, tenant, job_id)
 
     # Validate state
     _validate_job_state(job_doc, "reject", job_id)

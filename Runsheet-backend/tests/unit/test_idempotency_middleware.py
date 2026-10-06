@@ -49,7 +49,8 @@ _SETTINGS_PATCH = nullcontext()
 
 
 def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return auth_headers(tenant_id, sub="driver-1")
+    # The ack endpoint requires a driver identity (B5).
+    return auth_headers(tenant_id, sub="driver-1", roles=["driver"], driver_id="DRV-1")
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +360,40 @@ class TestIdempotencyEndpointIntegration:
 
         # The job service should NOT have been called (cached response)
         svc._append_event.assert_not_called()
+
+    def test_non_driver_cannot_replay_a_cached_response(self):
+        """The driver gate runs before replay, so a cached body isn't served to a non-driver (B5)."""
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="assigned")
+
+        cached_doc = {
+            "idempotency_key": "idem-key-1",
+            "tenant_id": TENANT_ID,
+            "response": {
+                "body": {"data": {"job_id": "JOB_1", "action": "ack"}, "request_id": "r"},
+                "status_code": 200,
+            },
+            "expires_at": (
+                datetime.now(timezone.utc) + timedelta(hours=12)
+            ).isoformat(),
+        }
+        es_mock = MagicMock()
+        es_mock.get_document = AsyncMock(return_value=cached_doc)
+        mw = IdempotencyMiddleware(es_service=es_mock)
+
+        app = self._make_app(svc, idempotency_mw=mw)
+        resp = TestClient(app).post(
+            "/api/scheduling/jobs/JOB_1/ack",
+            json={"device_id": "mobile-1"},
+            headers={
+                **auth_headers(TENANT_ID, sub="admin-1", roles=["admin"]),
+                "X-Idempotency-Key": "idem-key-1",
+            },
+        )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "INSUFFICIENT_ROLE"
+        assert "x-idempotent-replayed" not in resp.headers
 
     def test_expired_key_processes_normally(self):
         """Expired idempotency key processes as new request. Validates: Req 14.2"""
