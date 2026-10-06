@@ -173,18 +173,23 @@ export default function DriverQualificationsView() {
         stats={[
           {
             label: "Active Drivers",
-            value: (dashboard.total_active ?? 0).toString(),
+            value: (dashboard.active_drivers ?? 0).toString(),
             variant: "success",
           },
           {
             label: "Suspended",
-            value: (dashboard.total_suspended ?? 0).toString(),
+            value: (dashboard.suspended_drivers ?? 0).toString(),
             variant: "warning",
           },
           {
-            label: "Expiring Soon",
-            value: (dashboard.total_expiring_soon ?? 0).toString(),
+            label: "Expired",
+            value: (dashboard.expired_drivers ?? 0).toString(),
             variant: "error",
+          },
+          {
+            label: "Expiring ≤30 days",
+            value: (dashboard.expiring_within_30_days ?? 0).toString(),
+            variant: "warning",
           },
         ]}
         className="mb-6"
