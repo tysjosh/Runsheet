@@ -1170,6 +1170,13 @@ containers = [
             {"name": "COMMERCE_BACKBONE_ENABLED", "value": "true"},
             {"name": "COMMERCE_DUAL_WRITE_POSTGRES", "value": "true"},
             {"name": "COMMERCE_READ_FROM_POSTGRES", "value": "true"},
+            # Sub-flags (config/settings.py commerce_*_enabled). Without them the
+            # backbone is half-on: customers, price books, invoices and payments
+            # all 404, so none of order-to-cash is testable on staging (E1).
+            # Credit holds and dunning stay at their default (off).
+            {"name": "COMMERCE_CUSTOMERS_ENABLED", "value": "true"},
+            {"name": "COMMERCE_PRICING_ENGINE_ENABLED", "value": "true"},
+            {"name": "COMMERCE_INVOICING_ENABLED", "value": "true"},
             # Left OFF. Development sets five retired indices, and copying that
             # list here would suppress projection for aggregates whose relational
             # tables are empty in a brand-new environment.
