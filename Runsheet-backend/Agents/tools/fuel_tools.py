@@ -15,6 +15,7 @@ Validates:
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from strands import tool
@@ -53,6 +54,49 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
         )
 
 
+# The fuel station ``status`` values.
+FUEL_STATION_STATUSES = ("normal", "low", "critical", "empty")
+
+# Status words recognised in a free-text station query, mapped to the stored value.
+_STATION_STATUS_WORD_PATTERNS = (
+    (re.compile(r"\bcritical\b", re.IGNORECASE), "critical"),
+    (re.compile(r"\blow(\s+stock)?\b", re.IGNORECASE), "low"),
+    (re.compile(r"\bempty\b|\bout\s+of\s+stock\b", re.IGNORECASE), "empty"),
+    (re.compile(r"\bnormal\b", re.IGNORECASE), "normal"),
+)
+
+# Words that describe "fuel stations" rather than a field value. Left in the
+# free text they turn "critical fuel stations" into a phrase no station
+# contains (N-new-3, same failure as F5's fleet search).
+_GENERIC_STATION_WORDS = frozenset({
+    "fuel", "station", "stations", "stock", "level", "levels", "tank", "tanks",
+    "show", "me", "all", "list", "find", "the", "and", "or", "with", "which",
+    "are", "is", "what", "any", "in", "of",
+})
+
+
+def _split_station_query(query: str, *, fuel_type: str | None = None) -> tuple[list[str], str]:
+    """Return ``(status values found in query, remaining free text)``.
+
+    The explicit ``fuel_type`` token is stripped from the free text too, since
+    it is already applied as a filter.
+    """
+    text = query or ""
+    statuses: list[str] = []
+    for pattern, value in _STATION_STATUS_WORD_PATTERNS:
+        if pattern.search(text):
+            statuses.append(value)
+            text = pattern.sub(" ", text)
+    fuel_token = (fuel_type or "").strip().lower()
+    words = [
+        w for w in re.split(r"\s+", text)
+        if w
+        and w.strip(".,;:!?").lower() not in _GENERIC_STATION_WORDS
+        and not (fuel_token and w.strip(".,;:!?").lower() == fuel_token)
+    ]
+    return statuses, " ".join(words).strip(" .,;:!?")
+
+
 @tool
 async def search_fuel_stations(query: str, fuel_type: str = None, status: str = None,
                                 tenant_id: str | None = None) -> str:
@@ -61,9 +105,12 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
 
     Args:
         query: Natural language search query (e.g., "Industrial Area", "diesel stations",
-               "low stock stations near Nairobi")
+               "low stock stations near Nairobi"). Status words in the query
+               ("critical", "low", "low stock", "empty", "out of stock", "normal")
+               filter on the station's status.
         fuel_type: Optional fuel type filter. One of: "AGO", "PMS", "ATK", "LPG"
-        status: Optional stock status filter. One of: "normal", "low", "critical", "empty"
+        status: Optional stock status filter. One of: "normal", "low", "critical",
+                "empty". Overrides status words in the query.
         tenant_id: Tenant identifier for data scoping
 
     Returns:
@@ -81,16 +128,33 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
             + (f" (status={status})" if status else "")
         )
 
-        # Build bool query with tenant scoping
-        must_clauses = [
-            {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["name", "location_name", "station_id"],
-                    "type": "best_fields"
+        detected_statuses, free_text = _split_station_query(query, fuel_type=fuel_type)
+        if status:
+            status = status.strip().lower()
+            if status not in FUEL_STATION_STATUSES:
+                success = True
+                return (
+                    f"Unknown status '{status}'. "
+                    f"Valid statuses: {', '.join(FUEL_STATION_STATUSES)}."
+                )
+            statuses = [status]
+        else:
+            statuses = detected_statuses
+
+        # Free text left after removing status words, generic station nouns and
+        # the fuel_type token; nothing left means "every station matching the filters".
+        if free_text:
+            must_clauses = [
+                {
+                    "multi_match": {
+                        "query": free_text,
+                        "fields": ["name", "location_name", "station_id"],
+                        "type": "best_fields"
+                    }
                 }
-            }
-        ]
+            ]
+        else:
+            must_clauses = [{"match_all": {}}]
 
         filter_clauses = [
             {"term": {"tenant_id": tenant_id}}
@@ -98,8 +162,10 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
 
         if fuel_type:
             filter_clauses.append({"term": {"fuel_type": fuel_type}})
-        if status:
-            filter_clauses.append({"term": {"status": status}})
+        if len(statuses) == 1:
+            filter_clauses.append({"term": {"status": statuses[0]}})
+        elif statuses:
+            filter_clauses.append({"terms": {"status": statuses}})
 
         es_query = {
             "query": {
