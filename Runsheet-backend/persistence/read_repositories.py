@@ -262,12 +262,11 @@ class InvoiceReadRepository:
         ).scalar_one_or_none()
         return invoice_to_doc(row) if row is not None else None
 
-    async def list(self, session: AsyncSession, tenant_id: str, *,
-                   status: Optional[str] = None, customer_id: Optional[str] = None,
-                   account_id: Optional[str] = None, order_id: Optional[str] = None,
-                   cursor: Optional[str] = None,
-                   limit: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
-        limit = _clamp(limit)
+    @staticmethod
+    def _list_filters(*, status=None, customer_id=None, account_id=None,
+                      order_id=None, qbo_push_state=None, created_from=None,
+                      created_before=None, created_until=None) -> list:
+        """Filter list shared by :meth:`list` and :meth:`count`."""
         filters = []
         if status:
             filters.append(InvoiceORM.status == status)
@@ -277,6 +276,39 @@ class InvoiceReadRepository:
             filters.append(InvoiceORM.account_id == account_id)
         if order_id:
             filters.append(InvoiceORM.order_id == order_id)
+        if qbo_push_state:
+            filters.append(InvoiceORM.qbo_push_state == qbo_push_state)
+        if created_from is not None:
+            filters.append(InvoiceORM.created_at >= created_from)
+        if created_before is not None:
+            filters.append(InvoiceORM.created_at < created_before)
+        if created_until is not None:
+            filters.append(InvoiceORM.created_at <= created_until)
+        return filters
+
+    async def count(self, session: AsyncSession, tenant_id: str, **filters) -> int:
+        """Count invoices matching the :meth:`list` filters (data export)."""
+        where = [InvoiceORM.tenant_id == tenant_id, *self._list_filters(**filters)]
+        return int((
+            await session.execute(
+                select(func.count()).select_from(InvoiceORM).where(*where)
+            )
+        ).scalar_one())
+
+    async def list(self, session: AsyncSession, tenant_id: str, *,
+                   status: Optional[str] = None, customer_id: Optional[str] = None,
+                   account_id: Optional[str] = None, order_id: Optional[str] = None,
+                   qbo_push_state: Optional[str] = None,
+                   created_from=None, created_before=None, created_until=None,
+                   cursor: Optional[str] = None,
+                   limit: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
+        limit = _clamp(limit)
+        filters = self._list_filters(
+            status=status, customer_id=customer_id, account_id=account_id,
+            order_id=order_id, qbo_push_state=qbo_push_state,
+            created_from=created_from, created_before=created_before,
+            created_until=created_until,
+        )
         rows = await _keyset_page(
             session, InvoiceORM, tenant_id=tenant_id, filters=filters,
             sort_col=InvoiceORM.created_at, id_col=InvoiceORM.invoice_id,
@@ -657,8 +689,18 @@ class HybridReadRepository:
                      sort_field: str = "created_at",
                      sort_order: str = "desc",
                      page: int = 1,
-                     size: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
+                     size: int = _DEFAULT_PAGE_LIMIT,
+                     after: Optional[Tuple[Any, Any]] = None,
+                     with_total: bool = True) -> Dict[str, Any]:
         """Offset-paginated search over the document, matching the ES contract.
+
+        Keyset mode (data-export): ``after=(sort_value, pk)`` forces offset 0
+        and adds a predicate matching the ORDER BY ``(sort_field <dir>, pk
+        ASC)``, tie clause included, so rows sharing a sort value are neither
+        skipped nor repeated. ``with_total=False`` skips the count query
+        (``total`` is then ``None``). The result always carries ``raw_count``
+        (rows returned) and ``last_key`` (``(document[sort_field], pk)`` of the
+        last row, the pk read from the ORM column the predicate compares).
 
         Returns ``{"items": [...verbatim docs...], "total": int, "page": int,
         "size": int}``. ``term_filters`` are exact-match on document fields;
@@ -719,27 +761,52 @@ class HybridReadRepository:
             ]
             where.append(or_(*[c for c in clauses if c is not None]))
 
-        total = (
-            await session.execute(
-                select(func.count()).select_from(self.model).where(*where)
-            )
-        ).scalar_one()
+        total: Optional[int] = None
+        if with_total:
+            total = int((
+                await session.execute(
+                    select(func.count()).select_from(self.model).where(*where)
+                )
+            ).scalar_one())
+
+        pk_col = getattr(self.model, self.pk_attr)
+        offset = (page - 1) * size
+        if after is not None:
+            offset = 0
+            after_value, after_pk = after
+            sort_expr = self._doc_field(sort_field)
+            if sort_order == "desc":
+                where.append(or_(
+                    sort_expr < after_value,
+                    and_(sort_expr == after_value, pk_col > after_pk),
+                ))
+            else:
+                where.append(or_(
+                    sort_expr > after_value,
+                    and_(sort_expr == after_value, pk_col > after_pk),
+                ))
 
         order_expr = self._doc_field(sort_field)
         order_expr = order_expr.desc() if sort_order == "desc" else order_expr.asc()
         stmt = (
             select(self.model)
             .where(*where)
-            .order_by(order_expr, getattr(self.model, self.pk_attr).asc())
-            .offset((page - 1) * size)
+            .order_by(order_expr, pk_col.asc())
+            .offset(offset)
             .limit(size)
         )
         rows = list((await session.execute(stmt)).scalars().all())
+        last_key = (
+            ((rows[-1].document or {}).get(sort_field), getattr(rows[-1], self.pk_attr))
+            if rows else None
+        )
         return {
             "items": [dict(r.document or {}) for r in rows],
-            "total": int(total),
+            "total": total,
             "page": page,
             "size": size,
+            "raw_count": len(rows),
+            "last_key": last_key,
         }
 
     async def search_all_tenants(

@@ -16,6 +16,7 @@ import {
   type Column,
   EmptyState,
   EntityLink,
+  ExportCsvButton,
   PageHeader,
   Pagination,
   Table,
@@ -247,6 +248,12 @@ export default function OrdersPage({
     ],
   );
 
+  // The export takes the list's filters without the paging params.
+  const exportParams = useMemo(() => {
+    const { page: _page, size: _size, ...rest } = filters;
+    return rest;
+  }, [filters]);
+
   const fetchOrders = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -392,6 +399,12 @@ export default function OrdersPage({
         icon={<Package className="w-5 h-5" />}
         actions={
           <>
+            <ExportCsvButton
+              type="orders"
+              params={exportParams}
+              subject="orders"
+              allowedRoles={["admin", "dispatcher"]}
+            />
             <Button
               type="button"
               onClick={fetchOrders}

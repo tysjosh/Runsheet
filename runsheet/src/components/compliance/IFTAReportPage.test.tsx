@@ -8,7 +8,13 @@
  * lock in the null-safe rendering.
  */
 import "@testing-library/jest-dom";
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 jest.mock("../../services/complianceApi", () => {
   const actual = jest.requireActual("../../services/complianceApi");
@@ -28,8 +34,19 @@ jest.mock("../../services/api", () => ({
   },
 }));
 
+// Export CSV button: stub the download and the session roles.
+jest.mock("../../services/exportApi", () => ({
+  downloadCsvExport: jest.fn(),
+}));
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserRoles: jest.fn(),
+}));
+
 import type { IFTAReport } from "../../services/complianceApi";
 import { getIFTAReport } from "../../services/complianceApi";
+import { downloadCsvExport } from "../../services/exportApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import IFTAReportPage from "./IFTAReportPage";
 
 const mockGetReport = getIFTAReport as jest.MockedFunction<
@@ -48,8 +65,18 @@ function reportFixture(overrides: Partial<IFTAReport> = {}): IFTAReport {
   };
 }
 
+const mockDownload = downloadCsvExport as jest.MockedFunction<
+  typeof downloadCsvExport
+>;
+const mockRoles = getCurrentUserRoles as jest.MockedFunction<
+  typeof getCurrentUserRoles
+>;
+
 beforeEach(() => {
   mockGetReport.mockReset();
+  mockDownload.mockReset();
+  mockRoles.mockReset();
+  mockRoles.mockResolvedValue([]);
 });
 
 it("renders without crashing when fleet_mpg is null", async () => {
@@ -126,4 +153,39 @@ it("renders a truck row with null per-truck fleet_mpg without crashing", async (
   // Report-level MPG renders its real value; the null per-truck MPG shows "—".
   expect(screen.getByText("6.20")).toBeInTheDocument();
   expect(screen.getByText("1,200.0")).toBeInTheDocument();
+});
+
+describe("Export CSV", () => {
+  beforeEach(() => {
+    mockGetReport.mockResolvedValue({ data: reportFixture(), request_id: "r" });
+    mockDownload.mockResolvedValue({ filename: "ifta.csv" });
+  });
+
+  it("is hidden for a driver", async () => {
+    mockRoles.mockResolvedValue(["driver"]);
+    render(<IFTAReportPage />);
+    await waitFor(() => expect(mockRoles).toHaveBeenCalled());
+    await act(async () => {});
+    expect(
+      screen.queryByRole("button", { name: /Export CSV/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("exports the currently selected quarter for a dispatcher", async () => {
+    mockRoles.mockResolvedValue(["dispatcher"]);
+    render(<IFTAReportPage />);
+    const button = await screen.findByRole("button", {
+      name: /^Export CSV ?: IFTA report$/,
+    });
+    const select = screen.getByLabelText("Quarter:") as HTMLSelectElement;
+    const other = Array.from(select.options).find(
+      (o) => o.value !== select.value,
+    );
+    if (!other) throw new Error("expected more than one quarter option");
+    fireEvent.change(select, { target: { value: other.value } });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(mockDownload).toHaveBeenCalledWith("ifta", { quarter: other.value });
+  });
 });

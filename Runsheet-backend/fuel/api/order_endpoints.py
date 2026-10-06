@@ -57,6 +57,16 @@ from fuel.order_state_machine import (
 )
 from fuel.services.order_id_generator import mint_event_id
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from middleware.rate_limiter import limiter
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    KeysetPage,
+    KeysetSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 from services.ref_resolver import get_ref_resolver
 from services.time_utils import utcnow
 
@@ -833,6 +843,114 @@ async def list_orders(
     return OrderListResponse(
         items=items, total=result["total"],
         page=result["page"], size=result["size"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/orders/export (data-export §3.2)
+# ---------------------------------------------------------------------------
+
+#: Export pages only on an always-populated, immutable key (DD-4).
+_ORDER_EXPORT_SORTS = frozenset({None, "created_at", "created_at:asc", "created_at:desc"})
+
+
+def _delivery(row: Dict[str, Any], key: str) -> Any:
+    result = row.get("delivery_result") or {}
+    return result.get(key)
+
+
+_ORDER_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "order_id", "created_at", "status", "customer_id", "customer_name",
+        "ship_to_address", "customer_tank_id", "product_code",
+        "gallons_requested", "fill_to_full", "call_type", "intake_channel",
+        "delivery_window_start", "delivery_window_end", "assigned_driver_id",
+        "assigned_asset_id", "po_number",
+    )
+] + [
+    ExportColumn("delivered_at", lambda r: _delivery(r, "delivered_at")),
+    ExportColumn("delivered_gallons", lambda r: _delivery(r, "actual_gallons")),
+] + [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in ("total_cents", "hold_reason", "refusal_reason_code", "updated_at")
+]
+
+
+def _orders_export_fetch(repo: Any, tenant_id: str, filters: Dict[str, Any]):
+    """KeysetFetch over ``FuelOrderRepository.search`` in keyset mode.
+
+    ``raw_count`` / ``last_key`` come from the repository's raw store result,
+    never ``len(orders)``, so a document dropped by validation never ends
+    paging early.
+    """
+    async def fetch(after, page_size, with_total):
+        result = await repo.search(
+            tenant_id=tenant_id,
+            status=filters.get("status"),
+            customer_id=filters.get("customer_id"),
+            driver_id=filters.get("driver_id"),
+            call_type=filters.get("call_type"),
+            product_code=filters.get("product_code"),
+            start_date=filters.get("start_date"),
+            end_date=filters.get("end_date"),
+            intake_channel=filters.get("intake_channel"),
+            q=filters.get("q"),
+            size=page_size,
+            sort=filters.get("sort"),
+            keyset=True,
+            after=after,
+            with_total=with_total,
+        )
+        return KeysetPage(
+            rows=[o.model_dump(mode="json") for o in result["orders"]],
+            raw_count=result["raw_count"],
+            total=result.get("total"),
+            last_key=result["last_key"],
+        )
+    return fetch
+
+
+@router.get("/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_orders(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", "dispatcher", base=get_tenant_context)
+    ),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    customer_id: Optional[str] = Query(default=None),
+    driver_id: Optional[str] = Query(default=None),
+    call_type: Optional[str] = Query(default=None),
+    product_code: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    intake_channel: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    sort: Optional[str] = Query(default=None),
+):
+    """CSV of the tenant's orders matching the list filters (admin, dispatcher)."""
+    _validate_list_params(sort=sort, start_date=start_date, end_date=end_date)
+    if sort not in _ORDER_EXPORT_SORTS:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Export supports sort=created_at[:asc|:desc] only",
+            status_code=422,
+            details={"field": "sort", "reason": "not_supported_for_export"},
+        )
+    filters = {
+        "status": status_filter, "customer_id": customer_id,
+        "driver_id": driver_id, "call_type": call_type,
+        "product_code": product_code, "start_date": start_date,
+        "end_date": end_date, "intake_channel": intake_channel,
+        "q": q, "sort": sort,
+    }
+    source = KeysetSource(
+        _orders_export_fetch(_get_repository(), tenant.tenant_id, filters)
+    )
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="orders",
+        columns=_ORDER_EXPORT_COLUMNS, source=source, filters=filters,
     )
 
 

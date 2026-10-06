@@ -38,9 +38,20 @@ jest.mock("../../hooks/useOrdersWebSocket", () => ({
   })),
 }));
 
+// Export CSV button: stub the download and the session roles.
+jest.mock("../../services/exportApi", () => ({
+  downloadCsvExport: jest.fn(),
+}));
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserRoles: jest.fn(async () => []),
+}));
+
 import { useOrdersWebSocket } from "../../hooks/useOrdersWebSocket";
+import { downloadCsvExport } from "../../services/exportApi";
 import type { FuelOrder, OrderListResponse } from "../../services/ordersApi";
 import { listOrders } from "../../services/ordersApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import OrdersPage from "./OrdersPage";
 
 const mockListOrders = listOrders as jest.MockedFunction<typeof listOrders>;
@@ -359,5 +370,51 @@ describe("OrdersPage — WebSocket updates", () => {
     });
 
     expect(await screen.findByText("dispatched")).toBeInTheDocument();
+  });
+});
+
+describe("OrdersPage — Export CSV", () => {
+  const mockDownload = downloadCsvExport as jest.MockedFunction<
+    typeof downloadCsvExport
+  >;
+  const mockRoles = getCurrentUserRoles as jest.MockedFunction<
+    typeof getCurrentUserRoles
+  >;
+
+  beforeEach(() => {
+    mockDownload.mockReset();
+    mockDownload.mockResolvedValue({ filename: "orders.csv" });
+    mockListOrders.mockResolvedValue(paginatedResponse([orderFixture()]));
+  });
+
+  it("is hidden for a driver", async () => {
+    mockRoles.mockResolvedValue(["driver"]);
+    render(<OrdersPage tenantId="tenant-a" />);
+    await waitFor(() => expect(mockRoles).toHaveBeenCalled());
+    await act(async () => {});
+    expect(
+      screen.queryByRole("button", { name: /Export CSV/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("exports the current filters without page/size", async () => {
+    mockRoles.mockResolvedValue(["dispatcher"]);
+    render(<OrdersPage tenantId="tenant-a" />);
+    const button = await screen.findByRole("button", {
+      name: /^Export CSV ?: orders$/,
+    });
+    fireEvent.change(screen.getByLabelText(/filter by status/i), {
+      target: { value: "delivered" },
+    });
+    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(mockDownload).toHaveBeenCalledTimes(1);
+    const [type, params] = mockDownload.mock.calls[0];
+    expect(type).toBe("orders");
+    expect(params).toEqual(expect.objectContaining({ status: "delivered" }));
+    expect(params).not.toHaveProperty("page");
+    expect(params).not.toHaveProperty("size");
   });
 });

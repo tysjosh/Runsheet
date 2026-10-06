@@ -2,7 +2,13 @@
 
 import type React from "react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, EntityLink, PageHeader, Table } from "@/components/ui";
+import {
+  type Column,
+  EntityLink,
+  ExportCsvButton,
+  PageHeader,
+  Table,
+} from "@/components/ui";
 import {
   type CreateMileageAdjustmentPayload,
   createMileageAdjustment,
@@ -312,6 +318,14 @@ export default function IFTAReportPage() {
         title="IFTA Quarterly Report"
         subtitle="View per-truck mileage by jurisdiction, fleet MPG, and manage manual mileage adjustments for IFTA filing.
         "
+        actions={
+          <ExportCsvButton
+            type="ifta"
+            params={{ quarter }}
+            subject="IFTA report"
+            allowedRoles={["admin", "dispatcher"]}
+          />
+        }
       />
 
       {/* Quarter selector */}

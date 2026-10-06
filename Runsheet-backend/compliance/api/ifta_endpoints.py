@@ -43,7 +43,16 @@ from pydantic import BaseModel, ConfigDict, Field
 from compliance.api._authz import compliance_ops_dependency
 from compliance.services.ifta_reporter import IFTAReporter
 from errors.exceptions import AppException
+from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    StaticSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +219,93 @@ async def get_ifta_report(
         "data": report.model_dump(mode="json"),
         "request_id": _get_request_id(request),
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/compliance/ifta/report/export?quarter=... (data-export §3.1)
+# ---------------------------------------------------------------------------
+
+_IFTA_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "quarter", "truck_id", "jurisdiction", "total_miles", "taxable_miles",
+        "tax_paid_gallons", "net_taxable_gallons", "tax_rate", "tax_due",
+        "ifta_data_incomplete", "incomplete_reason",
+    )
+]
+
+
+def _ifta_export_rows(report: Any) -> List[Dict[str, Any]]:
+    """One row per truck × jurisdiction, then one per incomplete truck."""
+    rows: List[Dict[str, Any]] = []
+    for truck in report.trucks:
+        for entry in truck.jurisdictions:
+            rows.append({
+                "quarter": report.quarter,
+                "truck_id": truck.truck_id,
+                "jurisdiction": entry.jurisdiction,
+                "total_miles": entry.total_miles,
+                "taxable_miles": entry.taxable_miles,
+                "tax_paid_gallons": entry.tax_paid_gallons,
+                "net_taxable_gallons": entry.net_taxable_gallons,
+                "tax_rate": entry.tax_rate,
+                "tax_due": entry.tax_due,
+                "ifta_data_incomplete": False,
+                "incomplete_reason": None,
+            })
+    for flag in report.incomplete_trucks:
+        rows.append({
+            "quarter": report.quarter,
+            "truck_id": flag.truck_id,
+            "ifta_data_incomplete": True,
+            "incomplete_reason": flag.reason,
+        })
+    return rows
+
+
+@router.get("/report/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_ifta_report(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", "dispatcher", base=get_tenant_context)
+    ),
+    quarter: str = Query(
+        ...,
+        description="Calendar quarter to export (e.g., '2026-Q1').",
+    ),
+):
+    """CSV of the quarterly IFTA report (admin, dispatcher)."""
+    _validate_quarter(quarter)
+    svc = _get_ifta_reporter()
+
+    try:
+        report = await svc.generate_quarterly_report(
+            tenant.tenant_id, quarter
+        )
+    except AppException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "ifta.report_export: unexpected error for tenant=%s quarter=%s: %s",
+            tenant.tenant_id,
+            quarter,
+            exc,
+        )
+        # Same code as the report endpoint, through the structured envelope
+        # (no new raw HTTPException call sites; see the ceiling test).
+        raise AppException(
+            "ifta.report_failed",
+            "Failed to generate IFTA quarterly report.",
+            status_code=500,
+        )
+
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="ifta",
+        columns=_IFTA_EXPORT_COLUMNS,
+        source=StaticSource(_ifta_export_rows(report)),
+        filters={"quarter": quarter},
+    )
 
 
 # ---------------------------------------------------------------------------

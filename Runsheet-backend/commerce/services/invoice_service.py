@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 from uuid import uuid4
 
@@ -64,6 +64,46 @@ _DEFAULT_DRAFT_GRACE_SECONDS = 300
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
+
+
+def _invoice_must_clauses(
+    status: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    account_id: Optional[str] = None,
+    order_id: Optional[str] = None,
+    qbo_push_state: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_before: Optional[datetime] = None,
+    created_until: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Document-store must-clauses shared by ``InvoiceService.list`` and ``count``.
+
+    Invoice ``created_at`` is written as ``utcnow().isoformat()`` (``+00:00``
+    suffix) and compared as text, so date bounds use the same form.
+    """
+    from services.date_range import to_doc_bound
+
+    must_clauses: List[Dict[str, Any]] = []
+    if status:
+        must_clauses.append({"term": {"status": status}})
+    if customer_id:
+        must_clauses.append({"term": {"customer_id": customer_id}})
+    if account_id:
+        must_clauses.append({"term": {"account_id": account_id}})
+    if order_id:
+        must_clauses.append({"term": {"order_id": order_id}})
+    if qbo_push_state:
+        must_clauses.append({"term": {"qbo_push_state": qbo_push_state}})
+    bounds: Dict[str, str] = {}
+    if created_from is not None:
+        bounds["gte"] = to_doc_bound(created_from, z_suffix=False)
+    if created_before is not None:
+        bounds["lt"] = to_doc_bound(created_before, z_suffix=False)
+    if created_until is not None:
+        bounds["lte"] = to_doc_bound(created_until, z_suffix=False)
+    if bounds:
+        must_clauses.append({"range": {"created_at": bounds}})
+    return must_clauses
 
 
 class InvoiceService:
@@ -1758,6 +1798,47 @@ class InvoiceService:
     # List
     # ------------------------------------------------------------------
 
+    async def count(
+        self,
+        *,
+        tenant_id: str,
+        status: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+        qbo_push_state: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        created_until: Optional[datetime] = None,
+    ) -> int:
+        """Count Invoices matching the :meth:`list` filters (data export)."""
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_count,
+        )
+        pg = await read_invoice_count(
+            tenant_id, status=status, customer_id=customer_id,
+            account_id=account_id, order_id=order_id,
+            qbo_push_state=qbo_push_state, created_from=created_from,
+            created_before=created_before, created_until=created_until,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return int(pg)
+        clauses = _invoice_must_clauses(
+            status, customer_id, account_id, order_id, qbo_push_state,
+            created_from, created_before, created_until,
+        )
+        base_query: Dict[str, Any] = {
+            "query": {"bool": {"must": clauses if clauses else [{"match_all": {}}]}},
+            "size": 1,
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+        response = await self._es.search_documents(
+            INVOICES_CURRENT_INDEX, query, size=1
+        )
+        total = response["hits"]["total"]
+        return int(total.get("value", 0) if isinstance(total, dict) else total or 0)
+
     async def list(
         self,
         *,
@@ -1766,6 +1847,10 @@ class InvoiceService:
         customer_id: Optional[str] = None,
         account_id: Optional[str] = None,
         order_id: Optional[str] = None,
+        qbo_push_state: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        created_until: Optional[datetime] = None,
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
     ) -> Dict[str, Any]:
@@ -1789,20 +1874,18 @@ class InvoiceService:
         )
         pg = await read_invoice_list(
             tenant_id, status=status, customer_id=customer_id,
-            account_id=account_id, order_id=order_id, cursor=cursor, limit=limit,
+            account_id=account_id, order_id=order_id,
+            qbo_push_state=qbo_push_state, created_from=created_from,
+            created_before=created_before, created_until=created_until,
+            cursor=cursor, limit=limit,
         )
         if pg is not _NOT_CUT_OVER:
             return pg
 
-        must_clauses: List[Dict[str, Any]] = []
-        if status:
-            must_clauses.append({"term": {"status": status}})
-        if customer_id:
-            must_clauses.append({"term": {"customer_id": customer_id}})
-        if account_id:
-            must_clauses.append({"term": {"account_id": account_id}})
-        if order_id:
-            must_clauses.append({"term": {"order_id": order_id}})
+        must_clauses = _invoice_must_clauses(
+            status, customer_id, account_id, order_id, qbo_push_state,
+            created_from, created_before, created_until,
+        )
 
         base_query: Dict[str, Any] = {
             "query": {

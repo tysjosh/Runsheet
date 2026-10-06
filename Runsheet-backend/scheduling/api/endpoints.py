@@ -32,6 +32,17 @@ from scheduling.services.delay_detection_service import DelayDetectionService
 from scheduling.services.job_service import JobService
 from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
 from services.ref_resolver import get_ref_resolver
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    KeysetPage,
+    KeysetSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -298,6 +309,92 @@ async def list_jobs(
         page=result["pagination"]["page"],
         page_size=result["pagination"]["size"],
         request_id=_get_request_id(request),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/scheduling/jobs/export (data-export §3.3)
+# ---------------------------------------------------------------------------
+
+#: Export pages only on always-populated, immutable keys (DD-4).
+_JOB_EXPORT_SORTS = frozenset({"scheduled_time", "created_at"})
+
+_JOB_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "job_id", "scheduled_time", "status", "job_type", "priority", "origin",
+        "destination", "asset_assigned", "driver_id", "order_id",
+        "customer_id", "estimated_arrival", "started_at", "completed_at",
+        "delayed", "delay_duration_minutes", "failure_reason", "notes",
+    )
+]
+
+
+def _jobs_export_fetch(svc: Any, tenant_id: str, filters: dict):
+    """KeysetFetch over ``JobService.list_jobs`` in keyset mode."""
+    async def fetch(after, page_size, with_total):
+        result = await svc.list_jobs(
+            tenant_id=tenant_id,
+            job_type=filters.get("job_type"),
+            status=filters.get("status"),
+            asset_assigned=filters.get("asset_assigned"),
+            origin=filters.get("origin"),
+            destination=filters.get("destination"),
+            start_date=filters.get("start_date"),
+            end_date=filters.get("end_date"),
+            size=page_size,
+            sort_by=filters.get("sort_by") or "scheduled_time",
+            sort_order=filters.get("sort_order") or "asc",
+            keyset=True,
+            after=after,
+            with_total=with_total,
+        )
+        return KeysetPage(
+            rows=result["data"],
+            raw_count=result["raw_count"],
+            total=result["pagination"]["total"],
+            last_key=result["last_key"],
+        )
+    return fetch
+
+
+@router.get("/jobs/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_jobs(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", "dispatcher", base=get_tenant_context)
+    ),
+    job_type: Optional[str] = Query(None, description="Filter by job type"),
+    status: Optional[str] = Query(None, description="Filter by job status"),
+    asset_assigned: Optional[str] = Query(None, description="Filter by assigned asset"),
+    origin: Optional[str] = Query(None, description="Filter by origin"),
+    destination: Optional[str] = Query(None, description="Filter by destination"),
+    start_date: Optional[str] = Query(None, description="Start of date range (ISO 8601)"),
+    end_date: Optional[str] = Query(None, description="End of date range (ISO 8601)"),
+    sort_by: str = Query("scheduled_time", description="scheduled_time or created_at"),
+    sort_order: str = Query("asc", description="Sort order: asc or desc"),
+):
+    """CSV dispatch sheet of jobs matching the list filters (admin, dispatcher)."""
+    if sort_by not in _JOB_EXPORT_SORTS:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Export supports sort_by=scheduled_time or created_at only",
+            status_code=422,
+            details={"field": "sort_by", "reason": "not_supported_for_export"},
+        )
+    filters = {
+        "job_type": job_type, "status": status,
+        "asset_assigned": asset_assigned, "origin": origin,
+        "destination": destination, "start_date": start_date,
+        "end_date": end_date, "sort_by": sort_by, "sort_order": sort_order,
+    }
+    source = KeysetSource(
+        _jobs_export_fetch(_get_job_service(), tenant.tenant_id, filters)
+    )
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="jobs",
+        columns=_JOB_EXPORT_COLUMNS, source=source, filters=filters,
     )
 
 

@@ -315,6 +315,17 @@ from services.pod_hash_chain import (
     canonicalize_pod,
     compute_pod_hash,
 )
+from services.date_range import DateRange, doc_range_clause, parse_date_range
+from middleware.rate_limiter import limiter
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    KeysetPage,
+    KeysetSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 from services.reconciliation_service import (
     ReconciliationRecord,
     ReconciliationService,
@@ -3937,6 +3948,76 @@ class ReconciliationListResponse(BaseModel):
     has_next: bool
 
 
+def _reconciliation_must_clauses(
+    tenant_id: str,
+    order_id: Optional[str],
+    plan_id: Optional[str],
+    pod_id: Optional[str],
+    date_range: Optional[DateRange] = None,
+) -> List[Dict[str, Any]]:
+    """Must-clauses shared by the reconciliation list and its CSV export."""
+    must_clauses: List[Dict[str, Any]] = [
+        {"term": {"tenant_id": tenant_id}}
+    ]
+    if order_id and order_id.strip():
+        must_clauses.append({"term": {"order_id": order_id.strip()}})
+    if plan_id and plan_id.strip():
+        must_clauses.append({"term": {"plan_id": plan_id.strip()}})
+    if pod_id and pod_id.strip():
+        must_clauses.append({"term": {"pod_id": pod_id.strip()}})
+    if date_range is not None:
+        # ``generated_at`` is stored by ``model_dump(mode="json")``, which
+        # writes a UTC datetime with a ``Z`` suffix; the store compares as
+        # text, so the bounds use the same form.
+        clause = doc_range_clause("generated_at", date_range, z_suffix=True)
+        if clause is not None:
+            must_clauses.append(clause)
+    return must_clauses
+
+
+def _validated_reconciliation_rows(
+    hits: List[Any], tenant_id: str
+) -> List[ReconciliationRecord]:
+    """Tenant re-check, persistence-field strip and validation drop."""
+    validated_rows: List[ReconciliationRecord] = []
+    for hit in hits:
+        source = hit.get("_source") if hasattr(hit, 'get') else None
+        if not source:
+            continue
+        # Defense-in-depth: drop any row whose tenant_id does not match
+        # the caller. The ES ``term`` clause should already exclude
+        # them but a mis-labelled document must never leak.
+        if source.get("tenant_id") != tenant_id:
+            logger.warning(
+                "fuel_ops.reconciliation: dropping row with mismatched "
+                "tenant_id %s (expected %s)",
+                source.get("tenant_id"),
+                tenant_id,
+            )
+            continue
+        # Strip persistence-only fields that are not part of the model.
+        # ``_id``/``_source`` wrapping is already consumed above; here
+        # we drop the ``mvp_reconciliation`` mapping's ``created_at`` /
+        # ``updated_at`` / ``payment_status`` surrogates so the model's
+        # ``extra="forbid"`` does not trip. They are not part of the
+        # ReconciliationRecord contract.
+        doc = {k: v for k, v in source.items() if k not in (
+            "created_at",
+            "updated_at",
+            "payment_status",
+        )}
+        try:
+            validated_rows.append(ReconciliationRecord(**doc))
+        except ValidationError as exc:
+            logger.warning(
+                "fuel_ops.reconciliation: dropping row that failed "
+                "model validation (reconciliation_id=%s): %s",
+                source.get("reconciliation_id"),
+                exc,
+            )
+    return validated_rows
+
+
 @mvp_router.get("/reconciliation", response_model=ReconciliationListResponse)
 async def list_reconciliation_records(
     request: Request,
@@ -3970,6 +4051,20 @@ async def list_reconciliation_records(
         ge=1,
         le=500,
         description="Page size (1–500). Defaults to 50.",
+    ),
+    start_date: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only records generated at or after this YYYY-MM-DD or ISO-8601 "
+            "datetime (UTC when no offset is given)."
+        ),
+    ),
+    end_date: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only records generated on or before this date (a YYYY-MM-DD "
+            "value includes the whole day) or ISO-8601 datetime."
+        ),
     ),
 ) -> Dict[str, Any]:
     """Return paginated :class:`ReconciliationRecord` rows for the tenant.
@@ -4008,17 +4103,12 @@ async def list_reconciliation_records(
     Validates: Requirements 4.4.4, 4.4.5.
     """
 
+    date_range = parse_date_range(start_date, end_date)
     es = _get_es()
 
-    must_clauses: List[Dict[str, Any]] = [
-        {"term": {"tenant_id": tenant.tenant_id}}
-    ]
-    if order_id and order_id.strip():
-        must_clauses.append({"term": {"order_id": order_id.strip()}})
-    if plan_id and plan_id.strip():
-        must_clauses.append({"term": {"plan_id": plan_id.strip()}})
-    if pod_id and pod_id.strip():
-        must_clauses.append({"term": {"pod_id": pod_id.strip()}})
+    must_clauses = _reconciliation_must_clauses(
+        tenant.tenant_id, order_id, plan_id, pod_id, date_range
+    )
 
     # When ``min_variance_pct`` is supplied we need to scan enough rows
     # to find ``page * size`` matches after the post-hoc filter. A
@@ -4061,42 +4151,7 @@ async def list_reconciliation_records(
         except (TypeError, ValueError):
             es_total = 0
 
-    validated_rows: List[ReconciliationRecord] = []
-    for hit in hits:
-        source = hit.get("_source") if hasattr(hit, 'get') else None
-        if not source:
-            continue
-        # Defense-in-depth: drop any row whose tenant_id does not match
-        # the caller. The ES ``term`` clause should already exclude
-        # them but a mis-labelled document must never leak.
-        if source.get("tenant_id") != tenant.tenant_id:
-            logger.warning(
-                "fuel_ops.reconciliation: dropping row with mismatched "
-                "tenant_id %s (expected %s)",
-                source.get("tenant_id"),
-                tenant.tenant_id,
-            )
-            continue
-        # Strip persistence-only fields that are not part of the model.
-        # ``_id``/``_source`` wrapping is already consumed above; here
-        # we drop the ``mvp_reconciliation`` mapping's ``created_at`` /
-        # ``updated_at`` / ``payment_status`` surrogates so the model's
-        # ``extra="forbid"`` does not trip. They are not part of the
-        # ReconciliationRecord contract.
-        doc = {k: v for k, v in source.items() if k not in (
-            "created_at",
-            "updated_at",
-            "payment_status",
-        )}
-        try:
-            validated_rows.append(ReconciliationRecord(**doc))
-        except ValidationError as exc:
-            logger.warning(
-                "fuel_ops.reconciliation: dropping row that failed "
-                "model validation (reconciliation_id=%s): %s",
-                source.get("reconciliation_id"),
-                exc,
-            )
+    validated_rows = _validated_reconciliation_rows(hits, tenant.tenant_id)
 
     # Apply the min_variance_pct filter after model validation so we can
     # reason about the three variance percentages as floats in a single
@@ -4186,6 +4241,119 @@ async def list_reconciliation_records(
     # math would disagree due to integer division rounding.
     response["has_next"] = has_next
     return response
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/reconciliation/export (data-export §3.4)
+# ---------------------------------------------------------------------------
+
+_RECONCILIATION_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "generated_at", "reconciliation_id", "order_id", "plan_id", "pod_id",
+        "customer_id", "assigned_asset_id", "assigned_driver_id",
+        "ordered_gallons", "loaded_gallons", "delivered_gallons",
+        "invoiced_gallons", "variance_load_vs_order_pct",
+        "variance_delivered_vs_loaded_pct",
+        "variance_invoiced_vs_delivered_pct", "invoice_id",
+        "canonical_invoice_id", "qbo_invoice_id", "alert_flags",
+    )
+]
+
+
+def _reconciliation_export_query(
+    tenant_id: str,
+    order_id: Optional[str],
+    plan_id: Optional[str],
+    pod_id: Optional[str],
+    min_variance_pct: Optional[float],
+    date_range: DateRange,
+) -> Dict[str, Any]:
+    """The list's query with ``min_variance_pct`` pushed down.
+
+    Equivalent to the list's post-hoc filter: the model constrains all three
+    variances to ``>= 0``, and a missing/``null`` invoiced variance fails the
+    numeric range (SQL NULL), just as the list skips ``None``.
+    """
+    bool_query: Dict[str, Any] = {
+        "must": _reconciliation_must_clauses(
+            tenant_id, order_id, plan_id, pod_id, date_range
+        )
+    }
+    if min_variance_pct is not None:
+        threshold = abs(float(min_variance_pct))
+        bool_query["should"] = [
+            {"range": {field: {"gte": threshold}}}
+            for field in (
+                "variance_load_vs_order_pct",
+                "variance_delivered_vs_loaded_pct",
+                "variance_invoiced_vs_delivered_pct",
+            )
+        ]
+        bool_query["minimum_should_match"] = 1
+    return {"query": {"bool": bool_query}}
+
+
+def _reconciliation_export_fetch(es: Any, tenant_id: str, base_query: Dict[str, Any]):
+    """KeysetFetch over ``mvp_reconciliation`` with a 2-key sort on every call."""
+    from services.keyset_pagination import raw_keyset_info
+
+    async def fetch(after, page_size, with_total):
+        query = dict(base_query)
+        query["sort"] = [
+            {"generated_at": {"order": "desc"}},
+            {"reconciliation_id": {"order": "asc"}},
+        ]
+        query["from"] = 0
+        query["size"] = page_size
+        if after is not None:
+            query["search_after"] = [after[0], after[1]]
+        resp = await es.search_documents(MVP_RECONCILIATION_INDEX, query, page_size)
+        raw_count, last_key = raw_keyset_info(resp, keyset=True)
+        hits_outer = resp.get("hits", {}) if hasattr(resp, "get") else {}
+        hits = hits_outer.get("hits", []) or []
+        total_block = hits_outer.get("total", {}) or {}
+        total = int(total_block.get("value", 0) or 0) if hasattr(total_block, "get") else int(total_block or 0)
+        rows = [
+            r.model_dump(mode="json")
+            for r in _validated_reconciliation_rows(hits, tenant_id)
+        ]
+        return KeysetPage(rows=rows, raw_count=raw_count, total=total, last_key=last_key)
+
+    return fetch
+
+
+@mvp_router.get("/reconciliation/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_reconciliation_records(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", "dispatcher", base=get_tenant_context)
+    ),
+    order_id: Optional[str] = Query(default=None),
+    plan_id: Optional[str] = Query(default=None),
+    pod_id: Optional[str] = Query(default=None),
+    min_variance_pct: Optional[float] = Query(default=None, ge=0.0),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+):
+    """CSV reconciliation register matching the list filters (admin, dispatcher)."""
+    date_range = parse_date_range(start_date, end_date)
+    base_query = _reconciliation_export_query(
+        tenant.tenant_id, order_id, plan_id, pod_id, min_variance_pct, date_range
+    )
+    source = KeysetSource(
+        _reconciliation_export_fetch(_get_es(), tenant.tenant_id, base_query)
+    )
+    filters = {
+        "order_id": order_id, "plan_id": plan_id, "pod_id": pod_id,
+        "min_variance_pct": min_variance_pct,
+        "start_date": start_date, "end_date": end_date,
+    }
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="reconciliation",
+        columns=_RECONCILIATION_EXPORT_COLUMNS, source=source, filters=filters,
+    )
 
 
 # ---------------------------------------------------------------------------

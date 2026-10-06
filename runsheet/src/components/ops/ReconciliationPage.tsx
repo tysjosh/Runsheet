@@ -50,6 +50,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type Column,
   EntityLink,
+  ExportCsvButton,
   Table,
   ToastContainer,
   useToasts,
@@ -1374,6 +1375,17 @@ export default function ReconciliationPage({
               invoiced gallons.
             </p>
           </div>
+          <ExportCsvButton
+            type="reconciliation"
+            params={{
+              order_id: filters.order_id,
+              plan_id: filters.plan_id,
+              pod_id: filters.pod_id,
+              min_variance_pct: filters.min_variance_pct,
+            }}
+            subject="reconciliation"
+            allowedRoles={["admin", "dispatcher"]}
+          />
         </div>
         <div className="mt-4">
           <FiltersRow

@@ -119,7 +119,12 @@ runsheet/.env.local
 # =============================================================================
 # Kiro
 # =============================================================================
-.kiro/
+# Everything under .kiro/ stays local, except the data-export spec, which is
+# committed with its implementation so reviewers can read the design it follows.
+.kiro/*
+!.kiro/specs/
+.kiro/specs/*
+!.kiro/specs/data-export/
 
 # =============================================================================
 # IDE / Editor

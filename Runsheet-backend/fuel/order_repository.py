@@ -790,6 +790,9 @@ class FuelOrderRepository:
         page: int = 1,
         size: int = DEFAULT_PAGE_SIZE,
         sort: Optional[str] = None,
+        keyset: bool = False,
+        after: Optional[tuple] = None,
+        with_total: bool = True,
     ) -> Dict[str, Any]:
         """Search orders with the full filter set from Req 2.5.1.
 
@@ -810,14 +813,24 @@ class FuelOrderRepository:
             page: 1-based page number.
             size: Page size.
             sort: Sort field and direction (e.g. "created_at:desc").
+            keyset: Data-export keyset mode. Sorts on ``(sort field,
+                order_id ASC)`` with offset 0 on every call, so ``last_key``
+                always has two values.
+            after: ``(sort_value, order_id)`` of the previous page's last raw
+                row. Requires ``keyset=True``.
+            with_total: ``False`` skips the count on the Postgres path.
 
         Returns:
             A dict with ``orders`` (list of FuelOrder), ``total`` (int),
-            ``page`` (int), ``size`` (int).
+            ``page`` (int), ``size`` (int), plus ``raw_count`` and
+            ``last_key`` computed from the store result before any row is
+            dropped.
 
         Cross-tenant results are silently dropped (empty list).
         """
         self._require_tenant(tenant_id)
+        if after is not None and not keyset:
+            raise ValueError("after requires keyset=True")
         if page < 1:
             page = 1
         if size <= 0:
@@ -857,7 +870,8 @@ class FuelOrderRepository:
                 "ship_to_address",
             ],
             sort_field=pg_sort_field, sort_order=pg_sort_order,
-            page=page, size=size,
+            page=1 if keyset else page, size=size,
+            **({"after": after, "with_total": with_total} if keyset else {}),
         )
         if pg is not _NOT_CUT_OVER:
             orders_pg: List[FuelOrder] = []
@@ -870,6 +884,8 @@ class FuelOrderRepository:
                 "total": pg["total"],
                 "page": pg["page"],
                 "size": pg["size"],
+                "raw_count": pg.get("raw_count", len(pg["items"])),
+                "last_key": pg.get("last_key"),
             }
 
         # Build filter clauses
@@ -926,7 +942,17 @@ class FuelOrderRepository:
         query["size"] = size
 
         # Sort
-        if sort:
+        if keyset:
+            # Same 2-key sort on every call (count probe and first page
+            # included), so every hit carries two sort values.
+            query["sort"] = [
+                {pg_sort_field: {"order": pg_sort_order}},
+                {"order_id": {"order": "asc"}},
+            ]
+            query["from"] = 0
+            if after is not None:
+                query["search_after"] = [after[0], after[1]]
+        elif sort:
             parts = sort.split(":")
             sort_field = parts[0]
             sort_order = parts[1] if len(parts) > 1 else "desc"
@@ -937,6 +963,8 @@ class FuelOrderRepository:
         resp = await self._es.search_documents(
             self._orders_index, query, size
         )
+        from services.keyset_pagination import raw_keyset_info
+        raw_count, last_key = raw_keyset_info(resp, keyset=keyset)
         sources = _extract_sources(resp)
         total = _extract_total(resp)
 
@@ -959,6 +987,8 @@ class FuelOrderRepository:
             "total": total,
             "page": page,
             "size": size,
+            "raw_count": raw_count,
+            "last_key": last_key,
         }
 
     # ------------------------------------------------------------------

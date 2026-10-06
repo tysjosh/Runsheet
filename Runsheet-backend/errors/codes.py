@@ -47,6 +47,8 @@ class ErrorCode(str, Enum):
     
     RATE_LIMITED = "RATE_LIMITED"
     """Too many requests (HTTP 429)"""
+    EXPORT_TOO_LARGE = "EXPORT_TOO_LARGE"
+    """A CSV export matches more rows than the export cap (HTTP 413)"""
     
     # External service errors (5xx)
     ELASTICSEARCH_UNAVAILABLE = "ELASTICSEARCH_UNAVAILABLE"
@@ -429,6 +431,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.EXPORT_TOO_LARGE: 413,
     ErrorCode.ELASTICSEARCH_UNAVAILABLE: 503,
     ErrorCode.AI_SERVICE_UNAVAILABLE: 503,
     ErrorCode.AI_RATE_LIMITED: 429,

@@ -661,6 +661,14 @@ async def read_invoice_list(tenant_id: str, **kwargs):
         return await InvoiceReadRepository().list(session, tenant_id, **kwargs)
 
 
+async def read_invoice_count(tenant_id: str, **kwargs):
+    """Count invoices matching the ``read_invoice_list`` filters (data export)."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import InvoiceReadRepository
+    async with session_scope() as session:
+        return await InvoiceReadRepository().count(session, tenant_id, **kwargs)
 async def read_payment_get(tenant_id: str, payment_id: str):
     if not read_from_postgres():
         return _NOT_CUT_OVER
@@ -1233,7 +1241,9 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
                              text_fields: list | None = None,
                              sort_field: str = "created_at",
                              sort_order: str = "desc",
-                             page: int = 1, size: int = 20):
+                             page: int = 1, size: int = 20,
+                             after: tuple | None = None,
+                             with_total: bool = True):
     """Offset-paginated search of a hybrid aggregate from Postgres.
 
     Returns the ES-equivalent ``{"items", "total", "page", "size"}`` envelope,
@@ -1261,7 +1271,7 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
             unlinked_fields=unlinked_fields,
             text_query=text_query, text_fields=text_fields,
             sort_field=sort_field, sort_order=sort_order,
-            page=page, size=size,
+            page=page, size=size, after=after, with_total=with_total,
         )
 
 

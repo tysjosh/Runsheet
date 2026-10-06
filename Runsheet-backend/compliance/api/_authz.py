@@ -42,3 +42,9 @@ COMPLIANCE_OPS_ROLES: tuple[str, ...] = ("admin", "dispatcher")
 #: rather than ``/api/compliance/*`` — it lives in this package but is a Fleet
 #: surface, and the ``fleet`` nav item carries the same two roles.
 compliance_ops_dependency = roles_dependency(*COMPLIANCE_OPS_ROLES)
+
+#: Admin-only records (data-export G3): tenant-wide HOS and DVIR lists carry
+#: every driver's hours and inspections, which a dispatcher does not need to
+#: browse in bulk. Used together with ``compliance_ops_dependency``.
+COMPLIANCE_ADMIN_ROLES: tuple[str, ...] = ("admin",)
+compliance_admin_dependency = roles_dependency(*COMPLIANCE_ADMIN_ROLES)

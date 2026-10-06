@@ -162,3 +162,26 @@ def next_cursor_from_hits(
     source = hits[-1].get("_source") or {}
     value = source.get(id_field)
     return str(value) if value is not None else None
+
+
+def raw_keyset_info(resp: Any, *, keyset: bool) -> tuple[int, Optional[tuple]]:
+    """``(raw_count, last_key)`` of a search response, before any row is dropped.
+
+    Data-export keyset paging stops on the raw hit count and resumes from the
+    last RAW hit's ``sort`` values, so a document dropped later (tenant
+    mismatch, validation failure) never ends paging early. In keyset mode the
+    sort is always two keys ``(field, id)``; any other length is a programming
+    error and fails loudly rather than producing a short file.
+    """
+    hits_outer = resp.get("hits") if resp and hasattr(resp, "get") else None
+    hits = (hits_outer.get("hits") if hits_outer else None) or []
+    raw_count = len(hits)
+    if not keyset or not hits:
+        return raw_count, None
+    sort_values = hits[-1].get("sort") if hasattr(hits[-1], "get") else None
+    last_key = tuple(sort_values or ())
+    if len(last_key) != 2:
+        raise RuntimeError(
+            f"keyset sort returned {len(last_key)} value(s), expected 2"
+        )
+    return raw_count, last_key

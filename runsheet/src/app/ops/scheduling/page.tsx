@@ -16,6 +16,7 @@ import JobFilters, {
   type JobFilterValues,
 } from "../../../components/ops/JobFilters";
 import JobSummaryBar from "../../../components/ops/JobSummaryBar";
+import { ExportCsvButton } from "../../../components/ui/ExportCsvButton";
 import { useSchedulingWebSocket } from "../../../hooks/useSchedulingWebSocket";
 import {
   type JobFilters as ApiJobFilters,
@@ -35,6 +36,18 @@ const INITIAL_FILTERS: JobFilterValues = {
   end_date: "",
   asset_assigned: "",
 };
+
+/** The list's filter mapping, shared by the job fetch and the CSV export. */
+function toApiJobFilters(filters: JobFilterValues): ApiJobFilters {
+  const apiFilters: ApiJobFilters = {};
+  if (filters.job_type) apiFilters.job_type = filters.job_type;
+  if (filters.status) apiFilters.status = filters.status;
+  if (filters.asset_assigned)
+    apiFilters.asset_assigned = filters.asset_assigned;
+  if (filters.start_date) apiFilters.start_date = filters.start_date;
+  if (filters.end_date) apiFilters.end_date = filters.end_date;
+  return apiFilters;
+}
 
 /**
  * Job Board page — scheduling dashboard.
@@ -56,15 +69,7 @@ export default function SchedulingJobBoardPage() {
     try {
       setLoading(true);
 
-      const apiFilters: ApiJobFilters = {};
-      if (filters.job_type) apiFilters.job_type = filters.job_type;
-      if (filters.status) apiFilters.status = filters.status;
-      if (filters.asset_assigned)
-        apiFilters.asset_assigned = filters.asset_assigned;
-      if (filters.start_date) apiFilters.start_date = filters.start_date;
-      if (filters.end_date) apiFilters.end_date = filters.end_date;
-
-      const res = await getJobs(apiFilters);
+      const res = await getJobs(toApiJobFilters(filters));
       setJobs(res.data);
     } catch (error) {
       console.error("Failed to load job data:", error);
@@ -205,6 +210,12 @@ export default function SchedulingJobBoardPage() {
                 <ChevronDown className="w-4 h-4" />
               )}
             </button>
+            <ExportCsvButton
+              type="jobs"
+              params={{ ...toApiJobFilters(filters) }}
+              subject="jobs"
+              allowedRoles={["admin", "dispatcher"]}
+            />
             <button
               onClick={() => setShowCreateModal(true)}
               className="flex items-center gap-2 px-4 py-2 text-sm text-white rounded-lg transition-colors bg-primary hover:bg-primary-hover"

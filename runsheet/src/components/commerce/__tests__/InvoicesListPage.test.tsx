@@ -5,15 +5,32 @@
  * CustomerPicker (backed by getCustomers) and filters invoices by customer.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 jest.mock("../../../services/commerceApi", () => ({
   getInvoices: jest.fn(),
   getCustomers: jest.fn(),
 }));
 
+// Export CSV button: stub the download and the session roles.
+jest.mock("../../../services/exportApi", () => ({
+  downloadCsvExport: jest.fn(),
+}));
+jest.mock("../../../utils/auth", () => ({
+  ...jest.requireActual("../../../utils/auth"),
+  getCurrentUserRoles: jest.fn(async () => []),
+}));
+
 import { ApiError } from "../../../services/api";
 import { getCustomers, getInvoices } from "../../../services/commerceApi";
+import { downloadCsvExport } from "../../../services/exportApi";
+import { getCurrentUserRoles } from "../../../utils/auth";
 import InvoicesListPage from "../InvoicesListPage";
 
 const mockGetInvoices = getInvoices as jest.MockedFunction<typeof getInvoices>;
@@ -101,5 +118,49 @@ describe("InvoicesListPage", () => {
     render(<InvoicesListPage />);
 
     expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+  });
+});
+
+describe("InvoicesListPage — Export CSV", () => {
+  const mockDownload = downloadCsvExport as jest.MockedFunction<
+    typeof downloadCsvExport
+  >;
+  const mockRoles = getCurrentUserRoles as jest.MockedFunction<
+    typeof getCurrentUserRoles
+  >;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetInvoices.mockResolvedValue(invoicesResponse() as any);
+    mockGetCustomers.mockResolvedValue(customersResponse() as any);
+    mockDownload.mockResolvedValue({ filename: "invoices.csv" });
+  });
+
+  it("is hidden for a dispatcher (invoice export is admin only)", async () => {
+    mockRoles.mockResolvedValue(["dispatcher"]);
+    render(<InvoicesListPage />);
+    await waitFor(() => expect(mockRoles).toHaveBeenCalled());
+    await act(async () => {});
+    expect(
+      screen.queryByRole("button", { name: /Export CSV/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("exports the current status filter for an admin", async () => {
+    mockRoles.mockResolvedValue(["admin"]);
+    render(<InvoicesListPage />);
+    const button = await screen.findByRole("button", {
+      name: /^Export CSV ?: invoices$/,
+    });
+    fireEvent.change(screen.getByLabelText("Status"), {
+      target: { value: "overdue" },
+    });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(mockDownload).toHaveBeenCalledWith("invoices", {
+      status: "overdue",
+      customer_id: "",
+    });
   });
 });

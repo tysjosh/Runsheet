@@ -48,6 +48,7 @@
 | GET | `/api/commerce/customers/{customer_id}` | — | session_required | — | — | dict |
 | PATCH | `/api/commerce/customers/{customer_id}` | — | session_required | — | — | dict |
 | GET | `/api/commerce/invoices` | — | session_required | — | — | dict |
+| GET | `/api/commerce/invoices/export` | — | session_required | — | — | — |
 | GET | `/api/commerce/invoices/{invoice_id}` | — | session_required | — | — | dict |
 | GET | `/api/commerce/invoices/{invoice_id}/events` | — | session_required | — | — | dict |
 | POST | `/api/commerce/invoices/{invoice_id}/finalize` | — | session_required | — | — | dict |
@@ -83,11 +84,14 @@
 | PUT | `/api/compliance/drivers/{driver_id}` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/exemptions` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/exemptions` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/hos-records` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/adjustments` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/ifta/adjustments` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/completeness` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/fleet-mpg` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/report` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/ifta/report/export` | — | session_required | — | — | — |
+| GET | `/api/compliance/inspections` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/kfactor/dashboard` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/kfactor/{tank_id}/approve` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/kfactor/{tank_id}/suggest` | — | session_required | — | — | Dict |
@@ -158,6 +162,7 @@
 | GET | `/api/fuel/mvp/priorities` | /api/fuel | session_required | — | — | Dict |
 | GET | `/api/fuel/mvp/priority-clusters` | /api/fuel | session_required | — | — | PriorityClustersResponse |
 | GET | `/api/fuel/mvp/reconciliation` | /api/fuel | session_required | — | — | ReconciliationListResponse |
+| GET | `/api/fuel/mvp/reconciliation/export` | /api/fuel | session_required | — | — | — |
 | GET | `/api/fuel/mvp/replans/{event_id}/diff` | /api/fuel | session_required | — | — | ReplanDiffResponse |
 | POST | `/api/fuel/mvp/routes/{route_id}/emergency-stop` | /api/fuel | session_required | — | — | EmergencyStopResponse |
 | GET | `/api/fuel/mvp/trucks/{truck_id}/compartments` | /api/fuel | session_required | — | — | TruckCompartmentListResponse |
@@ -278,6 +283,7 @@
 | GET | `/api/orders` | /api/orders | session_required | — | — | OrderListResponse |
 | POST | `/api/orders` | /api/orders | session_required | — | — | IntakeResultResponse |
 | POST | `/api/orders/bulk` | /api/orders | session_required | — | — | BulkOrderResponse |
+| GET | `/api/orders/export` | /api/orders | session_required | — | — | — |
 | GET | `/api/orders/{order_id}` | /api/orders | session_required | — | — | — |
 | PATCH | `/api/orders/{order_id}/assign` | /api/orders | session_required | — | — | OrderResponse |
 | POST | `/api/orders/{order_id}/cancel` | /api/orders | session_required | — | — | OrderResponse |
@@ -290,6 +296,7 @@
 | POST | `/api/scheduling/jobs` | /api/scheduling | session_required | — | CreateJob | dict |
 | GET | `/api/scheduling/jobs/active` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs/delayed` | /api/scheduling | session_required | — | — | dict |
+| GET | `/api/scheduling/jobs/export` | /api/scheduling | session_required | — | — | — |
 | GET | `/api/scheduling/jobs/{job_id}` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs/{job_id}/accept` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs/{job_id}/ack` | /api/scheduling | session_required | — | AckRequest | dict |

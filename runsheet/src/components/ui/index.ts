@@ -19,6 +19,8 @@ export type {
   ResolvedLink,
 } from "./EntityLink";
 export { EntityLink, entityHref, summaryLabel } from "./EntityLink";
+export type { ExportCsvButtonProps } from "./ExportCsvButton";
+export { ExportCsvButton } from "./ExportCsvButton";
 export type { FilterBarProps, FilterSelectProps } from "./FilterBar";
 export { FilterBar, FilterSelect } from "./FilterBar";
 export type { InShellNav } from "./InShellNav";

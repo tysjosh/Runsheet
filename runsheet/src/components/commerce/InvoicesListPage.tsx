@@ -6,6 +6,7 @@ import {
   Badge,
   Button,
   EmptyState,
+  ExportCsvButton,
   FilterBar,
   LoadErrorState,
   PageHeader,
@@ -127,6 +128,14 @@ export default function InvoicesListPage({
       <PageHeader
         title="Invoices"
         subtitle="View and manage invoices across all accounts."
+        actions={
+          <ExportCsvButton
+            type="invoices"
+            params={{ status: statusFilter, customer_id: customerFilter }}
+            subject="invoices"
+            allowedRoles={["admin"]}
+          />
+        }
       />
 
       <FilterBar

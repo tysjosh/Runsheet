@@ -901,6 +901,10 @@ class JobService:
         size: int = 20,
         sort_by: str = "scheduled_time",
         sort_order: str = "asc",
+        *,
+        keyset: bool = False,
+        after: Optional[tuple] = None,
+        with_total: bool = True,
     ) -> dict:
         """Paginated job listing with filters.
 
@@ -919,13 +923,22 @@ class JobService:
             size: Page size.
             sort_by: Field to sort by.
             sort_order: ``asc`` or ``desc``.
+            keyset: Data-export keyset mode: sort ``(sort_by, job_id ASC)``
+                with offset 0 on every call.
+            after: ``(sort_value, job_id)`` of the previous page's last raw
+                row. Requires ``keyset=True``.
+            with_total: ``False`` skips the count on the Postgres path.
 
         Returns:
-            Dict with ``data`` (list of Job dicts) and ``pagination`` envelope.
+            Dict with ``data`` (list of Job dicts) and ``pagination`` envelope,
+            plus ``raw_count`` and ``last_key`` from the raw store result.
 
         Raises:
             AppException: 400 for invalid filter values.
         """
+        if after is not None and not keyset:
+            raise ValueError("after requires keyset=True")
+
         # Validate filter values
         if job_type is not None:
             valid_types = [jt.value for jt in JobType]
@@ -968,11 +981,14 @@ class JobService:
             },
             range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
             sort_field=sort_by, sort_order=sort_order,
-            page=page, size=size,
+            page=1 if keyset else page, size=size,
+            **({"after": after, "with_total": with_total} if keyset else {}),
         )
         if pg is not _NOT_CUT_OVER:
             total = pg["total"]
-            total_pages = math.ceil(total / size) if size > 0 else 0
+            total_pages = (
+                math.ceil(total / size) if size > 0 and total is not None else 0
+            )
             return {
                 "data": pg["items"],
                 "pagination": {
@@ -981,6 +997,8 @@ class JobService:
                     "total": total,
                     "total_pages": total_pages,
                 },
+                "raw_count": pg.get("raw_count", len(pg["items"])),
+                "last_key": pg.get("last_key"),
             }
 
         # Build query
@@ -1017,11 +1035,22 @@ class JobService:
             "size": size,
             "track_total_hits": True,
         }
+        if keyset:
+            # Same 2-key sort on every call, first page included.
+            query["sort"] = [
+                {sort_by: {"order": sort_order}},
+                {"job_id": {"order": "asc"}},
+            ]
+            query["from"] = 0
+            if after is not None:
+                query["search_after"] = [after[0], after[1]]
 
         response = await self._es.search_documents(
             JOBS_CURRENT_INDEX, query, size=size
         )
 
+        from services.keyset_pagination import raw_keyset_info
+        raw_count, last_key = raw_keyset_info(response, keyset=keyset)
         hits = response["hits"]["hits"]
         total = response["hits"]["total"]["value"]
         total_pages = math.ceil(total / size) if size > 0 else 0
@@ -1036,6 +1065,8 @@ class JobService:
                 "total": total,
                 "total_pages": total_pages,
             },
+            "raw_count": raw_count,
+            "last_key": last_key,
         }
 
     async def get_active_jobs(self, tenant_id: str) -> list[dict]:

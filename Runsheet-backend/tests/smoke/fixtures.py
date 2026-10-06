@@ -227,6 +227,7 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         },
     ),
     "GET /api/orders": RouteFixture(),
+    "GET /api/orders/export": RouteFixture(),
     "GET /api/orders/{order_id}": RouteFixture(
         path_params={"order_id": "ord_00000000000000000000000000000001"},
     ),
@@ -347,6 +348,7 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         json={"job_type": "delivery", "origin": "A", "destination": "B"},
     ),
     "GET /api/scheduling/jobs": RouteFixture(),
+    "GET /api/scheduling/jobs/export": RouteFixture(),
     "GET /api/scheduling/jobs/active": RouteFixture(),
     "GET /api/scheduling/jobs/delayed": RouteFixture(),
     "GET /api/scheduling/jobs/{job_id}": RouteFixture(
@@ -444,6 +446,7 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         path_params={"customer_id": "CUST-001"},
     ),
     "GET /api/commerce/invoices": RouteFixture(),
+    "GET /api/commerce/invoices/export": RouteFixture(),
     "GET /api/commerce/invoices/{invoice_id}": RouteFixture(
         path_params={"invoice_id": "inv_001"},
     ),
@@ -470,6 +473,9 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         path_params={"driver_id": "DRV-001"},
     ),
     "GET /api/compliance/ifta/report": RouteFixture(),
+    "GET /api/compliance/ifta/report/export": RouteFixture(params={"quarter": "2026-Q1"}),
+    "GET /api/compliance/hos-records": RouteFixture(),
+    "GET /api/compliance/inspections": RouteFixture(),
     "GET /api/compliance/ifta/completeness": RouteFixture(),
     "GET /api/compliance/kfactor/dashboard": RouteFixture(),
     "GET /api/compliance/meters": RouteFixture(),
@@ -494,6 +500,7 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         path_params={"customer_tank_id": "TANK-001"},
     ),
     "GET /api/fuel/mvp/depots": RouteFixture(),
+    "GET /api/fuel/mvp/reconciliation/export": RouteFixture(),
     "GET /api/fuel/mvp/depots/{depot_id}": RouteFixture(
         path_params={"depot_id": "DEP-001"},
     ),

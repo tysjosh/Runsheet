@@ -646,6 +646,12 @@ class Settings(BaseSettings):
         le=10000,
         description="Ops API rate limit per minute per user"
     )
+    export_rate_limit: int = Field(
+        default=5,
+        ge=1,
+        le=1000,
+        description="CSV exports per minute per user, per export route"
+    )
     ops_metrics_rate_limit: int = Field(
         default=20,
         ge=1,

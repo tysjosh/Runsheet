@@ -18,7 +18,13 @@
  * instance or a running FastAPI server.
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 jest.mock("../../services/fuelApi", () => {
   const actual = jest.requireActual("../../services/fuelApi");
@@ -31,6 +37,16 @@ jest.mock("../../services/fuelApi", () => {
   };
 });
 
+// Export CSV button: stub the download and the session roles.
+jest.mock("../../services/exportApi", () => ({
+  downloadCsvExport: jest.fn(),
+}));
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserRoles: jest.fn(async () => []),
+}));
+
+import { downloadCsvExport } from "../../services/exportApi";
 import type {
   BOLDownloadResponse,
   HashChainVerifyResponse,
@@ -44,6 +60,7 @@ import {
   listReconciliationRecords,
   verifyPodHashChain,
 } from "../../services/fuelApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import ReconciliationPage, {
   formatGallons,
   formatVariancePct,
@@ -470,5 +487,50 @@ describe("ReconciliationPage — tamper evidence panel", () => {
     expect(screen.getByTestId("mismatch-actual-hash")).toHaveTextContent(
       "actual-xyz",
     );
+  });
+});
+
+describe("ReconciliationPage — Export CSV", () => {
+  const mockDownload = downloadCsvExport as jest.MockedFunction<
+    typeof downloadCsvExport
+  >;
+  const mockRoles = getCurrentUserRoles as jest.MockedFunction<
+    typeof getCurrentUserRoles
+  >;
+
+  beforeEach(() => {
+    mockDownload.mockReset();
+    mockDownload.mockResolvedValue({ filename: "reconciliation.csv" });
+    mockList.mockResolvedValue(makeListResponse([]));
+  });
+
+  it("is hidden for a driver", async () => {
+    mockRoles.mockResolvedValue(["driver"]);
+    render(<ReconciliationPage />);
+    await waitFor(() => expect(mockRoles).toHaveBeenCalled());
+    await act(async () => {});
+    expect(
+      screen.queryByRole("button", { name: /Export CSV/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("exports the current filters for an admin", async () => {
+    mockRoles.mockResolvedValue(["admin"]);
+    render(<ReconciliationPage />);
+    const button = await screen.findByRole("button", {
+      name: /^Export CSV ?: reconciliation$/,
+    });
+    fireEvent.change(screen.getByLabelText("Min Variance %"), {
+      target: { value: "2.5" },
+    });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(mockDownload).toHaveBeenCalledWith(
+      "reconciliation",
+      expect.objectContaining({ min_variance_pct: 2.5 }),
+    );
+    const params = mockDownload.mock.calls[0][1];
+    expect(params).not.toHaveProperty("page");
   });
 });
