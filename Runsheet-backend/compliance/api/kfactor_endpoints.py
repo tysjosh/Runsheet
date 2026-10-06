@@ -38,9 +38,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
 from compliance.services.kfactor_calibration_service import (
+    DeliveryNotFoundError,
     KFactorCalibrationService,
 )
-from errors.exceptions import AppException, kfactor_variance_history_failed
+from errors.exceptions import (
+    AppException,
+    kfactor_variance_history_failed,
+    resource_not_found,
+)
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -277,6 +282,8 @@ async def get_variance(
         )
     except AppException:
         raise
+    except DeliveryNotFoundError as exc:
+        raise resource_not_found(str(exc), details={"delivery_id": delivery_id})
     except ValueError as exc:
         raise HTTPException(
             status_code=422,

@@ -61,3 +61,27 @@ def test_store_outage_is_not_a_404(client, es):
     es.search_documents = AsyncMock(side_effect=RuntimeError("store down"))
     resp = client.get(f"{BASE}/suggest", headers=HEADERS)
     assert resp.status_code == 500, resp.text
+
+
+def test_unknown_delivery_on_a_real_tank_is_404(client, es):
+    """Row 54: variance for a delivery that does not exist is 404, not 422."""
+    from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
+
+    tank = {"tank_id": "QA-TANK-1", "tenant_id": TENANT, "kfactor": 1.0}
+
+    async def _search(index, query, size=10, **kw):
+        hits = [{"_source": tank}] if index == CUSTOMER_TANKS_INDEX else []
+        return {"hits": {"hits": hits, "total": {"value": len(hits)}}}
+
+    es.search_documents = AsyncMock(side_effect=_search)
+
+    resp = client.get(
+        "/api/compliance/kfactor/QA-TANK-1/variance?delivery_id=QA-DEL-NOPE",
+        headers=HEADERS,
+    )
+
+    assert resp.status_code == 404, resp.text
+    payload = resp.json()
+    assert payload["error_code"] == "RESOURCE_NOT_FOUND"
+    assert payload["details"]["delivery_id"] == "QA-DEL-NOPE"
+    assert payload.get("request_id")
