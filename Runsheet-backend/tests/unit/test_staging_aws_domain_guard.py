@@ -41,6 +41,8 @@ case "$1 $2" in
         fi ;;
     esac ;;
   "acm describe-certificate") echo api.staging.runsheetops.com ;;
+  # No image in ECR yet, so the deploy reaches the build step (the sentinel).
+  "ecr describe-images") exit 1 ;;
   *) echo None ;;
 esac
 exit 0
@@ -89,6 +91,9 @@ def harness(tmp_path):
             "AWS_REGION": "us-east-2",
             "AWS_CONFIG_FILE": os.devnull,
             "AWS_SHARED_CREDENTIALS_FILE": os.devnull,
+            # The guard runs before either build path; the local path's stubbed
+            # `docker build` (exit 97) is the "got past the guard" sentinel.
+            "BUILD_MODE": "local",
         }
         if domain is not None:
             env["DOMAIN"] = domain
