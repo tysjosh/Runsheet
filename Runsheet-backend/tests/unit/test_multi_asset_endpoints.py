@@ -75,6 +75,25 @@ def _es_agg_response(total, active, delayed, by_type_buckets, by_subtype_buckets
     }
 
 
+def _summary_search(trucks_resp, agg_resp, jobs_resp=None):
+    """``search_documents`` mock for /fleet/summary, routed by call shape.
+
+    The summary reads the trucks list, the delayed jobs (``jobs_current``,
+    for averageDelay) and the asset aggregation. ``agg_resp`` may be an
+    exception to simulate a failing aggregation.
+    """
+    async def _search(index, query, *args, **kwargs):
+        if index == "jobs_current":
+            return jobs_resp if jobs_resp is not None else _es_search_response([])
+        if "aggs" in query:
+            if isinstance(agg_resp, Exception):
+                raise agg_resp
+            return agg_resp
+        return trucks_resp
+
+    return AsyncMock(side_effect=_search)
+
+
 def _extract_inner_query(query):
     """Extract the inner query from a tenant-filter-wrapped ES query.
 
@@ -442,7 +461,7 @@ class TestGetTrucksBackwardCompat:
         assert data["data"][0]["plateNumber"] == "ABC-1234"
 
     def test_query_filters_for_trucks_or_legacy(self, client):
-        """GET /fleet/trucks ES query uses should clause for truck subtype or missing asset_type."""
+        """GET /fleet/trucks ES query uses should clause for any vehicle or missing asset_type."""
         c, mock_es = client
         mock_es.search_documents = AsyncMock(return_value=_es_search_response([]))
 
@@ -453,8 +472,8 @@ class TestGetTrucksBackwardCompat:
         # The inner query is wrapped by inject_tenant_filter inside must[0]
         inner = _extract_inner_query(query)
         should = inner.get("bool", {}).get("should", [])
-        # Should contain term for asset_subtype=truck
-        assert {"term": {"asset_subtype": "truck"}} in should
+        # Should contain term for asset_type=vehicle (truck, fuel_truck, personnel_vehicle)
+        assert {"term": {"asset_type": "vehicle"}} in should
         # Should contain must_not exists for legacy docs
         legacy_clause = {"bool": {"must_not": {"exists": {"field": "asset_type"}}}}
         assert legacy_clause in should
@@ -541,7 +560,7 @@ class TestGetFleetSummary:
             ],
         )
         # First call = trucks query, second call = assets aggregation
-        mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
+        mock_es.search_documents = _summary_search(trucks_resp, agg_resp)
 
         resp = c.get("/api/fleet/summary")
         assert resp.status_code == 200
@@ -574,7 +593,7 @@ class TestGetFleetSummary:
                 {"key": "fuel_truck", "doc_count": 2},
             ],
         )
-        mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
+        mock_es.search_documents = _summary_search(trucks_resp, agg_resp)
 
         resp = c.get("/api/fleet/summary")
         data = resp.json()["data"]
@@ -586,9 +605,7 @@ class TestGetFleetSummary:
         c, mock_es = client
         # First call (trucks) succeeds with empty result, second call (agg) fails
         trucks_resp = _es_search_response([])
-        mock_es.search_documents = AsyncMock(
-            side_effect=[trucks_resp, Exception("ES down")]
-        )
+        mock_es.search_documents = _summary_search(trucks_resp, Exception("ES down"))
 
         resp = c.get("/api/fleet/summary")
         assert resp.status_code == 200
@@ -604,12 +621,13 @@ class TestGetFleetSummary:
         c, mock_es = client
         trucks_resp = _es_search_response([])
         agg_resp = _es_agg_response(0, 0, 0, [], [])
-        mock_es.search_documents = AsyncMock(side_effect=[trucks_resp, agg_resp])
+        mock_es.search_documents = _summary_search(trucks_resp, agg_resp)
 
         c.get("/api/fleet/summary")
         calls = mock_es.search_documents.call_args_list
-        assert len(calls) == 2
-        assert calls[1][0][0] == "trucks"
+        agg_calls = [call for call in calls if "aggs" in call[0][1]]
+        assert len(agg_calls) == 1
+        assert agg_calls[0][0][0] == "trucks"
 
 
 # ---------------------------------------------------------------------------

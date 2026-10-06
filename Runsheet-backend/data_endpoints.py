@@ -100,6 +100,64 @@ class FleetSummary(BaseModel):
     averageDelay: float
 
 
+# An asset counts as active in any of these statuses: the asset-level values
+# (active, in_transit) plus the legacy truck-level ones (on_time, delayed).
+_ACTIVE_ASSET_STATUSES = ("active", "in_transit", "on_time", "delayed")
+
+
+def _is_vehicle(doc: dict) -> bool:
+    """A "truck" in the fleet views is any vehicle: ``asset_type == "vehicle"``
+    (truck, fuel_truck, personnel_vehicle) or a legacy doc with no asset_type."""
+    asset_type = doc.get("asset_type")
+    return asset_type is None or asset_type == "vehicle"
+
+
+def _truck_summary(docs: list, average_delay: float) -> "FleetSummary":
+    trucks = [d for d in docs if _is_vehicle(d)]
+    return FleetSummary(
+        totalTrucks=len(trucks),
+        activeTrucks=len([t for t in trucks if t.get("status") in _ACTIVE_ASSET_STATUSES]),
+        onTimeTrucks=len([t for t in trucks if t.get("status") == "on_time"]),
+        delayedTrucks=len([t for t in trucks if t.get("status") == "delayed"]),
+        averageDelay=average_delay,
+    )
+
+
+async def _average_delay_minutes(tenant_id: str) -> float:
+    """Mean ``delay_duration_minutes`` over the tenant's delayed jobs (0.0 with none).
+
+    Reads the ``job`` aggregate from Postgres when cut over, otherwise the
+    ``jobs_current`` index, and averages with ``delay_metrics`` so the number
+    matches ``/scheduling/metrics/delays``. A failed read is logged and
+    reported as 0.0, like the asset aggregations below.
+    """
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from scheduling.services.job_metrics_aggregator import delay_metrics
+    from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
+
+    try:
+        jobs = await read_hybrid_fetch_for_aggregation(
+            "job", tenant_id, bool_filters={"delayed": True},
+        )
+        if jobs is _NOT_CUT_OVER:
+            query = inject_tenant_filter({"query": {"term": {"delayed": True}}}, tenant_id)
+            response = await elasticsearch_service.search_documents(
+                JOBS_CURRENT_INDEX, query, size=1000
+            )
+            jobs = [hit["_source"] for hit in response["hits"]["hits"]]
+        jobs = [
+            j for j in jobs
+            if j.get("tenant_id") == tenant_id and j.get("delayed") is True
+        ]
+        return float(delay_metrics(jobs)["avg_delay_minutes"])
+    except Exception as exc:
+        logger.warning("Failed to compute average delay, returning 0.0: %s", exc)
+        return 0.0
+
+
 # Multi-Asset Models
 
 class AssetType(str, Enum):
@@ -286,16 +344,9 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
             pg_assets = [
                 a for a in pg_assets if a.get("tenant_id") == tenant.tenant_id
             ]
-            # Trucks summary: legacy "trucks" set == every doc in the index
-            # (the alias and the index share the same docs), matching the ES
-            # match_all scan.
-            trucks = pg_assets
-            summary = FleetSummary(
-                totalTrucks=len(trucks),
-                activeTrucks=len([t for t in trucks if t.get("status") in ['on_time', 'delayed']]),
-                onTimeTrucks=len([t for t in trucks if t.get("status") == 'on_time']),
-                delayedTrucks=len([t for t in trucks if t.get("status") == 'delayed']),
-                averageDelay=45,
+            # Truck counts cover vehicles only (see _is_vehicle).
+            summary = _truck_summary(
+                pg_assets, await _average_delay_minutes(tenant.tenant_id)
             )
 
             # Multi-asset rollups: reproduce the by_type / by_subtype terms aggs
@@ -321,7 +372,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
 
             total_assets = len(pg_assets)
             active_assets = len([
-                a for a in pg_assets if a.get("status") in ("active", "in_transit")
+                a for a in pg_assets if a.get("status") in _ACTIVE_ASSET_STATUSES
             ])
             delayed_assets = len([
                 a for a in pg_assets if a.get("status") == "delayed"
@@ -351,13 +402,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         trucks_response = await elasticsearch_service.search_documents("trucks", trucks_query, size=1000)
         trucks = [hit["_source"] for hit in trucks_response["hits"]["hits"]]
 
-        summary = FleetSummary(
-            totalTrucks=len(trucks),
-            activeTrucks=len([t for t in trucks if t.get("status") in ['on_time', 'delayed']]),
-            onTimeTrucks=len([t for t in trucks if t.get("status") == 'on_time']),
-            delayedTrucks=len([t for t in trucks if t.get("status") == 'delayed']),
-            averageDelay=45
-        )
+        summary = _truck_summary(trucks, await _average_delay_minutes(tenant.tenant_id))
 
         # Multi-asset counts via ES aggregations (tenant-scoped)
         agg_query = inject_tenant_filter(
@@ -374,7 +419,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
             },
             "active_count": {
                 "filter": {
-                    "terms": {"status": ["active", "in_transit"]}
+                    "terms": {"status": list(_ACTIVE_ASSET_STATUSES)}
                 }
             },
             "delayed_count": {
@@ -434,7 +479,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
 async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
         # Read-cutover: serve from Postgres when enabled. The ES query keeps
-        # docs where asset_subtype == "truck" OR asset_type is missing (legacy),
+        # every vehicle (asset_type == "vehicle" OR asset_type missing, legacy),
         # sorted by created_at desc. We reproduce that predicate + sort over the
         # PG documents so the formatted payload is identical.
         from commerce.services.commerce_persistence_bridge import (
@@ -448,18 +493,15 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
             pg_docs = [
                 d for d in pg_docs if d.get("tenant_id") == tenant.tenant_id
             ]
-            trucks = [
-                d for d in pg_docs
-                if d.get("asset_subtype") == "truck" or "asset_type" not in d
-            ]
+            trucks = [d for d in pg_docs if _is_vehicle(d)]
             trucks.sort(key=lambda d: d.get("created_at") or "", reverse=True)
         else:
-            # Filter for only truck assets: asset_subtype is "truck" OR asset_type is not set (legacy documents)
+            # Every vehicle: asset_type is "vehicle" OR asset_type is not set (legacy documents)
             inner_query = {
                 "query": {
                     "bool": {
                         "should": [
-                            {"term": {"asset_subtype": "truck"}},
+                            {"term": {"asset_type": "vehicle"}},
                             {"bool": {"must_not": {"exists": {"field": "asset_type"}}}}
                         ],
                         "minimum_should_match": 1
@@ -469,7 +511,10 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
             query = inject_tenant_filter(inner_query, tenant.tenant_id)
             query["sort"] = [{"created_at": {"order": "desc"}}]
             response = await elasticsearch_service.search_documents("trucks", query, size=1000)
-            trucks = [hit["_source"] for hit in response["hits"]["hits"]]
+            trucks = [
+                hit["_source"] for hit in response["hits"]["hits"]
+                if _is_vehicle(hit["_source"])
+            ]
 
         # Convert to Truck model format for consistency
         formatted_trucks = []
