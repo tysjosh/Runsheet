@@ -1796,3 +1796,99 @@ class TestDriverQualificationC10ExpiredStatus:
         # The detail table still lists the expired qualification.
         past = next(d for d in result.drivers if d.driver_id == "d_past")
         assert any(q.alert_level == "expired" for q in past.qualifications)
+
+
+# ---------------------------------------------------------------------------
+# Tests: qualification summary by ops driver id (B10)
+# ---------------------------------------------------------------------------
+
+
+def _ops_ref_search(linked_by_ops_id: Dict[str, Dict[str, Any]], by_dq_id=None):
+    """A search fake that answers the ``get`` lookup and the ops-id lookup.
+
+    ``linked_by_ops_id`` maps an ops driver id to the DQ record that carries it
+    in ``external_refs.ops_driver_id``; ``by_dq_id`` maps a DQ ``driver_id`` to
+    its record. Every query must carry the tenant filter.
+    """
+    import json
+
+    by_dq_id = by_dq_id or {}
+    seen: list = []
+
+    async def _search(index, query, size=None, **kw):
+        text = json.dumps(query)
+        seen.append(query)
+        assert _TENANT_ID in text, "query is not tenant-filtered"
+        musts = query["query"]["bool"].get("must", [])
+        flat = json.dumps(musts) + json.dumps(query["query"]["bool"].get("filter", []))
+        for ops_id, doc in linked_by_ops_id.items():
+            if f'"external_refs.ops_driver_id": "{ops_id}"' in flat:
+                return _es_search_response([doc])
+        for dq_id, doc in by_dq_id.items():
+            if f'"driver_id": "{dq_id}"' in flat:
+                return _es_search_response([doc])
+        return {"hits": {"hits": []}}
+
+    return _search, seen
+
+
+class TestQualificationSummaryOpsRef:
+    """get_qualification_summary resolves an ops driver id via external_refs (B10)."""
+
+    @pytest.mark.asyncio
+    async def test_ops_driver_id_resolves_linked_dq_driver(self):
+        linked = _make_driver_doc(driver_id="driver_" + "a" * 8 + "-" + "b" * 27)
+        linked["external_refs"] = {"ops_driver_id": "DRV-001"}
+        es = _make_es_service()
+        search, seen = _ops_ref_search({"DRV-001": linked})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        summary = await service.get_qualification_summary(_TENANT_ID, "DRV-001")
+
+        assert summary.full_name == "John Smith"
+        assert summary.driver_id == linked["driver_id"]
+        assert any(
+            "external_refs.ops_driver_id" in str(q) for q in seen
+        ), "no ops-id lookup was made"
+
+    @pytest.mark.asyncio
+    async def test_unlinked_ops_driver_id_is_not_found(self):
+        es = _make_es_service()
+        search, _ = _ops_ref_search({})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        with pytest.raises(AppException) as exc_info:
+            await service.get_qualification_summary(_TENANT_ID, "DRV-404")
+
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_dq_shaped_id_still_resolves_directly(self):
+        dq_id = "driver_12345678-1234-1234-1234-123456789abc"
+        doc = _make_driver_doc(driver_id=dq_id)
+        es = _make_es_service()
+        search, seen = _ops_ref_search({}, by_dq_id={dq_id: doc})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        summary = await service.get_qualification_summary(_TENANT_ID, dq_id)
+
+        assert summary.driver_id == dq_id
+        assert not any("external_refs.ops_driver_id" in str(q) for q in seen)
+
+    @pytest.mark.asyncio
+    async def test_dq_shaped_id_not_found_falls_back_to_ops_ref(self):
+        """A DQ-shaped id with no DQ record is tried as an ops id too."""
+        dq_shaped = "driver_12345678-1234-1234-1234-123456789abc"
+        linked = _make_driver_doc(driver_id="driver_linked")
+        linked["external_refs"] = {"ops_driver_id": dq_shaped}
+        es = _make_es_service()
+        search, _ = _ops_ref_search({dq_shaped: linked})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        summary = await service.get_qualification_summary(_TENANT_ID, dq_shaped)
+
+        assert summary.driver_id == "driver_linked"

@@ -23,6 +23,7 @@ Validates: Requirement 5.1
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -31,7 +32,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.models.driver import Driver, DriverStatus
 from compliance.services.compliance_es_mappings import DRIVERS_INDEX
-from errors.exceptions import resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -45,6 +47,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Shape of a server-assigned DQ driver id (compliance/models/driver.py
+# ``_generate_driver_id``: ``driver_<uuid4>``). Anything else is treated as an
+# ops driver id and resolved through ``external_refs.ops_driver_id`` (B10).
+_DQ_DRIVER_ID_RE = re.compile(r"^driver_[0-9a-f-]{36}$")
 
 _DEFAULT_PAGE_LIMIT = 50
 _MAX_PAGE_LIMIT = 200
@@ -681,13 +688,18 @@ class DriverQualificationService:
         always surfaced as ``expired`` regardless of individual expiry dates,
         since they are not road-legal for assignment (Req 4.3).
 
+        ``driver_id`` may be a DQ id (``driver_<uuid4>``) or an ops driver id
+        (``DRV-001``) from the profile read. An ops id, or a DQ-shaped id with
+        no DQ record, resolves through ``external_refs.ops_driver_id`` within
+        the tenant (B10). The summary's ``driver_id`` is the DQ record's id.
+
         Raises ``resource_not_found`` when the driver has no compliance
         qualification record in this tenant; callers correlating from the ops
         utilization store treat that as an unresolved reference.
 
         Validates: Requirements 4.2, 4.3.
         """
-        driver = await self.get(tenant_id, driver_id)
+        driver = await self._get_for_summary(tenant_id, driver_id)
         today = date.today()
 
         qualifications: List[QualificationAlert] = []
@@ -734,11 +746,52 @@ class DriverQualificationService:
         overall_status = "expired" if driver_status in ("suspended", "expired") else worst
 
         return DriverQualificationSummary(
-            driver_id=driver_id,
+            driver_id=driver.get("driver_id") or driver_id,
             full_name=driver.get("full_name", ""),
             driver_status=driver_status,
             overall_status=overall_status,
             qualifications=qualifications,
+        )
+
+    async def _get_for_summary(self, tenant_id: str, driver_id: str) -> Dict[str, Any]:
+        """Resolve a DQ id or an ops driver id to the tenant's DQ record (B10).
+
+        A DQ-shaped id is read directly; when it isn't DQ-shaped, or no DQ
+        record has it, the tenant's drivers are searched for
+        ``external_refs.ops_driver_id == driver_id``.
+
+        Raises:
+            AppException: ``resource_not_found`` when neither lookup matches.
+        """
+        if _DQ_DRIVER_ID_RE.match(driver_id):
+            try:
+                return await self.get(tenant_id, driver_id)
+            except AppException as exc:
+                if exc.error_code != ErrorCode.RESOURCE_NOT_FOUND:
+                    raise
+
+        query = inject_tenant_filter(
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"external_refs.ops_driver_id": driver_id}},
+                        ]
+                    }
+                },
+                "size": 1,
+            },
+            tenant_id,
+        )
+        response = await self._es.search_documents(DRIVERS_INDEX, query, size=1)
+        hits = response["hits"]["hits"]
+        # Re-check the tenant on the row itself, in case a backend ignores the
+        # filter: an id must never resolve to another tenant's driver.
+        if hits and hits[0]["_source"].get("tenant_id") == tenant_id:
+            return hits[0]["_source"]
+        raise resource_not_found(
+            f"Driver '{driver_id}' not found",
+            details={"driver_id": driver_id},
         )
 
     @staticmethod
