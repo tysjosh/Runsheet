@@ -202,6 +202,13 @@ class DriverQualificationService:
 
         Validates: Requirement 5.1
         """
+        # C10: a driver whose CDL or medical card has already expired is
+        # stored ``expired`` rather than ``active``. An explicit
+        # ``suspended`` is left alone.
+        status = self._status_for_expiry(
+            status, cdl_expiry_date, medical_card_expiry_date
+        )
+
         # Validate via Pydantic model (raises ValueError on invalid input)
         driver = Driver(
             tenant_id=tenant_id,
@@ -498,6 +505,22 @@ class DriverQualificationService:
         if not partial:
             return existing
 
+        # C10: re-derive status from the effective expiry dates so an
+        # update can't leave (or put) an already-expired driver ``active``.
+        effective_status = partial.get("status", existing.get("status", "active"))
+        derived_status = self._status_for_expiry(
+            effective_status,
+            self._parse_date(partial.get("cdl_expiry_date", existing.get("cdl_expiry_date"))),
+            self._parse_date(
+                partial.get(
+                    "medical_card_expiry_date",
+                    existing.get("medical_card_expiry_date"),
+                )
+            ),
+        )
+        if derived_status != effective_status:
+            partial["status"] = derived_status
+
         partial["updated_at"] = utcnow().isoformat()
 
         await self._es.update_document(DRIVERS_INDEX, driver_id, partial)
@@ -731,6 +754,21 @@ class DriverQualificationService:
             except (ValueError, TypeError):
                 return None
         return None
+
+    @classmethod
+    def _status_for_expiry(
+        cls, status: str, cdl_expiry: Any, medical_expiry: Any
+    ) -> str:
+        """Return ``expired`` for an ``active`` driver whose CDL or medical
+        card expiry date is already in the past; otherwise ``status``."""
+        if status != "active":
+            return status
+        today = date.today()
+        for value in (cdl_expiry, medical_expiry):
+            parsed = cls._parse_date(value)
+            if parsed is not None and parsed < today:
+                return "expired"
+        return status
 
     @staticmethod
     def _cdl_class_meets_minimum(driver_class: str, min_class: str) -> bool:
@@ -1093,7 +1131,9 @@ class DriverQualificationService:
         total_drivers = len(all_drivers)
         active_drivers = 0
         suspended_drivers = 0
-        expired_drivers = 0
+        # Drivers with status ``expired`` plus active drivers holding an
+        # already-expired qualification (counted once each).
+        expired_ids: set = set()
 
         # Sets to track unique drivers expiring within thresholds
         expiring_60: set = set()
@@ -1115,7 +1155,7 @@ class DriverQualificationService:
             elif status == "suspended":
                 suspended_drivers += 1
             elif status == "expired":
-                expired_drivers += 1
+                expired_ids.add(driver_id)
 
             # Build qualification alerts for this driver
             qualifications: List[QualificationAlert] = []
@@ -1162,7 +1202,12 @@ class DriverQualificationService:
                         status=qual_status,
                     ))
 
-                    # Track for aggregate counts
+                    # Track for aggregate counts (C10): an already-expired
+                    # qualification counts the driver as expired, never as
+                    # "expiring".
+                    if days_until_expiry < 0:
+                        expired_ids.add(driver_id)
+                        continue
                     if days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
                         expiring_60.add(driver_id)
                     if days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
@@ -1222,6 +1267,8 @@ class DriverQualificationService:
             # Then by driver name
             d.full_name
         ))
+
+        expired_drivers = len(expired_ids)
 
         dashboard = DQFDashboard(
             tenant_id=tenant_id,

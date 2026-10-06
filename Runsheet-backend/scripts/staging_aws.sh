@@ -14,6 +14,7 @@
 #   ./scripts/staging_aws.sh up         # create everything (idempotent)
 #   ./scripts/staging_aws.sh deploy     # build + push image, roll the service
 #   ./scripts/staging_aws.sh migrate    # alembic upgrade head as a one-shot task
+#   ./scripts/staging_aws.sh files-bucket  # S3 bucket + task-role policy for file storage
 #   ./scripts/staging_aws.sh verify     # readiness + auth + TLS + redis
 #   ./scripts/staging_aws.sh status     # what exists right now
 #   ./scripts/staging_aws.sh frontend-env  # env vars to paste into Vercel
@@ -705,6 +706,8 @@ cmd_up() {
 
   log "Credentials vault KMS key"
   ensure_vault_kms
+  log "File storage bucket"
+  ensure_files_bucket
 
   log "Load balancer"
   local alb_arn tg_arn
@@ -1105,6 +1108,56 @@ ensure_vault_kms() {
   ok "task role may use ${VAULT_KMS_ALIAS} (GenerateDataKey/Decrypt/DescribeKey only)"
 }
 
+#: Object storage for FileStorageService (services/file_storage_service.py):
+#: terminal BOL scans and raw EDI (compliance finding C9), proof-of-delivery
+#: photos and signatures, meter tickets. Without FUEL_OPS_S3_BUCKET the service
+#: is never built and every BOL is stored with raw_document_ref: null. Bucket
+#: names are global, so the account id is part of the name. Private, SSE-S3,
+#: owner-enforced; the task role gets Put/Get on tenants/* only, which is the
+#: one key prefix FileStorageService ever writes. Cost is pennies a month.
+FILES_BUCKET="${PREFIX}-files-${ACCOUNT_ID}"
+
+files_bucket() {
+  aws s3api head-bucket --bucket "${FILES_BUCKET}" >/dev/null 2>&1 && echo "${FILES_BUCKET}" || true
+}
+
+ensure_files_bucket() {
+  if [ -n "$(files_bucket)" ]; then
+    ok "s3 ${FILES_BUCKET}"
+  else
+    if [ "$AWS_REGION" = "us-east-1" ]; then
+      aws s3api create-bucket --bucket "${FILES_BUCKET}" >/dev/null
+    else
+      aws s3api create-bucket --bucket "${FILES_BUCKET}" \
+        --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
+    fi
+    ok "created s3 ${FILES_BUCKET}"
+  fi
+  aws s3api put-public-access-block --bucket "${FILES_BUCKET}" \
+    --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  aws s3api put-bucket-ownership-controls --bucket "${FILES_BUCKET}" \
+    --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
+  aws s3api put-bucket-encryption --bucket "${FILES_BUCKET}" \
+    --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+  aws s3api put-bucket-tagging --bucket "${FILES_BUCKET}" \
+    --tagging "TagSet=[{Key=Project,Value=${PROJECT}},{Key=Environment,Value=${ENV_NAME}}]"
+  # Presigned PUT/GET URLs are used straight from the browser and driver app.
+  aws s3api put-bucket-cors --bucket "${FILES_BUCKET}" --cors-configuration \
+    "$(printf '{"CORSRules":[{"AllowedOrigins":["%s"],"AllowedMethods":["GET","PUT"],"AllowedHeaders":["*"],"MaxAgeSeconds":3000}]}' "$(app_origin)")"
+  ok "s3 ${FILES_BUCKET}: private, SSE-S3, owner-enforced, CORS $(app_origin)"
+  aws iam put-role-policy --role-name "${PREFIX}-task" --policy-name "${PREFIX}-files-s3" \
+    --policy-document "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"FileStorageObjects","Effect":"Allow","Action":["s3:PutObject","s3:GetObject"],"Resource":"arn:aws:s3:::%s/tenants/*"}]}' "${FILES_BUCKET}")" >/dev/null
+  ok "task role may Put/Get ${FILES_BUCKET}/tenants/*"
+}
+
+cmd_files_bucket() {
+  log "File storage bucket"
+  ensure_files_bucket
+  warn "run 'deploy' (or re-register the task definition) to set FUEL_OPS_S3_BUCKET"
+}
+
 # ---------------------------------------------------------------------------
 # task definition
 # ---------------------------------------------------------------------------
@@ -1235,6 +1288,12 @@ containers = [
             # Omitted, rather than empty, when no key exists yet.
             [{"name": "FUEL_OPS_KMS_KEY_ID", "value": os.environ["VAULT_KMS_KEY_ARN"]}]
             if os.environ.get("VAULT_KMS_KEY_ARN") else []
+        ) + (
+            # FileStorageService bucket (see ensure_files_bucket). Without it BOL
+            # scans and POD photos are never stored (C9). Omitted when absent.
+            [{"name": "FUEL_OPS_S3_BUCKET", "value": os.environ["FILES_BUCKET_NAME"]},
+             {"name": "FUEL_OPS_S3_REGION", "value": region}]
+            if os.environ.get("FILES_BUCKET_NAME") else []
         ),
         "secrets": [
             {"name": "DATABASE_URL", "valueFrom": secret_db},
@@ -1474,6 +1533,12 @@ cmd_deploy() {
     ok "vault kms key ${VAULT_KMS_KEY_ARN##*/}"
   else
     warn "no ${VAULT_KMS_ALIAS} — credential writes (and dispatcher order intake) will fail; run 'up'"
+  fi
+  export FILES_BUCKET_NAME="$(files_bucket)"
+  if [ -n "$FILES_BUCKET_NAME" ]; then
+    ok "files bucket ${FILES_BUCKET_NAME}"
+  else
+    warn "no ${FILES_BUCKET} — BOL scans and POD photos won't be stored; run 'files-bucket'"
   fi
   local td; td="$(register_task_def "$image")"
   ok "$td"
@@ -1925,6 +1990,12 @@ WARNING
       && ok "$s" || true
   done
 
+  log "Deleting file storage bucket"
+  if [ -n "$(files_bucket)" ]; then
+    aws s3 rm "s3://${FILES_BUCKET}" --recursive >/dev/null 2>&1 || true
+    aws s3api delete-bucket --bucket "${FILES_BUCKET}" >/dev/null 2>&1 && ok "${FILES_BUCKET}" || true
+  fi
+
   log "Deleting IAM roles"
   for role in "${PREFIX}-execution" "${PREFIX}-task"; do
     for p in $(aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
@@ -1973,6 +2044,7 @@ case "${1:-plan}" in
   up)      cmd_up      ;;
   deploy)  cmd_deploy  ;;
   deploy-ui) cmd_deploy_ui ;;
+  files-bucket) cmd_files_bucket ;;
   migrate) cmd_migrate ;;
   verify)  cmd_verify  ;;
   status)  cmd_status  ;;
