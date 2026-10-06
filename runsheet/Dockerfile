@@ -42,7 +42,10 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — dependencies
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS deps
+# Base images come from the AWS ECR Public mirror of the Docker Official Images
+# (same image, same tag). CodeBuild pulls Docker Hub anonymously from shared IPs
+# and gets 429 Too Many Requests; public.ecr.aws has no such limit from AWS.
+FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS deps
 
 WORKDIR /app
 
@@ -55,7 +58,7 @@ RUN npm ci
 # ---------------------------------------------------------------------------
 # Stage 2 — build
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS builder
+FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -95,7 +98,7 @@ RUN case "${NEXT_PUBLIC_API_URL}" in \
 # ---------------------------------------------------------------------------
 # Stage 3 — runtime
 # ---------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS runtime
+FROM public.ecr.aws/docker/library/node:22-bookworm-slim AS runtime
 
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \

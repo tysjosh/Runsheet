@@ -14,7 +14,10 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — build the virtualenv
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim-bookworm AS builder
+# Base images come from the AWS ECR Public mirror of the Docker Official Images
+# (same image, same tag). CodeBuild pulls Docker Hub anonymously from shared IPs
+# and gets 429 Too Many Requests; public.ecr.aws has no such limit from AWS.
+FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -38,7 +41,7 @@ RUN pip install --upgrade pip setuptools wheel \
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim-bookworm AS runtime
+FROM public.ecr.aws/docker/library/python:3.11-slim-bookworm AS runtime
 
 # PYTHONUNBUFFERED so log lines reach the collector as they are written rather
 # than sitting in a pipe buffer — without it a crash loses the reason for it.
