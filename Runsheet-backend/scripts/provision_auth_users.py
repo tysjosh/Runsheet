@@ -19,13 +19,20 @@ This is the operator entry point for the User_Provisioner (task 2.3). It:
    user per row, assigns roles, and writes the ``tenant_id`` / ``has_pii_access``
    metadata (Req 9.3, 9.6) — isolating per-row failures so one bad row never
    aborts the batch (Req 9.7).
-4. Prints a one-line summary and exits non-zero if any row failed.
+4. Seeds the default notification rules and templates once for each tenant
+   that had a row provisioned successfully
+   (``notifications.services.seed_data.seed_default_data``, idempotent), so a
+   newly onboarded tenant isn't left with zero rules (data finding B2). A
+   seeding failure is logged and never fails provisioning. Skip it with
+   ``--skip-notification-seed``.
+5. Prints a one-line summary and exits non-zero if any row failed.
 
 Usage:
     python -m scripts.provision_auth_users          # from Runsheet-backend/
     python scripts/provision_auth_users.py           # standalone
     python -m scripts.provision_auth_users --roles-only
     python -m scripts.provision_auth_users --skip-role-creation
+    python -m scripts.provision_auth_users --skip-notification-seed
 
 Design reference: ``.kiro/specs/supertokens-auth-migration/design.md``
 §User_Provisioner.
@@ -71,6 +78,10 @@ RoleCreator = Callable[[str], Awaitable[bool]]
 # A rows reader seam: () -> awaitable[list[AuthUserRow]]. Production reads the
 # ``auth_users`` table; tests inject an in-memory list.
 RowsReader = Callable[[], Awaitable[Sequence[AuthUserRow]]]
+
+# A notification-seeder seam: (tenant_id) -> awaitable. Production seeds the
+# default rules/templates; tests inject a recorder.
+NotificationSeeder = Callable[[str], Awaitable[None]]
 
 #: The SuperTokens tenant the canonical roles are created in. This migration
 #: does not use the MultiTenancy recipe, so roles live in the single default
@@ -208,6 +219,54 @@ async def read_auth_user_rows() -> list[AuthUserRow]:
 
 
 # ---------------------------------------------------------------------------
+# Default notification rules/templates for onboarded tenants (B2)
+# ---------------------------------------------------------------------------
+
+
+async def _default_notification_seeder(tenant_id: str) -> None:
+    from notifications.services.seed_data import seed_default_data
+    from services.elasticsearch_service import elasticsearch_service
+
+    await seed_default_data(elasticsearch_service, tenant_id)
+
+
+async def seed_notifications_for_tenants(
+    rows: Sequence[AuthUserRow],
+    report: ProvisionReport,
+    *,
+    seeder: Optional[NotificationSeeder] = None,
+) -> list[str]:
+    """Seed default notification data once per tenant with a provisioned row.
+
+    Only tenants with at least one successfully provisioned row are seeded.
+    ``seed_default_data`` skips records that already exist, so re-running is
+    safe. A failure for one tenant is logged and the next tenant still runs.
+
+    Returns:
+        The tenant ids that were seeded without error.
+    """
+    seed = seeder if seeder is not None else _default_notification_seeder
+    succeeded_emails = {result.email for result in report.succeeded}
+    tenant_ids = sorted(
+        {row.tenant_id for row in rows if row.email in succeeded_emails and row.tenant_id}
+    )
+    seeded: list[str] = []
+    for tenant_id in tenant_ids:
+        try:
+            await seed(tenant_id)
+        except Exception as exc:  # noqa: BLE001 - seeding never fails provisioning
+            logger.warning(
+                "Default notification seed failed for tenant_id=%s: %s",
+                tenant_id,
+                exc,
+            )
+            continue
+        seeded.append(tenant_id)
+        logger.info("Default notification data ensured for tenant_id=%s", tenant_id)
+    return seeded
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -222,6 +281,8 @@ async def provision_auth_users(
     rows_reader: Optional[RowsReader] = None,
     admin: Optional[SuperTokensAdmin] = None,
     store: Optional[AuthUserStore] = None,
+    seed_notifications: bool = True,
+    notification_seeder: Optional[NotificationSeeder] = None,
 ) -> Optional[ProvisionReport]:
     """Initialize the SDK, create canonical roles, and provision every row.
 
@@ -241,6 +302,10 @@ async def provision_auth_users(
             ``auth_users`` from PostgreSQL.
         admin: SuperTokens admin seam passed to :func:`provision_all`.
         store: ``auth_users`` write-back seam passed to :func:`provision_all`.
+        seed_notifications: When ``True`` (default), seed the default
+            notification rules/templates for each tenant with a provisioned row.
+        notification_seeder: Seam for seeding one tenant (see
+            :func:`seed_notifications_for_tenants`).
 
     Returns:
         The :class:`ProvisionReport` from :func:`provision_all`, or ``None`` when
@@ -272,6 +337,13 @@ async def provision_auth_users(
         )
 
     report = await provision_all(rows, admin=admin, store=store)
+
+    if seed_notifications:
+        await seed_notifications_for_tenants(
+            rows, report, seeder=notification_seeder
+        )
+    else:
+        logger.info("Skipping notification seed (--skip-notification-seed)")
     return report
 
 
@@ -335,6 +407,15 @@ Examples:
         default=False,
         help="Provision users without (re)creating the canonical UserRoles.",
     )
+    parser.add_argument(
+        "--skip-notification-seed",
+        action="store_true",
+        default=False,
+        help=(
+            "Don't seed the default notification rules/templates for the "
+            "provisioned tenants."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -343,6 +424,7 @@ Examples:
             provision_auth_users(
                 skip_role_creation=args.skip_role_creation,
                 roles_only=args.roles_only,
+                seed_notifications=not args.skip_notification_seed,
             )
         )
     except Exception as exc:  # noqa: BLE001 — surface a clean CLI failure
