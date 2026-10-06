@@ -98,6 +98,15 @@ async def test_index_document_refuses_an_empty_id(store, index_name):
         await store.index_document(index_name, "", {"tenant_id": TENANT})
 
 
+async def test_nul_in_a_document_id_is_rejected_before_postgres(store, index_name):
+    """Postgres rejects NUL in text; the store answers with the 400 error instead."""
+    import persistence.document_query as dq
+
+    with pytest.raises(dq.InvalidQueryValueError) as exc:
+        await store.get_document(index_name, "\x00")
+    assert str(exc.value) == "An id contains a control character."
+
+
 async def test_delete_reports_whether_anything_was_removed(store, index_name):
     await store.index_document(index_name, "a", {"tenant_id": TENANT})
     assert await store.delete_document(index_name, "a") is True

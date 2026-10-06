@@ -61,6 +61,8 @@ from persistence.document_aggregations import (
 )
 from persistence.document_field_policy import assert_searchable
 from persistence.document_query import (
+    InvalidDocumentIdError,
+    InvalidQueryValueError,
     UnsupportedQueryError,
     apply_source_filter,
     build_order_by,
@@ -132,6 +134,19 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _guard_doc_id(doc_id: Any) -> None:
+    """Raise :class:`InvalidDocumentIdError` if ``doc_id`` holds a control character.
+
+    Postgres rejects NUL in a text column, which surfaced as a 500 on id routes
+    such as ``/api/agent/approvals/%00/approve``. Tab, newline and carriage
+    return are allowed, as in :func:`reject_control_characters` (N5).
+    """
+    try:
+        reject_control_characters(str(doc_id))
+    except InvalidQueryValueError:
+        raise InvalidDocumentIdError() from None
+
+
 class PostgresDocumentStore:
     """The document-store half of :class:`ElasticsearchService`, over Postgres.
 
@@ -195,6 +210,7 @@ class PostgresDocumentStore:
         """
         if doc_id is None or str(doc_id) == "":
             raise ValueError(f"index_document({index}) requires a non-empty doc_id")
+        _guard_doc_id(doc_id)
 
         from services.elasticsearch_service import TIMESTAMP_SKIP_INDICES
 
@@ -236,6 +252,7 @@ class PostgresDocumentStore:
         A missing document raises, as ES's 404 does — the callers that tolerate
         absence check first.
         """
+        _guard_doc_id(doc_id)
         model = self._model()
         partial_doc["updated_at"] = self._clock()
         async with self._session_scope() as session:
@@ -356,6 +373,7 @@ class PostgresDocumentStore:
             stale event" from "wrote the update" — the distinction
             ``upsert_with_last_event_timestamp`` returns to its callers.
         """
+        _guard_doc_id(doc_id)
         model = self._model()
         async with self._session_scope() as session:
             row = (
@@ -432,6 +450,7 @@ class PostgresDocumentStore:
 
     async def document_exists(self, index: str, doc_id: str) -> bool:
         """Whether a document exists, without transferring its body."""
+        _guard_doc_id(doc_id)
         model = self._model()
         async with self._session_scope() as session:
             found = (
@@ -511,6 +530,7 @@ class PostgresDocumentStore:
 
     async def delete_document(self, index: str, doc_id: str) -> bool:
         """Delete by id. ``False`` when the document was not there."""
+        _guard_doc_id(doc_id)
         model = self._model()
         async with self._session_scope() as session:
             row = await session.get(model, (index, str(doc_id)))
@@ -525,6 +545,7 @@ class PostgresDocumentStore:
 
     async def get_document(self, index: str, doc_id: str) -> Optional[Dict[str, Any]]:
         """The document body, or ``None``. Matches the ES facade's 404 → None."""
+        _guard_doc_id(doc_id)
         model = self._model()
         async with self._session_scope() as session:
             row = await session.get(model, (index, str(doc_id)))

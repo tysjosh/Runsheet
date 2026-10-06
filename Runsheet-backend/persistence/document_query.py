@@ -157,6 +157,15 @@ class InvalidQueryValueError(ValueError):
         super().__init__(self.safe_message)
 
 
+class InvalidDocumentIdError(InvalidQueryValueError):
+    """A document id contains a control character (same 400 mapping as N5)."""
+
+    safe_message = "An id contains a control character."
+
+    def __init__(self) -> None:
+        super().__init__()
+
+
 def reject_control_characters(value: Any, *, _depth: int = 0) -> None:
     """Raise :class:`InvalidQueryValueError` if any key or string holds a control character.
 
