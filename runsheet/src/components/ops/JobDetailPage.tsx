@@ -62,6 +62,7 @@ import type {
 import LoadingSpinner from "../LoadingSpinner";
 import { entityHref } from "../ui/EntityLink";
 import CargoManifestEditor from "./CargoManifestEditor";
+import DriverActivitySection from "./DriverActivitySection";
 import JobActionButtons from "./JobActionButtons";
 
 // ─── Cross-Module Linkage Helpers (cross-module-entity-linkage Req 3.3, 13.1) ─
@@ -1010,6 +1011,9 @@ export default function JobDetailPage({
               <EventTimeline events={job.events ?? []} />
             </div>
           </div>
+
+          {/* Driver Activity (G1): the job's driver messages and exceptions */}
+          <DriverActivitySection jobId={job.job_id} />
 
           {/* Cargo Manifest Card */}
           {(job.job_type === "cargo_transport" || cargo.length > 0) && (
