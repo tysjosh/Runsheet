@@ -264,6 +264,7 @@ class TestConfigureCompartmentsCanonicalization:
     def test_canonicalizes_every_allowed_grade(self):
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.get_document = AsyncMock(return_value=None)
 
         app = self._make_app(es)
         client = self._client(app)
@@ -297,6 +298,7 @@ class TestConfigureCompartmentsCanonicalization:
     def test_unknown_allowed_grade_rejects_with_400(self):
         es = MagicMock()
         es.index_document = AsyncMock()
+        es.get_document = AsyncMock(return_value=None)
 
         app = self._make_app(es)
         client = self._client(app)

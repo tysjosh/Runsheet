@@ -511,8 +511,10 @@ class ConfirmationProtocol:
                 )
             elif tool_name == "reroute_job":
                 from datetime import datetime, timezone
-                await self._es.update_document(
-                    "jobs_current",
+                from scheduling.services.job_writes import update_job_fields
+                # Document store + Postgres current-state row (N-FF-2).
+                await update_job_fields(
+                    self._es,
                     params["job_id"],
                     {
                         "destination": params["new_destination"],

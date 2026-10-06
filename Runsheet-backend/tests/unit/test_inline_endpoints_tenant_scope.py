@@ -367,6 +367,17 @@ async def test_ingestion_stamps_tenant_on_history_writes() -> None:
 
     es.index_document = _index
 
+    # The current-location write is a merge into the asset doc (N-FF-1).
+    async def _update(index: str, doc_id: str, partial: Dict[str, Any]):
+        index_calls.append((index, doc_id, dict(partial)))
+
+    es.update_document = _update
+
+    async def _get(index: str, doc_id: str):
+        return None
+
+    es.get_document = _get
+
     service = DataIngestionService(es_service=es, connection_manager=None)
 
     update = LocationUpdate(

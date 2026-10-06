@@ -41,6 +41,7 @@ from errors.exceptions import (
 )
 from errors.codes import ErrorCode
 from services.time_utils import utcnow
+from fuel.compartment_state_models import _STATE_FIELDS as _COMPARTMENT_STATE_FIELDS
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
@@ -681,6 +682,17 @@ async def configure_compartments(
             }
             # Use composite key: truck_id + compartment_id
             doc_id = f"{truck_id}_{compartment.compartment_id}"
+            # This write replaces the whole document, and the same document
+            # holds the compartment's lifecycle (state, last_loaded_product,
+            # last_loaded_at, last_cleaned_at) that CompartmentStateRepository
+            # maintains. Re-configuring a compartment must not erase what it
+            # last carried — the cross-contamination guard reads it — so carry
+            # those fields over from this tenant's existing document.
+            existing = await es.get_document(TRUCK_COMPARTMENTS_INDEX, doc_id)
+            if isinstance(existing, dict) and existing.get("tenant_id") == tenant_id:
+                for field in _COMPARTMENT_STATE_FIELDS:
+                    if field in existing:
+                        doc[field] = existing[field]
             await es.index_document(TRUCK_COMPARTMENTS_INDEX, doc_id, doc)
             # Postgres source of truth. The composite id is passed explicitly
             # because it is what every reader fetches by; the repository can

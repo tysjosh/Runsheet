@@ -45,6 +45,8 @@ def _make_protocol_with_es() -> ConfirmationProtocol:
     es_service = MagicMock()
     es_service.update_document = AsyncMock()
     es_service.index_document = AsyncMock()
+    # The job write helper reads the merged job back to mirror it.
+    es_service.get_document = AsyncMock(return_value=None)
 
     protocol = ConfirmationProtocol(
         risk_registry=MagicMock(),

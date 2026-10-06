@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from scheduling.models import JobStatus
+from scheduling.services.job_writes import update_job_fields
 from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
 
 logger = logging.getLogger(__name__)
@@ -115,28 +116,19 @@ class DelayDetectionService:
                 "updated_at": now_iso,
             }
 
+            # Document store + Postgres current-state row, so a PG-served read
+            # (get_delayed_jobs / delay metrics) reflects it and the sweep does
+            # not re-detect the same job every cycle. Merges into job_doc for
+            # the broadcast.
             try:
-                await self._es.update_document(
-                    JOBS_CURRENT_INDEX, job_id, update_fields
+                await update_job_fields(
+                    self._es, job_id, update_fields, job_doc=job_doc
                 )
             except Exception as exc:
                 logger.error(
                     "Failed to mark job %s as delayed: %s", job_id, exc
                 )
                 continue
-
-            # Mirror the delay transition to the Postgres source-of-truth so a
-            # PG-served read (get_delayed_jobs / delay metrics) reflects it and
-            # the sweep does not re-detect the same job every cycle.
-            from commerce.services.commerce_persistence_bridge import (
-                mirror_current_state_fields,
-            )
-            await mirror_current_state_fields(
-                "job", job_doc.get("tenant_id"), job_id, update_fields
-            )
-
-            # Merge updates into doc for broadcast
-            job_doc.update(update_fields)
             newly_delayed.append(job_doc)
 
             # Broadcast delay_alert via WebSocket

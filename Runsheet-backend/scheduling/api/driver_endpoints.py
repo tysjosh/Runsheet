@@ -27,6 +27,7 @@ from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from scheduling.models import JobStatus
 from scheduling.services.job_service import JobService
+from scheduling.services.job_writes import update_job_fields
 
 logger = logging.getLogger(__name__)
 
@@ -376,10 +377,10 @@ async def accept_job(
         update_fields.setdefault("updated_at", now)
 
     if update_fields:
-        await svc._es.update_document(
-            "jobs_current", job_id, update_fields
-        )
-        job_doc.update(update_fields)
+        # Document store + Postgres current-state row. Writing only the
+        # store left GET /jobs/{id} (PG-served) on the old status, so the
+        # driver's next ack was refused (N-FF-2).
+        await update_job_fields(svc._es, job_id, update_fields, job_doc=job_doc)
 
     # Append accept event to job timeline
     event_payload = {
@@ -473,10 +474,10 @@ async def reject_job(
             "status": JobStatus.SCHEDULED.value,
             "updated_at": now,
         }
-        await svc._es.update_document(
-            "jobs_current", job_id, update_fields
-        )
-        job_doc.update(update_fields)
+        # Document store + Postgres current-state row. Writing only the
+        # store left GET /jobs/{id} (PG-served) on the old status, so the
+        # driver's next ack was refused (N-FF-2).
+        await update_job_fields(svc._es, job_id, update_fields, job_doc=job_doc)
 
     # Append reject event to job timeline
     event_payload = {

@@ -39,6 +39,7 @@ from scheduling.models import (
     VALID_TRANSITIONS,
 )
 from scheduling.services.job_id_generator import JobIdGenerator
+from scheduling.services.job_writes import index_job, update_job_fields
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     JOB_EVENTS_INDEX,
@@ -205,13 +206,8 @@ class JobService:
             doc["destination_location"] = data.destination_location.model_dump()
 
         # --- Index into jobs_current ---
-        await self._es.index_document(JOBS_CURRENT_INDEX, job_id, doc)
-
-        # Dual-write the job current-state to the Postgres source-of-truth.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", doc)
+        # Document store + Postgres current-state row (``job_writes``).
+        await index_job(self._es, job_id, doc)
 
         # --- Append event ---
         await self._append_event(
@@ -341,16 +337,9 @@ class JobService:
         now = datetime.now(timezone.utc).isoformat()
         update_fields = {**link_fields, "updated_at": now}
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
-
-        job_doc.update(update_fields)
-
-        # Dual-write the merged current-state to Postgres (read-cutover serves
-        # from PG), mirroring create_job / assign_asset / transition_status.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         return job_doc
 
@@ -428,7 +417,9 @@ class JobService:
         if readiness_flags:
             update_fields["readiness_flags"] = readiness_flags
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # Append event
         await self._append_event(
@@ -458,16 +449,6 @@ class JobService:
         # Merge updates into doc for return / broadcast
         job_doc.update(update_fields)
 
-        # Dual-write the merged job current-state to the Postgres
-        # source-of-truth. ``_get_job_doc`` serves reads from Postgres under
-        # read-cutover, so an assignment that only touched ES would be
-        # invisible to the next status transition (it would still see
-        # ``scheduled``). Mirror here exactly as create_job / transition_status
-        # do. (Bug found in dispatcher journey: assign left PG at 'scheduled'.)
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
 
         await self._broadcast_job_update("status_changed", job_doc)
 
@@ -543,7 +524,9 @@ class JobService:
             "updated_at": now,
         }
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # Append asset_reassigned event with old and new asset ids
         await self._append_event(
@@ -647,12 +630,6 @@ class JobService:
 
         await self._broadcast_job_update("status_changed", job_doc)
 
-        # Dual-write the reassigned current-state to Postgres (read-cutover
-        # serves from PG). Mirrors the create_job / transition_status pattern.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
 
         return Job(**self._normalize_job_doc(job_doc))
 
@@ -802,7 +779,9 @@ class JobService:
         # changing status away from assigned/in_progress is sufficient.
 
         # Update job document
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # Append status_changed event
         await self._append_event(
@@ -834,11 +813,6 @@ class JobService:
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
 
-        # Dual-write the merged job current-state to Postgres.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
 
         # --- Auto-consume parts for completed maintenance jobs (Req 5.1, 5.3, 5.5) ---
         if target_status == JobStatus.COMPLETED:

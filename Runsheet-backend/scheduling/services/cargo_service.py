@@ -23,6 +23,7 @@ from typing import Optional
 from errors.exceptions import resource_not_found, validation_error
 from persistence.document_matcher import matches
 from scheduling.models import CargoItem, CargoItemStatus
+from scheduling.services.job_writes import atomic_update_job, update_job_fields
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     JOB_EVENTS_INDEX,
@@ -104,11 +105,13 @@ class CargoService:
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # Update the job document with the new manifest
-        await self._es.update_document(
-            JOBS_CURRENT_INDEX,
+        # Update the job document with the new manifest, and its Postgres
+        # current-state row (GET /jobs/{id} reads it under read-cutover).
+        await update_job_fields(
+            self._es,
             job_id,
             {"cargo_manifest": manifest, "updated_at": now},
+            job_doc=dict(job_doc),
         )
 
         # Append cargo_updated event
@@ -188,8 +191,10 @@ class CargoService:
                     return doc
             return None  # removed since the read: leave the doc unchanged
 
-        updated_job, applied = await self._es.atomic_update(
-            JOBS_CURRENT_INDEX, job_id, _set_item_status
+        # Mirrors the updated job to its Postgres current-state row, which
+        # GET /jobs/{id} reads; the store-only write left it stale (N-FF-2).
+        updated_job, applied = await atomic_update_job(
+            self._es, job_id, _set_item_status
         )
         if not applied:
             raise resource_not_found(

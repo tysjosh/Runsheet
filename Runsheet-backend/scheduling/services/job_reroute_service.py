@@ -25,6 +25,7 @@ from errors.exceptions import (
     resource_not_found,
     validation_error,
 )
+from scheduling.services.job_writes import update_job_fields
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     JOB_EVENTS_INDEX,
@@ -146,10 +147,9 @@ class JobRerouteService:
         if new_destination_location:
             update_fields["destination_location"] = new_destination_location
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
-
-        # Merge updates into doc for event and broadcast
-        job_doc.update(update_fields)
+        # Document store + Postgres current-state row; merges into job_doc
+        # for the event and broadcast below.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # 5. Append job_rerouted event
         await self._append_event(

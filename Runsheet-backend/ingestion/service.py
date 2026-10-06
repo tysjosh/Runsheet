@@ -570,6 +570,18 @@ class DataIngestionService:
             True if the asset exists (and matches the tenant when provided),
             False otherwise.
         """
+        return await self._find_asset_doc_id(asset_id, tenant_id) is not None
+
+    async def _find_asset_doc_id(
+        self, asset_id: str, tenant_id: Optional[str] = None
+    ) -> Optional[str]:
+        """The store id of the asset's ``trucks`` document, or ``None``.
+
+        The document is found by its ``asset_id`` or ``truck_id`` field, and its
+        store id is not guaranteed to equal ``asset_id`` for every vintage, so
+        the location merge writes to the id the search returned. A hit without
+        an ``_id`` (test doubles) falls back to ``asset_id``.
+        """
         try:
             # Assets live in the trucks index (the store has no ``assets``
             # alias) and key on asset_id or truck_id depending on vintage, so
@@ -591,9 +603,11 @@ class DataIngestionService:
             result = await self.es_service.search_documents(ASSETS_INDEX, query, size=1)
 
             if result and result.get("hits", {}).get("total", {}).get("value", 0) > 0:
-                return True
+                hits = result.get("hits", {}).get("hits") or []
+                found = hits[0].get("_id") if hits else None
+                return str(found) if found else asset_id
 
-            return False
+            return None
 
         except Exception as e:
             # Fail closed: an asset that can't be confirmed is rejected, so a
@@ -603,7 +617,7 @@ class DataIngestionService:
                 f"Error checking asset existence for {asset_id}: {e}",
                 extra={"extra_data": {"asset_id": asset_id, "error": str(e)}}
             )
-            return False
+            return None
     
     async def process_location_update(self, update: LocationUpdate) -> LocationUpdateResult:
         """
@@ -645,8 +659,8 @@ class DataIngestionService:
             # Verify asset exists within the authenticated tenant. Rejecting
             # cross-tenant asset ids prevents a caller for tenant A from
             # writing location history against tenant B by guessing an ID.
-            asset_exists = await self.validate_asset_exists(asset_id, tenant_id=tenant_id)
-            if not asset_exists:
+            asset_doc_id = await self._find_asset_doc_id(asset_id, tenant_id=tenant_id)
+            if asset_doc_id is None:
                 self._logger.warning(
                     f"Location update rejected: asset_id '{asset_id}' not found"
                     + (f" for tenant '{tenant_id}'" if tenant_id else ""),
@@ -675,24 +689,38 @@ class DataIngestionService:
             if sanitized_data.get("heading") is not None:
                 location_data["current_heading"] = sanitized_data["heading"]
 
-            # Write to "trucks" index (assets is an alias pointing to trucks)
-            await self.es_service.index_document(
-                index="trucks",
-                doc_id=asset_id,
-                document=location_data
+            # Merge the live-position fields into the asset's ``trucks``
+            # document. This was ``index_document``, a full replace: the stored
+            # doc kept only these fields, lost ``asset_id`` / ``truck_id`` /
+            # ``asset_type``, and dropped out of every asset search, so the next
+            # ping 404'd and job-create / driver assignment with that asset
+            # failed (N-FF-1).
+            await self.es_service.update_document(
+                ASSETS_INDEX, asset_doc_id, location_data
             )
 
-            # Mirror the live-position fields to the Postgres source-of-truth so
-            # the (now PG-backed) fleet dashboard / truck reads reflect the
-            # update. Uses a partial field-merge (not a full replace) so the
-            # other truck fields are preserved.
+            # Mirror the merged asset to the Postgres source-of-truth (the
+            # PG-backed fleet reads), read back from the store just written as
+            # the asset PATCH does. Upsert rather than a field merge so a truck
+            # with no relational row yet gets one.
             try:
                 from commerce.services.commerce_persistence_bridge import (
                     mirror_current_state_fields,
+                    mirror_current_state_upsert,
                 )
-                await mirror_current_state_fields(
-                    "truck", tenant_id, asset_id, location_data
-                )
+                merged = await self.es_service.get_document(ASSETS_INDEX, asset_doc_id)
+                if isinstance(merged, dict) and merged.get("tenant_id") == tenant_id:
+                    await mirror_current_state_upsert(
+                        "truck", merged, doc_id=asset_doc_id
+                    )
+                else:
+                    # ``tenant_id`` is positional in ``set_fields``; passing it
+                    # in the fields as well raised "multiple values", which is
+                    # why the old field-merge mirror never landed.
+                    await mirror_current_state_fields(
+                        "truck", tenant_id, asset_doc_id,
+                        {k: v for k, v in location_data.items() if k != "tenant_id"},
+                    )
             except Exception:  # noqa: BLE001 — best-effort, never block ingestion
                 self._logger.warning(
                     "PG location mirror failed for asset %s", asset_id,

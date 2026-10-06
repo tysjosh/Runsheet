@@ -79,7 +79,17 @@ class FleetRegistrationService:
                 "volume": total_capacity,
             },
         }
-        await self._es.index_document(self.FLEET_INDEX, truck_id, document)
+        # Create-if-absent, not index_document: ``_get_fleet_document`` reads a
+        # store error as "absent", and a full replace here would then overwrite
+        # an existing truck with these five fields, dropping it out of asset
+        # searches (the N-FF-1 class). Ids are global, so it also refuses to
+        # replace another tenant's truck.
+        created = await self._es.create_document(self.FLEET_INDEX, truck_id, document)
+        if not created:
+            logger.warning(
+                f"Fleet document for {truck_id} already exists; left unchanged"
+            )
+            return
         logger.info(
             f"Created fleet document for fuel tanker {truck_id} "
             f"with cargo volume {total_capacity}L"
