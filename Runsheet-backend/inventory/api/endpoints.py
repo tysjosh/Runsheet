@@ -204,8 +204,9 @@ async def adjust_stock(
     Positive quantity_change = restock, negative = consumption.
     """
     service = _get_inventory_service()
-    # Use tenant_id as actor_id fallback (in production, extract from JWT)
-    actor_id = tenant.tenant_id
+    # The audit actor is the authenticated user, not the tenant (B4; same fix
+    # as created_by on jobs in cf55801, B13).
+    actor_id = tenant.user_id
     result = await service.adjust_stock(
         item_id=item_id,
         adjustment=body,
