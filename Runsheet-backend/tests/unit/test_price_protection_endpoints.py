@@ -292,15 +292,10 @@ class TestCreateContract:
         )
 
         assert resp.status_code == 422, resp.text
-        detail = resp.json()["detail"]
-        # Custom validator failures return a dict; Pydantic schema
-        # failures return a list. Our model validators run post-
-        # schema, so the response is a dict.
-        if isinstance(detail, dict):
-            assert (
-                detail["error_code"]
-                == "price_protection_contract.invalid_payload"
-            )
+        # Model validator failures use the standard envelope (C12/C-2).
+        body = resp.json()
+        assert body["error_code"] == "price_protection_contract.invalid_payload"
+        assert body["request_id"]
 
     def test_rejects_end_before_start(self):
         app, _es = _build_app(tenant_id="tenant-A")
@@ -432,8 +427,9 @@ class TestGetContract:
         )
 
         assert resp.status_code == 404, resp.text
-        detail = resp.json()["detail"]
-        assert detail["error_code"] == "price_protection_contract.not_found"
+        body = resp.json()
+        assert body["error_code"] == "price_protection_contract.not_found"
+        assert body["request_id"]
 
     def test_returns_404_for_cross_tenant_contract(self):
         """Does not leak existence across tenants (Constraint C3)."""
@@ -500,13 +496,13 @@ class TestUpdateContract:
         )
 
         assert resp.status_code == 422, resp.text
-        detail = resp.json()["detail"]
+        body = resp.json()
         assert (
-            detail["error_code"]
+            body["error_code"]
             == "price_protection_contract.invalid_status_transition"
         )
-        assert detail["current_status"] == "active"
-        assert detail["requested_status"] == "exhausted"
+        assert body["details"]["current_status"] == "active"
+        assert body["details"]["requested_status"] == "exhausted"
 
     def test_rejects_cancel_from_exhausted(self):
         """Cancellation is only allowed from ``active``."""
@@ -535,9 +531,8 @@ class TestUpdateContract:
         )
 
         assert resp.status_code == 422, resp.text
-        detail = resp.json()["detail"]
         assert (
-            detail["error_code"]
+            resp.json()["error_code"]
             == "price_protection_contract.no_mutable_fields"
         )
 

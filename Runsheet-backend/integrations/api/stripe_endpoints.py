@@ -46,6 +46,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from integrations.stripe_connector import (
     StripeConnector,
     StripeSignatureVerificationError,
@@ -169,15 +171,13 @@ async def _resolve_connector_or_404(tenant_id: str) -> StripeConnector:
             },
         )
     if connector is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "stripe_integration_not_configured",
-                "message": (
-                    "No active Stripe integration for this tenant. "
-                    "Connect Stripe from the Integration Marketplace first."
-                ),
-            },
+        raise AppException(
+            ErrorCode.STRIPE_INTEGRATION_NOT_CONFIGURED,
+            (
+                "No active Stripe integration for this tenant. "
+                "Connect Stripe from the Integration Marketplace first."
+            ),
+            status_code=404,
         )
     return connector
 

@@ -30,7 +30,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from commerce.api._authz import commerce_staff_dependency
@@ -205,12 +205,10 @@ async def create_pricing_rule(
     try:
         rule = PricingRule.model_validate(payload)
     except Exception as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICING_RULE_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "pricing_rule.invalid_payload",
-                "message": str(exc),
-            },
         )
 
     document = rule.model_dump(mode="json")
@@ -365,12 +363,10 @@ async def resolve_price(
             account_id=body.account_id,
         )
     except PricingNoRuleMatchedError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICING_NO_RULE_MATCHED,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": exc.error_code,
-                "message": str(exc),
-            },
         )
     except PricingRackPriceUnavailableError as exc:
         raise AppException(
@@ -383,12 +379,10 @@ async def resolve_price(
             },
         )
     except NotImplementedError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICING_NOT_IMPLEMENTED,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "pricing.not_implemented",
-                "message": str(exc),
-            },
         )
 
     return {

@@ -47,6 +47,7 @@ from compliance.services.compliance_subject_ref import (
     subject_ref_for_kind,
     validate_subject_ref,
 )
+from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
@@ -367,12 +368,10 @@ async def create_asset_certification(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "asset_certifications.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -490,12 +489,10 @@ async def update_asset_certification(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "asset_certifications.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(

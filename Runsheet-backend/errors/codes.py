@@ -226,6 +226,86 @@ class ErrorCode(str, Enum):
     PRICING_RACK_PRICE_UNAVAILABLE = "pricing.rack_price_unavailable"
     """No rack price for the terminal/product and none supplied (HTTP 422)"""
 
+    # Compliance / commerce 4xx codes moved from HTTPException detail payloads
+    # to the standard envelope (C12/C-2). Values are the shipped wire strings.
+    TERMINAL_BOLS_EMPTY_PAYLOAD = "terminal_bols.empty_payload"
+    """EDI body is empty (HTTP 400)"""
+
+    TERMINAL_BOLS_INVALID_EDI = "terminal_bols.invalid_edi"
+    """Body is not a parseable EDI document (HTTP 422)"""
+
+    TERMINAL_BOLS_EMPTY_FILE = "terminal_bols.empty_file"
+    """Uploaded BOL file is empty (HTTP 400)"""
+
+    TERMINAL_BOLS_INVALID_UPLOAD = "terminal_bols.invalid_upload"
+    """Uploaded BOL could not be ingested (HTTP 422)"""
+
+    TERMINAL_BOLS_INVALID_CONFIRM = "terminal_bols.invalid_confirm"
+    """BOL confirmation payload is invalid (HTTP 422)"""
+
+    TERMINAL_BOLS_INVALID_LINK = "terminal_bols.invalid_link"
+    """BOL link payload is invalid (HTTP 422)"""
+
+    ASSET_CERTIFICATIONS_INVALID_PAYLOAD = "asset_certifications.invalid_payload"
+    """Asset certification payload failed validation (HTTP 422)"""
+
+    METERS_INVALID_PAYLOAD = "meters.invalid_payload"
+    """Meter registration payload failed validation (HTTP 422)"""
+
+    KFACTOR_INVALID_ADJUSTMENT = "kfactor.invalid_adjustment"
+    """K-factor adjustment is invalid (HTTP 422)"""
+
+    KFACTOR_VARIANCE_COMPUTATION_ERROR = "kfactor.variance_computation_error"
+    """K-factor variance could not be computed from the inputs (HTTP 422)"""
+
+    KFACTOR_SUGGEST_ERROR = "kfactor.suggest_error"
+    """K-factor suggestion could not be computed from the inputs (HTTP 422)"""
+
+    PRICE_PROTECTION_CONTRACT_INVALID_PAYLOAD = "price_protection_contract.invalid_payload"
+    """Price-protection contract payload failed validation (HTTP 422)"""
+
+    PRICE_PROTECTION_CONTRACT_NOT_FOUND = "price_protection_contract.not_found"
+    """Price-protection contract does not exist for the tenant (HTTP 404)"""
+
+    PRICE_PROTECTION_CONTRACT_NO_MUTABLE_FIELDS = "price_protection_contract.no_mutable_fields"
+    """Contract update carried no mutable fields (HTTP 422)"""
+
+    PRICE_PROTECTION_CONTRACT_INVALID_STATUS_TRANSITION = "price_protection_contract.invalid_status_transition"
+    """Contract status transition is not allowed (HTTP 422)"""
+
+    PRICING_RULE_INVALID_PAYLOAD = "pricing_rule.invalid_payload"
+    """Pricing rule payload failed validation (HTTP 422)"""
+
+    PRICING_NO_RULE_MATCHED = "pricing.no_rule_matched"
+    """No pricing rule matched the delivery (HTTP 422)"""
+
+    PRICING_NOT_IMPLEMENTED = "pricing.not_implemented"
+    """Pricing strategy is not implemented (HTTP 422)"""
+
+    STRIPE_INTEGRATION_NOT_CONFIGURED = "stripe_integration_not_configured"
+    """Stripe integration is not configured for the tenant (HTTP 404)"""
+
+    INVALID_EXPIRES_AT = "INVALID_EXPIRES_AT"
+    """expires_at is not a valid ISO 8601 datetime (HTTP 422)"""
+
+    MISSING_AUTHORIZED_BY = "MISSING_AUTHORIZED_BY"
+    """authorized_by is required (HTTP 422)"""
+
+    INVALID_QBO_PUSH_STATE = "INVALID_QBO_PUSH_STATE"
+    """Invoice is not in a QBO push state that allows the action (HTTP 409)"""
+
+    INVALID_PAYMENT_METHOD = "INVALID_PAYMENT_METHOD"
+    """Payment method is not supported (HTTP 422)"""
+
+    INVALID_MOMENT = "INVALID_MOMENT"
+    """moment is not a valid ISO 8601 datetime (HTTP 422)"""
+
+    COMMERCE_PRICE_BOOK_NO_RULE = "commerce.pricing.no_rule"
+    """Price book has no rule for the product/account/moment (HTTP 422)"""
+
+    COMMERCE_PRICE_BOOK_UNKNOWN_PRODUCT = "commerce.pricing.unknown_product"
+    """Price book product code is unknown (HTTP 422)"""
+
     # Driver Mobile App errors (4xx / 202)
     #
     # Values are UPPER_SNAKE, matching the rest of the catalog rather than the
@@ -404,6 +484,32 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.SUPPLIER_CONTRACT_NOT_FOUND: 404,
     ErrorCode.KFACTOR_VARIANCE_HISTORY_FAILED: 500,
     ErrorCode.PRICING_RACK_PRICE_UNAVAILABLE: 422,
+    ErrorCode.TERMINAL_BOLS_EMPTY_PAYLOAD: 400,
+    ErrorCode.TERMINAL_BOLS_INVALID_EDI: 422,
+    ErrorCode.TERMINAL_BOLS_EMPTY_FILE: 400,
+    ErrorCode.TERMINAL_BOLS_INVALID_UPLOAD: 422,
+    ErrorCode.TERMINAL_BOLS_INVALID_CONFIRM: 422,
+    ErrorCode.TERMINAL_BOLS_INVALID_LINK: 422,
+    ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD: 422,
+    ErrorCode.METERS_INVALID_PAYLOAD: 422,
+    ErrorCode.KFACTOR_INVALID_ADJUSTMENT: 422,
+    ErrorCode.KFACTOR_VARIANCE_COMPUTATION_ERROR: 422,
+    ErrorCode.KFACTOR_SUGGEST_ERROR: 422,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_PAYLOAD: 422,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_NOT_FOUND: 404,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_NO_MUTABLE_FIELDS: 422,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_STATUS_TRANSITION: 422,
+    ErrorCode.PRICING_RULE_INVALID_PAYLOAD: 422,
+    ErrorCode.PRICING_NO_RULE_MATCHED: 422,
+    ErrorCode.PRICING_NOT_IMPLEMENTED: 422,
+    ErrorCode.STRIPE_INTEGRATION_NOT_CONFIGURED: 404,
+    ErrorCode.INVALID_EXPIRES_AT: 422,
+    ErrorCode.MISSING_AUTHORIZED_BY: 422,
+    ErrorCode.INVALID_QBO_PUSH_STATE: 409,
+    ErrorCode.INVALID_PAYMENT_METHOD: 422,
+    ErrorCode.INVALID_MOMENT: 422,
+    ErrorCode.COMMERCE_PRICE_BOOK_NO_RULE: 422,
+    ErrorCode.COMMERCE_PRICE_BOOK_UNKNOWN_PRODUCT: 422,
     # Driver Mobile App error codes
     ErrorCode.SESSION_EXPIRED: 401,
     ErrorCode.DRIVER_IDENTITY_MISSING: 403,

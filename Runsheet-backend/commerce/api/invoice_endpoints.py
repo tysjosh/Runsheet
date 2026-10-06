@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
@@ -334,12 +334,10 @@ async def void_invoice(
     """
     # Validate that authorized_by is provided when force=true
     if body.force and not body.authorized_by:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.MISSING_AUTHORIZED_BY,
+            "authorized_by is required when force=true",
             status_code=422,
-            detail={
-                "error_code": "MISSING_AUTHORIZED_BY",
-                "message": "authorized_by is required when force=true",
-            },
         )
 
     service = _get_invoice_service()
@@ -449,14 +447,14 @@ async def retry_qbo_push(
 
     current_push_state = invoice.get("qbo_push_state")
     if current_push_state != "dead_letter":
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.INVALID_QBO_PUSH_STATE,
+            (
+                f"Cannot retry QBO push: invoice qbo_push_state is "
+                f"'{current_push_state}', expected 'dead_letter'"
+            ),
             status_code=409,
-            detail={
-                "error_code": "INVALID_QBO_PUSH_STATE",
-                "message": (
-                    f"Cannot retry QBO push: invoice qbo_push_state is "
-                    f"'{current_push_state}', expected 'dead_letter'"
-                ),
+            details={
                 "invoice_id": invoice_id,
                 "current_qbo_push_state": current_push_state,
             },

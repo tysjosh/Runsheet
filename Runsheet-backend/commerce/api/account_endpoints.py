@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
@@ -185,7 +185,7 @@ def _get_request_id(request: Request) -> str:
 def _parse_expires_at(expires_at_str: str) -> datetime:
     """Parse an ISO 8601 datetime string into a timezone-aware datetime.
 
-    Raises HTTPException 422 if the string is not a valid datetime.
+    Raises AppException 422 if the string is not a valid datetime.
     """
     try:
         dt = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
@@ -193,12 +193,10 @@ def _parse_expires_at(expires_at_str: str) -> datetime:
             dt = dt.replace(tzinfo=timezone.utc)
         return dt
     except (ValueError, TypeError):
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.INVALID_EXPIRES_AT,
+            f"expires_at must be a valid ISO 8601 datetime, got: {expires_at_str}",
             status_code=422,
-            detail={
-                "error_code": "INVALID_EXPIRES_AT",
-                "message": f"expires_at must be a valid ISO 8601 datetime, got: {expires_at_str}",
-            },
         )
 
 

@@ -40,25 +40,19 @@ EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
     "ops/api/endpoints.py": 11,
     "integrations/api/integrations_endpoints.py": 7,
     "fuel/api/fuel_ops_endpoints.py": 115,
-    "integrations/api/stripe_endpoints.py": 8,
+    "integrations/api/stripe_endpoints.py": 7,
     "import_endpoints.py": 12,
     # Commerce endpoints (commerce-backbone spec) — raw HTTPException tech
     # debt frozen at introduction; migrate to errors.exceptions over time.
-    "commerce/api/account_endpoints.py": 1,
-    "commerce/api/invoice_endpoints.py": 2,
-    "commerce/api/payment_endpoints.py": 1,
-    "commerce/api/price_book_endpoints.py": 2,
-    "commerce/api/price_protection_endpoints.py": 6,
-    "commerce/api/pricing_endpoints.py": 3,
     # Compliance endpoints (fuel-compliance-backbone spec) — same tech-debt
     # freeze; structured-envelope migration tracked separately.
-    "compliance/api/asset_certification_endpoints.py": 7,
+    "compliance/api/asset_certification_endpoints.py": 5,
     "compliance/api/driver_endpoints.py": 7,
     "compliance/api/ifta_endpoints.py": 7,
-    "compliance/api/kfactor_endpoints.py": 8,
-    "compliance/api/meter_endpoints.py": 5,
+    "compliance/api/kfactor_endpoints.py": 5,
+    "compliance/api/meter_endpoints.py": 4,
     "compliance/api/tax_endpoints.py": 3,
-    "compliance/api/terminal_bol_endpoints.py": 11,
+    "compliance/api/terminal_bol_endpoints.py": 5,
 }
 
 #: Total ceiling — sum of per-file counts. A handy second gate that
