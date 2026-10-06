@@ -20,7 +20,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from errors.codes import ErrorCode
-from errors.exceptions import AppException
+from errors.exceptions import AppException, error_code_value
 from schemas.common import ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -129,7 +129,7 @@ async def handle_app_exception(request: Request, exc: AppException) -> JSONRespo
     logger.warning(
         "Application error occurred",
         extra={
-            "error_code": exc.error_code.value,
+            "error_code": error_code_value(exc.error_code),
             "error_message": exc.message,
             "status_code": exc.status_code,
             "details": exc.details,
@@ -141,7 +141,7 @@ async def handle_app_exception(request: Request, exc: AppException) -> JSONRespo
     
     # Build the error response
     error_response = ErrorResponse(
-        error_code=exc.error_code.value,
+        error_code=error_code_value(exc.error_code),
         message=exc.message,
         details=exc.details,
         request_id=request_id,

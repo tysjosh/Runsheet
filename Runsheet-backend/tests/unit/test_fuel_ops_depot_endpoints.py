@@ -62,6 +62,16 @@ class _FakeESService:
     ) -> None:
         self.docs[doc_id] = dict(document)
 
+    # -------- create_document --------------------------------------------
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Ids are global, like the real store key: no tenant in it.
+        if doc_id in self.docs:
+            return False
+        self.docs[doc_id] = dict(document)
+        return True
+
     # -------- search_documents -------------------------------------------
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int
@@ -69,10 +79,14 @@ class _FakeESService:
         must = query.get("query", {}).get("bool", {}).get("must", [])
         tenant_id: str | None = None
         equality: Dict[str, Any] = {}
-        fuel_type_filter: str | None = None
+        fuel_type_filter: List[str] | None = None
         id_lookup: str | None = None
 
         for clause in must:
+            terms = clause.get("terms") if isinstance(clause, dict) else None
+            if terms and "fuel_types_supported" in terms:
+                fuel_type_filter = list(terms["fuel_types_supported"])
+                continue
             term = clause.get("term") if isinstance(clause, dict) else None
             if not term:
                 continue
@@ -82,7 +96,7 @@ class _FakeESService:
                 elif field == "depot_id":
                     id_lookup = value
                 elif field == "fuel_types_supported":
-                    fuel_type_filter = value
+                    fuel_type_filter = [value]
                 else:
                     equality[field] = value
 
@@ -105,7 +119,7 @@ class _FakeESService:
                 continue
             if fuel_type_filter is not None:
                 supported = doc.get("fuel_types_supported") or []
-                if fuel_type_filter not in supported:
+                if not any(code in supported for code in fuel_type_filter):
                     continue
             matches.append({"_source": dict(doc)})
 
@@ -220,6 +234,40 @@ class TestCreateDepot:
         assert data["fuel_types_supported"] == ["DIESEL_2", "GASOLINE_REG"]
         # The repository must have persisted the record under its id.
         assert "depot_001" in es.docs
+        assert es.docs["depot_001"]["tenant_id"] == "tenant-1"
+
+    def test_duplicate_id_in_same_tenant_is_409(self):
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        assert client.post("/api/fuel/mvp/depots", json=_base_create_payload()).status_code == 201
+        before = dict(es.docs["depot_001"])
+
+        resp = client.post(
+            "/api/fuel/mvp/depots", json=_base_create_payload(name="Renamed")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert es.docs["depot_001"] == before
+
+    def test_other_tenant_cannot_take_over_an_existing_id(self):
+        """S7: tenant-2 posting tenant-1's depot id must not overwrite it."""
+        app, es = _build_app(tenant_id="tenant-1")
+        client = TestClient(app)
+        assert client.post("/api/fuel/mvp/depots", json=_base_create_payload()).status_code == 201
+        before = dict(es.docs["depot_001"])
+
+        app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
+            tenant_id="tenant-2"
+        )
+        resp = client.post(
+            "/api/fuel/mvp/depots", json=_base_create_payload(name="Takeover")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert "tenant-1" not in resp.text
+        assert es.docs["depot_001"] == before
         assert es.docs["depot_001"]["tenant_id"] == "tenant-1"
 
     def test_mints_id_when_omitted(self):
@@ -383,18 +431,38 @@ class TestListDepots:
         data = resp.json()
         assert [d["depot_id"] for d in data["items"]] == ["p"]
 
-    def test_fuel_type_filter_unknown_returns_empty(self):
-        """An unknown fuel-type filter is a miss, not a 400."""
-
+    @pytest.mark.parametrize("value", ["UNOBTAINIUM", "bogus"])
+    def test_fuel_type_filter_unknown_is_422(self, value):
+        """F12: an unknown fuel-type filter is a 422, not an empty 200."""
         app, es = _build_app()
         client = TestClient(app)
         _seed_depot(es)
+        resp = client.get("/api/fuel/mvp/depots", params={"fuel_type": value})
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["details"] == {"fuel_type": value}
 
-        resp = client.get(
-            "/api/fuel/mvp/depots", params={"fuel_type": "UNOBTAINIUM"}
-        )
-        assert resp.status_code == 200
-        assert resp.json()["items"] == []
+    def test_fuel_type_filter_accepts_a_category_name(self):
+        """S6: ``diesel`` matches the DIESEL_2 depot, not the gasoline one."""
+        app, es = _build_app()
+        client = TestClient(app)
+        _seed_depot(es, depot_id="d", fuel_types_supported=["DIESEL_2"])
+        _seed_depot(es, depot_id="g", fuel_types_supported=["GASOLINE_PREM"])
+        resp = client.get("/api/fuel/mvp/depots", params={"fuel_type": "diesel"})
+        assert resp.status_code == 200, resp.text
+        assert [d["depot_id"] for d in resp.json()["items"]] == ["d"]
+
+    def test_fuel_type_category_matches_any_code_in_it(self):
+        """``gasoline`` covers GASOLINE_REG and GASOLINE_PREM depots."""
+        app, es = _build_app()
+        client = TestClient(app)
+        _seed_depot(es, depot_id="reg", fuel_types_supported=["GASOLINE_REG"])
+        _seed_depot(es, depot_id="prem", fuel_types_supported=["GASOLINE_PREM"])
+        _seed_depot(es, depot_id="d", fuel_types_supported=["DIESEL_2"])
+        resp = client.get("/api/fuel/mvp/depots", params={"fuel_type": "gasoline"})
+        assert resp.status_code == 200, resp.text
+        assert sorted(d["depot_id"] for d in resp.json()["items"]) == ["prem", "reg"]
 
     def test_rejects_invalid_status_filter(self):
         app, _ = _build_app()
@@ -519,7 +587,7 @@ class TestUpdateDepot:
         )
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "depot_not_found"
+        assert body["error_code"] == "depot_not_found"
 
     def test_returns_403_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -532,9 +600,9 @@ class TestUpdateDepot:
         )
         assert resp.status_code == 403
         body = resp.json()
-        assert body["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert body["error_code"] == "cross_tenant_access_denied"
         # Depot_id is safe to echo; owning tenant is not leaked.
-        assert body["detail"]["depot_id"] == "depot_001"
+        assert body["details"]["depot_id"] == "depot_001"
 
     def test_empty_patch_returns_current_model(self):
         app, es = _build_app()
@@ -579,7 +647,7 @@ class TestDeleteDepot:
         resp = client.delete("/api/fuel/mvp/depots/does-not-exist")
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "depot_not_found"
+        assert body["error_code"] == "depot_not_found"
 
     def test_returns_403_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -589,7 +657,7 @@ class TestDeleteDepot:
         resp = client.delete("/api/fuel/mvp/depots/depot_001")
         assert resp.status_code == 403
         body = resp.json()
-        assert body["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert body["error_code"] == "cross_tenant_access_denied"
         # Depot must remain in the store — cross-tenant delete is a no-op.
         assert "depot_001" in es.docs
 
@@ -674,7 +742,7 @@ class TestDeleteDepotN6:
         resp = TestClient(app).delete("/api/fuel/mvp/depots/does-not-exist")
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "depot_not_found"
+        assert resp.json()["error_code"] == "depot_not_found"
         assert settings.set_calls == []
 
     def test_incomplete_delete_is_500_with_the_standard_envelope(self):

@@ -17,6 +17,8 @@ Exposes tenant-scoped endpoints for driver CRUD and utilization:
   (admin only): provision the SuperTokens user for an email, assign the
   ``driver`` role, and link ``auth_users.driver_id``.
 * ``DELETE /api/ops/drivers/{driver_id}/app-access`` — revoke it again.
+* ``GET /api/ops/drivers/{driver_id}/activity`` — the driver's messages and
+  exceptions, newest first (admin / dispatcher; G1).
 
 Every handler depends on :func:`get_tenant_context` and tenant-scopes
 through :func:`inject_tenant_filter` (via the DriverRepository).
@@ -45,6 +47,7 @@ from typing import (
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
     app_access_already_linked,
@@ -94,6 +97,9 @@ _app_access_service: Any = None
 #: Wired by ``bootstrap/driver.py``, which runs after the duty-status service
 #: exists; may also be injected later via :func:`set_duty_status_service`.
 _duty_status_service: Any = None
+#: Read of driver messages and exceptions (G1), injected via
+#: :func:`set_driver_activity_service`.
+_driver_activity_service: Any = None
 
 
 def configure_driver_endpoints(
@@ -174,6 +180,25 @@ def set_driver_qualification_service(driver_qualification_service: Any) -> None:
     _driver_qualification_service = driver_qualification_service
 
 
+def set_driver_activity_service(service: Any) -> None:
+    """Inject the ``DriverActivityService`` behind ``/{driver_id}/activity`` (G1).
+
+    Wired by ``bootstrap/scheduling.py`` with the same service the job-level
+    read uses.
+    """
+    global _driver_activity_service
+    _driver_activity_service = service
+
+
+def _get_driver_activity_service():
+    """Return the configured DriverActivityService or raise."""
+    if _driver_activity_service is None:
+        raise RuntimeError(
+            "Driver activity not configured. Call set_driver_activity_service() during startup."
+        )
+    return _driver_activity_service
+
+
 def set_duty_status_service(duty_status_service: Any) -> None:
     """Inject (or clear) the ``DutyStatusService`` post-construction.
 
@@ -200,6 +225,38 @@ def _get_driver_repository():
 def _get_ref_resolver():
     """Return the resolver used to resolve the truck → asset link."""
     return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
+
+
+async def _validate_assigned_truck(tenant_id: str, truck_id: Optional[str]) -> None:
+    """Refuse an ``assigned_truck_id`` that isn't a truck in this tenant (B15).
+
+    Resolves through the same tenant-scoped ``asset`` loader the profile read
+    uses (``make_asset_loader``: the ``trucks`` index, matching ``asset_id`` or
+    ``truck_id``). Like the customer-tank customer check, it is only enforced
+    when an ``asset`` loader is registered, so a partially-wired app stays
+    additive. Clearing the truck (``None``) is always allowed.
+
+    Raises:
+        AppException: 422 ``VALIDATION_ERROR`` with ``details.assigned_truck_id``
+            when the id is unknown or belongs to another tenant.
+    """
+    if not truck_id:
+        return
+    resolver = _get_ref_resolver()
+    try:
+        registered = "asset" in resolver.registered_types()
+    except Exception:  # noqa: BLE001 - defensive; never block a write on this
+        registered = False
+    if not registered:
+        return
+    ref = await resolver.resolve(tenant_id, "asset", truck_id)
+    if not ref.is_resolved:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Assigned truck was not found in this tenant",
+            status_code=422,
+            details={"assigned_truck_id": truck_id},
+        )
 
 
 def _get_app_access_service() -> "AppAccessService":
@@ -641,6 +698,57 @@ async def get_driver_profile(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/ops/drivers/{driver_id}/activity (G1) — admin / dispatcher
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{driver_id}/activity")
+async def get_driver_activity(
+    driver_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    activity_type: Optional[Literal["message", "exception"]] = Query(
+        None, alias="type", description="Only messages or only exceptions"
+    ),
+    start_date: Optional[datetime] = Query(None, description="Earliest timestamp (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="Latest timestamp (ISO 8601)"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(20, ge=1, le=100, description="Page size"),
+) -> dict:
+    """Messages and exceptions from one driver, newest first (G1).
+
+    Read-only and tenant-scoped over the existing ``job_messages`` and
+    ``driver_exceptions`` stores. Admins and dispatchers only: a driver gets
+    403 ``INSUFFICIENT_ROLE``. A missing or other-tenant driver is 404.
+    """
+    require_role(tenant, "admin", "dispatcher")
+    repo = _get_driver_repository()
+    if await repo.get(tenant.tenant_id, driver_id) is None:
+        raise resource_not_found(
+            message=f"Driver '{driver_id}' not found",
+            details={"driver_id": driver_id},
+        )
+    result = await _get_driver_activity_service().list_for_driver(
+        tenant.tenant_id,
+        driver_id,
+        types=[activity_type] if activity_type else None,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        size=size,
+    )
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=result["items"],
+        total=result["total"],
+        page=page,
+        page_size=size,
+        request_id=getattr(request.state, "request_id", "unknown"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # POST /api/ops/drivers (Req 3.1.3) — admin only
 # ---------------------------------------------------------------------------
 
@@ -657,6 +765,7 @@ async def create_driver(
     """
     _require_admin_role(tenant)
     repo = _get_driver_repository()
+    await _validate_assigned_truck(tenant.tenant_id, body.assigned_truck_id)
 
     now = utcnow()
     driver_data: Dict[str, Any] = {
@@ -775,6 +884,9 @@ async def update_driver(
             message=f"Driver '{driver_id}' not found",
             details={"driver_id": driver_id},
         )
+
+    if "assigned_truck_id" in updates:
+        await _validate_assigned_truck(tenant.tenant_id, updates["assigned_truck_id"])
 
     if updates:
         updated = await repo.update(tenant.tenant_id, driver_id, updates)

@@ -26,7 +26,7 @@ Validates: Requirements 6.1.1, 6.1.2, 6.1.3, 6.1.5.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -283,6 +283,35 @@ def canonicalize(code_or_alias: str) -> str:
         raise UnknownFuelProductError(code_or_alias) from exc
 
 
+_CATEGORIES: frozenset[str] = frozenset(get_args(FuelCategory))
+
+
+def resolve_product_filter(value: str) -> List[str]:
+    """Resolve a list-filter value to the catalog codes it selects.
+
+    * A canonical code or alias (``DIESEL_2``, ``AGO``, case-insensitive)
+      resolves to ``[code]`` via :func:`canonicalize`.
+    * A :data:`FuelCategory` name (``diesel``, ``gasoline``) resolves to every
+      catalog code in that category, in catalog order.
+
+    Used by the depot and station list filters so a caller can filter by
+    product family (findings F12/S6, decision D6).
+
+    Raises:
+        UnknownFuelProductError: (a ``ValueError``) for anything else, which
+            the endpoints map to 422 ``VALIDATION_ERROR``.
+    """
+
+    try:
+        return [canonicalize(value)]
+    except (UnknownFuelProductError, TypeError):
+        pass
+    category = value.strip().lower() if isinstance(value, str) else ""
+    if category in _CATEGORIES:
+        return [p.product_code for p in FUEL_PRODUCT_CATALOG if p.category == category]
+    raise UnknownFuelProductError(value)
+
+
 def get_products_for_region(region_code: str) -> List[FuelProduct]:
     """Return the default catalog entries available in ``region_code``.
 
@@ -394,4 +423,5 @@ __all__ = [
     "get_products_for_region",
     "get_product",
     "is_known_product",
+    "resolve_product_filter",
 ]

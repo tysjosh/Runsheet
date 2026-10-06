@@ -166,21 +166,22 @@ export interface DQFDashboardEntry {
   qualifications: DriverQualificationStatus[];
 }
 
-/** Mirrors the backend `DQFDashboard` (driver_qualification_service.py). */
+/** Mirrors the backend ``DQFDashboard`` model field for field. */
 export interface DQFDashboard {
-  tenant_id?: string;
+  tenant_id: string;
   total_drivers: number;
   active_drivers: number;
   suspended_drivers: number;
-  /** Drivers with status `expired` plus active drivers holding an already-expired qualification. */
+  /** Stored ``expired``, or active with a tracked qualification past due. */
   expired_drivers: number;
-  /** Not yet expired; already-expired drivers are only in `expired_drivers`. */
-  expiring_within_60_days: number;
-  expiring_within_30_days: number;
+  /** Expiring within 60 days and nothing past due. */
+  expiring_drivers: number;
   expiring_within_7_days: number;
+  expiring_within_30_days: number;
+  expiring_within_60_days: number;
   drug_test_overdue: number;
   drivers: DQFDashboardEntry[];
-  generated_at?: string;
+  generated_at: string;
 }
 
 // ─── Asset Certification Types ───────────────────────────────────────────────

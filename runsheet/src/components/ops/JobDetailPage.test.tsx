@@ -32,6 +32,7 @@ jest.mock("../../services/schedulingApi", () => ({
   getJob: jest.fn(),
   getCargo: jest.fn(),
   getJobEta: jest.fn(),
+  getJobDriverActivity: jest.fn(),
   reassignAsset: jest.fn(),
   transitionStatus: jest.fn(),
 }));
@@ -44,6 +45,7 @@ import { apiService } from "../../services/api";
 import {
   getCargo,
   getJob,
+  getJobDriverActivity,
   getJobEta,
   reassignAsset,
 } from "../../services/schedulingApi";
@@ -51,6 +53,9 @@ import {
 const mockGetJob = getJob as jest.MockedFunction<typeof getJob>;
 const mockGetCargo = getCargo as jest.MockedFunction<typeof getCargo>;
 const mockGetJobEta = getJobEta as jest.MockedFunction<typeof getJobEta>;
+const mockGetDriverActivity = getJobDriverActivity as jest.MockedFunction<
+  typeof getJobDriverActivity
+>;
 const mockReassign = reassignAsset as jest.MockedFunction<typeof reassignAsset>;
 const mockGetAssets = apiService.getAssets as jest.MockedFunction<
   typeof apiService.getAssets
@@ -91,9 +96,36 @@ beforeEach(() => {
   mockGetJobEta.mockReset();
   mockReassign.mockReset();
   mockGetAssets.mockReset();
+  mockGetDriverActivity.mockReset();
+  mockGetDriverActivity.mockResolvedValue({
+    data: [],
+    pagination: { page: 1, size: 20, total: 0, total_pages: 0 },
+    request_id: "a",
+  });
   mockGetCargo.mockResolvedValue({ data: [], request_id: "c" });
   mockGetJobEta.mockRejectedValue(new Error("no eta"));
   mockGetAssets.mockResolvedValue({ data: [], success: true } as never);
+});
+
+describe("JobDetailPage — driver activity (G1)", () => {
+  it("renders the Driver activity section for the job", async () => {
+    mockGetJob.mockResolvedValue({
+      data: { ...jobFixture(), links: {} },
+      request_id: "j",
+    } as never);
+
+    renderPage();
+
+    expect(
+      await screen.findByRole("region", { name: "Driver activity" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockGetDriverActivity).toHaveBeenCalledWith("JOB-1", {
+        page: 1,
+        size: 20,
+      }),
+    );
+  });
 });
 
 describe("JobDetailPage — linked records", () => {

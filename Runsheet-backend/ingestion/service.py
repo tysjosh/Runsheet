@@ -21,6 +21,8 @@ from typing import Optional, List, Any, TYPE_CHECKING
 from pydantic import BaseModel, field_validator, model_validator
 
 from errors.exceptions import validation_error, resource_not_found
+from ops.middleware.tenant_guard import inject_tenant_filter
+from services.ref_loaders import ASSETS_INDEX
 from telemetry.service import TelemetryService, get_telemetry_service
 from services.time_utils import utcnow
 
@@ -499,7 +501,7 @@ class DataIngestionService:
         # If asset_type or asset_subtype not provided in the update, look up from ES
         if not asset_type or not asset_subtype:
             try:
-                doc = await self.es_service.get_document("assets", asset_id)
+                doc = await self.es_service.get_document(ASSETS_INDEX, asset_id)
                 if doc:
                     asset_type = asset_type or doc.get("asset_type")
                     asset_subtype = asset_subtype or doc.get("asset_subtype")
@@ -567,18 +569,24 @@ class DataIngestionService:
             False otherwise.
         """
         try:
-            # Search for the asset in Elasticsearch using the assets alias,
-            # optionally scoping to the caller's tenant.
-            filters = [{"term": {"truck_id": asset_id}}]
-            if tenant_id:
-                filters.append({"term": {"tenant_id": tenant_id}})
-
-            query = {
-                "query": {"bool": {"filter": filters}},
-                "size": 1,
+            # Assets live in the trucks index (the store has no ``assets``
+            # alias) and key on asset_id or truck_id depending on vintage, so
+            # match either, as make_asset_loader does.
+            inner = {
+                "query": {
+                    "bool": {
+                        "should": [
+                            {"term": {"asset_id": asset_id}},
+                            {"term": {"truck_id": asset_id}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
             }
+            query = inject_tenant_filter(inner, tenant_id) if tenant_id else inner
+            query["size"] = 1
 
-            result = await self.es_service.search_documents("assets", query, size=1)
+            result = await self.es_service.search_documents(ASSETS_INDEX, query, size=1)
 
             if result and result.get("hits", {}).get("total", {}).get("value", 0) > 0:
                 return True
@@ -586,13 +594,14 @@ class DataIngestionService:
             return False
 
         except Exception as e:
+            # Fail closed: an asset that can't be confirmed is rejected, so a
+            # store error can't let an update through for an unknown or
+            # another tenant's asset (B2).
             self._logger.warning(
                 f"Error checking asset existence for {asset_id}: {e}",
                 extra={"extra_data": {"asset_id": asset_id, "error": str(e)}}
             )
-            # In case of error, we'll be conservative and allow the update
-            # The actual storage operation will fail if there's a real issue
-            return True
+            return False
     
     async def process_location_update(self, update: LocationUpdate) -> LocationUpdateResult:
         """

@@ -253,6 +253,7 @@
 | GET | `/api/ops/drivers/utilization` | /api/ops | session_required | — | — | DriverUtilizationResponse |
 | GET | `/api/ops/drivers/{driver_id}` | /api/ops | session_required | — | — | DriverResponse |
 | PATCH | `/api/ops/drivers/{driver_id}` | /api/ops | session_required | — | — | DriverResponse |
+| GET | `/api/ops/drivers/{driver_id}/activity` | /api/ops | session_required | — | — | dict |
 | DELETE | `/api/ops/drivers/{driver_id}/app-access` | /api/ops | session_required | — | — | AppAccessResponse |
 | POST | `/api/ops/drivers/{driver_id}/app-access` | /api/ops | session_required | — | — | AppAccessResponse |
 | GET | `/api/ops/drivers/{driver_id}/profile` | /api/ops | session_required | — | — | DriverProfileResponse |
@@ -296,6 +297,7 @@
 | GET | `/api/scheduling/jobs/{job_id}/cargo` | /api/scheduling | session_required | — | — | dict |
 | PATCH | `/api/scheduling/jobs/{job_id}/cargo` | /api/scheduling | session_required | — | UpdateCargoManifest | dict |
 | PATCH | `/api/scheduling/jobs/{job_id}/cargo/{item_id}/status` | /api/scheduling | session_required | — | UpdateCargoItemStatus | dict |
+| GET | `/api/scheduling/jobs/{job_id}/driver-activity` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs/{job_id}/eta` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs/{job_id}/events` | /api/scheduling | session_required | — | — | dict |
 | PATCH | `/api/scheduling/jobs/{job_id}/reassign` | /api/scheduling | session_required | — | AssignAsset | dict |

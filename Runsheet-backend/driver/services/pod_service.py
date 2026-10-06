@@ -105,6 +105,7 @@ from driver.services.work_ref import WorkRef
 from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
+    error_code_value,
     delivered_gallons_required,
     forbidden,
     invalid_request,
@@ -1610,14 +1611,14 @@ class PODSubmissionService:
             await self._record_transition_failure(
                 tenant_id=ref.tenant_id,
                 pod_doc=pod_doc,
-                error_code=error_code.value,
+                error_code=error_code_value(error_code),
             )
             details = {
                 "reason": "pod_order_transition_failed",
                 "pod_id": pod_id,
                 "order_id": order_id,
                 "target_status": target_status,
-                "transition_error_code": error_code.value,
+                "transition_error_code": error_code_value(error_code),
                 "pod_status_transition": POD_TRANSITION_PENDING,
             }
             if isinstance(exc, AppException) and exc.details:

@@ -22,6 +22,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     BOL_DOWNLOAD_PRESIGN_TTL_SECONDS,
     configure_fuel_ops_endpoints,
@@ -124,6 +126,8 @@ def _build_app(
     tenant_id: str = TENANT_ID,
 ):
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
 
     es = _BolESService(rows_by_pod or {})

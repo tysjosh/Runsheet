@@ -266,6 +266,7 @@ class DriverRepository:
     repository relies on is:
 
         * ``await es.index_document(index, doc_id, document)``
+        * ``await es.create_document(index, doc_id, document)`` → bool
         * ``await es.search_documents(index, query, size)``
         * ``await es.update_document(index, doc_id, partial_doc)``
         * ``await es.atomic_update(index, doc_id, transform)``
@@ -390,9 +391,18 @@ class DriverRepository:
         model = Driver(**payload)
         doc = model.model_dump(mode="json", exclude_none=False)
 
-        await self._es.index_document(
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a driver another tenant owns (S7).
+        created = await self._es.create_document(
             self._drivers_index, model.driver_id, doc
         )
+        if not created:
+            from errors.exceptions import already_exists
+
+            raise already_exists(
+                "A driver with this id already exists",
+                details={"driver_id": model.driver_id},
+            )
         return model
 
     # ------------------------------------------------------------------

@@ -38,6 +38,7 @@ from config.settings import clear_settings_cache
 #: a second code path to keep in step.
 _DELEGATING_METHODS = (
     "index_document",
+    "create_document",
     "update_document",
     "bulk_index_documents",
     "search_documents",
@@ -108,6 +109,10 @@ class _RecordingStore:
         self.calls.append(("index_document", index, doc_id))
         return {"result": "created"}
 
+    async def create_document(self, index, doc_id, document):
+        self.calls.append(("create_document", index, doc_id))
+        return True
+
     async def get_document(self, index, doc_id):
         self.calls.append(("get_document", index, doc_id))
         return None
@@ -142,6 +147,22 @@ async def test_index_is_served_by_the_store(service_with_stub_store):
     service, store = service_with_stub_store
     await service.index_document("some_index", "a", {"tenant_id": "t"})
     assert store.calls == [("index_document", "some_index", "a")]
+
+
+async def test_create_is_served_by_the_store(service_with_stub_store):
+    service, store = service_with_stub_store
+    assert await service.create_document("some_index", "a", {"tenant_id": "t"}) is True
+    assert store.calls == [("create_document", "some_index", "a")]
+
+
+async def test_create_on_a_retired_index_reports_not_created(
+    service_with_stub_store, monkeypatch
+):
+    """A retired index takes no writes, so nothing was created."""
+    service, store = service_with_stub_store
+    monkeypatch.setattr(service, "_is_retired_index", lambda index: True)
+    assert await service.create_document("gone", "a", {}) is False
+    assert store.calls == []
 
 
 async def test_the_verbatim_opt_out_reaches_the_store(service_with_stub_store):

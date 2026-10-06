@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # --- Enums ---
@@ -103,9 +103,28 @@ class CreateJob(BaseModel):
     cargo_manifest: Optional[list[CargoItem]] = None
     priority: Priority = Priority.NORMAL
     notes: Optional[str] = None
+    # Deprecated and ignored: the service always stores the authenticated
+    # actor. Kept so clients that still send it don't start getting 422.
     created_by: Optional[str] = None
     origin_location: Optional[GeoPoint] = None
     destination_location: Optional[GeoPoint] = None
+
+    @field_validator("scheduled_time")
+    @classmethod
+    def validate_scheduled_time_iso(cls, v: str) -> str:
+        """Reject anything that isn't ISO-8601 (a trailing ``Z`` is accepted).
+
+        The value is kept as the submitted string, so the stored and returned
+        format is unchanged for valid input.
+        """
+        candidate = v.strip()
+        if candidate.endswith(("Z", "z")):
+            candidate = candidate[:-1] + "+00:00"
+        try:
+            datetime.fromisoformat(candidate)
+        except ValueError:
+            raise ValueError("scheduled_time must be an ISO-8601 date-time")
+        return v
 
     @model_validator(mode="after")
     def validate_cargo_for_transport(self):

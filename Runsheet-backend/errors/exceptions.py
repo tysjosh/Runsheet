@@ -10,7 +10,7 @@ validation errors, authentication errors, external service failures,
 and internal errors.
 """
 
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from errors.codes import ErrorCode, get_default_status_code
 
@@ -36,7 +36,7 @@ class AppException(Exception):
     
     def __init__(
         self,
-        error_code: ErrorCode,
+        error_code: Union[ErrorCode, str],
         message: str,
         status_code: Optional[int] = None,
         details: Optional[dict[str, Any]] = None,
@@ -47,12 +47,23 @@ class AppException(Exception):
         Initialize an AppException.
         
         Args:
-            error_code: The error code from the ErrorCode enum
+            error_code: The error code from the ErrorCode enum, or a plain
+                string for a module-local code (e.g. the lowercase fuel-ops
+                codes). A string code has no default status, so it requires
+                an explicit ``status_code``.
             message: A human-readable error message
             status_code: The HTTP status code (defaults to the error code's default)
             details: Optional dictionary with additional error context
             headers: Optional response headers (e.g. ``Retry-After`` on a 429)
+
+        Raises:
+            ValueError: A string ``error_code`` without a ``status_code``.
         """
+        if not isinstance(error_code, ErrorCode) and status_code is None:
+            raise ValueError(
+                f"AppException with string error_code {error_code!r} "
+                "needs an explicit status_code"
+            )
         self.error_code = error_code
         self.message = message
         self.status_code = status_code or get_default_status_code(error_code)
@@ -68,7 +79,7 @@ class AppException(Exception):
             Dictionary containing error_code, message, and details
         """
         result = {
-            "error_code": self.error_code.value,
+            "error_code": error_code_value(self.error_code),
             "message": self.message,
         }
         if self.details is not None:
@@ -77,10 +88,15 @@ class AppException(Exception):
     
     def __repr__(self) -> str:
         return (
-            f"AppException(error_code={self.error_code.value!r}, "
+            f"AppException(error_code={error_code_value(self.error_code)!r}, "
             f"message={self.message!r}, status_code={self.status_code}, "
             f"details={self.details!r})"
         )
+
+
+def error_code_value(code: Union[ErrorCode, str]) -> str:
+    """Return the wire string for an ``ErrorCode`` member or a plain string code."""
+    return str(getattr(code, "value", code))
 
 
 # Convenience factory functions for common error types
@@ -116,6 +132,22 @@ def resource_not_found(
     """Create a resource not found exception."""
     return AppException(
         error_code=ErrorCode.RESOURCE_NOT_FOUND,
+        message=message,
+        details=details
+    )
+
+
+def already_exists(
+    message: str,
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create a 409 for a create whose id is already taken.
+
+    Ids are global across tenants, so the message must stay generic: it never
+    names the owning tenant or echoes the stored document.
+    """
+    return AppException(
+        error_code=ErrorCode.RESOURCE_ALREADY_EXISTS,
         message=message,
         details=details
     )
@@ -486,6 +518,23 @@ def channel_disabled(
     """Create a channel disabled exception."""
     return AppException(
         error_code=ErrorCode.CHANNEL_DISABLED,
+        message=message,
+        details=details
+    )
+
+
+def order_intake_disabled(
+    message: str = "Order intake isn't enabled for this account",
+    details: Optional[dict[str, Any]] = None
+) -> AppException:
+    """Create the 409 for an order refused because intake is switched off.
+
+    Raised when the tenant's ``order_intake_pipeline`` flag is ``disabled``,
+    so a dispatcher create never reports success for an order that was not
+    stored.
+    """
+    return AppException(
+        error_code=ErrorCode.ORDER_INTAKE_DISABLED,
         message=message,
         details=details
     )

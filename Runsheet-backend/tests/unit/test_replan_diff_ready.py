@@ -28,6 +28,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskSignal,
@@ -442,6 +444,8 @@ def _build_fastapi_app(es_service) -> FastAPI:
     configure_fuel_ops_endpoints(es_service=es_service)
 
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(mvp_router)
 
     async def _stub_tenant():
@@ -525,7 +529,7 @@ class TestReplanDiffEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/fuel/mvp/replans/missing/diff")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "replan_event_not_found"
+        assert resp.json()["error_code"] == "replan_event_not_found"
 
     def test_cross_tenant_event_returns_404(self):
         """Simulate a misconfigured ES that returns a row belonging to
@@ -540,7 +544,7 @@ class TestReplanDiffEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/fuel/mvp/replans/evt-1/diff")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "replan_event_not_found"
+        assert resp.json()["error_code"] == "replan_event_not_found"
 
     def test_event_without_structured_diff_returns_distinct_404(self):
         doc = _sample_event_doc(include_diff=False)
@@ -554,7 +558,7 @@ class TestReplanDiffEndpoint:
             resp = client.get("/api/fuel/mvp/replans/evt-1/diff")
         assert resp.status_code == 404
         assert (
-            resp.json()["detail"]["error_code"] == "replan_diff_not_available"
+            resp.json()["error_code"] == "replan_diff_not_available"
         )
 
     def test_es_failure_returns_502(self):
@@ -565,4 +569,4 @@ class TestReplanDiffEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/fuel/mvp/replans/evt-1/diff")
         assert resp.status_code == 502
-        assert resp.json()["detail"]["error_code"] == "replan_events_unavailable"
+        assert resp.json()["error_code"] == "replan_events_unavailable"

@@ -302,9 +302,9 @@ class TestCreateSupplierContract:
         resp = client.post("/api/fuel/supplier-contracts", json=body)
 
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "unknown_product_code"
-        assert detail["fuel_product_code"] == "UNOBTAINIUM"
+        assert detail["details"]["fuel_product_code"] == "UNOBTAINIUM"
 
     def test_rejects_negative_minimum_lift(self):
         app, _, _ = _build_app()
@@ -453,7 +453,7 @@ class TestGetSupplierContract:
         client = TestClient(app)
         resp = client.get("/api/fuel/supplier-contracts/missing")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "supplier_contract_not_found"
+        assert resp.json()["error_code"] == "supplier_contract_not_found"
 
     def test_masks_cross_tenant_as_404(self):
         """Cross-tenant reads surface as 404 so existence is not leaked."""
@@ -542,7 +542,7 @@ class TestDeleteSupplierContract:
         client = TestClient(app)
         resp = client.delete("/api/fuel/supplier-contracts/missing")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "supplier_contract_not_found"
+        assert resp.json()["error_code"] == "supplier_contract_not_found"
 
     def test_cross_tenant_delete_returns_404(self):
         """Repository masks cross-tenant deletes as 404 (no existence leak)."""
@@ -556,7 +556,7 @@ class TestDeleteSupplierContract:
         # The repository raises CrossTenantAccessError for cross-tenant
         # delete attempts; the router maps that to 403.
         assert resp.status_code == 403
-        assert resp.json()["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert resp.json()["error_code"] == "cross_tenant_access_denied"
         assert "sc_001" in es.docs  # not deleted
 
     def test_delete_does_not_purge_lift_counter(self):

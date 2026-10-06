@@ -24,6 +24,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     mvp_router,
@@ -137,6 +139,8 @@ def _build_app(tenant_id: str = "tenant-1") -> tuple[FastAPI, _FakeESService]:
     configure_fuel_ops_endpoints(es_service=es, customer_tank_repository=repo)
 
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     app.include_router(mvp_router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
@@ -222,8 +226,8 @@ class TestCreateCustomerTank:
         # distinguish "bad product" from generic validation errors.
         assert resp.status_code == 400
         body = resp.json()
-        assert body["detail"]["error_code"] == "unknown_product_code"
-        assert body["detail"]["fuel_product_code"] == "UNOBTAINIUM"
+        assert body["error_code"] == "unknown_product_code"
+        assert body["details"]["fuel_product_code"] == "UNOBTAINIUM"
 
     def test_rejects_level_exceeding_capacity(self):
         app, _ = _build_app()
@@ -357,7 +361,7 @@ class TestGetCustomerTank:
         resp = client.get("/api/fuel/mvp/customer-tanks/does-not-exist")
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "customer_tank_not_found"
+        assert body["error_code"] == "customer_tank_not_found"
 
     def test_returns_404_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -436,7 +440,7 @@ class TestUpdateCustomerTank:
         )
         assert resp.status_code == 403
         body = resp.json()
-        assert body["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert body["error_code"] == "cross_tenant_access_denied"
 
     def test_empty_patch_returns_current_model(self):
         app, es = _build_app()

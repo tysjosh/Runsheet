@@ -26,6 +26,7 @@ def client():
     """
     with patch("data_endpoints.elasticsearch_service") as mock_es:
         mock_es.index_document = AsyncMock(return_value={"result": "created"})
+        mock_es.create_document = AsyncMock(return_value=True)
         from main import app
 
         install_test_auth(app)
@@ -78,11 +79,39 @@ class TestCreateFleetAsset:
         assert data["data"]["asset_type"] == "vehicle"
         assert data["data"]["asset_subtype"] == "truck"
         assert data["data"]["plateNumber"] == "ABC-1234"
-        # Verify ES was called with the right index and doc ID
-        mock_es.index_document.assert_called_once()
-        call_args = mock_es.index_document.call_args
+        # Verify the store was called with the right index and doc ID, as a
+        # create-if-absent rather than an upsert.
+        mock_es.index_document.assert_not_called()
+        mock_es.create_document.assert_called_once()
+        call_args = mock_es.create_document.call_args
         assert call_args[0][0] == "trucks"  # index name
         assert call_args[0][1] == "V-001"   # doc ID
+
+    def test_taken_asset_id_is_409_with_no_overwrite_or_mirror_write(self, client):
+        """B8/S7: an id already stored (in any tenant) is refused, not replaced."""
+        c, mock_es = client
+        mock_es.create_document = AsyncMock(return_value=False)
+        payload = {
+            "asset_id": "V-001",
+            "asset_type": "vehicle",
+            "asset_subtype": "truck",
+            "name": "Truck Alpha",
+            "status": "active",
+            "current_location": self._make_location("Dubai"),
+            "plate_number": "ABC-1234",
+        }
+        with patch(
+            "commerce.services.commerce_persistence_bridge.mirror_current_state_upsert",
+            new=AsyncMock(),
+        ) as mirror:
+            resp = c.post("/api/fleet/assets", json=payload)
+
+        assert resp.status_code == 409
+        body = resp.json()
+        assert body["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert "t1" not in body["message"]
+        mock_es.index_document.assert_not_called()
+        mirror.assert_not_called()
 
     def test_create_vessel_asset_success(self, client):
         """A valid vessel asset with vessel_name should be created successfully."""

@@ -82,6 +82,20 @@ async def initialize(app, container: ServiceContainer) -> None:
         delay_service=delay_service,
     )
 
+    # Dispatcher read of driver messages and exceptions (G1): one service over
+    # the job_messages / driver_exceptions stores the driver endpoints below
+    # write, behind both the job-level and the driver-level route.
+    from driver.services.driver_activity_service import DriverActivityService
+    from fuel.api.driver_endpoints import (
+        set_driver_activity_service as set_ops_driver_activity_service,
+    )
+    from scheduling.api.endpoints import set_driver_activity_service
+
+    driver_activity_service = DriverActivityService(es_service)
+    container.driver_activity_service = driver_activity_service
+    set_driver_activity_service(driver_activity_service)
+    set_ops_driver_activity_service(driver_activity_service)
+
     # Wire driver acknowledgment endpoints
     configure_driver_endpoints(
         job_service=job_service,

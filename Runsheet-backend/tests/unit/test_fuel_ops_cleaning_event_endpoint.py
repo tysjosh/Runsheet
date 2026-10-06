@@ -338,9 +338,9 @@ class TestEvidenceRefValidation:
             },
         )
         assert resp.status_code == 403
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "cross_tenant_file_ref"
-        assert detail["field"] == "evidence_refs[1]"
+        assert detail["details"]["field"] == "evidence_refs[1]"
         # The service must not have been called once a ref failed.
         assert svc.calls == []
 
@@ -381,9 +381,9 @@ class TestErrorModes:
             json={"method": "flush", "actor_id": "driver-1"},
         )
         assert resp.status_code == 404
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "compartment_not_found"
-        assert detail["compartment_id"] == "does-not-exist"
+        assert detail["details"]["compartment_id"] == "does-not-exist"
         assert svc.calls == []
 
     def test_cross_tenant_compartment_returns_404_not_403(self):
@@ -469,7 +469,7 @@ class TestServiceErrorTranslation:
             json={"method": "flush", "actor_id": "driver-1"},
         )
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "compartment_not_found"
+        assert resp.json()["error_code"] == "compartment_not_found"
 
     def test_cross_tenant_access_error_returns_403(self):
         state = _clean_compartment_state()
@@ -485,7 +485,7 @@ class TestServiceErrorTranslation:
             json={"method": "flush", "actor_id": "driver-1"},
         )
         assert resp.status_code == 403
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "cross_tenant_access_denied"
 
     def test_conflict_error_returns_409(self):
@@ -503,7 +503,7 @@ class TestServiceErrorTranslation:
         )
         assert resp.status_code == 409
         assert (
-            resp.json()["detail"]["error_code"] == "compartment_state_conflict"
+            resp.json()["error_code"] == "compartment_state_conflict"
         )
 
     def test_persistence_error_returns_500_with_event_id(self):
@@ -523,9 +523,9 @@ class TestServiceErrorTranslation:
             json={"method": "flush", "actor_id": "driver-1"},
         )
         assert resp.status_code == 500
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "cleaning_event_persistence_error"
-        assert detail["cleaning_event_id"] == "ce_abc"
+        assert detail["details"]["cleaning_event_id"] == "ce_abc"
 
     def test_service_permission_error_returns_403(self):
         """When no router-level FileStorageService is wired but the
@@ -544,7 +544,7 @@ class TestServiceErrorTranslation:
         )
         assert resp.status_code == 403
         assert (
-            resp.json()["detail"]["error_code"] == "cross_tenant_file_ref"
+            resp.json()["error_code"] == "cross_tenant_file_ref"
         )
 
 

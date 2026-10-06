@@ -39,7 +39,6 @@ from pathlib import Path
 EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
     "ops/api/endpoints.py": 11,
     "integrations/api/integrations_endpoints.py": 7,
-    "fuel/api/fuel_ops_endpoints.py": 115,
     "integrations/api/stripe_endpoints.py": 7,
     "import_endpoints.py": 12,
     # Commerce endpoints (commerce-backbone spec) — raw HTTPException tech

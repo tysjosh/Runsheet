@@ -273,6 +273,48 @@ export async function createJob(
   });
 }
 
+// ─── Driver Activity (G1) ────────────────────────────────────────────────────
+
+export type DriverActivityType = "message" | "exception";
+
+/**
+ * One row of ``GET /scheduling/jobs/:id/driver-activity``: a driver message
+ * (``text`` is the body) or a driver exception (``text`` is the note).
+ */
+export interface DriverActivityItem {
+  id: string;
+  type: DriverActivityType;
+  timestamp: string | null;
+  driver_id: string | null;
+  job_id: string | null;
+  order_id: string | null;
+  text: string | null;
+  /** Messages only: who sent it (driver, dispatcher, ...). */
+  sender_role?: string | null;
+  /** Exceptions only. */
+  exception_type?: string | null;
+  severity?: string | null;
+}
+
+export interface DriverActivityParams {
+  type?: DriverActivityType;
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  size?: number;
+}
+
+/** GET /scheduling/jobs/:id/driver-activity — driver messages and exceptions, newest first */
+export async function getJobDriverActivity(
+  jobId: string,
+  params: DriverActivityParams = {},
+): Promise<PaginatedResponse<DriverActivityItem>> {
+  const qs = buildQueryString(params);
+  return schedulingRequest<PaginatedResponse<DriverActivityItem>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/driver-activity${qs}`,
+  );
+}
+
 // ─── Status Transition Endpoint ──────────────────────────────────────────────
 
 /** PATCH /scheduling/jobs/:id/status — transition job status */

@@ -226,7 +226,8 @@ class TestListStations:
         client.get("/api/fuel/stations?fuel_type=AGO&status=low&location=Dubai&page=2&size=10")
         mock_fuel_service.list_stations.assert_called_once_with(
             tenant_id=TENANT_ID,
-            fuel_type="AGO",
+            # The alias is resolved to catalog codes before the query (F12/S6).
+            fuel_type=["DIESEL_2"],
             status="low",
             location="Dubai",
             page=2,
@@ -243,6 +244,36 @@ class TestListStations:
         call_kwargs = mock_fuel_service.list_stations.call_args.kwargs
         assert call_kwargs["page"] == 1
         assert call_kwargs["size"] == 50
+
+    @pytest.mark.parametrize(
+        "params", [{"status": "bogus"}, {"fuel_type": "bogus"}]
+    )
+    def test_unknown_filter_value_is_422(self, client, mock_fuel_service, params):
+        """F12: an unknown enum filter is a 422, not an empty 200."""
+        resp = client.get("/api/fuel/stations", params=params)
+        assert resp.status_code == 422, resp.text
+        mock_fuel_service.list_stations.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("value", "codes"),
+        [
+            ("diesel", ["DIESEL_2"]),
+            ("gasoline", ["GASOLINE_REG", "GASOLINE_PREM"]),
+            ("PROPANE", ["PROPANE"]),
+            ("lpg", ["PROPANE"]),
+        ],
+    )
+    def test_fuel_type_accepts_codes_aliases_and_categories(
+        self, client, mock_fuel_service, value, codes
+    ):
+        mock_fuel_service.list_stations.return_value = PaginatedResponse(
+            data=[],
+            pagination=PaginationMeta.compute(page=1, size=50, total=0),
+            request_id="",
+        )
+        resp = client.get("/api/fuel/stations", params={"fuel_type": value})
+        assert resp.status_code == 200, resp.text
+        assert mock_fuel_service.list_stations.call_args.kwargs["fuel_type"] == codes
 
 
 # ---------------------------------------------------------------------------

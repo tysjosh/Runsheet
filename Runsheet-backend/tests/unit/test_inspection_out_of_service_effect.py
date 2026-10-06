@@ -75,6 +75,24 @@ def _term_filters(node: Any, found: Optional[Dict[str, Any]] = None) -> Dict[str
     return found
 
 
+def _ids_value(node: Any) -> Optional[str]:
+    """The single doc id in an ``{"ids": {"values": [...]}}`` clause, if any."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "ids" and isinstance(value, dict):
+                values = value.get("values") or []
+                return values[0] if len(values) == 1 else None
+            found = _ids_value(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _ids_value(item)
+            if found is not None:
+                return found
+    return None
+
+
 class FakeES:
     """Records writes and answers searches by applying the query's term filters.
 
@@ -104,7 +122,9 @@ class FakeES:
         terms = _term_filters(query)
 
         if index == ASSET_INDEX:
-            key = (terms.get("tenant_id"), terms.get("_id"))
+            # The lookup is by doc id through ``ids`` (``term _id`` matches
+            # nothing on the Postgres store).
+            key = (terms.get("tenant_id"), _ids_value(query))
             hits = (
                 [{"_id": key[1], "_source": {"tenant_id": key[0]}}]
                 if key in self.assets

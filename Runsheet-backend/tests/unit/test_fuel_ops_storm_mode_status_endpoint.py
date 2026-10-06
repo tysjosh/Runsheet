@@ -23,6 +23,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -263,6 +265,8 @@ def _build_app(
     )
 
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id
@@ -488,6 +492,6 @@ class TestUnwired:
         resp = client.get("/api/fuel/storm-mode/status")
         assert resp.status_code == 503
         assert (
-            resp.json()["detail"]["error_code"]
+            resp.json()["error_code"]
             == "storm_mode_evaluator_unavailable"
         )

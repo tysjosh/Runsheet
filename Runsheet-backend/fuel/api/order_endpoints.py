@@ -30,17 +30,23 @@ Validates: Requirements 2.4, 2.5, 2.5.7, 2.5.8, 10.1.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, get_args
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth.authorization import require_role
+from errors.codes import ErrorCode
 from errors.exceptions import (
+    AppException,
+    error_code_value,
     insufficient_role,
     missing_client_event_id,
     missing_hold_reason,
+    order_intake_disabled,
     resource_not_found,
     validation_error,
 )
@@ -480,6 +486,10 @@ class OrderEventsListResponse(BaseModel):
     total: int
 
 
+#: Every value ``FuelOrder.status`` can hold, in declaration order.
+_ORDER_STATUSES: tuple[str, ...] = get_args(OrderStatus)
+
+
 class StatusTransitionRequest(BaseModel):
     """Body for ``PATCH /api/orders/{order_id}/status``."""
     model_config = ConfigDict(extra="forbid")
@@ -552,7 +562,8 @@ async def create_order(
     """Create a new fuel order via the dispatcher keyboard.
 
     Requires ``client_event_id`` in the body for idempotency. Rejects
-    with 400 ``missing_client_event_id`` when missing.
+    with 400 ``missing_client_event_id`` when missing, and with 409
+    ``ORDER_INTAKE_DISABLED`` when the tenant's intake flag is disabled.
     Role-gate: dispatcher or admin.
     Validates: Requirement 2.4.
     """
@@ -572,6 +583,12 @@ async def create_order(
         client_event_id=body.client_event_id,
     )
 
+    # ``legacy_passthrough`` means the tenant's intake flag is disabled and the
+    # pipeline stored nothing. Answering 201 would tell the dispatcher an order
+    # exists when it does not (finding F1).
+    if result.status == "legacy_passthrough":
+        raise order_intake_disabled()
+
     if result.order_id:
         response.headers["Location"] = f"/api/orders/{result.order_id}"
 
@@ -587,6 +604,27 @@ async def create_order(
 # ---------------------------------------------------------------------------
 
 
+#: Per-row text for a failure we did not author. The cause is logged instead.
+BULK_ROW_GENERIC_ERROR = "Row could not be processed"
+
+
+def _bulk_row_error(exc: Exception, idx: int, request_id: str) -> str:
+    """Map a bulk row failure to the text returned to the caller (D12).
+
+    ``AppException`` messages are written by us and safe to return, so the
+    row gets ``"<error_code>: <message>"``. Anything else could carry a DSN,
+    a stack detail or another tenant's data, so the row gets a fixed message
+    and the original exception is logged server-side only.
+    """
+    if isinstance(exc, AppException):
+        return f"{error_code_value(exc.error_code)}: {exc.message}"
+    logger.warning(
+        "order_endpoints.bulk: row %d failed (request_id=%s)",
+        idx, request_id, exc_info=exc,
+    )
+    return BULK_ROW_GENERIC_ERROR
+
+
 @router.post("/bulk", response_model=BulkOrderResponse, status_code=status.HTTP_200_OK)
 async def create_orders_bulk(
     body: BulkOrderRequest,
@@ -595,7 +633,11 @@ async def create_orders_bulk(
 ) -> BulkOrderResponse:
     """Bulk-create fuel orders (up to 1000 rows).
 
-    Supports ``dry_run`` mode which validates all rows without persisting.
+    Supports ``dry_run`` mode, which runs each row through
+    ``OrderIntakePipeline.validate_dispatcher_payload`` without persisting.
+    A failed row carries ``"<error_code>: <message>"`` for our own errors and
+    a fixed generic message otherwise; raw exception text is never returned.
+    Rows refused because intake is disabled are errors, not processed.
     Enforces the 1000-row cap — rejects with 400 when exceeded.
     Role-gate: dispatcher or admin.
     Validates: Requirement 2.4.
@@ -623,7 +665,14 @@ async def create_orders_bulk(
 
         if body.dry_run:
             try:
-                row.model_dump(exclude={"client_event_id"}, exclude_none=True)
+                payload = row.model_dump(exclude={"client_event_id"}, exclude_none=True)
+                # Run the pipeline's own value checks (adapter transform,
+                # platform stamping, tank ownership, FuelOrder rules) without
+                # writing, so a row the real run would refuse is not reported
+                # as valid (finding F2).
+                await pipeline.validate_dispatcher_payload(
+                    tenant, payload, f"{request_id}_row_{idx}"
+                )
                 results.append(BulkOrderResultItem(
                     row_index=idx, order_id=None, event_id=client_event_id,
                     status="dry_run_valid", error=None,
@@ -632,7 +681,7 @@ async def create_orders_bulk(
             except Exception as exc:
                 results.append(BulkOrderResultItem(
                     row_index=idx, order_id=None, event_id=client_event_id,
-                    status="error", error=str(exc),
+                    status="error", error=_bulk_row_error(exc, idx, request_id),
                 ))
                 error_count += 1
         else:
@@ -644,6 +693,10 @@ async def create_orders_bulk(
                     request_id=f"{request_id}_row_{idx}",
                     client_event_id=client_event_id,
                 )
+                if result.status == "legacy_passthrough":
+                    # Intake is disabled: nothing was stored, so the row is an
+                    # error rather than "processed" (finding F1).
+                    raise order_intake_disabled()
                 if result.status == "duplicate":
                     duplicate_count += 1
                     results.append(BulkOrderResultItem(
@@ -660,12 +713,8 @@ async def create_orders_bulk(
                 error_count += 1
                 results.append(BulkOrderResultItem(
                     row_index=idx, order_id=None, event_id=client_event_id,
-                    status="error", error=str(exc),
+                    status="error", error=_bulk_row_error(exc, idx, request_id),
                 ))
-                logger.warning(
-                    "order_endpoints.bulk: row %d failed for tenant=%s: %s",
-                    idx, tenant.tenant_id, exc,
-                )
 
     return BulkOrderResponse(
         total=len(body.orders), processed=processed_count,
@@ -677,6 +726,56 @@ async def create_orders_bulk(
 # ---------------------------------------------------------------------------
 # GET /api/orders (Req 2.5)
 # ---------------------------------------------------------------------------
+
+
+#: Fields ``GET /api/orders?sort=`` may order by (decision D10). The repository
+#: passes the field straight to the store, so anything else was silently
+#: accepted. ``priority`` is listed per D10; orders don't carry it today, so it
+#: sorts as missing.
+ORDER_SORT_FIELDS = frozenset({
+    "created_at",
+    "updated_at",
+    "last_event_timestamp",
+    "delivery_window_start",
+    "delivery_window_end",
+    "priority",
+    "status",
+})
+
+_SORT_PATTERN = re.compile(r"^([a-z_]+)(?::(asc|desc))?$")
+
+
+def _list_param_error(field: str, message: str, value: str) -> AppException:
+    return AppException(
+        error_code=ErrorCode.VALIDATION_ERROR,
+        message=message,
+        status_code=422,
+        details={"field": field, "value": value},
+    )
+
+
+def _validate_list_params(
+    *, sort: Optional[str], start_date: Optional[str], end_date: Optional[str]
+) -> None:
+    """422 on a malformed ``sort`` or date before the repository runs (F8, D10)."""
+    if sort is not None:
+        match = _SORT_PATTERN.match(sort)
+        if match is None or match.group(1) not in ORDER_SORT_FIELDS:
+            raise _list_param_error(
+                "sort",
+                "sort must be <field> or <field>:asc|desc, with field one of "
+                + ", ".join(sorted(ORDER_SORT_FIELDS)),
+                sort,
+            )
+    for field, value in (("start_date", start_date), ("end_date", end_date)):
+        if value is None:
+            continue
+        try:
+            datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise _list_param_error(
+                field, f"{field} must be an ISO-8601 date or timestamp", value
+            ) from None
 
 
 @router.get("", response_model=OrderListResponse)
@@ -713,6 +812,7 @@ async def list_orders(
     Validates: Requirements 2.5, 3.13.
     """
     require_role(tenant, "dispatcher", "admin")
+    _validate_list_params(sort=sort, start_date=start_date, end_date=end_date)
     repo = _get_repository()
     result = await repo.search(
         tenant_id=tenant.tenant_id,
@@ -827,8 +927,9 @@ async def update_order_status(
 ) -> OrderResponse:
     """Apply a state-machine-guarded status transition.
 
-    Validates the transition against the order state machine. Rejects
-    invalid transitions with 409 ``invalid_status_transition``.
+    Validates the transition against the order state machine. Rejects an
+    unknown ``new_status`` with 422 ``VALIDATION_ERROR`` and a disallowed
+    transition with 409 ``invalid_status_transition``.
     Rejects transitions to scheduled/dispatched/in_transit without a
     delivery window with 409 ``missing_delivery_window``.
     Role-gate: dispatcher or admin.
@@ -844,6 +945,15 @@ async def update_order_status(
             details={"order_id": order_id},
         )
 
+    # An unknown status is a bad request, not a refused transition (F11).
+    # Known-but-disallowed transitions still get the state machine's 409.
+    if body.new_status not in _ORDER_STATUSES:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="new_status is not an order status",
+            status_code=422,
+            details={"new_status": body.new_status, "allowed": list(_ORDER_STATUSES)},
+        )
     updated = await _get_order_service().apply_status_transition(
         order=order.model_dump(mode="python"),
         new_status=body.new_status,

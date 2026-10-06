@@ -793,6 +793,66 @@ class TestCustomerTankIdValidation:
         assert "INVALID_CUSTOMER_TANK_REF" in str(exc_info.value.error_code)
 
 
+class TestCustomerTankCustomerMatch:
+    """F3: a tank in the tenant but owned by another customer is refused."""
+
+    @staticmethod
+    def _tank(customer_id):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            customer_tank_id="tank-001", tenant_id=TENANT_A, customer_id=customer_id
+        )
+
+    async def _ingest(self, pipeline, tank_id="tank-001"):
+        payload = _valid_order_payload(customer_tank_id=tank_id)
+        body = json.dumps(payload).encode()
+        return await pipeline.ingest_webhook(
+            channel_id=CHANNEL_ID,
+            body=body,
+            signature=_sign_body(body),
+            request_id="req-f3",
+        )
+
+    @pytest.mark.asyncio
+    async def test_other_customers_tank_is_rejected(
+        self, pipeline, customer_tank_repo, idempotency_service
+    ):
+        customer_tank_repo.get = AsyncMock(return_value=self._tank("cust-other"))
+        with pytest.raises(AppException) as exc_info:
+            await self._ingest(pipeline)
+        exc = exc_info.value
+        assert exc.error_code.value == "INVALID_CUSTOMER_TANK_REF"
+        assert exc.status_code == 400
+        # Only the caller's own reference: never the tank's owning customer.
+        assert exc.details == {"customer_tank_id": "tank-001"}
+        assert "cust-other" not in exc.message
+        idempotency_service.mark_processed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_same_customers_tank_is_accepted(self, pipeline, customer_tank_repo):
+        # _valid_order_payload uses customer_id "cust-123".
+        customer_tank_repo.get = AsyncMock(return_value=self._tank("cust-123"))
+        result = await self._ingest(pipeline)
+        assert result.status == "processed"
+
+    @pytest.mark.asyncio
+    async def test_dry_run_rejects_other_customers_tank(
+        self, pipeline, customer_tank_repo, intake_channel_repo
+    ):
+        intake_channel_repo.ensure_dispatcher_channel = AsyncMock(
+            return_value=_make_channel(channel_type="api_partner")
+        )
+        customer_tank_repo.get = AsyncMock(return_value=self._tank("cust-other"))
+        with pytest.raises(AppException) as exc_info:
+            await pipeline.validate_dispatcher_payload(
+                {"tenant_id": TENANT_A, "user_id": "u-1"},
+                _valid_order_payload(customer_tank_id="tank-001"),
+                "req-f3-dry",
+            )
+        assert exc_info.value.error_code.value == "INVALID_CUSTOMER_TANK_REF"
+
+
 # ---------------------------------------------------------------------------
 # Tests — customer_tank_id = None bypasses the tank check
 # ---------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from enum import Enum
 from datetime import datetime
 import logging
 from services.elasticsearch_service import elasticsearch_service
+from services.ref_loaders import ASSETS_INDEX
 from services.time_utils import utcnow
 from middleware.rate_limiter import limiter
 from config.legacy_flags import is_legacy_ng_delivery_enabled
@@ -22,6 +23,7 @@ from ops.middleware.tenant_guard import TenantContext, get_tenant_context, injec
 from auth.authorization import require_role
 from errors.exceptions import (
     AppException,
+    already_exists,
     forbidden,
     internal_error,
     legacy_ng_delivery_disabled,
@@ -96,6 +98,64 @@ class FleetSummary(BaseModel):
     onTimeTrucks: int
     delayedTrucks: int
     averageDelay: float
+
+
+# An asset counts as active in any of these statuses: the asset-level values
+# (active, in_transit) plus the legacy truck-level ones (on_time, delayed).
+_ACTIVE_ASSET_STATUSES = ("active", "in_transit", "on_time", "delayed")
+
+
+def _is_vehicle(doc: dict) -> bool:
+    """A "truck" in the fleet views is any vehicle: ``asset_type == "vehicle"``
+    (truck, fuel_truck, personnel_vehicle) or a legacy doc with no asset_type."""
+    asset_type = doc.get("asset_type")
+    return asset_type is None or asset_type == "vehicle"
+
+
+def _truck_summary(docs: list, average_delay: float) -> "FleetSummary":
+    trucks = [d for d in docs if _is_vehicle(d)]
+    return FleetSummary(
+        totalTrucks=len(trucks),
+        activeTrucks=len([t for t in trucks if t.get("status") in _ACTIVE_ASSET_STATUSES]),
+        onTimeTrucks=len([t for t in trucks if t.get("status") == "on_time"]),
+        delayedTrucks=len([t for t in trucks if t.get("status") == "delayed"]),
+        averageDelay=average_delay,
+    )
+
+
+async def _average_delay_minutes(tenant_id: str) -> float:
+    """Mean ``delay_duration_minutes`` over the tenant's delayed jobs (0.0 with none).
+
+    Reads the ``job`` aggregate from Postgres when cut over, otherwise the
+    ``jobs_current`` index, and averages with ``delay_metrics`` so the number
+    matches ``/scheduling/metrics/delays``. A failed read is logged and
+    reported as 0.0, like the asset aggregations below.
+    """
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_fetch_for_aggregation,
+    )
+    from scheduling.services.job_metrics_aggregator import delay_metrics
+    from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
+
+    try:
+        jobs = await read_hybrid_fetch_for_aggregation(
+            "job", tenant_id, bool_filters={"delayed": True},
+        )
+        if jobs is _NOT_CUT_OVER:
+            query = inject_tenant_filter({"query": {"term": {"delayed": True}}}, tenant_id)
+            response = await elasticsearch_service.search_documents(
+                JOBS_CURRENT_INDEX, query, size=1000
+            )
+            jobs = [hit["_source"] for hit in response["hits"]["hits"]]
+        jobs = [
+            j for j in jobs
+            if j.get("tenant_id") == tenant_id and j.get("delayed") is True
+        ]
+        return float(delay_metrics(jobs)["avg_delay_minutes"])
+    except Exception as exc:
+        logger.warning("Failed to compute average delay, returning 0.0: %s", exc)
+        return 0.0
 
 
 # Multi-Asset Models
@@ -284,16 +344,9 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
             pg_assets = [
                 a for a in pg_assets if a.get("tenant_id") == tenant.tenant_id
             ]
-            # Trucks summary: legacy "trucks" set == every doc in the index
-            # (the alias and the index share the same docs), matching the ES
-            # match_all scan.
-            trucks = pg_assets
-            summary = FleetSummary(
-                totalTrucks=len(trucks),
-                activeTrucks=len([t for t in trucks if t.get("status") in ['on_time', 'delayed']]),
-                onTimeTrucks=len([t for t in trucks if t.get("status") == 'on_time']),
-                delayedTrucks=len([t for t in trucks if t.get("status") == 'delayed']),
-                averageDelay=45,
+            # Truck counts cover vehicles only (see _is_vehicle).
+            summary = _truck_summary(
+                pg_assets, await _average_delay_minutes(tenant.tenant_id)
             )
 
             # Multi-asset rollups: reproduce the by_type / by_subtype terms aggs
@@ -319,7 +372,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
 
             total_assets = len(pg_assets)
             active_assets = len([
-                a for a in pg_assets if a.get("status") in ("active", "in_transit")
+                a for a in pg_assets if a.get("status") in _ACTIVE_ASSET_STATUSES
             ])
             delayed_assets = len([
                 a for a in pg_assets if a.get("status") == "delayed"
@@ -349,13 +402,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         trucks_response = await elasticsearch_service.search_documents("trucks", trucks_query, size=1000)
         trucks = [hit["_source"] for hit in trucks_response["hits"]["hits"]]
 
-        summary = FleetSummary(
-            totalTrucks=len(trucks),
-            activeTrucks=len([t for t in trucks if t.get("status") in ['on_time', 'delayed']]),
-            onTimeTrucks=len([t for t in trucks if t.get("status") == 'on_time']),
-            delayedTrucks=len([t for t in trucks if t.get("status") == 'delayed']),
-            averageDelay=45
-        )
+        summary = _truck_summary(trucks, await _average_delay_minutes(tenant.tenant_id))
 
         # Multi-asset counts via ES aggregations (tenant-scoped)
         agg_query = inject_tenant_filter(
@@ -372,7 +419,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
             },
             "active_count": {
                 "filter": {
-                    "terms": {"status": ["active", "in_transit"]}
+                    "terms": {"status": list(_ACTIVE_ASSET_STATUSES)}
                 }
             },
             "delayed_count": {
@@ -383,7 +430,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         }
 
         try:
-            agg_result = await elasticsearch_service.search_documents("assets", agg_query)
+            agg_result = await elasticsearch_service.search_documents(ASSETS_INDEX, agg_query)
             aggs = agg_result.get("aggregations", {})
 
             total_assets = agg_result.get("hits", {}).get("total", {}).get("value", 0)
@@ -432,7 +479,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
 async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
         # Read-cutover: serve from Postgres when enabled. The ES query keeps
-        # docs where asset_subtype == "truck" OR asset_type is missing (legacy),
+        # every vehicle (asset_type == "vehicle" OR asset_type missing, legacy),
         # sorted by created_at desc. We reproduce that predicate + sort over the
         # PG documents so the formatted payload is identical.
         from commerce.services.commerce_persistence_bridge import (
@@ -446,18 +493,15 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
             pg_docs = [
                 d for d in pg_docs if d.get("tenant_id") == tenant.tenant_id
             ]
-            trucks = [
-                d for d in pg_docs
-                if d.get("asset_subtype") == "truck" or "asset_type" not in d
-            ]
+            trucks = [d for d in pg_docs if _is_vehicle(d)]
             trucks.sort(key=lambda d: d.get("created_at") or "", reverse=True)
         else:
-            # Filter for only truck assets: asset_subtype is "truck" OR asset_type is not set (legacy documents)
+            # Every vehicle: asset_type is "vehicle" OR asset_type is not set (legacy documents)
             inner_query = {
                 "query": {
                     "bool": {
                         "should": [
-                            {"term": {"asset_subtype": "truck"}},
+                            {"term": {"asset_type": "vehicle"}},
                             {"bool": {"must_not": {"exists": {"field": "asset_type"}}}}
                         ],
                         "minimum_should_match": 1
@@ -467,7 +511,10 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
             query = inject_tenant_filter(inner_query, tenant.tenant_id)
             query["sort"] = [{"created_at": {"order": "desc"}}]
             response = await elasticsearch_service.search_documents("trucks", query, size=1000)
-            trucks = [hit["_source"] for hit in response["hits"]["hits"]]
+            trucks = [
+                hit["_source"] for hit in response["hits"]["hits"]
+                if _is_vehicle(hit["_source"])
+            ]
 
         # Convert to Truck model format for consistency
         formatted_trucks = []
@@ -532,9 +579,10 @@ async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext
                 raise resource_not_found(message="Truck not found", details={"truck_id": truck_id})
             truck = pg
         else:
-            # Tenant-scoped lookup by truck_id
+            # Tenant-scoped lookup by doc id (== truck_id). ``ids`` is the
+            # clause the store maps to its doc id; ``term _id`` matches nothing.
             query = inject_tenant_filter(
-                {"query": {"term": {"_id": truck_id}}},
+                {"query": {"ids": {"values": [truck_id]}}},
                 tenant.tenant_id,
             )
             query["size"] = 1
@@ -733,8 +781,8 @@ async def get_fleet_assets(
         query = inject_tenant_filter(inner_query, tenant.tenant_id)
         query["sort"] = [{"created_at": {"order": "desc"}}]
 
-        # Query the assets alias (points to trucks index)
-        response = await elasticsearch_service.search_documents("assets", query, size=1000)
+        # Assets live in the trucks index; the store has no ``assets`` alias.
+        response = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1000)
         docs = [hit["_source"] for hit in response["hits"]["hits"]]
         docs = [d for d in docs if _matches_search(d)]
 
@@ -779,13 +827,13 @@ async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext
                 "timestamp": utcnow().isoformat(),
             }
 
-        # Tenant-scoped lookup by asset_id
+        # Tenant-scoped lookup by doc id (== asset_id)
         query = inject_tenant_filter(
-            {"query": {"term": {"_id": asset_id}}},
+            {"query": {"ids": {"values": [asset_id]}}},
             tenant.tenant_id,
         )
         query["size"] = 1
-        result = await elasticsearch_service.search_documents("assets", query, size=1)
+        result = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1)
         hits = result["hits"]["hits"]
         if not hits:
             raise resource_not_found(message="Asset not found", details={"asset_id": asset_id})
@@ -845,8 +893,18 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
         now = utcnow().isoformat()
         doc["last_update"] = now
 
-        # Index into the trucks index using asset_id as the document ID
-        await elasticsearch_service.index_document("trucks", body.asset_id, doc)
+        # Create in the trucks index using asset_id as the document ID. Ids are
+        # global in the store, so this is create-if-absent: an upsert would
+        # replace an asset another tenant owns (B8/S7). Refused before the
+        # mirror write so the relational row can't be overwritten either.
+        created = await elasticsearch_service.create_document(
+            "trucks", body.asset_id, doc
+        )
+        if not created:
+            raise already_exists(
+                "An asset with this id already exists",
+                details={"asset_id": body.asset_id},
+            )
 
         # Dual-write the truck/asset to the Postgres source-of-truth.
         from commerce.services.commerce_persistence_bridge import (
@@ -859,9 +917,36 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
             "success": True,
             "timestamp": now,
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.exception("Error creating asset")
         raise internal_error(message="Failed to create asset", details={"error": str(e)})
+
+
+async def _get_tenant_asset_doc(asset_id: str, tenant_id: str) -> Optional[dict]:
+    """The caller's asset document by id, or ``None`` if absent or another tenant's.
+
+    Served from Postgres when the truck aggregate is cut over, otherwise from
+    the document store with an ``ids`` lookup (``term _id`` matches nothing
+    there, B1). ``truck`` is tenant-optional in the hybrid read, so the tenant
+    is checked here, as the GET routes do.
+    """
+    from commerce.services.commerce_persistence_bridge import (
+        _NOT_CUT_OVER,
+        read_hybrid_get,
+    )
+
+    pg = await read_hybrid_get("truck", tenant_id, asset_id)
+    if pg is not _NOT_CUT_OVER:
+        return pg if pg is not None and pg.get("tenant_id") == tenant_id else None
+    query = inject_tenant_filter(
+        {"query": {"ids": {"values": [asset_id]}}}, tenant_id
+    )
+    query["size"] = 1
+    result = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1)
+    hits = result["hits"]["hits"]
+    return hits[0]["_source"] if hits else None
 
 
 @router.patch("/fleet/assets/{asset_id}")
@@ -910,26 +995,19 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         partial_doc["last_update"] = utcnow().isoformat()
 
         # Verify the asset belongs to this tenant before updating
-        verify_query = inject_tenant_filter(
-            {"query": {"term": {"_id": asset_id}}},
-            tenant.tenant_id,
-        )
-        verify_query["size"] = 1
-        verify_result = await elasticsearch_service.search_documents("trucks", verify_query, size=1)
-        if not verify_result["hits"]["hits"]:
+        if await _get_tenant_asset_doc(asset_id, tenant.tenant_id) is None:
             raise resource_not_found(message="Asset not found", details={"asset_id": asset_id})
 
-        # Partial update via ES _update API
-        await elasticsearch_service.update_document("trucks", asset_id, partial_doc)
+        # Partial update; the doc id is the asset id.
+        await elasticsearch_service.update_document(ASSETS_INDEX, asset_id, partial_doc)
 
-        # Return the full updated document (tenant-scoped)
-        updated_query = inject_tenant_filter(
-            {"query": {"term": {"_id": asset_id}}},
-            tenant.tenant_id,
-        )
-        updated_query["size"] = 1
-        updated_result = await elasticsearch_service.search_documents("trucks", updated_query, size=1)
-        updated_doc = updated_result["hits"]["hits"][0]["_source"] if updated_result["hits"]["hits"] else {}
+        # Return the full updated document. Read it back from the store that was
+        # just written, never the hybrid Postgres read: the PG row is refreshed
+        # by the mirror below, so reading it first would mirror the stale row
+        # back over this update.
+        updated_doc = await elasticsearch_service.get_document(ASSETS_INDEX, asset_id) or {}
+        if updated_doc.get("tenant_id") != tenant.tenant_id:
+            updated_doc = {}
 
         # Dual-write the updated truck/asset to the Postgres source-of-truth so
         # the PG row stays current (the create path mirrors too; without this
@@ -1254,7 +1332,7 @@ async def _universal_search_assets(tenant_id: str, q: str, limit: int) -> List[d
         docs = [d for d in pg_assets if d.get("tenant_id") == tenant_id]
     else:
         query = inject_tenant_filter({"query": {"match_all": {}}}, tenant_id)
-        resp = await elasticsearch_service.search_documents("assets", query, size=1000)
+        resp = await elasticsearch_service.search_documents(ASSETS_INDEX, query, size=1000)
         docs = [hit["_source"] for hit in resp["hits"]["hits"]]
 
     matched = [d for d in docs if _matches(d)][:limit]

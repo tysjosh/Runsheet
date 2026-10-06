@@ -308,3 +308,30 @@ async def test_assign_appends_asset_assigned_event():
     assert event_doc["tenant_id"] == "t1"
     assert event_doc["actor_id"] == "op_1"
     assert event_doc["event_payload"]["asset_id"] == "TRUCK_01"
+
+
+# ---------------------------------------------------------------------------
+# B14: an asset double-booking is ASSET_CONFLICT, not DRIFT_THRESHOLD_EXCEEDED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_assign_busy_asset_uses_asset_conflict_code():
+    from errors.codes import ErrorCode
+
+    es = _make_es_mock()
+    es.search_documents = AsyncMock(
+        side_effect=[
+            _job_hit(_scheduled_job_doc()),
+            _vehicle_asset_hit("TRUCK_01"),
+            _job_hit({"job_id": "JOB_99", "status": "assigned", "asset_assigned": "TRUCK_01"}),
+        ]
+    )
+    svc = _make_service(es)
+
+    with pytest.raises(AppException) as exc_info:
+        await svc.assign_asset("JOB_1", "TRUCK_01", "t1")
+
+    assert exc_info.value.error_code == ErrorCode.ASSET_CONFLICT
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.details["conflicting_job_id"] == "JOB_99"

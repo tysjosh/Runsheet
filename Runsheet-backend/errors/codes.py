@@ -33,6 +33,10 @@ class ErrorCode(str, Enum):
     
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
     """Requested resource does not exist (HTTP 404)"""
+    RESOURCE_ALREADY_EXISTS = "RESOURCE_ALREADY_EXISTS"
+    """A create used an id that is already taken, in any tenant (HTTP 409)"""
+    ASSET_CONFLICT = "ASSET_CONFLICT"
+    """The asset is already assigned to another active job (HTTP 409)"""
     
     # Authentication errors (4xx)
     UNAUTHORIZED = "UNAUTHORIZED"
@@ -116,6 +120,8 @@ class ErrorCode(str, Enum):
 
     CHANNEL_DISABLED = "CHANNEL_DISABLED"
     """Intake channel is disabled and cannot accept orders (HTTP 403)"""
+    ORDER_INTAKE_DISABLED = "ORDER_INTAKE_DISABLED"
+    """The tenant's order_intake_pipeline flag is disabled, so the order was not stored (HTTP 409)"""
 
     INSUFFICIENT_ROLE = "INSUFFICIENT_ROLE"
     """Caller lacks the required role for this operation (HTTP 403)"""
@@ -418,6 +424,8 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.VALIDATION_ERROR: 400,
     ErrorCode.INVALID_REQUEST: 400,
     ErrorCode.RESOURCE_NOT_FOUND: 404,
+    ErrorCode.RESOURCE_ALREADY_EXISTS: 409,
+    ErrorCode.ASSET_CONFLICT: 409,
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.RATE_LIMITED: 429,
@@ -460,6 +468,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.LOADING_PLAN_EXECUTION_FAILED: 409,
     ErrorCode.APPROVAL_EXPIRED: 409,
     ErrorCode.CHANNEL_DISABLED: 403,
+    ErrorCode.ORDER_INTAKE_DISABLED: 409,
     ErrorCode.INSUFFICIENT_ROLE: 403,
     ErrorCode.DRIVER_UNAVAILABLE: 409,
     ErrorCode.LEGACY_ROUTE_SUNSET: 410,

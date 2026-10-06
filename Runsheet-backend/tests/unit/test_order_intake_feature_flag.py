@@ -611,3 +611,207 @@ class TestFlagStateTransitions:
         assert resp.status_code == 200
         assert resp.json()["data"]["previous_state"] == "active_gated"
         assert resp.json()["data"]["new_state"] == "shadow"
+
+
+# ---------------------------------------------------------------------------
+# Tests — the order endpoints over the real pipeline (findings F1, F2)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingOrderRepo:
+    """Stands in for ``FuelOrderRepository`` inside the pipeline and records writes."""
+
+    def __init__(self, upserts: list, events: list):
+        self._upserts = upserts
+        self._events = events
+
+    async def upsert_with_last_event_timestamp(self, tenant_id, doc):
+        self._upserts.append((tenant_id, doc))
+
+    async def append_event(self, tenant_id, ev):
+        self._events.append((tenant_id, ev))
+
+
+class _RecordingHook:
+    def __init__(self):
+        self.before = 0
+        self.after = 0
+
+    async def before_accept(self, order_doc):
+        self.before += 1
+        return order_doc
+
+    async def after_accept(self, order_doc):
+        self.after += 1
+
+
+_ORDER_BODY = {
+    "customer_id": "cust-1",
+    "customer_name": "Test Customer",
+    "ship_to_address": "123 Main St",
+    "ship_to_lat": 30.0,
+    "ship_to_lon": -90.0,
+    "product_code": "DIESEL_2",
+    "gallons_requested": 500,
+    "call_type": "one_off",
+    "delivery_window_start": "2026-01-16T08:00:00+00:00",
+    "delivery_window_end": "2026-01-16T12:00:00+00:00",
+}
+
+
+class TestOrderIntakeDisabledAndDryRun:
+    """POST /api/orders and /bulk through the real ``OrderIntakePipeline``.
+
+    F1: a disabled intake flag is a 409 ``ORDER_INTAKE_DISABLED`` in the
+    standard envelope, never a 201 that stored nothing. F2: a bulk dry run
+    runs the pipeline's value validation, so a row the real run would refuse
+    is reported as an error rather than ``dry_run_valid``.
+    """
+
+    @pytest.fixture
+    def harness(self):
+        from errors.handlers import register_exception_handlers
+        from fuel.api.order_endpoints import configure_order_endpoints
+        from fuel.api.order_endpoints import router as order_router
+        from fuel.intake.adapter_base import IntakeAdapterRegistry
+        from fuel.intake.dispatcher_adapter import DispatcherIntakeAdapter
+        from fuel.services.order_intake_pipeline import OrderIntakePipeline
+        from middleware.request_id import RequestIDMiddleware
+        from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+
+        ff = FakeFeatureFlagService(initial_state="disabled")
+        registry = IntakeAdapterRegistry()
+        registry.register(
+            DispatcherIntakeAdapter(), channel_type="dispatcher", schema_version="1.0"
+        )
+        channel_repo = MagicMock()
+        channel_repo.ensure_dispatcher_channel = AsyncMock(return_value=FakeChannel())
+        idempotency = FakeIdempotencyService()
+        ws = FakeOrdersWSManager()
+        pipeline = OrderIntakePipeline(
+            es_service=FakeEsService(),
+            intake_channel_repo=channel_repo,
+            adapter_registry=registry,
+            idempotency_service=idempotency,
+            feature_flag_service=ff,
+            poison_queue_service=FakePoisonQueueService(),
+            ws_manager=ws,
+            credentials_vault=FakeCredentialsVault(),
+            customer_tank_repo=FakeCustomerTankRepo(),
+        )
+        hook = _RecordingHook()
+        pipeline.register_hook(hook)
+        configure_order_endpoints(
+            order_intake_pipeline=pipeline, order_repository=MagicMock()
+        )
+
+        app = FastAPI()
+        register_exception_handlers(app)
+        app.add_middleware(RequestIDMiddleware)
+        app.include_router(order_router)
+        app.dependency_overrides[get_tenant_context] = lambda: TenantContext(
+            tenant_id="tenant-test",
+            user_id="dispatcher-1",
+            has_pii_access=False,
+            roles=["dispatcher"],
+        )
+
+        upserts: list = []
+        events: list = []
+        with patch(
+            "fuel.order_repository.FuelOrderRepository",
+            return_value=_RecordingOrderRepo(upserts, events),
+        ):
+            yield {
+                "client": TestClient(app),
+                "ff": ff,
+                "upserts": upserts,
+                "events": events,
+                "idempotency": idempotency,
+                "ws": ws,
+                "hook": hook,
+            }
+
+    async def _enable(self, ff):
+        await ff.set_overlay_state(
+            "order_intake_pipeline", "tenant-test", "active_auto", "admin"
+        )
+
+    def test_create_with_flag_disabled_is_409_standard_envelope(self, harness):
+        resp = harness["client"].post(
+            "/api/orders",
+            json={"client_event_id": "evt-f1-1", **_ORDER_BODY},
+            headers={"X-Request-ID": "req-f1-409"},
+        )
+        assert resp.status_code == 409, resp.text
+        body = resp.json()
+        assert body["error_code"] == "ORDER_INTAKE_DISABLED"
+        assert body["message"] == "Order intake isn't enabled for this account"
+        assert body["request_id"] == "req-f1-409"
+        assert "detail" not in body
+        assert harness["upserts"] == []
+        assert harness["events"] == []
+
+    @pytest.mark.asyncio
+    async def test_create_with_flag_enabled_is_201(self, harness):
+        await self._enable(harness["ff"])
+        resp = harness["client"].post(
+            "/api/orders", json={"client_event_id": "evt-f1-2", **_ORDER_BODY}
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["status"] == "processed"
+        assert len(harness["upserts"]) == 1
+
+    def test_bulk_row_on_disabled_flag_is_an_error(self, harness):
+        resp = harness["client"].post(
+            "/api/orders/bulk", json={"orders": [dict(_ORDER_BODY)]}
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["processed"] == 0
+        assert body["errors"] == 1
+        row = body["results"][0]
+        assert row["status"] == "error"
+        assert row["error"] == (
+            "ORDER_INTAKE_DISABLED: Order intake isn't enabled for this account"
+        )
+        assert harness["upserts"] == []
+
+    def test_bulk_dry_run_on_disabled_flag_is_an_error(self, harness):
+        resp = harness["client"].post(
+            "/api/orders/bulk",
+            json={"orders": [dict(_ORDER_BODY)], "dry_run": True},
+        )
+        assert resp.status_code == 200, resp.text
+        row = resp.json()["results"][0]
+        assert row["status"] == "error"
+        assert row["error"].startswith("ORDER_INTAKE_DISABLED: ")
+
+    @pytest.mark.asyncio
+    async def test_bulk_dry_run_runs_pipeline_value_validation(self, harness):
+        await self._enable(harness["ff"])
+        inverted = {
+            **_ORDER_BODY,
+            "delivery_window_start": "2026-01-16T12:00:00+00:00",
+            "delivery_window_end": "2026-01-16T08:00:00+00:00",
+        }
+        unknown_tank = {**_ORDER_BODY, "customer_tank_id": "tank-nope"}
+        resp = harness["client"].post(
+            "/api/orders/bulk",
+            json={"orders": [dict(_ORDER_BODY), inverted, unknown_tank], "dry_run": True},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        statuses = [r["status"] for r in body["results"]]
+        assert statuses == ["dry_run_valid", "error", "error"]
+        assert body["processed"] == 1
+        assert body["errors"] == 2
+        assert body["results"][1]["error"].startswith("ORDER_PAYLOAD_INVALID: ")
+        assert body["results"][2]["error"].startswith("INVALID_CUSTOMER_TANK_REF: ")
+        # A dry run writes, publishes and consumes nothing.
+        assert harness["upserts"] == []
+        assert harness["events"] == []
+        assert harness["idempotency"].marked == []
+        assert harness["ws"].broadcasts == []
+        assert harness["hook"].before == 0
+        assert harness["hook"].after == 0

@@ -10,12 +10,14 @@ Validates: Requirements 1.1-1.6, 2.1-2.7, 3.1-3.5, 4.1, 4.4, 5.1-5.5
 """
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from fuel.models import (
@@ -34,6 +36,7 @@ from fuel.models import (
     RefillResult,
     UpdateFuelStation,
 )
+from fuel.services.fuel_product_catalog import resolve_product_filter
 from fuel.services.fuel_service import FuelService
 
 logger = logging.getLogger(__name__)
@@ -99,8 +102,17 @@ class UpdateThresholdRequest(BaseModel):
 async def list_stations(
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
-    fuel_type: Optional[str] = Query(None, description="Filter by fuel type: AGO, PMS, ATK, LPG"),
-    status: Optional[str] = Query(None, description="Filter by status: normal, low, critical, empty"),
+    fuel_type: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by fuel product: a code (DIESEL_2), a legacy alias "
+            "(AGO, PMS, ATK, LPG) or a category (diesel, gasoline, ...). "
+            "Anything else is 422."
+        ),
+    ),
+    status: Optional[Literal["normal", "low", "critical", "empty"]] = Query(
+        None, description="Filter by status: normal, low, critical, empty"
+    ),
     location: Optional[str] = Query(None, description="Filter by location name"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(50, ge=1, le=100, description="Page size"),
@@ -108,12 +120,27 @@ async def list_stations(
     """
     List fuel stations with optional filters and pagination.
 
+    ``fuel_type`` is resolved through the fuel product catalog before the
+    query, and an unknown ``fuel_type`` or ``status`` is a 422 rather than an
+    empty page (findings F12/S6).
+
     Validates: Requirements 1.1, 1.6
     """
+    fuel_codes = None
+    if fuel_type:
+        try:
+            fuel_codes = resolve_product_filter(fuel_type)
+        except ValueError:
+            raise AppException(
+                error_code=ErrorCode.VALIDATION_ERROR,
+                message="Unknown fuel product, alias or category",
+                status_code=422,
+                details={"fuel_type": fuel_type},
+            ) from None
     svc = _get_fuel_service()
     result = await svc.list_stations(
         tenant_id=tenant.tenant_id,
-        fuel_type=fuel_type,
+        fuel_type=fuel_codes,
         status=status,
         location=location,
         page=page,
