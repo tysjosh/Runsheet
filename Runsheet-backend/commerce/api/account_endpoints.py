@@ -23,6 +23,8 @@ from config.settings import get_settings
 from commerce.api._authz import require_commerce_staff
 from commerce.services.account_service import AccountService
 from commerce.services.credit_service import CreditService
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
 
@@ -107,12 +109,9 @@ async def require_accounts_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     # Accounts are a Tier 4 / staff surface: the customer master and its credit

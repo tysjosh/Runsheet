@@ -308,6 +308,20 @@ class ErrorCode(str, Enum):
     DUPLICATE_METER_NUMBER = "DUPLICATE_METER_NUMBER"
     """A meter with this meter_number is already registered for the tenant (HTTP 409)"""
 
+    # Commerce feature-flag gates. 404 so a tenant without the module cannot
+    # tell the surface exists. The string values are what the UI matches on.
+    COMMERCE_DISABLED = "COMMERCE_DISABLED"
+    """Commerce backbone is not enabled for the tenant (HTTP 404)"""
+
+    CUSTOMERS_DISABLED = "CUSTOMERS_DISABLED"
+    """Commerce customers module is not enabled for the tenant (HTTP 404)"""
+
+    PRICING_DISABLED = "PRICING_DISABLED"
+    """Commerce pricing engine is not enabled for the tenant (HTTP 404)"""
+
+    INVOICING_DISABLED = "INVOICING_DISABLED"
+    """Commerce invoicing module is not enabled for the tenant (HTTP 404)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -414,6 +428,10 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.HOS_FIGURES_UNAVAILABLE: 409,
     ErrorCode.DRIVER_NOT_DISPATCH_ELIGIBLE: 409,
     ErrorCode.DUPLICATE_METER_NUMBER: 409,
+    ErrorCode.COMMERCE_DISABLED: 404,
+    ErrorCode.CUSTOMERS_DISABLED: 404,
+    ErrorCode.PRICING_DISABLED: 404,
+    ErrorCode.INVOICING_DISABLED: 404,
 }
 
 

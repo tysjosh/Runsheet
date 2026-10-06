@@ -44,12 +44,10 @@ EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
     "import_endpoints.py": 12,
     # Commerce endpoints (commerce-backbone spec) — raw HTTPException tech
     # debt frozen at introduction; migrate to errors.exceptions over time.
-    "commerce/api/account_endpoints.py": 2,
-    "commerce/api/ar_aging_endpoints.py": 1,
-    "commerce/api/customer_endpoints.py": 2,
-    "commerce/api/invoice_endpoints.py": 4,
-    "commerce/api/payment_endpoints.py": 3,
-    "commerce/api/price_book_endpoints.py": 4,
+    "commerce/api/account_endpoints.py": 1,
+    "commerce/api/invoice_endpoints.py": 2,
+    "commerce/api/payment_endpoints.py": 1,
+    "commerce/api/price_book_endpoints.py": 2,
     "commerce/api/price_protection_endpoints.py": 6,
     "commerce/api/pricing_endpoints.py": 3,
     # Compliance endpoints (fuel-compliance-backbone spec) — same tech-debt

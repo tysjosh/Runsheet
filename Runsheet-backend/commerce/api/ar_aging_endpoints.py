@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_staff
 from commerce.services.ar_aging_service import ARAgingService
 from commerce.services.commerce_es_mappings import AR_AGING_SNAPSHOTS_INDEX
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -80,12 +82,9 @@ async def require_ar_aging_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     # Receivables aging is a Tier 4 / staff surface: the ERP owns the invoice, so

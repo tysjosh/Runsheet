@@ -23,6 +23,8 @@ from config.settings import get_settings
 from commerce.api._authz import require_commerce_staff
 from commerce.services.price_book_service import PriceBookService
 from commerce.services.pricing_engine import PricingEngine, PricingError
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -101,12 +103,9 @@ async def require_pricing_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     if not settings.commerce_pricing_engine_enabled:
@@ -115,12 +114,9 @@ async def require_pricing_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "PRICING_DISABLED",
-                "message": "Commerce pricing engine is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.PRICING_DISABLED,
+            "Commerce pricing engine is not enabled for this tenant",
         )
 
     # Price books are a Tier 4 / staff surface: the ERP prices. Applied after the

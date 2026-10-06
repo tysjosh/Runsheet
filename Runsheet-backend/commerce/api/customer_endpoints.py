@@ -13,12 +13,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_ops
 from commerce.services.customer_service import CustomerService
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -75,12 +77,9 @@ async def require_customers_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     if not settings.commerce_customers_enabled:
@@ -89,12 +88,9 @@ async def require_customers_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "CUSTOMERS_DISABLED",
-                "message": "Commerce customers module is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.CUSTOMERS_DISABLED,
+            "Commerce customers module is not enabled for this tenant",
         )
 
     # Customers are an operations surface — an order needs a customer and a tank,
