@@ -76,6 +76,8 @@ def _mock_es_service() -> MagicMock:
     )
     mock.index_document = AsyncMock(return_value={"result": "created"})
     mock.get_document = AsyncMock(return_value=None)
+    # Non-canonical commits write create-if-absent per row (C1).
+    mock.create_document = AsyncMock(return_value=True)
     return mock
 
 
@@ -363,9 +365,8 @@ class TestCommit:
 
     async def test_commit_valid_session(self, client, mock_es):
         """Commit a validated session successfully."""
-        mock_es.bulk_index_documents = AsyncMock(
-            return_value={"successful": 3, "failed": 0, "errors": []}
-        )
+        mock_es.get_document = AsyncMock(return_value=None)
+        mock_es.create_document = AsyncMock(return_value=True)
         session_id = await self._create_and_validate_session(client, "fleet")
         resp = await client.post(
             "/api/import/commit",
@@ -382,9 +383,8 @@ class TestCommit:
 
     async def test_commit_with_skip_errors(self, client, mock_es):
         """Commit with skip_errors=True."""
-        mock_es.bulk_index_documents = AsyncMock(
-            return_value={"successful": 2, "failed": 0, "errors": []}
-        )
+        mock_es.get_document = AsyncMock(return_value=None)
+        mock_es.create_document = AsyncMock(return_value=True)
         session_id = await self._create_and_validate_session(client, "inventory")
         resp = await client.post(
             "/api/import/commit",
@@ -642,9 +642,8 @@ class TestImportWorkflow:
 
     async def test_full_csv_import_workflow(self, client, mock_es):
         """Run the complete import workflow for fleet data."""
-        mock_es.bulk_index_documents = AsyncMock(
-            return_value={"successful": 3, "failed": 0, "errors": []}
-        )
+        mock_es.get_document = AsyncMock(return_value=None)
+        mock_es.create_document = AsyncMock(return_value=True)
 
         # Step 1: Upload CSV
         csv_data = _csv_bytes_for("fleet")

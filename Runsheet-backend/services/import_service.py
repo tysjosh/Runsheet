@@ -35,6 +35,15 @@ logger = logging.getLogger(__name__)
 
 ACTIVE_IMPORT_SESSIONS_INDEX = "import_sessions_active"
 CANONICAL_IMPORT_TYPES = frozenset({"orders", "customer_tanks", "tank_readings"})
+#: Document id field per non-canonical data type (the template's id field).
+#: Document ids are global in the store, so these rows are written
+#: create-if-absent and never replace a row another tenant owns (C1).
+NON_CANONICAL_ID_FIELDS = {
+    "fleet": "truck_id",
+    "inventory": "item_id",
+    "fuel_stations": "station_id",
+    "jobs": "job_id",
+}
 
 
 class _ActiveSession:
@@ -424,22 +433,13 @@ class ImportService:
             skipped += canonical_skipped
             import_errors.extend(canonical_errors)
         elif documents:
-            try:
-                bulk_result = await self.es_service.bulk_index_documents(
-                    target_index, [doc for _, doc in documents]
-                )
-                imported = bulk_result.get("successful", 0)
-                failed = bulk_result.get("failed", 0)
-                for err in bulk_result.get("errors", []):
-                    import_errors.append(str(err))
-            except Exception as exc:
-                logger.error(
-                    "Bulk indexing failed for session %s: %s",
-                    session_id,
-                    exc,
-                )
-                import_errors.append(str(exc))
-                failed = len(documents)
+            imported, failed, tenant_errors = await self._commit_tenant_documents(
+                session=session,
+                target_index=target_index,
+                documents=documents,
+                tenant=tenant,
+            )
+            import_errors.extend(tenant_errors)
 
         duration = time.time() - start_time
 
@@ -767,6 +767,85 @@ class ImportService:
             datetime.fromisoformat(
                 str(document["reading_at"]).replace("Z", "+00:00")
             )
+
+    async def _commit_tenant_documents(
+        self,
+        *,
+        session: _ActiveSession,
+        target_index: str,
+        documents: list[tuple[int, dict[str, Any]]],
+        tenant: Any,
+    ) -> tuple[int, int, list[str]]:
+        """Write non-canonical rows stamped with the tenant, never across tenants (C1).
+
+        Document ids are global in the store, so a blind upsert of an id another
+        tenant owns would replace that tenant's row. Each row is instead:
+
+        - updated in place if the importing tenant already owns that id,
+        - created with ``create_document`` (insert-if-absent) if the id is free,
+        - a per-row error if any other owner (or a legacy row with no tenant)
+          holds the id. The error doesn't name the other owner.
+
+        Freeze decision: if the tenant's own row is deleted and another tenant
+        recreates the id between the read and the update, the update wins. That
+        window is accepted rather than adding a new store primitive.
+        """
+        tenant_id = (
+            getattr(tenant, "tenant_id", None)
+            if tenant is not None
+            else session.tenant_id
+        )
+        if not tenant_id:
+            raise ValueError("tenant context is required for imports")
+        if session.tenant_id and session.tenant_id != tenant_id:
+            raise ValueError(f"Import session {session.session_id} not found")
+
+        id_field = NON_CANONICAL_ID_FIELDS.get(session.data_type, "id")
+        imported = 0
+        failed = 0
+        errors: list[str] = []
+        for row_number, doc in documents:
+            doc["tenant_id"] = tenant_id
+            doc_id = str(doc.get(id_field) or "").strip()
+            if not doc_id:
+                failed += 1
+                errors.append(f"row {row_number}: missing {id_field}")
+                continue
+            in_use = f"row {row_number}: {id_field} '{doc_id}' is already in use"
+            try:
+                existing = await self.es_service.get_document(target_index, doc_id)
+                if existing is not None:
+                    if existing.get("tenant_id") != tenant_id:
+                        failed += 1
+                        errors.append(in_use)
+                        continue
+                    await self.es_service.index_document(target_index, doc_id, doc)
+                    imported += 1
+                    continue
+                if await self.es_service.create_document(target_index, doc_id, doc):
+                    imported += 1
+                    continue
+                # Lost a create race, or the index takes no writes.
+                current = await self.es_service.get_document(target_index, doc_id)
+                if current is None:
+                    failed += 1
+                    errors.append(f"row {row_number}: could not be written")
+                elif current.get("tenant_id") == tenant_id:
+                    await self.es_service.index_document(target_index, doc_id, doc)
+                    imported += 1
+                else:
+                    failed += 1
+                    errors.append(in_use)
+            except Exception as exc:
+                logger.error(
+                    "Import row write failed: session=%s row=%d: %s",
+                    session.session_id,
+                    row_number,
+                    exc,
+                )
+                failed += 1
+                errors.append(f"row {row_number}: {exc}")
+        return imported, failed, errors
 
     async def _commit_canonical_documents(
         self,
