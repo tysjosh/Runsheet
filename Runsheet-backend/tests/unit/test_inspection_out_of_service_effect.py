@@ -141,10 +141,13 @@ class RecordingWSManager:
 
     def __init__(self, *, fail: bool = False) -> None:
         self.broadcasts: List[tuple] = []
+        self.tenant_ids: List[str] = []
         self._fail = fail
 
-    async def broadcast(self, event_type: str, event_data: dict) -> None:
+    # Same signature as SchedulingWebSocketManager.broadcast (N-new-1).
+    async def broadcast(self, event_type: str, event_data: dict, tenant_id: str = "") -> None:
         self.broadcasts.append((event_type, dict(event_data)))
+        self.tenant_ids.append(tenant_id)
         if self._fail:
             raise RuntimeError("socket gone")
 
@@ -240,6 +243,7 @@ class TestOutOfServiceEffect:
         event_type, event_data = ws.broadcasts[0]
         assert event_type == ASSET_OUT_OF_SERVICE_EVENT
         assert event_data["tenant_id"] == TENANT
+        assert ws.tenant_ids == [TENANT]  # the manager refuses a tenantless call
         assert event_data["asset_id"] == ASSET
         assert event_data["driver_id"] == DRIVER
         assert event_data["inspection_id"] == report["inspection_id"]

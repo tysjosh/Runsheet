@@ -1654,7 +1654,9 @@ class JobService:
         """
         if self._ws_manager is not None:
             try:
-                await self._ws_manager.broadcast(event_type, job_data)
+                await self._ws_manager.broadcast(
+                    event_type, job_data, tenant_id=job_data.get("tenant_id", "")
+                )
             except Exception as exc:
                 logger.warning(
                     "WebSocket broadcast failed for %s on job %s: %s",

@@ -622,7 +622,9 @@ class DriverTransitionGateStack:
             reason_code=reason_code,
         )
         try:
-            await self._scheduling_ws_manager.broadcast(HOS_BLOCK_EVENT, event_data)
+            await self._scheduling_ws_manager.broadcast(
+                HOS_BLOCK_EVENT, event_data, tenant_id=tenant_id
+            )
         except Exception as exc:
             logger.warning(
                 "Dispatcher broadcast failed for %s on tenant=%s driver=%s "

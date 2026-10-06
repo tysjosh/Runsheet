@@ -355,6 +355,7 @@ class DelayDetectionService:
                         "delay_duration_minutes": delay_minutes,
                         "tenant_id": job_data.get("tenant_id"),
                     },
+                    tenant_id=job_data.get("tenant_id", ""),
                 )
             except Exception as exc:
                 logger.warning(

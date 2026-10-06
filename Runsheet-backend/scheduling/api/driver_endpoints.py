@@ -174,7 +174,9 @@ async def _broadcast_driver_event(
     # Broadcast through scheduling WS
     if _scheduling_ws_manager is not None:
         try:
-            await _scheduling_ws_manager.broadcast(event_type, event_data)
+            await _scheduling_ws_manager.broadcast(
+                event_type, event_data, tenant_id=event_data.get("tenant_id", "")
+            )
         except Exception as exc:
             logger.warning(
                 "Scheduling WS broadcast failed for %s on job %s: %s",
@@ -194,8 +196,14 @@ async def _broadcast_driver_event(
                     driver_id,
                     {"type": event_type, "data": event_data},
                 )
-            elif hasattr(_driver_ws_manager, "broadcast"):
-                await _driver_ws_manager.broadcast(event_type, event_data)
+            else:
+                # No driver to target. A fan-out to every driver socket would
+                # cross tenants, so driver delivery is skipped (D3).
+                logger.debug(
+                    "No driver id; driver socket delivery skipped for %s on job %s",
+                    event_type,
+                    event_data.get("job_id"),
+                )
         except Exception as exc:
             logger.warning(
                 "Driver WS broadcast failed for %s on job %s: %s",

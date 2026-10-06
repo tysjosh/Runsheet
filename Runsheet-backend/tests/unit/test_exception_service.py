@@ -65,10 +65,13 @@ class _FakeSignalBus:
 class _FakeSchedulingWS:
     def __init__(self, error: Exception | None = None):
         self.broadcasts: list[tuple] = []
+        self.tenant_ids: list[str] = []
         self._error = error
 
-    async def broadcast(self, event_type, event_data):
+    # Same signature as SchedulingWebSocketManager.broadcast (N-new-1).
+    async def broadcast(self, event_type, event_data, tenant_id=""):
         self.broadcasts.append((event_type, event_data))
+        self.tenant_ids.append(tenant_id)
         if self._error is not None:
             raise self._error
 
@@ -328,6 +331,9 @@ async def test_high_and_critical_broadcast_exception_escalation(severity):
     assert event_type == "exception_escalation"
     assert data["severity"] == severity.value
     assert data["job_id"] == "JOB_1"
+    # The manager refuses a tenantless call.
+    assert col["scheduling_ws_manager"].tenant_ids == [data["tenant_id"]]
+    assert data["tenant_id"]
     assert col["driver_ws_manager"].sent[0][0] == DRIVER_ID
 
 

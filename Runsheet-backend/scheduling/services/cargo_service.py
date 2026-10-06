@@ -238,6 +238,7 @@ class CargoService:
                         "old_status": old_status,
                         "new_status": new_status.value,
                     },
+                    tenant_id=tenant_id,
                 )
             except Exception as exc:
                 logger.warning(
@@ -505,6 +506,7 @@ class CargoService:
                         "destination": job_doc.get("destination"),
                         "asset_assigned": job_doc.get("asset_assigned"),
                     },
+                    tenant_id=job_doc.get("tenant_id", ""),
                 )
             except Exception as exc:
                 logger.warning(

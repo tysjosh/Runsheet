@@ -586,7 +586,7 @@ class InspectionService:
         }
         try:
             await self._scheduling_ws_manager.broadcast(
-                ASSET_OUT_OF_SERVICE_EVENT, event_data
+                ASSET_OUT_OF_SERVICE_EVENT, event_data, tenant_id=tenant_id
             )
         except Exception as exc:
             logger.warning(

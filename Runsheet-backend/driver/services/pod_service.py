@@ -1449,8 +1449,14 @@ class PODSubmissionService:
                         driver_id,
                         {"type": event_type, "data": event_data},
                     )
-                elif hasattr(self._driver_ws_manager, "broadcast"):
-                    await self._driver_ws_manager.broadcast(event_type, event_data)
+                else:
+                    # No driver to target. A fan-out to every driver socket
+                    # would cross tenants, so driver delivery is skipped (D3).
+                    logger.debug(
+                        "No driver id; driver socket delivery skipped for %s on work %s",
+                        event_type,
+                        event_data.get("job_id") or event_data.get("order_id"),
+                    )
             except Exception as exc:
                 logger.warning(
                     "Driver WS broadcast failed for %s on work %s: %s",
