@@ -16,6 +16,7 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 7.1, 7.2,
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -199,8 +200,9 @@ async def list_notifications(
             "reference/name, related entity id, subject, and message body."
         ),
     ),
-    start_date: Optional[str] = Query(None, description="Start of date range (ISO 8601)"),
-    end_date: Optional[str] = Query(None, description="End of date range (ISO 8601)"),
+    # Typed so an unparseable date is a 422 instead of being passed through (B5).
+    start_date: Optional[datetime] = Query(None, description="Start of date range (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="End of date range (ISO 8601)"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
 ):
@@ -225,9 +227,9 @@ async def list_notifications(
         if q:
             filters["search"] = q
         if start_date:
-            filters["start_date"] = start_date
+            filters["start_date"] = start_date.isoformat()
         if end_date:
-            filters["end_date"] = end_date
+            filters["end_date"] = end_date.isoformat()
 
         result = await svc.list_notifications(
             tenant_id=tenant.tenant_id,
@@ -251,8 +253,9 @@ async def list_notifications(
 async def get_notification_summary(
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
-    start_date: Optional[str] = Query(None, description="Start of date range (ISO 8601)"),
-    end_date: Optional[str] = Query(None, description="End of date range (ISO 8601)"),
+    # Typed so an unparseable date is a 422 instead of being passed through (B5).
+    start_date: Optional[datetime] = Query(None, description="Start of date range (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="End of date range (ISO 8601)"),
 ):
     """
     Aggregate notification counts by type, channel, and status.
@@ -263,8 +266,8 @@ async def get_notification_summary(
     try:
         result = await svc.get_summary(
             tenant_id=tenant.tenant_id,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=start_date.isoformat() if start_date else None,
+            end_date=end_date.isoformat() if end_date else None,
         )
         return result
     except AppException:
