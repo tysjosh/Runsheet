@@ -19,6 +19,8 @@ from typing import Any, Dict, List
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     mvp_router,
@@ -92,6 +94,8 @@ def _build_app(
         file_storage_service=mock.MagicMock(),
     )
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     app.include_router(mvp_router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(

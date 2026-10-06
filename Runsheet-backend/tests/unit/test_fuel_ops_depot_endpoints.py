@@ -587,7 +587,7 @@ class TestUpdateDepot:
         )
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "depot_not_found"
+        assert body["error_code"] == "depot_not_found"
 
     def test_returns_403_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -600,9 +600,9 @@ class TestUpdateDepot:
         )
         assert resp.status_code == 403
         body = resp.json()
-        assert body["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert body["error_code"] == "cross_tenant_access_denied"
         # Depot_id is safe to echo; owning tenant is not leaked.
-        assert body["detail"]["depot_id"] == "depot_001"
+        assert body["details"]["depot_id"] == "depot_001"
 
     def test_empty_patch_returns_current_model(self):
         app, es = _build_app()
@@ -647,7 +647,7 @@ class TestDeleteDepot:
         resp = client.delete("/api/fuel/mvp/depots/does-not-exist")
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "depot_not_found"
+        assert body["error_code"] == "depot_not_found"
 
     def test_returns_403_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -657,7 +657,7 @@ class TestDeleteDepot:
         resp = client.delete("/api/fuel/mvp/depots/depot_001")
         assert resp.status_code == 403
         body = resp.json()
-        assert body["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert body["error_code"] == "cross_tenant_access_denied"
         # Depot must remain in the store — cross-tenant delete is a no-op.
         assert "depot_001" in es.docs
 
@@ -742,7 +742,7 @@ class TestDeleteDepotN6:
         resp = TestClient(app).delete("/api/fuel/mvp/depots/does-not-exist")
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "depot_not_found"
+        assert resp.json()["error_code"] == "depot_not_found"
         assert settings.set_calls == []
 
     def test_incomplete_delete_is_500_with_the_standard_envelope(self):

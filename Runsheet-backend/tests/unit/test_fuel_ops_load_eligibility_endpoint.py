@@ -40,6 +40,8 @@ from unittest import mock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+
+from errors.handlers import register_exception_handlers
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
@@ -143,6 +145,8 @@ def _build_app(
     )
 
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     app.include_router(mvp_router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
@@ -391,9 +395,9 @@ class TestErrorModes:
             _url("does-not-exist"), params={"product_code": "DIESEL_2"}
         )
         assert resp.status_code == 404
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "compartment_not_found"
-        assert detail["compartment_id"] == "does-not-exist"
+        assert detail["details"]["compartment_id"] == "does-not-exist"
 
     def test_cross_tenant_compartment_returns_404_not_403(self):
         # Existence is never leaked across tenants.
@@ -405,7 +409,7 @@ class TestErrorModes:
             _url(state.compartment_id), params={"product_code": "DIESEL_2"}
         )
         assert resp.status_code == 404
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "compartment_not_found"
 
     def test_unknown_product_code_returns_422(self):
@@ -418,9 +422,9 @@ class TestErrorModes:
             params={"product_code": "NOT_A_REAL_FUEL"},
         )
         assert resp.status_code == 422
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "unknown_product_code"
-        assert detail["product_code"] == "NOT_A_REAL_FUEL"
+        assert detail["details"]["product_code"] == "NOT_A_REAL_FUEL"
 
     def test_missing_product_code_query_returns_422(self):
         # FastAPI returns 422 for missing required query params.
@@ -453,7 +457,7 @@ class TestErrorModes:
             _url(state.compartment_id), params={"product_code": "   "}
         )
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "invalid_product_code"
 
 

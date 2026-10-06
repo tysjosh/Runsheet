@@ -33,7 +33,7 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, get_args
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -42,6 +42,7 @@ from auth.authorization import require_role
 from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
+    error_code_value,
     insufficient_role,
     missing_client_event_id,
     missing_hold_reason,
@@ -485,6 +486,10 @@ class OrderEventsListResponse(BaseModel):
     total: int
 
 
+#: Every value ``FuelOrder.status`` can hold, in declaration order.
+_ORDER_STATUSES: tuple[str, ...] = get_args(OrderStatus)
+
+
 class StatusTransitionRequest(BaseModel):
     """Body for ``PATCH /api/orders/{order_id}/status``."""
     model_config = ConfigDict(extra="forbid")
@@ -612,7 +617,7 @@ def _bulk_row_error(exc: Exception, idx: int, request_id: str) -> str:
     and the original exception is logged server-side only.
     """
     if isinstance(exc, AppException):
-        return f"{getattr(exc.error_code, 'value', exc.error_code)}: {exc.message}"
+        return f"{error_code_value(exc.error_code)}: {exc.message}"
     logger.warning(
         "order_endpoints.bulk: row %d failed (request_id=%s)",
         idx, request_id, exc_info=exc,
@@ -922,8 +927,9 @@ async def update_order_status(
 ) -> OrderResponse:
     """Apply a state-machine-guarded status transition.
 
-    Validates the transition against the order state machine. Rejects
-    invalid transitions with 409 ``invalid_status_transition``.
+    Validates the transition against the order state machine. Rejects an
+    unknown ``new_status`` with 422 ``VALIDATION_ERROR`` and a disallowed
+    transition with 409 ``invalid_status_transition``.
     Rejects transitions to scheduled/dispatched/in_transit without a
     delivery window with 409 ``missing_delivery_window``.
     Role-gate: dispatcher or admin.
@@ -939,6 +945,15 @@ async def update_order_status(
             details={"order_id": order_id},
         )
 
+    # An unknown status is a bad request, not a refused transition (F11).
+    # Known-but-disallowed transitions still get the state machine's 409.
+    if body.new_status not in _ORDER_STATUSES:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="new_status is not an order status",
+            status_code=422,
+            details={"new_status": body.new_status, "allowed": list(_ORDER_STATUSES)},
+        )
     updated = await _get_order_service().apply_status_transition(
         order=order.model_dump(mode="python"),
         new_status=body.new_status,

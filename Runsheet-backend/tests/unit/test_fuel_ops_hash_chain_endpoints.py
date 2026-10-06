@@ -24,6 +24,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -172,6 +174,8 @@ def _make_es_service(pod_docs: List[Dict[str, Any]]):
 
 def _build_app(pod_docs: List[Dict[str, Any]], tenant_id: str = "tenant-1"):
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     es = _make_es_service(pod_docs)
     configure_fuel_ops_endpoints(es_service=es)
@@ -233,7 +237,7 @@ class TestHashProofEndpoint:
         resp = client.get("/api/fuel/pod/UNKNOWN/hash-proof")
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "pod_not_found"
+        assert resp.json()["error_code"] == "pod_not_found"
 
     def test_cross_tenant_pod_is_hidden_as_404(self):
         pod = _build_pod(pod_id="POD-1", tenant_id="other-tenant")
@@ -253,7 +257,7 @@ class TestHashProofEndpoint:
         resp = client.get("/api/fuel/pod/POD-1/hash-proof")
 
         assert resp.status_code == 409
-        assert resp.json()["detail"]["error_code"] == "pod_hash_unavailable"
+        assert resp.json()["error_code"] == "pod_hash_unavailable"
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +423,7 @@ class TestHashChainVerifyEndpoint:
         )
 
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "invalid_selector"
+        assert resp.json()["error_code"] == "invalid_selector"
 
     def test_rejects_empty_pod_ids(self):
         app, _ = _build_app(_build_chain())
@@ -442,7 +446,7 @@ class TestHashChainVerifyEndpoint:
         )
 
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "missing_selector"
+        assert resp.json()["error_code"] == "missing_selector"
 
     def test_range_mode_walks_inclusive_window(self):
         chain = _build_chain()
@@ -475,7 +479,7 @@ class TestHashChainVerifyEndpoint:
         )
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "pod_not_found"
+        assert resp.json()["error_code"] == "pod_not_found"
 
     def test_cross_tenant_pod_ids_are_reported_as_not_found(self):
         """A POD owned by another tenant must be invisible from the verify

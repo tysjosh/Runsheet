@@ -165,3 +165,36 @@ class TestForecastFilterExtensions:
         )
         # Scoped to the credential-bound tenant, NOT the query parameter.
         assert _term_value(_must_clauses_from_last_query(es), "tenant_id") == "t1"
+
+
+class TestForecastEnvelopeF9:
+    """F9: the forecasts envelope carries the caller's request id, and a store
+    failure returns a generic 500 rather than the exception text."""
+
+    def _app(self, es_side_effect=None):
+        from errors.handlers import register_exception_handlers
+        from middleware.request_id import RequestIDMiddleware
+
+        app, es = _build_app()
+        register_exception_handlers(app)
+        app.add_middleware(RequestIDMiddleware)
+        if es_side_effect is not None:
+            es.search_documents = AsyncMock(side_effect=es_side_effect)
+        return TestClient(app, headers=auth_headers("t1"), raise_server_exceptions=False)
+
+    def test_request_id_matches_the_header(self):
+        resp = self._app().get(
+            "/api/fuel/mvp/forecasts", headers={"X-Request-ID": "req-f9-forecasts"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["request_id"] == "req-f9-forecasts"
+
+    def test_store_failure_is_a_generic_500(self):
+        resp = self._app(RuntimeError("secret-dsn://user:pw@db")).get(
+            "/api/fuel/mvp/forecasts", headers={"X-Request-ID": "req-f9-500"}
+        )
+        assert resp.status_code == 500, resp.text
+        assert "secret-dsn" not in resp.text
+        body = resp.json()
+        assert body["error_code"] == "INTERNAL_ERROR"
+        assert body["request_id"] == "req-f9-500"

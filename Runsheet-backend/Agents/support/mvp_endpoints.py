@@ -600,10 +600,13 @@ async def get_forecasts(
             total=total_count,
             page=page,
             page_size=size,
+            request_id=getattr(request.state, "request_id", "unknown"),
         )
     except Exception as e:
-        logger.error("Failed to query forecasts: %s", e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        # The cause stays in the log; the caller gets a generic 500 (F9),
+        # because str(e) can carry store DSNs or query internals.
+        logger.error("Failed to query forecasts: %s", e, exc_info=True)
+        raise internal_error(message="Forecasts could not be loaded") from e
 
 
 # ---------------------------------------------------------------------------

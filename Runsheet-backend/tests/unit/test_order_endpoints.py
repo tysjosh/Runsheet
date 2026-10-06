@@ -1335,3 +1335,30 @@ class TestListOrdersParamValidation:
         call = repo.search_calls[0]
         for key, value in params.items():
             assert call[key] == value
+
+
+class TestUnknownNewStatus:
+    """F11: an unknown ``new_status`` is a 422, a disallowed known one stays 409."""
+
+    def test_unknown_status_is_422(self):
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order(status="placed"))
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.patch("/api/orders/ord_abc123/status", json={"new_status": "bogus"})
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error_code"] == "VALIDATION_ERROR"
+        assert detail["details"]["new_status"] == "bogus"
+        assert repo._orders["tenant-A::ord_abc123"].status == "placed"
+
+    def test_known_but_disallowed_status_stays_409(self):
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order(status="placed"))
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.patch("/api/orders/ord_abc123/status", json={"new_status": "in_transit"})
+        assert resp.status_code == 409, resp.text
+
+    def test_unknown_status_on_a_missing_order_is_still_404(self):
+        _, client, *_ = _build_app()
+        resp = client.patch("/api/orders/nope/status", json={"new_status": "bogus"})
+        assert resp.status_code == 404, resp.text
