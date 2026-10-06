@@ -360,4 +360,63 @@ describe("CreateOrderModal — submission", () => {
       expect(screen.getByText(/missing_volume/i)).toBeInTheDocument();
     });
   });
+
+  it("shows the readable message from a 409 ORDER_INTAKE_DISABLED envelope (F1)", async () => {
+    // Build the error the way ordersRequest does for a non-OK response, from
+    // the standard AppException envelope POST /api/orders returns when the
+    // tenant's order intake flag is off.
+    const { apiErrorFromResponse } = jest.requireActual<
+      typeof import("../../services/apiErrors")
+    >("../../services/apiErrors");
+    const envelope = {
+      error_code: "ORDER_INTAKE_DISABLED",
+      message: "Order intake isn't enabled for this account",
+      details: {},
+      request_id: "req-409",
+    };
+    const error = await apiErrorFromResponse({
+      status: 409,
+      json: async () => envelope,
+    } as unknown as Response);
+    mockCreateOrder.mockRejectedValue(error);
+    const onClose = jest.fn();
+
+    render(<CreateOrderModal isOpen={true} onClose={onClose} />);
+
+    const getInput = (id: string) =>
+      document.getElementById(id) as HTMLInputElement;
+
+    await pickOption("Customer ID", /Acme Fuel/);
+    await pickOption("Product Code", /Diesel #2/);
+
+    await act(async () => {
+      fireEvent.change(getInput("co-customer-name"), {
+        target: { value: "Acme" },
+      });
+      fireEvent.change(getInput("co-address"), {
+        target: { value: "123 Main" },
+      });
+      fireEvent.change(getInput("co-lat"), { target: { value: "40.7" } });
+      fireEvent.change(getInput("co-lon"), { target: { value: "-74.0" } });
+      fireEvent.change(getInput("co-gallons"), { target: { value: "500" } });
+      fireEvent.change(getInput("co-window-start"), {
+        target: { value: "2024-06-01T08:00" },
+      });
+      fireEvent.change(getInput("co-window-end"), {
+        target: { value: "2024-06-01T17:00" },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Order intake isn't enabled for this account",
+    );
+    expect(alert).not.toHaveTextContent("[object Object]");
+    expect(alert).not.toHaveTextContent("ORDER_INTAKE_DISABLED");
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
