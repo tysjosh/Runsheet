@@ -99,6 +99,55 @@ def test_malformed_edi_is_422(client, body):
     assert "terminal_bols.invalid_edi" in json.dumps(resp.json())
 
 
+def test_list_pages_on_created_at_then_bol_id(es, client):
+    """Finding C13: the list sorts by created_at but paged on ``bol_id > cursor``.
+
+    Three BOLs whose created_at order (c, a, b) differs from their bol_id
+    order (a, b, c). The mock honours sort + search_after like the store does.
+    """
+    docs = {
+        "QA-BOL-a": {"bol_id": "QA-BOL-a", "tenant_id": TENANT, "created_at": "2026-10-02T00:00:00+00:00"},
+        "QA-BOL-b": {"bol_id": "QA-BOL-b", "tenant_id": TENANT, "created_at": "2026-10-01T00:00:00+00:00"},
+        "QA-BOL-c": {"bol_id": "QA-BOL-c", "tenant_id": TENANT, "created_at": "2026-10-03T00:00:00+00:00"},
+    }
+    ordered = sorted(docs.values(), key=lambda d: d["bol_id"])
+    ordered = sorted(ordered, key=lambda d: d["created_at"], reverse=True)
+    key = lambda d: (d["created_at"], d["bol_id"])  # noqa: E731
+
+    async def _search(index, query, size=100, **kw):
+        rows = ordered
+        after = query.get("search_after")
+        if after:
+            # created_at desc, bol_id asc: rows strictly after the boundary.
+            rows = [
+                d for d in ordered
+                if d["created_at"] < after[0] or (d["created_at"] == after[0] and d["bol_id"] > after[1])
+            ]
+        rows = rows[: query.get("size", size)]
+        return {"hits": {"hits": [{"_source": d} for d in rows], "total": {"value": len(rows)}}}
+
+    es.search_documents = AsyncMock(side_effect=_search)
+    es.get_document = AsyncMock(side_effect=lambda index, doc_id: docs.get(doc_id))
+    headers = auth_headers(TENANT, roles=["admin"])
+
+    first = client.get(URL, params={"limit": 2}, headers=headers).json()
+    assert [d["bol_id"] for d in first["data"]] == ["QA-BOL-c", "QA-BOL-a"]
+    assert first["next_cursor"] == "QA-BOL-a"
+
+    second = client.get(URL, params={"limit": 2, "cursor": first["next_cursor"]}, headers=headers).json()
+    assert [d["bol_id"] for d in second["data"]] == ["QA-BOL-b"]
+    assert second["next_cursor"] is None
+    sent = es.search_documents.call_args_list[-1].args[1]
+    assert sent["search_after"] == [key(docs["QA-BOL-a"])[0], "QA-BOL-a"]
+    assert "range" not in repr(sent["query"])
+
+
+def test_unknown_cursor_is_400(es, client):
+    es.get_document = AsyncMock(return_value=None)
+    resp = client.get(URL, params={"cursor": "QA-BOL-gone"}, headers=auth_headers(TENANT, roles=["admin"]))
+    assert resp.status_code == 400, resp.text
+
+
 @pytest.mark.parametrize(
     ("path", "body"),
     [

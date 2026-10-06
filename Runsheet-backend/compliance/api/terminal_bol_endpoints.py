@@ -46,6 +46,7 @@ from compliance.services.terminal_bol_ingestion_service import (
     TerminalBOLIngestionService,
 )
 from errors.exceptions import AppException
+from services.keyset_pagination import next_cursor_from_hits, search_after_for_cursor
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -525,7 +526,7 @@ async def list_terminal_bols(
         default=None,
         description=(
             "Cursor for keyset pagination — the bol_id of the last "
-            "item on the previous page."
+            "item on the previous page (next_cursor)."
         ),
     ),
     limit: int = Query(
@@ -553,18 +554,25 @@ async def list_terminal_bols(
     if load_number is not None:
         filters.append({"term": {"load_number": load_number.strip()}})
 
-    # Keyset pagination: if cursor is provided, only return BOLs with
-    # bol_id lexicographically after the cursor.
-    if cursor is not None:
-        filters.append({"range": {"bol_id": {"gt": cursor.strip()}}})
-
+    # Keyset pagination on (created_at desc, bol_id asc): the cursor is the
+    # bol_id of the last row on the previous page and resolves to that row's
+    # sort values. Paging on ``bol_id > cursor`` while sorting by created_at
+    # skipped and repeated rows (finding C13). An unknown cursor is a 400.
+    sort: List[Dict[str, Any]] = [
+        {"created_at": {"order": "desc"}},
+        {"bol_id": {"order": "asc"}},
+    ]
     base_query: Dict[str, Any] = {
         "query": (
             {"bool": {"filter": filters}} if filters else {"match_all": {}}
         ),
-        "sort": [{"created_at": {"order": "desc"}}],
+        "sort": sort,
         "size": limit,
     }
+    if cursor is not None and cursor.strip():
+        base_query["search_after"] = await search_after_for_cursor(
+            es, TERMINAL_BOLS_INDEX, cursor.strip(), sort
+        )
     query = inject_tenant_filter(base_query, tenant.tenant_id)
 
     try:
@@ -593,10 +601,7 @@ async def list_terminal_bols(
             continue
         items.append(source)
 
-    # Determine next_cursor from the last item's bol_id
-    next_cursor: Optional[str] = None
-    if items and len(items) == limit:
-        next_cursor = items[-1].get("bol_id")
+    next_cursor = next_cursor_from_hits(hits, limit, id_field="bol_id")
 
     return {
         "data": items,
