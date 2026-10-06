@@ -698,6 +698,14 @@ class ImportService:
                     row, field_mapping, session.data_type
                 )
                 self._validate_canonical_document(session.data_type, document)
+                if session.data_type == "customer_tanks" and session.tenant_id:
+                    issue = await self._customer_ref_issue(
+                        session.tenant_id, row_index, document
+                    )
+                    if issue is not None:
+                        result.errors.append(issue)
+                        rows_with_errors.add(row_index)
+                        continue
                 if (
                     session.data_type == "tank_readings"
                     and self._tank_import_service is not None
@@ -717,6 +725,49 @@ class ImportService:
                 rows_with_errors.add(row_index)
         result.error_count = len(result.errors)
         result.valid_rows = result.total_rows - len(rows_with_errors)
+
+    async def _customer_ref_issue(
+        self,
+        tenant_id: str,
+        row_number: int,
+        document: dict[str, Any],
+    ) -> Optional[ValidationIssue]:
+        """Validate-time copy of the commit-time customer check (B1 / F7).
+
+        Uses the same resolver choice as ``TankImportService._validate_customer``
+        so ``/api/import/validate`` reports ``customer_not_found`` rows instead
+        of letting them fail only at commit.
+        """
+        from errors.exceptions import AppException
+        from fuel.services.customer_ref import validate_customer_ref
+        from services.ref_resolver import get_ref_resolver
+
+        resolver = (
+            getattr(self._tank_import_service, "_ref_resolver", None)
+            or get_ref_resolver()
+        )
+        customer_id = document.get("customer_id")
+        # Commit skips the lookup when an existing tank keeps its customer, so
+        # validate does too; otherwise the two steps would disagree.
+        tanks = getattr(self._tank_import_service, "_tanks", None)
+        source_system = str(document.get("source_system") or "").strip()
+        external_tank_id = str(document.get("external_tank_id") or "").strip()
+        if tanks is not None and source_system and external_tank_id:
+            existing = await tanks.get_by_external_id(
+                tenant_id, source_system, external_tank_id
+            )
+            if existing is not None and existing.customer_id == customer_id:
+                return None
+        try:
+            await validate_customer_ref(resolver, tenant_id, customer_id)
+        except AppException as exc:
+            return ValidationIssue(
+                row_number=row_number,
+                field_name="customer_id",
+                description=exc.message,
+                value=str(customer_id),
+            )
+        return None
 
     @staticmethod
     def _validate_canonical_document(

@@ -123,3 +123,95 @@ async def test_active_session_survives_service_restart_and_remains_tenant_scoped
         tenant_id="tenant-a",
     )
     assert validated.valid_rows == 3
+
+
+# ---------------------------------------------------------------------------
+# B1: /api/import/validate reports a customer that doesn't exist in the tenant
+# ---------------------------------------------------------------------------
+
+
+def _customer_resolver(customers, *, register=True):
+    """RefResolver whose ``customer`` loader knows ``customers`` (id -> tenant)."""
+    from services.ref_resolver import RefResolver
+
+    resolver = RefResolver()
+
+    async def _load(tenant_id, customer_id):
+        if customers.get(customer_id) == tenant_id:
+            return {"customer_id": customer_id}
+        return None
+
+    if register:
+        resolver.register("customer", _load)
+    return resolver
+
+
+async def _validate_tanks(service, tenant_id="tenant-a"):
+    content = SchemaTemplates().generate_csv_template("customer_tanks").encode()
+    parsed = await service.parse_csv(
+        content, "customer_tanks", tenant_id=tenant_id, source_name="tanks.csv"
+    )
+    return await service.validate(
+        parsed.session_id, parsed.suggested_mapping, tenant_id=tenant_id
+    )
+
+
+def _tank_service_with(resolver):
+    return ImportService(
+        _Elasticsearch(),
+        tank_import_service=SimpleNamespace(_ref_resolver=resolver),
+    )
+
+
+async def test_validate_reports_customer_not_found_for_tank_rows():
+    # The template has CUST-100 and CUST-200; only CUST-100 is tenant-a's,
+    # CUST-200 belongs to another tenant.
+    resolver = _customer_resolver({"CUST-100": "tenant-a", "CUST-200": "tenant-b"})
+
+    result = await _validate_tanks(_tank_service_with(resolver))
+
+    assert result.total_rows == 2
+    assert result.valid_rows == 1
+    assert len(result.errors) == 1
+    issue = result.errors[0]
+    assert issue.row_number == 2
+    assert issue.field_name == "customer_id"
+    assert issue.value == "CUST-200"
+    assert "CUST-200" in issue.description
+
+
+async def test_validate_accepts_known_customers():
+    resolver = _customer_resolver({"CUST-100": "tenant-a", "CUST-200": "tenant-a"})
+
+    result = await _validate_tanks(_tank_service_with(resolver))
+
+    assert result.valid_rows == 2
+    assert result.errors == []
+
+
+async def test_validate_skips_lookup_for_existing_tank_with_same_customer():
+    """Commit doesn't re-check an unchanged customer, so validate doesn't either."""
+
+    class _Tanks:
+        async def get_by_external_id(self, tenant_id, source_system, external_id):
+            if external_id == "T-200":
+                return SimpleNamespace(customer_id="CUST-200")
+            return None
+
+    resolver = _customer_resolver({"CUST-100": "tenant-a"})
+    service = ImportService(
+        _Elasticsearch(),
+        tank_import_service=SimpleNamespace(_ref_resolver=resolver, _tanks=_Tanks()),
+    )
+
+    result = await _validate_tanks(service)
+
+    assert result.valid_rows == 2
+
+
+async def test_validate_without_customer_loader_stays_additive():
+    resolver = _customer_resolver({}, register=False)
+
+    result = await _validate_tanks(_tank_service_with(resolver))
+
+    assert result.valid_rows == 2
