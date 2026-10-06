@@ -15,11 +15,12 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, create_autospec
 
 from fuel.order_repository import FuelOrderRepository
 from fuel.services.loading_plan_executor import LoadingPlanExecutor
 from fuel.services.order_service import OrderService
+from fuel.websocket.orders_ws import OrdersWSManager
 from persistence.plan_execution_lock import PlanExecutionLock
 from tests.unit._loading_plan_fakes import (
     ORDERS,
@@ -64,7 +65,7 @@ async def test_apply_notifies_only_confirmed_and_scheduled(monkeypatch):
         store.seed(ORDERS, order["order_id"], order)
     store.seed(PLANS, "plan-1", plan_doc("plan-1", orders=orders))
     repo = FuelOrderRepository(store)
-    ws = AsyncMock()
+    ws = create_autospec(OrdersWSManager, instance=True)
     counters = AsyncMock()
     service = OrderService(order_repo=repo, ws_manager=ws, driver_counter_service=counters)
     notified = []
@@ -91,7 +92,8 @@ async def test_apply_notifies_only_confirmed_and_scheduled(monkeypatch):
     assert set(notified) == {"order.confirmed", "order.scheduled"}
     assert sorted(notified) == ["order.confirmed", "order.scheduled", "order.scheduled"]
     counters.increment_counters.assert_not_awaited()
-    assert {c.args[0]["type"] for c in ws.broadcast.await_args_list} == {"order_status_changed"}
+    # The event type is the typed method: every WS call is order_status_changed.
+    assert {name for name, _args, _kwargs in ws.method_calls} == {"broadcast_order_status_changed"}
     assert forbidden == []
     assert store.write_count(index="jobs_current") == 0
     assert set(store.write_counts()["by_index"]) <= {ORDERS, "fuel_order_events", PLANS}

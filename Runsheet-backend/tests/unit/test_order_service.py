@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 import pytest
 
 from fuel.services.order_service import OrderService
+from fuel.websocket.orders_ws import OrdersWSManager
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +62,10 @@ def _build_service(
     order_repo.append_event = AsyncMock()
     order_repo.upsert_with_last_event_timestamp = AsyncMock(return_value=True)
 
-    ws_manager = AsyncMock()
-    ws_manager.broadcast = AsyncMock(return_value=1)
+    # Autospec so a call that doesn't fit the real manager's API fails here
+    # instead of being swallowed by the service (N-new-1).
+    ws_manager = create_autospec(OrdersWSManager, instance=True)
+    ws_manager.broadcast_order_status_changed.return_value = 1
 
     feature_flag_service = AsyncMock()
     feature_flag_service.get_overlay_state = AsyncMock(return_value=overlay_state)
@@ -151,13 +154,18 @@ class TestApplyStatusTransition:
 
         await service.apply_status_transition(order, "confirmed")
 
-        ws.broadcast.assert_called_once()
-        msg = ws.broadcast.call_args[0][0]
-        assert msg["type"] == "order_status_changed"
-        assert msg["data"]["old_status"] == "placed"
-        assert msg["data"]["new_status"] == "confirmed"
-        assert msg["data"]["order_id"] == "ord_abc123"
-        assert msg["tenant_id"] == "tenant_1"
+        ws.broadcast.assert_not_called()
+        ws.broadcast_order_status_changed.assert_awaited_once()
+        data = ws.broadcast_order_status_changed.await_args.args[0]
+        assert data["old_status"] == "placed"
+        assert data["new_status"] == "confirmed"
+        assert data["status"] == "confirmed"
+        assert data["order_id"] == "ord_abc123"
+        assert data["tenant_id"] == "tenant_1"
+        # The full order, JSON-encoded (datetimes become ISO strings).
+        assert data["trace_id"] == "trace_001"
+        assert data["delivery_window_start"] == "2026-05-11T08:00:00+00:00"
+        assert data["updated_at"] == _FIXED_NOW.isoformat()
 
     @pytest.mark.asyncio
     async def test_invalid_transition_raises_409(self):
@@ -352,7 +360,7 @@ class TestDriverCounterUpdates:
 
         assert result["status"] == "failed"
         # Broadcast still happened
-        ws.broadcast.assert_called_once()
+        ws.broadcast_order_status_changed.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -539,7 +547,7 @@ class TestBroadcastResilience:
     async def test_broadcast_failure_does_not_block(self):
         """WS broadcast failure does not prevent the transition."""
         service, repo, ws, _ = _build_service()
-        ws.broadcast = AsyncMock(side_effect=RuntimeError("WS down"))
+        ws.broadcast_order_status_changed.side_effect = RuntimeError("WS down")
         order = _make_order(status="placed")
 
         result = await service.apply_status_transition(order, "confirmed")

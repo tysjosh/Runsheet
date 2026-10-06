@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, create_autospec
 
 import pytest
 
@@ -30,6 +30,7 @@ from fuel.services.loading_plan_executor import (
 )
 from fuel.services.order_service import OrderService
 from fuel.services.plan_dispatch_service import FuelPlanDispatchService
+from fuel.websocket.orders_ws import OrdersWSManager
 from ops.services.feature_flags import FeatureFlagService
 from persistence.plan_execution_lock import PlanExecutionLock
 from tests.unit._loading_plan_fakes import (
@@ -93,7 +94,7 @@ class Harness:
                 self.store.seed(PLANS, plan["plan_id"], plan)
         self.snapshots = {o["order_id"]: _snapshot(o) for o in (plan_orders if plan_orders is not None else orders)}
         self.repo = FuelOrderRepository(self.store)
-        self.ws = AsyncMock()
+        self.ws = create_autospec(OrdersWSManager, instance=True)
         self.counters = AsyncMock()
         self.order_service = OrderService(
             order_repo=self.repo, ws_manager=self.ws, driver_counter_service=self.counters
@@ -254,11 +255,11 @@ async def test_t_u1_placed_confirmed_and_scheduled_orders_are_applied():
     assert plan["execution_result"]["outcome"] == "applied"
 
     assert h.store.write_count(index="jobs_current") == 0
-    broadcasts = [c.args[0] for c in h.ws.broadcast.await_args_list]
-    assert all(b["type"] == "order_status_changed" for b in broadcasts)
+    h.ws.broadcast.assert_not_awaited()
+    broadcasts = [c.args[0] for c in h.ws.broadcast_order_status_changed.await_args_list]
     per_order = {}
     for b in broadcasts:
-        per_order.setdefault(b["data"]["order_id"], []).append(b["data"]["new_status"])
+        per_order.setdefault(b["order_id"], []).append(b["new_status"])
     assert per_order == {"ord-1": ["confirmed", "scheduled"], "ord-2": ["scheduled"]}
 
 
@@ -301,7 +302,7 @@ async def test_empty_string_links_are_unlinked():
 async def test_t_u2_second_run_is_a_replay_with_zero_writes():
     h = Harness(_three("placed", "confirmed", "scheduled"))
     first = await h.run()
-    mark, broadcasts, events = h.mark(), h.ws.broadcast.await_count, len(h.store.events())
+    mark, broadcasts, events = h.mark(), h.ws.broadcast_order_status_changed.await_count, len(h.store.events())
 
     second = await h.run()
 
@@ -309,7 +310,7 @@ async def test_t_u2_second_run_is_a_replay_with_zero_writes():
     assert second.applied_order_ids == first.applied_order_ids
     assert second.attempt_id == first.attempt_id
     assert [op for op in h.store.ops[mark:] if op[3]] == []
-    assert h.ws.broadcast.await_count == broadcasts
+    assert h.ws.broadcast_order_status_changed.await_count == broadcasts
     assert len(h.store.events()) == events
 
 
@@ -328,7 +329,7 @@ async def test_t_u2_mvp_dispatched_orders_are_applied_with_no_order_writes():
     assert result.outcome == "applied"
     assert result.applied_order_ids == ["ord-1", "ord-2", "ord-3"]
     assert h.order_writes() == []
-    assert h.ws.broadcast.await_count == 0
+    assert h.ws.broadcast_order_status_changed.await_count == 0
 
 
 # ---------------------------------------------------------------------------
@@ -453,7 +454,7 @@ async def test_t_u3_stale_plan_is_refused_with_zero_order_writes(case):
     assert result.message == _template(reason, "plan-1")
     assert "SECRET" not in result.message
     assert h.order_writes() == []
-    assert h.notified == [] and h.ws.broadcast.await_count == 0
+    assert h.notified == [] and h.ws.broadcast_order_status_changed.await_count == 0
     if reason != "plan_not_found":
         assert h.plan()["execution_status"] == "failed"
 
@@ -686,7 +687,7 @@ async def test_same_status_edit_before_first_claim_is_a_clean_failure():
     for oid in ("ord-1", "ord-2", "ord-3"):
         assert h.links(oid) == (None, None) and h.order(oid)["status"] == "confirmed"
     assert h.order("ord-1")["gallons_requested"] == 999.0
-    assert h.notified == [] and h.ws.broadcast.await_count == 0
+    assert h.notified == [] and h.ws.broadcast_order_status_changed.await_count == 0
     assert h.plan()["execution_status"] == "failed"
 
 
@@ -1088,7 +1089,7 @@ async def test_t_u6_shadow_lists_would_apply_and_writes_nothing():
         {"order_id": "ord-3", "from_status": "scheduled", "target_status": "scheduled", "steps": ["link"]},
     ]
     assert h.store.writes() == []
-    assert h.ws.broadcast.await_count == 0 and h.notified == []
+    assert h.ws.broadcast_order_status_changed.await_count == 0 and h.notified == []
 
 
 async def test_t_u6_shadow_reports_refusals_without_writing():

@@ -369,7 +369,7 @@ async def test_guarded_chain_placed_confirmed_scheduled(source):
     assert [e["event_type"] for e in store.events("o1")] == ["order_confirmed", "order_scheduled"]
     subs["order.confirmed"].assert_awaited_once()
     subs["order.scheduled"].assert_awaited_once()
-    assert ws.broadcast.await_count == 2
+    assert ws.broadcast_order_status_changed.await_count == 2
 
 
 async def test_guarded_transition_carries_links_into_the_write():

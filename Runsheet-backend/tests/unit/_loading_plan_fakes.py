@@ -632,6 +632,7 @@ class ApprovalHarness:
         clock: Optional[Callable[[], datetime]] = None,
         ws: Optional[Any] = None,
         activity: Optional[Any] = None,
+        order_ws: Optional[Any] = None,
     ) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
@@ -649,7 +650,8 @@ class ApprovalHarness:
         for order in orders:
             self.store.seed(ORDERS, order["order_id"], order)
         self.repo = FuelOrderRepository(self.store)
-        self.order_ws = AsyncMock()
+        # FEAT-001 (N-new-1): ``order_ws`` lets a test pass a real OrdersWSManager.
+        self.order_ws = order_ws if order_ws is not None else AsyncMock()
         self.order_service = OrderService(
             order_repo=self.repo, ws_manager=self.order_ws, driver_counter_service=AsyncMock()
         )

@@ -25,6 +25,8 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from fastapi.encoders import jsonable_encoder
+
 from fuel.order_state_machine import (
     assert_transition,
     assert_window_present_for_transition,
@@ -557,27 +559,23 @@ class OrderService:
         old_status: str,
         new_status: str,
     ) -> None:
-        """Broadcast the status change via the orders WebSocket manager."""
+        """Broadcast the status change via the orders WebSocket manager.
+
+        Sends the full order (``OrdersPage.handleOrderUpdate`` replaces the
+        row with ``message.data``), JSON-encoded because ``send_json`` on a
+        ``datetime`` fails and the manager then drops the client (N-new-1).
+        """
         try:
-            await self._ws_manager.broadcast({
-                "type": "order_status_changed",
-                "data": {
-                    "order_id": order["order_id"],
-                    "tenant_id": order["tenant_id"],
-                    "old_status": old_status,
-                    "new_status": new_status,
-                    "updated_at": (
-                        order["updated_at"].isoformat()
-                        if hasattr(order["updated_at"], "isoformat")
-                        else str(order["updated_at"])
-                    ),
-                },
-                "tenant_id": order["tenant_id"],
+            await self._ws_manager.broadcast_order_status_changed({
+                **jsonable_encoder(order),
+                "old_status": old_status,
+                "new_status": new_status,
+                "status": new_status,
             })
         except Exception as exc:
             # WebSocket broadcast failures MUST NOT block the main path
             logger.warning(
-                "OrdersWSManager.broadcast failed for order=%s: %s",
+                "OrdersWSManager.broadcast_order_status_changed failed for order=%s: %s",
                 order.get("order_id"),
                 exc,
             )
