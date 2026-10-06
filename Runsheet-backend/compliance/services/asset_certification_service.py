@@ -60,6 +60,30 @@ DOT_CARGO_TANK_CERT_TYPES = {"V_test", "K_test", "I_test", "P_test", "UT_test"}
 RETEST_INTERVAL_DAYS = 1095
 
 
+def derive_certification_status(
+    stored_status: Optional[str], expiry: Optional[date], today: date
+) -> str:
+    """Status implied by the expiry date (N-CFV-2).
+
+    Same window as ``/api/fleet/assets/{id}/compliance``: past expiry is
+    ``expired``, within ``ALERT_THRESHOLD_WARNING_DAYS`` is ``expiring_soon``,
+    otherwise ``valid``. A stored ``superseded`` or ``expired`` is kept,
+    since both are deliberate transitions rather than date-derived.
+    """
+    if stored_status == "superseded":
+        return "superseded"
+    if stored_status == "expired":
+        return "expired"
+    if expiry is None:
+        return stored_status or "valid"
+    days = (expiry - today).days
+    if days < 0:
+        return "expired"
+    if days <= ALERT_THRESHOLD_WARNING_DAYS:
+        return "expiring_soon"
+    return "valid"
+
+
 # ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
@@ -155,8 +179,13 @@ class AssetCertificationService:
         restrictions from previously expired certifications of the same
         type for the same asset are automatically cleared (Req 13.8).
 
+        The stored status is derived from ``expiry_date`` (N-CFV-2): a
+        client ``expired``/``superseded`` is kept, anything else is replaced
+        by the date-implied value, as the C7 meter fix does.
+
         Validates: Requirement 13.1, 13.8
         """
+        status = derive_certification_status(status, expiry_date, date.today())
         cert = AssetCertification(
             tenant_id=tenant_id,
             asset_id=asset_id,
@@ -190,7 +219,8 @@ class AssetCertificationService:
 
         # Req 13.8: When a new valid certification is recorded, clear
         # dispatch restrictions from previously expired certs of the same type.
-        if status == "valid":
+        # An expiring_soon cert is still in force, so it clears them too.
+        if cert.status in ("valid", "expiring_soon"):
             await self.clear_dispatch_restrictions(
                 tenant_id, asset_id, certification_type
             )
@@ -316,7 +346,7 @@ class AssetCertificationService:
                     f"Asset certification '{cert_id}' not found",
                     details={"cert_id": cert_id},
                 )
-            return pg
+            return self._with_derived_status(pg)
 
         base_query: Dict[str, Any] = {
             "query": {
@@ -341,7 +371,7 @@ class AssetCertificationService:
                 details={"cert_id": cert_id},
             )
 
-        return hits[0]["_source"]
+        return self._with_derived_status(hits[0]["_source"])
 
     # ------------------------------------------------------------------
     # List
@@ -389,8 +419,16 @@ class AssetCertificationService:
             sort_doc_field="expiry_date", sort_order="asc",
             cursor=cursor, limit=limit,
         )
+        # Freeze decision D4: ``status`` filters on the STORED value; the
+        # returned items show the date-derived status.
         if pg is not _NOT_CUT_OVER:
-            return pg
+            today = date.today()
+            return {
+                **pg,
+                "items": [
+                    self._with_derived_status(d, today) for d in pg.get("items", [])
+                ],
+            }
 
         must_clauses: List[Dict[str, Any]] = []
         if asset_id:
@@ -425,7 +463,8 @@ class AssetCertificationService:
         )
 
         hits = response["hits"]["hits"]
-        items = [hit["_source"] for hit in hits]
+        today = date.today()
+        items = [self._with_derived_status(hit["_source"], today) for hit in hits]
 
         next_cursor = next_cursor_from_hits(
             hits, limit, id_field="cert_id"
@@ -497,6 +536,37 @@ class AssetCertificationService:
 
         if not partial:
             return existing
+
+        # N-CFV-1: the merged dates must stay in order.
+        merged_cert_date = self._parse_date(
+            partial.get("certification_date", existing.get("certification_date"))
+        )
+        merged_expiry = self._parse_date(
+            partial.get("expiry_date", existing.get("expiry_date"))
+        )
+        if (
+            merged_cert_date is not None
+            and merged_expiry is not None
+            and merged_expiry < merged_cert_date
+        ):
+            raise validation_error(
+                "expiry_date must be on or after certification_date",
+                details={
+                    "certification_date": merged_cert_date.isoformat(),
+                    "expiry_date": merged_expiry.isoformat(),
+                },
+            )
+
+        # N-CFV-2: new dates without an explicit status re-derive it. A
+        # superseded cert stays superseded; otherwise the new dates decide
+        # (``existing`` already carries the read-derived status, so its
+        # ``expired`` may only reflect the old expiry date).
+        dates_changed = "certification_date" in partial or "expiry_date" in partial
+        if dates_changed and status is None:
+            base = "superseded" if existing.get("status") == "superseded" else "valid"
+            partial["status"] = derive_certification_status(
+                base, merged_expiry, date.today()
+            )
 
         partial["updated_at"] = utcnow().isoformat()
 
@@ -957,7 +1027,9 @@ class AssetCertificationService:
                 cert_id=cert_doc.get("cert_id", ""),
                 certification_date=certification_date,
                 expiry_date=expiry_date,
-                status=cert_doc.get("status", "valid"),
+                status=derive_certification_status(
+                    cert_doc.get("status", "valid"), expiry_date, today
+                ),
                 days_until_expiry=days_until_expiry,
                 inspector_name=cert_doc.get("inspector_name", ""),
                 certificate_number=cert_doc.get("certificate_number", ""),
@@ -1054,6 +1126,18 @@ class AssetCertificationService:
             "created_at": cert.created_at.isoformat(),
             "updated_at": cert.updated_at.isoformat(),
         }
+
+    @classmethod
+    def _with_derived_status(
+        cls, doc: Dict[str, Any], today: Optional[date] = None
+    ) -> Dict[str, Any]:
+        """Copy of ``doc`` whose ``status`` reflects its expiry date today."""
+        derived = derive_certification_status(
+            doc.get("status"),
+            cls._parse_date(doc.get("expiry_date")),
+            today or date.today(),
+        )
+        return {**doc, "status": derived}
 
     @staticmethod
     def _parse_date(value: Any) -> Optional[date]:

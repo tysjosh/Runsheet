@@ -73,3 +73,42 @@ def test_cert_for_an_unknown_asset_is_still_rejected(client):
     resp = client.post(URL, json=_body("QA-NOPE"), headers=auth_headers(TENANT, roles=["admin"]))
     assert resp.status_code == 400, resp.text
     assert resp.json()["details"]["reason"] == "asset_not_found"
+
+
+@pytest.fixture
+def real_service_client():
+    """The real service over a mocked ES, so the model validators run."""
+    from compliance.services.asset_certification_service import AssetCertificationService
+
+    resolver = RefResolver()
+    es = _es_with_truck()
+    es.index_document = AsyncMock(return_value=None)
+    resolver.register("asset", make_asset_loader(es))
+    ep.configure_asset_certification_api(
+        asset_certification_service=AssetCertificationService(es), ref_resolver=resolver
+    )
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(ep.router)
+    install_test_auth(app)
+    yield TestClient(app), es
+    ep._asset_cert_service = None
+    ep._ref_resolver = None
+
+
+def _error_code(body: dict):
+    if "error_code" in body:
+        return body["error_code"]
+    detail = body.get("detail")
+    return detail.get("error_code") if isinstance(detail, dict) else None
+
+
+def test_expiry_before_certification_date_is_422(real_service_client):
+    client, es = real_service_client
+    body = {**_body("QA-TRUCK-01"), "certification_date": "2027-01-01", "expiry_date": "2026-01-01"}
+
+    resp = client.post(URL, json=body, headers=auth_headers(TENANT, roles=["admin"]))
+
+    assert resp.status_code == 422, resp.text
+    assert _error_code(resp.json()) == "asset_certifications.invalid_payload"
+    es.index_document.assert_not_called()
