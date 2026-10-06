@@ -280,10 +280,12 @@ async def test_price_protection_get_served_from_postgres(engine, read_from_pg):
     from commerce.api import price_protection_endpoints as ppe
     doc = await ppe._fetch_contract_or_404("ppc_r", TENANT)
     assert doc["contract_id"] == "ppc_r"
-    # Missing id raises 404 from the PG path.
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException):
+    # Missing id raises 404 from the PG path (standard envelope, C12/C-2).
+    from errors.exceptions import AppException
+    with pytest.raises(AppException) as exc_info:
         await ppe._fetch_contract_or_404("ppc_missing", TENANT)
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.error_code.value == "price_protection_contract.not_found"
 
 
 # ---------------------------------------------------------------------------
