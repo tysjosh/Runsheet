@@ -62,7 +62,9 @@ describe("DriverQualificationsView — DQF dashboard stats", () => {
     });
 
     render(<DriverQualificationsView />);
-    fireEvent.click(await screen.findByRole("button", { name: /DQF Dashboard/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: /DQF Dashboard/i }),
+    );
 
     const expiredLabel = await screen.findByText("Expired");
     const expiringLabel = screen.getByText("Expiring ≤30 days");
