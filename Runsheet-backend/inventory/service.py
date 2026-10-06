@@ -236,6 +236,22 @@ class InventoryService:
         new_quantity = update_fields.get("quantity", existing.quantity)
         new_threshold = update_fields.get("min_threshold", existing.min_threshold)
 
+        # B3: refuse a change that would put the item above capacity. Only a
+        # change that raises quantity or lowers max_capacity is refused, so a
+        # legacy over-capacity item can still be edited or brought down.
+        new_max = update_fields.get("max_capacity", existing.max_capacity)
+        if new_quantity > new_max and (
+            new_quantity > existing.quantity or new_max < existing.max_capacity
+        ):
+            raise validation_error(
+                f"quantity ({new_quantity}) cannot exceed max_capacity ({new_max})",
+                details={
+                    "item_id": item_id,
+                    "quantity": new_quantity,
+                    "max_capacity": new_max,
+                },
+            )
+
         # Only auto-derive status if it's not currently ON_ORDER
         if existing.status != InventoryStatus.ON_ORDER:
             new_status = self._derive_status(new_quantity, new_threshold)
@@ -317,6 +333,21 @@ class InventoryService:
                     "current_quantity": previous_quantity,
                     "adjustment": adjustment.quantity_change,
                     "resulting_quantity": new_quantity,
+                },
+            )
+
+        # B3: a restock can't push the item above capacity. Consumption is
+        # never refused here, so job completion and replanning can always
+        # draw down stock, even on a legacy over-capacity item.
+        if adjustment.quantity_change > 0 and new_quantity > existing.max_capacity:
+            raise validation_error(
+                "Stock adjustment would exceed max_capacity",
+                details={
+                    "item_id": item_id,
+                    "current_quantity": previous_quantity,
+                    "adjustment": adjustment.quantity_change,
+                    "resulting_quantity": new_quantity,
+                    "max_capacity": existing.max_capacity,
                 },
             )
 
