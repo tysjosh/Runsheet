@@ -13,6 +13,11 @@
 #   ./scripts/staging_aws.sh plan       # print what would be created + cost
 #   ./scripts/staging_aws.sh up         # create everything (idempotent)
 #   ./scripts/staging_aws.sh deploy     # build + push image, roll the service
+#   ./scripts/staging_aws.sh codebuild-setup  # CodeBuild project, role, source bucket
+#   ./scripts/staging_aws.sh build-backend    # build + push the backend image only
+#
+# Images are built in AWS CodeBuild from `git archive HEAD` (no local Docker or
+# disk needed). BUILD_MODE=local builds with the local Docker daemon instead.
 #   ./scripts/staging_aws.sh migrate    # alembic upgrade head as a one-shot task
 #   ./scripts/staging_aws.sh files-bucket  # S3 bucket + task-role policy for file storage
 #   ./scripts/staging_aws.sh verify     # readiness + auth + TLS + redis
@@ -296,6 +301,8 @@ Billable resources this creates:
   Fargate task, ${TASK_CPU} CPU / ${TASK_MEM} MB, 1 replica     ~\$36/month
   Secrets Manager, 4 secrets                  ~\$1.60/month
   CloudWatch Logs, ECR storage                cents
+  CodeBuild ${CB_PROJECT} (MEDIUM, per build minute)
+    + Maps-key secret + source bucket       ~\$0.10-0.15/deploy + \$0.40/month
                                               ------------
                                               ~\$90/month
 
@@ -1167,6 +1174,287 @@ cmd_files_bucket() {
 }
 
 # ---------------------------------------------------------------------------
+# image builds: AWS CodeBuild (default) or the local Docker daemon
+# ---------------------------------------------------------------------------
+#: Images are built in CodeBuild by default, so a deploy needs no local Docker and
+#: no local disk. BUILD_MODE=local restores the old path (docker build + push from
+#: this machine), which still needs ~8 GB free.
+#:
+#: The build input is `git archive` of the commit being deployed, uploaded to a
+#: private bucket. The working tree is never sent, so uncommitted edits and
+#: gitignored files (.env*, keys) cannot reach an image. The archive is a ZIP, not a
+#: tarball: CodeBuild only unpacks ZIP objects from an S3 source.
+#:
+#: Cost: BUILD_GENERAL1_MEDIUM on-demand is about $0.01 per build minute, so a
+#: backend + UI deploy (~10-15 build minutes) is roughly $0.10-0.15. Plus the
+#: maps-key secret ($0.40/month) and pennies of S3/CloudWatch.
+BUILD_MODE="${BUILD_MODE:-codebuild}"
+CB_PROJECT="${PREFIX}-image-build"
+CB_ROLE="${PREFIX}-codebuild"
+CB_BUCKET="${PREFIX}-codebuild-src-${ACCOUNT_ID}"
+CB_LOG_GROUP="/codebuild/${CB_PROJECT}"
+#: NEXT_PUBLIC_GOOGLE_MAPS_API_KEY is compiled into the browser bundle, so it is not
+#: secret once deployed (Google's referrer restriction is the real control). It is
+#: still passed to CodeBuild as a SECRETS_MANAGER variable so it never sits in
+#: build history or project config as plaintext.
+SECRET_MAPS="${PREFIX}/ui-build/maps-key"
+
+#: The inline buildspec. TARGET, SHA and IMAGE_URI come from start-build; for the
+#: UI so do the NEXT_PUBLIC_* values. Same docker build arguments and tag as the
+#: local path, and it refuses anything but the SHA tag (never :latest).
+read -r -d '' CB_BUILDSPEC <<'BUILDSPEC' || true
+version: 0.2
+env:
+  shell: bash
+phases:
+  build:
+    commands:
+      - |
+        set -euo pipefail
+        case "${IMAGE_URI:-}" in
+          ""|*:latest) echo "refusing IMAGE_URI '${IMAGE_URI:-}': a commit-SHA tag is required" >&2; exit 1 ;;
+        esac
+        # SHA is the full commit the source archive was made from (the S3 key is
+        # <SHA>/src.zip). The image tag must be an abbreviation of it.
+        tag="${IMAGE_URI##*:}"
+        if ! [[ "${SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "SHA must be a full 40-hex commit id, got '${SHA:-}'" >&2; exit 1
+        fi
+        if [ "${#tag}" -lt 7 ] || [ "${SHA#"$tag"}" = "$SHA" ]; then
+          echo "IMAGE_URI tag '$tag' is not a prefix of SHA ${SHA}" >&2; exit 1
+        fi
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          | docker login --username AWS --password-stdin "${IMAGE_URI%%/*}"
+        export DOCKER_BUILDKIT=1
+        case "${TARGET:-}" in
+          backend)
+            docker build --platform linux/amd64 -t "$IMAGE_URI" Runsheet-backend ;;
+          ui)
+            docker build --platform linux/amd64 \
+              --build-arg "NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}" \
+              --build-arg "NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}" \
+              --build-arg "NEXT_PUBLIC_ST_API_DOMAIN=${NEXT_PUBLIC_ST_API_DOMAIN}" \
+              --build-arg "NEXT_PUBLIC_ST_WEBSITE_DOMAIN=${NEXT_PUBLIC_ST_WEBSITE_DOMAIN}" \
+              --build-arg "NEXT_PUBLIC_TENANT_ID=${NEXT_PUBLIC_TENANT_ID}" \
+              --build-arg "NEXT_PUBLIC_SITE_URL=${NEXT_PUBLIC_SITE_URL}" \
+              --build-arg "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${NEXT_PUBLIC_GOOGLE_MAPS_API_KEY:-}" \
+              -t "$IMAGE_URI" runsheet ;;
+          *) echo "unknown TARGET '${TARGET:-}' (backend|ui)" >&2; exit 1 ;;
+        esac
+        docker image inspect --format 'platform {{.Os}}/{{.Architecture}}' "$IMAGE_URI"
+        docker push "$IMAGE_URI"
+BUILDSPEC
+
+#: The Maps key from runsheet/.env.local. A worktree has no .env.local (it is
+#: gitignored), so this falls back to the main checkout's copy.
+maps_key() {
+  local f main
+  f="$(dirname "$0")/../../runsheet/.env.local"
+  if [ ! -f "$f" ]; then
+    main="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+    if [ -n "$main" ]; then f="$(dirname "$main")/runsheet/.env.local"; fi
+  fi
+  grep -E '^NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+secret_exists() {
+  aws secretsmanager describe-secret --secret-id "$1" >/dev/null 2>&1
+}
+
+#: Store (or refresh) the Maps key secret from .env.local. Compared without being
+#: printed; an unchanged value writes no new secret version.
+ensure_maps_secret() {
+  local key; key="$(maps_key)"
+  if [ -z "$key" ]; then
+    if secret_exists "${SECRET_MAPS}"; then
+      ok "secret ${SECRET_MAPS} (no .env.local key; using the stored value)"
+    else
+      warn "no Maps key in runsheet/.env.local and no ${SECRET_MAPS} — maps will not render"
+    fi
+  elif secret_exists "${SECRET_MAPS}" && [ "$(secret_value "${SECRET_MAPS}")" = "$key" ]; then
+    ok "secret ${SECRET_MAPS} (unchanged)"
+  else
+    ensure_secret "${SECRET_MAPS}" "$key"
+  fi
+}
+
+ensure_codebuild_bucket() {
+  if aws s3api head-bucket --bucket "${CB_BUCKET}" >/dev/null 2>&1; then
+    ok "s3 ${CB_BUCKET}"
+  else
+    if [ "$AWS_REGION" = "us-east-1" ]; then
+      aws s3api create-bucket --bucket "${CB_BUCKET}" >/dev/null
+    else
+      aws s3api create-bucket --bucket "${CB_BUCKET}" \
+        --create-bucket-configuration "LocationConstraint=${AWS_REGION}" >/dev/null
+    fi
+    ok "created s3 ${CB_BUCKET}"
+  fi
+  aws s3api put-public-access-block --bucket "${CB_BUCKET}" \
+    --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+  aws s3api put-bucket-ownership-controls --bucket "${CB_BUCKET}" \
+    --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
+  aws s3api put-bucket-encryption --bucket "${CB_BUCKET}" \
+    --server-side-encryption-configuration \
+    '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}'
+  aws s3api put-bucket-lifecycle-configuration --bucket "${CB_BUCKET}" \
+    --lifecycle-configuration '{"Rules":[
+      {"ID":"expire-sources","Status":"Enabled","Filter":{"Prefix":""},"Expiration":{"Days":7},
+       "AbortIncompleteMultipartUpload":{"DaysAfterInitiation":1}}]}' >/dev/null
+  aws s3api put-bucket-policy --bucket "${CB_BUCKET}" --policy "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"DenyInsecureTransport","Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::%s","arn:aws:s3:::%s/*"],"Condition":{"Bool":{"aws:SecureTransport":"false"}}}]}' "${CB_BUCKET}" "${CB_BUCKET}")"
+  aws s3api put-bucket-tagging --bucket "${CB_BUCKET}" \
+    --tagging "TagSet=[{Key=Project,Value=${PROJECT}},{Key=Environment,Value=${ENV_NAME}}]"
+  ok "s3 ${CB_BUCKET}: private, SSE-S3, owner-enforced, TLS only, objects expire after 7 days"
+}
+
+#: Role CodeBuild assumes. Least privilege: its own log group, read on the source
+#: bucket, push/pull on the two staging repos only, and read on the Maps secret.
+ensure_codebuild_role() {
+  if aws iam get-role --role-name "${CB_ROLE}" >/dev/null 2>&1; then
+    ok "role ${CB_ROLE}"
+  else
+    aws iam create-role --role-name "${CB_ROLE}" \
+      --assume-role-policy-document "$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"codebuild.amazonaws.com"},"Action":"sts:AssumeRole","Condition":{"StringEquals":{"aws:SourceAccount":"%s"}}}]}' "${ACCOUNT_ID}")" \
+      --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" >/dev/null
+    ok "created role ${CB_ROLE}"
+  fi
+  local repo_base="arn:aws:ecr:${AWS_REGION}:${ACCOUNT_ID}:repository"
+  local lg_arn="arn:aws:logs:${AWS_REGION}:${ACCOUNT_ID}:log-group:${CB_LOG_GROUP}"
+  local secret_stmt=""
+  if secret_exists "${SECRET_MAPS}"; then
+    secret_stmt="$(printf ',{"Sid":"MapsKey","Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"%s"}' "$(secret_arn "${SECRET_MAPS}")")"
+  fi
+  aws iam put-role-policy --role-name "${CB_ROLE}" --policy-name "${CB_ROLE}-build" \
+    --policy-document "$(printf '{"Version":"2012-10-17","Statement":[
+      {"Sid":"Logs","Effect":"Allow","Action":["logs:CreateLogStream","logs:PutLogEvents"],"Resource":["%s","%s:*"]},
+      {"Sid":"Source","Effect":"Allow","Action":["s3:GetObject","s3:GetObjectVersion"],"Resource":"arn:aws:s3:::%s/*"},
+      {"Sid":"EcrAuth","Effect":"Allow","Action":"ecr:GetAuthorizationToken","Resource":"*"},
+      {"Sid":"EcrPushPull","Effect":"Allow","Action":["ecr:BatchCheckLayerAvailability","ecr:BatchGetImage","ecr:GetDownloadUrlForLayer","ecr:InitiateLayerUpload","ecr:UploadLayerPart","ecr:CompleteLayerUpload","ecr:PutImage"],"Resource":["%s/%s","%s/%s"]}%s]}' \
+      "$lg_arn" "$lg_arn" "${CB_BUCKET}" "$repo_base" "${ECR_REPO}" "$repo_base" "${UI_ECR_REPO}" "$secret_stmt")" >/dev/null
+  ok "role ${CB_ROLE}: logs ${CB_LOG_GROUP}, read ${CB_BUCKET}, push ${ECR_REPO}/${UI_ECR_REPO}${secret_stmt:+, read ${SECRET_MAPS}}"
+}
+
+ensure_codebuild_project() {
+  local role_arn source envj
+  role_arn="$(aws iam get-role --role-name "${CB_ROLE}" --query 'Role.Arn' --output text)"
+  # The location is a placeholder; every start-build overrides it with the archive.
+  source="$(CB_BUILDSPEC="$CB_BUILDSPEC" CB_BUCKET="$CB_BUCKET" python3 -c 'import json,os
+print(json.dumps({"type":"S3","location":os.environ["CB_BUCKET"]+"/placeholder/src.zip","buildspec":os.environ["CB_BUILDSPEC"]}))')"
+  envj="type=LINUX_CONTAINER,image=aws/codebuild/standard:7.0,computeType=BUILD_GENERAL1_MEDIUM,privilegedMode=true,imagePullCredentialsType=CODEBUILD"
+  local verb="update-project" name_flag="--name" found
+  # A failed lookup must not be read as "absent", or setup would try to create an
+  # existing project. batch-get-projects reports a missing name as "None".
+  found="$(aws codebuild batch-get-projects --names "${CB_PROJECT}" --query 'projects[0].name' --output text)" \
+    || die "could not look up codebuild project ${CB_PROJECT} (error above)"
+  if [ "$found" = "None" ] || [ -z "$found" ]; then verb="create-project"; fi
+  # A just-created role can take a few seconds to become assumable by CodeBuild.
+  local i err=""
+  for i in 1 2 3 4 5 6; do
+    # stdout (the project JSON) is discarded; stderr is kept for the failure message.
+    if err="$(aws codebuild "$verb" "$name_flag" "${CB_PROJECT}" \
+         --description "Runsheet ${ENV_NAME} image builds (staging_aws.sh)" \
+         --source "$source" --artifacts type=NO_ARTIFACTS --environment "$envj" \
+         --service-role "$role_arn" --timeout-in-minutes 30 \
+         --logs-config "cloudWatchLogs={status=ENABLED,groupName=${CB_LOG_GROUP}},s3Logs={status=DISABLED}" \
+         --tags "key=Project,value=${PROJECT}" "key=Environment,value=${ENV_NAME}" 2>&1 >/dev/null)"; then
+      ok "codebuild ${CB_PROJECT} (${verb%-project}d: MEDIUM, privileged, standard:7.0, 30 min)"
+      return
+    fi
+    [ "$i" -lt 6 ] && { warn "codebuild $verb attempt $i failed; retrying in 10 s"; sleep 10; }
+  done
+  die "codebuild $verb ${CB_PROJECT} failed after 6 attempts: ${err}"
+}
+
+ensure_codebuild() {
+  log "CodeBuild image builder"
+  ensure_codebuild_bucket
+  aws logs create-log-group --log-group-name "${CB_LOG_GROUP}" >/dev/null 2>&1 || true
+  aws logs put-retention-policy --log-group-name "${CB_LOG_GROUP}" --retention-in-days 14 >/dev/null
+  ok "${CB_LOG_GROUP} (14 days)"
+  ensure_maps_secret
+  ensure_codebuild_role
+  ensure_codebuild_project
+}
+
+cmd_codebuild_setup() { ensure_codebuild; }
+
+image_exists() {
+  aws ecr describe-images --repository-name "$1" --image-ids "imageTag=$2" >/dev/null 2>&1
+}
+
+#: Build <target> (backend|ui) as <image> in CodeBuild from the archive of HEAD.
+#: Extra NAME=VALUE arguments become plaintext build environment variables.
+codebuild_image() {
+  local target="$1" image="$2"; shift 2
+  local full key envj build_id
+  full="$(git rev-parse HEAD)"
+  key="${full}/src.zip"
+  [ -z "$(git status --porcelain 2>/dev/null)" ] \
+    || warn "working tree has uncommitted changes; they are NOT in the image (built from ${full})"
+  ensure_codebuild
+
+  # Uploaded on every build (~7 MB), never reused: if a previous `git archive`
+  # died mid-stream, `aws s3 cp -` may have stored a truncated object under this
+  # key, and trusting it would fail every later build of the commit. A failed
+  # archive here aborts the run (pipefail) before start-build.
+  log "Uploading git archive ${full} to s3://${CB_BUCKET}/${key}"
+  # From the repository root: run in a subdirectory, git archive only packs that
+  # subtree, and the buildspec needs both Runsheet-backend/ and runsheet/.
+  git -C "$(git rev-parse --show-toplevel)" archive --format=zip "$full" \
+    | aws s3 cp - "s3://${CB_BUCKET}/${key}" --only-show-errors
+  ok "uploaded"
+
+  local maps_arn=""
+  if [ "$target" = "ui" ] && secret_exists "${SECRET_MAPS}"; then
+    maps_arn="$(secret_arn "${SECRET_MAPS}")"
+  fi
+  envj="$(MAPS_ARN="$maps_arn" python3 -c 'import json,os,sys
+env=[{"name":k,"value":v,"type":"PLAINTEXT"} for k,v in (a.split("=",1) for a in sys.argv[1:])]
+if os.environ["MAPS_ARN"]:
+    env.append({"name":"NEXT_PUBLIC_GOOGLE_MAPS_API_KEY","value":os.environ["MAPS_ARN"],"type":"SECRETS_MANAGER"})
+print(json.dumps(env))' "TARGET=${target}" "SHA=${full}" "IMAGE_URI=${image}" "$@")"
+
+  build_id="$(aws codebuild start-build --project-name "${CB_PROJECT}" \
+    --source-type-override S3 --source-location-override "${CB_BUCKET}/${key}" \
+    --environment-variables-override "$envj" --query 'build.id' --output text)"
+  log "CodeBuild ${build_id}"
+
+  # Transient poll errors are retried, but not forever: 20 failures in a row
+  # (~5 min, e.g. expired credentials) stop the wait. The build itself keeps running.
+  local status phase last="" fails=0
+  while :; do
+    if ! read -r status phase < <(aws codebuild batch-get-builds --ids "$build_id" \
+         --query 'builds[0].[buildStatus,currentPhase]' --output text); then
+      fails=$((fails + 1))
+      [ "$fails" -lt 20 ] \
+        || die "could not read the status of CodeBuild ${build_id} 20 times in a row; check it in the console"
+      warn "could not read build status (${fails}/20); retrying"; sleep 15; continue
+    fi
+    fails=0
+    if [ "$phase" != "$last" ]; then ok "phase ${phase}"; last="$phase"; fi
+    if [ "$status" != "IN_PROGRESS" ]; then break; fi
+    sleep 15
+  done
+  if [ "$status" != "SUCCEEDED" ]; then
+    local stream
+    stream="$(aws codebuild batch-get-builds --ids "$build_id" --query 'builds[0].logs.streamName' --output text)"
+    warn "build ${status}; last log lines (${CB_LOG_GROUP}/${stream}):"
+    aws logs get-log-events --log-group-name "${CB_LOG_GROUP}" --log-stream-name "$stream" \
+      --limit 80 --query 'events[].message' --output text 2>/dev/null | tr '\t' '\n' >&2 || true
+    die "CodeBuild ${build_id} ${status}"
+  fi
+  ok "built and pushed ${image##*/} in CodeBuild"
+}
+
+cmd_build_backend() {
+  local sha; sha="$(git rev-parse --short HEAD)"
+  local image="${REGISTRY}/${ECR_REPO}:${sha}"
+  if image_exists "${ECR_REPO}" "$sha"; then ok "${ECR_REPO}:${sha} already in ECR"; return; fi
+  codebuild_image backend "$image"
+}
+
+# ---------------------------------------------------------------------------
 # task definition
 # ---------------------------------------------------------------------------
 register_task_def() {
@@ -1439,25 +1727,38 @@ cmd_deploy_ui() {
   # The origins are BUILD ARGS, not runtime env. See runsheet/Dockerfile. This also
   # means the image is environment-specific and cannot be promoted between
   # environments by changing a task-definition variable.
-  log "Building ${image} with api=${api} app=${app}"
-  local maps_key
-  maps_key="$(grep -E '^NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=' "$(dirname "$0")/../../runsheet/.env.local" 2>/dev/null | cut -d= -f2- || true)"
-  [ -n "$maps_key" ] || warn "no Maps key found in runsheet/.env.local — maps will not render"
-  docker build --platform linux/amd64 \
-    --build-arg "NEXT_PUBLIC_API_URL=${api}/api" \
-    --build-arg "NEXT_PUBLIC_WS_URL=$(echo "$api" | sed 's|^https|wss|; s|^http|ws|')" \
-    --build-arg "NEXT_PUBLIC_ST_API_DOMAIN=${api}" \
-    --build-arg "NEXT_PUBLIC_ST_WEBSITE_DOMAIN=${app}" \
-    --build-arg "NEXT_PUBLIC_TENANT_ID=demo-tenant" \
-    --build-arg "NEXT_PUBLIC_SITE_URL=${app}" \
-    --build-arg "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${maps_key}" \
-    -t "$image" "$(dirname "$0")/../../runsheet" >/dev/null
-  ok "built"
+  log "Building ${image} with api=${api} app=${app} (${BUILD_MODE})"
+  # One list for both build paths, so a CodeBuild image and a local image get the
+  # same NEXT_PUBLIC_* values. The Maps key is added per path below.
+  local ui_args=(
+    "NEXT_PUBLIC_API_URL=${api}/api"
+    "NEXT_PUBLIC_WS_URL=$(echo "$api" | sed 's|^https|wss|; s|^http|ws|')"
+    "NEXT_PUBLIC_ST_API_DOMAIN=${api}"
+    "NEXT_PUBLIC_ST_WEBSITE_DOMAIN=${app}"
+    "NEXT_PUBLIC_TENANT_ID=demo-tenant"
+    "NEXT_PUBLIC_SITE_URL=${app}"
+  )
+  # Always rebuilt, unlike the backend: the tag names only the commit, but the
+  # bundle also bakes in the DOMAIN-derived origins and the Maps key. Skipping on
+  # an existing tag would redeploy a stale bundle after either of those changed.
+  if [ "$BUILD_MODE" = "local" ]; then
+    local maps_key a build_args=()
+    maps_key="$(maps_key)"
+    [ -n "$maps_key" ] || warn "no Maps key found in runsheet/.env.local — maps will not render"
+    for a in "${ui_args[@]}" "NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=${maps_key}"; do
+      build_args+=(--build-arg "$a")
+    done
+    docker build --platform linux/amd64 "${build_args[@]}" \
+      -t "$image" "$(dirname "$0")/../../runsheet" >/dev/null
+    ok "built"
 
-  log "Pushing to ECR"
-  aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null 2>&1
-  docker push "$image" >/dev/null
-  ok "pushed ${sha}"
+    log "Pushing to ECR"
+    aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null 2>&1
+    docker push "$image" >/dev/null
+    ok "pushed ${sha}"
+  else
+    codebuild_image ui "$image" "${ui_args[@]}"
+  fi
 
   log "Registering the UI task definition"
   #: Read from runsheet/.env.local so a local developer and the deployed task agree
@@ -1515,16 +1816,22 @@ cmd_deploy() {
   [ -n "$(alb_dns)" ] || die "no ALB — run 'up' first"
   image="${REGISTRY}/${ECR_REPO}:${sha}"
 
-  log "Building ${image} (linux/amd64)"
+  log "Building ${image} (linux/amd64, ${BUILD_MODE})"
   # Tagged with the commit SHA, never :latest. A rollback needs a name that still
   # means the same bytes tomorrow.
-  docker build --platform linux/amd64 -t "$image" "$(dirname "$0")/.." >/dev/null
-  ok "built"
+  if image_exists "${ECR_REPO}" "$sha"; then
+    ok "${ECR_REPO}:${sha} already in ECR; not rebuilding"
+  elif [ "$BUILD_MODE" = "local" ]; then
+    docker build --platform linux/amd64 -t "$image" "$(dirname "$0")/.." >/dev/null
+    ok "built"
 
-  log "Pushing to ECR"
-  aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null 2>&1
-  docker push "$image" >/dev/null
-  ok "pushed ${sha}"
+    log "Pushing to ECR"
+    aws ecr get-login-password | docker login --username AWS --password-stdin "${REGISTRY}" >/dev/null 2>&1
+    docker push "$image" >/dev/null
+    ok "pushed ${sha}"
+  else
+    codebuild_image backend "$image"
+  fi
 
   log "Registering task definition"
   resolve_supertokens
@@ -1897,6 +2204,7 @@ This DESTROYS the Runsheet staging environment in ${AWS_REGION}:
   Secrets ${SECRET_DB}, ${SECRET_GEMINI}, ${SECRET_ST}, ${SECRET_REDIS} (+ password, + auth token)
   IAM roles ${PREFIX}-execution, ${PREFIX}-task
   S3 bucket ${FILES_BUCKET} and every object in it (raw BOL / POD uploads)
+  CodeBuild ${CB_PROJECT}, role ${CB_ROLE}, bucket ${CB_BUCKET}, secret ${SECRET_MAPS}
   Security groups, subnet group, log group, ECR repo ${ECR_REPO} and its images
 
 It does NOT touch the default VPC, its subnets, or anything belonging to the
@@ -2008,8 +2316,19 @@ WARNING
     aws s3api delete-bucket --bucket "${FILES_BUCKET}" >/dev/null 2>&1 && ok "${FILES_BUCKET}" || true
   fi
 
+  log "Deleting the CodeBuild image builder"
+  if aws codebuild delete-project --name "${CB_PROJECT}" >/dev/null 2>&1; then ok "${CB_PROJECT}"; fi
+  if aws s3api head-bucket --bucket "${CB_BUCKET}" >/dev/null 2>&1; then
+    aws s3 rm "s3://${CB_BUCKET}" --recursive >/dev/null 2>&1 || true
+    if aws s3api delete-bucket --bucket "${CB_BUCKET}" >/dev/null 2>&1; then ok "${CB_BUCKET}"; fi
+  fi
+  if aws secretsmanager delete-secret --secret-id "${SECRET_MAPS}" \
+       --force-delete-without-recovery >/dev/null 2>&1; then
+    ok "${SECRET_MAPS}"
+  fi
+
   log "Deleting IAM roles"
-  for role in "${PREFIX}-execution" "${PREFIX}-task"; do
+  for role in "${PREFIX}-execution" "${PREFIX}-task" "${CB_ROLE}"; do
     for p in $(aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null); do
       aws iam detach-role-policy --role-name "$role" --policy-arn "$p" >/dev/null 2>&1 || true
     done
@@ -2020,7 +2339,7 @@ WARNING
   done
 
   log "Deleting log groups and ECR repositories"
-  for lg in "${LOG_GROUP}" "${UI_LOG_GROUP}"; do
+  for lg in "${LOG_GROUP}" "${UI_LOG_GROUP}" "${CB_LOG_GROUP}"; do
     aws logs delete-log-group --log-group-name "$lg" >/dev/null 2>&1 && ok "$lg" || true
   done
   for repo in "${ECR_REPO}" "${UI_ECR_REPO}"; do
@@ -2051,8 +2370,15 @@ WARNING
   ok "staging destroyed"
 }
 
+case "$BUILD_MODE" in
+  codebuild|local) ;;
+  *) die "BUILD_MODE must be codebuild (default) or local, got '${BUILD_MODE}'" ;;
+esac
+
 case "${1:-plan}" in
   plan)    cmd_plan    ;;
+  codebuild-setup) cmd_codebuild_setup ;;
+  build-backend) cmd_build_backend ;;
   up)      cmd_up      ;;
   deploy)  cmd_deploy  ;;
   deploy-ui) cmd_deploy_ui ;;
@@ -2063,5 +2389,5 @@ case "${1:-plan}" in
   logs)    cmd_logs "${2:-10m}" ;;
   frontend-env) cmd_frontend_env ;;
   down)    cmd_down    ;;
-  *)       die "unknown command '$1' — one of plan|up|deploy|deploy-ui|migrate|verify|status|logs|frontend-env|down" ;;
+  *)       die "unknown command '$1' — one of plan|up|codebuild-setup|build-backend|deploy|deploy-ui|migrate|verify|status|logs|frontend-env|down" ;;
 esac
