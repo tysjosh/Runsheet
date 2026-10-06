@@ -656,6 +656,37 @@ class TestDefaultDepotFlag:
         assert es.docs["depot_001"]["is_default"] is False
 
     @pytest.mark.asyncio
+    async def test_clearing_a_default_also_updates_the_relational_row(
+        self, repo: DepotRepository, es: _FakeESService
+    ):
+        """N6 follow-up: reads come from Postgres once cut over, so the
+        cleared flag must reach the relational mirror, not just the document
+        store. Otherwise two depots stay default."""
+        from unittest.mock import AsyncMock, patch
+
+        mirror = AsyncMock()
+        with patch(
+            "commerce.services.commerce_persistence_bridge.mirror_current_state_upsert",
+            mirror,
+        ):
+            await repo.create(
+                "tenant-A", _base_depot_kwargs(depot_id="depot_001", is_default=True)
+            )
+            await repo.create(
+                "tenant-A", _base_depot_kwargs(depot_id="depot_002", is_default=True)
+            )
+
+        writes = [(c.args[0], c.args[1]["depot_id"], c.args[1]["is_default"])
+                  for c in mirror.await_args_list]
+        assert writes[-1] == ("depot", "depot_001", False)
+        assert ("depot", "depot_002", True) in writes
+        # The mirrored row is the full depot, not a partial patch.
+        last = mirror.await_args_list[-1].args[1]
+        assert last["name"] == "Central Loading Rack"
+        assert last["tenant_id"] == "tenant-A"
+        assert es.docs["depot_001"]["is_default"] is False
+
+    @pytest.mark.asyncio
     async def test_default_is_scoped_per_tenant(
         self, repo: DepotRepository, es: _FakeESService
     ):

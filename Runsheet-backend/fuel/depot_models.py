@@ -638,14 +638,29 @@ class DepotRepository:
             )
             return
 
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+
         for depot in others:
             if depot.depot_id == keep_depot_id or not depot.is_default:
                 continue
             try:
+                now = _utcnow_iso()
+                cleared = depot.model_copy(
+                    update={"is_default": False, "updated_at": datetime.fromisoformat(now)}
+                )
                 await self._es.update_document(
                     self._index,
                     depot.depot_id,
-                    {"is_default": False, "updated_at": _utcnow_iso()},
+                    {"is_default": False, "updated_at": now},
+                )
+                # The relational row too: reads (and the route resolver's
+                # is_default fallback) are served from Postgres once cut
+                # over, so clearing only the document store left two
+                # defaults (N6 follow-up).
+                await mirror_current_state_upsert(
+                    "depot", cleared.model_dump(mode="json", exclude_none=False)
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.warning(
