@@ -196,6 +196,7 @@ async def approve_kfactor_adjustment(
     operator_id = getattr(tenant, "user_id", None) or tenant.tenant_id
 
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         adjustment = await svc.approve_adjustment(
             tank_id=tank_id,
             new_kfactor=body.new_kfactor,
@@ -269,6 +270,7 @@ async def get_variance(
     svc = _get_kfactor_service()
 
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         variance = await svc.compute_variance(
             delivery_id=delivery_id,
             tenant_id=tenant.tenant_id,
@@ -354,6 +356,7 @@ async def get_variance_history(
     """
     svc = _get_kfactor_service()
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         history = await svc.get_variance_history(
             tank_id=tank_id, tenant_id=tenant.tenant_id, limit=limit
         )
@@ -401,6 +404,7 @@ async def suggest_kfactor(
     svc = _get_kfactor_service()
 
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         suggested = await svc.suggest_new_kfactor(
             tank_id=tank_id,
             tenant_id=tenant.tenant_id,

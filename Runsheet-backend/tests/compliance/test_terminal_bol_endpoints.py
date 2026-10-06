@@ -97,3 +97,19 @@ def test_malformed_edi_is_422(client, body):
     resp = _post_raw(client, body)
     assert resp.status_code == 422, resp.text
     assert "terminal_bols.invalid_edi" in json.dumps(resp.json())
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        pytest.param("QA-BOL-NOPE/confirm", {"load_number": "QA-LOAD-9"}, id="confirm"),
+        pytest.param("QA-BOL-NOPE/link", {"load_plan_id": "QA-PLAN-1"}, id="link"),
+    ],
+)
+def test_unknown_bol_is_404(client, path, body):
+    """Finding C11: an unknown BOL id was a 400 validation error."""
+    resp = client.post(f"{URL}/{path}", json=body, headers=auth_headers(TENANT, roles=["admin"]))
+    assert resp.status_code == 404, resp.text
+    payload = resp.json()
+    assert payload["error_code"] == "RESOURCE_NOT_FOUND"
+    assert payload.get("request_id")

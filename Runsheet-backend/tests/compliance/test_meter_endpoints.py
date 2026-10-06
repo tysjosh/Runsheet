@@ -96,3 +96,23 @@ def test_valid_meter_is_created(client, es):
     resp = client.post(URL, json=_body(), headers=HEADERS)
     assert resp.status_code == 201, resp.text
     es.index_document.assert_awaited_once()
+
+
+def test_audit_trail_for_unknown_meter_is_404(client):
+    """Finding C11: it answered 200 [] while GET /meters/{id} answered 404."""
+    resp = client.get(f"{URL}/meter_QA-nope/audit-trail", headers=HEADERS)
+    assert resp.status_code == 404, resp.text
+    payload = resp.json()
+    assert payload["error_code"] == "RESOURCE_NOT_FOUND"
+    assert payload.get("request_id")
+
+
+def test_audit_trail_for_known_meter_is_200(client, es):
+    async def _search(index, query, size=100, **kw):
+        if index == "meter_registry":
+            return _resp([_existing_meter()])
+        return _resp([])
+
+    es.search_documents = AsyncMock(side_effect=_search)
+    resp = client.get(f"{URL}/meter_QA-1/audit-trail", headers=HEADERS)
+    assert resp.status_code == 200, resp.text

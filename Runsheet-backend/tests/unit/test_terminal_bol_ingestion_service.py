@@ -435,6 +435,7 @@ class TestConfirmManualBol:
             await svc.confirm_manual_bol(_TENANT_ID, "bol_nonexistent", {"load_number": "X"})
 
         assert "not found" in str(exc_info.value).lower()
+        assert getattr(exc_info.value, "status_code", None) == 404
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +543,7 @@ class TestLinkToLoadPlan:
             await svc.link_to_load_plan("bol_nonexistent", "lp_123", _TENANT_ID)
 
         assert "not found" in str(exc_info.value).lower()
+        assert getattr(exc_info.value, "status_code", None) == 404
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_raises_error_when_bol_not_linkable(self, es_service, registry):

@@ -347,6 +347,8 @@ async def get_meter_audit_trail(
     svc = _get_meter_service()
 
     try:
+        # Unknown meter → 404, as GET /meters/{id} does, not 200 [] (C11).
+        await svc.get_meter(tenant.tenant_id, meter_id)
         result = await svc.get_meter_audit_trail(
             tenant.tenant_id,
             meter_id,

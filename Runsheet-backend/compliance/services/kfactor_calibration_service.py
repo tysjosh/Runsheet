@@ -24,6 +24,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.services.compliance_es_mappings import KFACTOR_HISTORY_INDEX
+from errors.exceptions import resource_not_found
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -465,6 +466,28 @@ class KFactorCalibrationService:
             )
         return None
 
+    async def require_tank(self, tank_id: str, tenant_id: str) -> Dict[str, Any]:
+        """Return the tenant's customer tank or raise 404 (finding C11).
+
+        Same tenant-filtered lookup as :meth:`_get_customer_tank`, except a
+        search failure propagates (an outage stays a 500) instead of being
+        read as "not found".
+        """
+        from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
+
+        query: Dict[str, Any] = {
+            "query": {"term": {"customer_tank_id": tank_id}}
+        }
+        query = inject_tenant_filter(query, tenant_id)
+        resp = await self._es.search_documents(CUSTOMER_TANKS_INDEX, query, 1)
+        hits = (resp or {}).get("hits", {}).get("hits", [])
+        if not hits:
+            raise resource_not_found(
+                f"Customer tank '{tank_id}' not found",
+                details={"tank_id": tank_id},
+            )
+        return hits[0].get("_source", {})
+
     async def _get_customer_tank(
         self, tank_id: str, tenant_id: str
     ) -> Optional[Dict[str, Any]]:
@@ -855,8 +878,9 @@ class KFactorCalibrationService:
         # 2. Look up the customer tank to get the current (old) K-factor
         tank = await self._get_customer_tank(tank_id, tenant_id)
         if tank is None:
-            raise ValueError(
-                f"Customer tank '{tank_id}' not found for tenant '{tenant_id}'"
+            raise resource_not_found(
+                f"Customer tank '{tank_id}' not found",
+                details={"tank_id": tank_id},
             )
 
         # 2b. Guard: reject adjustment if fewer than MIN_DELIVERIES_FOR_CALIBRATION (Req 9.7)
