@@ -7,7 +7,7 @@ Validates:
   per minute per IP address for API endpoints
 """
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, model_validator
 from typing import List, Optional
 from enum import Enum
@@ -1077,7 +1077,10 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
 # Analytics
 @router.get("/analytics/metrics")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_analytics_metrics(request: Request, tenant: TenantContext = Depends(get_tenant_context), timeRange: str = "7d"):
+# No timeRange parameter: get_current_metrics reads one daily_performance
+# snapshot with no range dimension, so the old, unused param was removed (Data
+# info item). FastAPI ignores unknown query params, so ?timeRange= still works.
+async def get_analytics_metrics(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
         metrics = await elasticsearch_service.get_current_metrics(tenant.tenant_id)
     except Exception:
@@ -1104,7 +1107,14 @@ async def get_route_performance(request: Request, tenant: TenantContext = Depend
 # Semantic Search
 @router.get("/search")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def semantic_search(request: Request, q: str, tenant: TenantContext = Depends(get_tenant_context), index: str = "trucks", limit: int = 10):
+async def semantic_search(
+    request: Request,
+    q: str,
+    tenant: TenantContext = Depends(get_tenant_context),
+    index: str = "trucks",
+    # Bounded so a client can't ask the store for an unbounded page (B6).
+    limit: int = Query(10, ge=1, le=100),
+):
     """
     Perform semantic search across different indices
     """
