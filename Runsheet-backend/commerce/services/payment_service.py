@@ -700,6 +700,12 @@ class PaymentService:
         await self._es.update_document(
             ACCOUNTS_CURRENT_INDEX, account_id, account_update
         )
+        # Mirror to Postgres so reads under COMMERCE_READ_FROM_POSTGRES agree.
+        from commerce.services.commerce_persistence_bridge import mirror_account_fields
+        await mirror_account_fields(
+            tenant_id, account_id, {"credit_balance_cents": new_balance},
+            event_type="balance_changed",
+        )
 
         # Emit account_credit_balance_applied event to account_events
         event_id = f"aevt_{uuid4()}"

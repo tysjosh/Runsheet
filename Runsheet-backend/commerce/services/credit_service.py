@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from commerce.models.account import CreditState
@@ -240,6 +240,11 @@ class CreditService:
             ACCOUNT_EVENTS_INDEX, event_doc["event_id"], event_doc
         )
 
+        # Dual-write the audit entry, matching AccountService._write_account_event.
+        from commerce.services.commerce_persistence_bridge import mirror_account_event
+
+        await mirror_account_event(event_doc)
+
         logger.info(
             "Wrote account event %s (type=%s, seq=%d) for account %s tenant %s",
             event_doc["event_id"],
@@ -251,11 +256,33 @@ class CreditService:
         return event_doc
 
     async def _update_account(
-        self, account_id: str, partial: Dict[str, Any]
+        self, tenant_id: str, account_id: str, partial: Dict[str, Any]
     ) -> None:
-        """Update the account projection in accounts_current."""
+        """Update the account projection and mirror it to Postgres.
+
+        Reads under ``COMMERCE_READ_FROM_POSTGRES`` come from the ``accounts``
+        table, so the ES-only write left credit_state / override expiry
+        invisible on GET (N-CFV-3). The mirror uses the same dual-write bridge
+        as ``AccountService.update`` (best-effort, swallow-and-log).
+        """
         partial["updated_at"] = utcnow().isoformat()
         await self._es.update_document(ACCOUNTS_CURRENT_INDEX, account_id, partial)
+
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_account_fields,
+        )
+
+        pg_fields: Dict[str, Any] = {
+            k: v for k, v in partial.items() if k != "updated_at"
+        }
+        expires = pg_fields.get("credit_override_expires_at")
+        if isinstance(expires, str):
+            # The ORM column is DateTime(timezone=True); SQLite rejects strings.
+            parsed = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            pg_fields["credit_override_expires_at"] = parsed
+        await mirror_account_fields(tenant_id, account_id, pg_fields)
 
     async def _evaluate_credit_state(
         self, tenant_id: str, account_id: str
@@ -407,6 +434,7 @@ class CreditService:
 
         # Transition to override state
         await self._update_account(
+            tenant_id,
             account_id,
             {
                 "credit_state": CreditState.OVERRIDE.value,
@@ -469,6 +497,7 @@ class CreditService:
 
         # Update the account projection
         await self._update_account(
+            tenant_id,
             account_id,
             {
                 "credit_state": new_state.value,
@@ -548,6 +577,7 @@ class CreditService:
         if open_balance <= credit_limit:
             # Payment brought account back under limit — transition to ok
             await self._update_account(
+                tenant_id,
                 account_id,
                 {
                     "credit_state": CreditState.OK.value,
@@ -582,6 +612,7 @@ class CreditService:
         else:
             # Still over limit — update balance projection but stay on hold
             await self._update_account(
+                tenant_id,
                 account_id,
                 {
                     "open_balance_cents": open_balance,
