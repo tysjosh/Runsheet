@@ -725,8 +725,20 @@ class DriverQualificationService:
         Validates: Requirements 4.2, 4.3.
         """
         driver = await self._get_for_summary(tenant_id, driver_id)
-        today = date.today()
+        return self.summarize_qualifications(driver, date.today(), driver_id)
 
+    def summarize_qualifications(
+        self,
+        driver: Dict[str, Any],
+        today: date,
+        driver_id: Optional[str] = None,
+    ) -> DriverQualificationSummary:
+        """Collapse one DQ record into its qualification summary (no I/O).
+
+        The rule :meth:`get_qualification_summary` applies, shared with the
+        driver qualification CSV export (OI-57) so both report the same
+        ``overall_status``.
+        """
         qualifications: List[QualificationAlert] = []
         worst = "valid"
 

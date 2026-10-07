@@ -6,6 +6,7 @@ import {
   Badge,
   Button,
   EmptyState,
+  ExportCsvButton,
   FilterBar,
   Pagination,
   StatsBar,
@@ -406,6 +407,15 @@ export default function DriverQualificationsView() {
               <option value="suspended">Suspended</option>
               <option value="expired">Expired</option>
             </select>
+          }
+          actions={
+            // Qualification expiry dates per driver; admin only (OI-57).
+            <ExportCsvButton
+              type="driver_qualifications"
+              params={{ status: statusFilter || undefined }}
+              subject="driver qualifications"
+              allowedRoles={["admin"]}
+            />
           }
         />
 

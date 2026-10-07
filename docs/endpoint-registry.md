@@ -80,11 +80,13 @@
 | GET | `/api/compliance/drivers` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/drivers` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/drivers/dashboard` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/drivers/export` | — | session_required | — | — | — |
 | GET | `/api/compliance/drivers/{driver_id}` | — | session_required | — | — | Dict |
 | PUT | `/api/compliance/drivers/{driver_id}` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/exemptions` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/exemptions` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/hos-records` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/hos-records/daily-summary/export` | — | session_required | — | — | — |
 | GET | `/api/compliance/ifta/adjustments` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/ifta/adjustments` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/completeness` | — | session_required | — | — | Dict |

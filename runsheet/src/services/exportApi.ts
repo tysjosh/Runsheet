@@ -17,7 +17,8 @@ export type ExportType =
   | "orders"
   | "jobs"
   | "reconciliation"
-  | "invoices";
+  | "invoices"
+  | "driver_qualifications";
 
 export type ExportParams = Record<
   string,
@@ -30,6 +31,8 @@ export const EXPORT_PATHS: Record<ExportType, string> = {
   jobs: "/scheduling/jobs/export",
   reconciliation: "/fuel/mvp/reconciliation/export",
   invoices: "/commerce/invoices/export",
+  // OI-57. The driver hours export has no admin page, so no entry here.
+  driver_qualifications: "/compliance/drivers/export",
 };
 
 /** Large exports stream for a while; the timeout bounds time-to-headers. */

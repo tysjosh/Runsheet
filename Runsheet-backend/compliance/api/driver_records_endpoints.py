@@ -356,4 +356,5 @@ async def export_driver_hours_summary(
         request=request, tenant=tenant, export_type="driver_hours",
         columns=_DRIVER_HOURS_COLUMNS, source=source,
         filters={"driver_id": driver, "start_date": start_date, "end_date": end_date},
+        max_rows=MAX_EXPORT_ROWS,
     )
