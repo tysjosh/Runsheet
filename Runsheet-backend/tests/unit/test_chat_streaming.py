@@ -261,3 +261,44 @@ def test_tool_returned_error_text_is_absent_from_the_chat_stream(monkeypatch):
     assert "SECRET-7f3a" not in body
     assert "tool_output" not in body
     assert [p["type"] for p in _sse_payloads(body)].count("tool_result") == 1
+
+
+def test_direct_path_emits_one_tool_event_per_tool_use(monkeypatch):
+    """OI-39: raw ``current_tool_use`` deltas collapse to one ``tool`` event each."""
+    import inline_endpoints
+    from errors.handlers import register_exception_handlers
+    from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+
+    mainagent = importlib.import_module("Agents.mainagent")
+
+    class _DirectAgent:
+        async def chat_streaming(self, *args, **kwargs):
+            for partial in ("", '{"q', '{"query": "trucks"}'):
+                yield {"current_tool_use": {
+                    "toolUseId": "tu-1", "name": "search_fleet_data", "input": partial,
+                }}
+            yield {"current_tool_result": {"name": "search_fleet_data", "status": "success"}}
+            for partial in ("", '{"id": 1}'):
+                yield {"current_tool_use": {
+                    "toolUseId": "tu-2", "name": "search_fleet_data", "input": partial,
+                }}
+            yield {"data": "Done"}
+            yield {"result": "ok"}
+
+    monkeypatch.setattr(mainagent, "LogisticsAgent", _DirectAgent)
+
+    async def _tenant() -> TenantContext:
+        return TenantContext(
+            tenant_id="tenant-1", user_id="user-1", has_pii_access=False, roles=["dispatcher"]
+        )
+
+    app = FastAPI()
+    app.include_router(inline_endpoints.router)
+    register_exception_handlers(app)
+    app.dependency_overrides[get_tenant_context] = _tenant
+
+    with TestClient(app).stream("POST", "/api/chat", json={"message": "Show trucks"}) as resp:
+        body = "".join(resp.iter_text())
+
+    types = [p["type"] for p in _sse_payloads(body)]
+    assert types == ["tool", "tool_result", "tool", "text", "done"]

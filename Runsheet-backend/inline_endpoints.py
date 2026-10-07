@@ -102,6 +102,7 @@ async def chat_endpoint(
 
     async def generate_response():
         done_sent = False
+        seen_tool_uses: set = set()
         try:
             async for event in agent.chat_streaming(
                 request.message,
@@ -135,7 +136,14 @@ async def chat_endpoint(
                         if text:
                             yield _sse({'type': 'text', 'content': text})
                     elif "current_tool_use" in event:
-                        tool_info = event["current_tool_use"]
+                        # Strands repeats current_tool_use for every streamed
+                        # input delta; emit one tool event per tool use, as
+                        # the specialists' stream() does (OI-39).
+                        tool_info = event["current_tool_use"] or {}
+                        use_key = tool_info.get('toolUseId') or tool_info.get('name', '')
+                        if use_key in seen_tool_uses:
+                            continue
+                        seen_tool_uses.add(use_key)
                         yield _sse({'type': 'tool', 'tool_name': tool_info.get('name', ''), 'tool_input': tool_info.get('input', {})})
                     elif "current_tool_result" in event:
                         # Name and status only: tool output can carry
