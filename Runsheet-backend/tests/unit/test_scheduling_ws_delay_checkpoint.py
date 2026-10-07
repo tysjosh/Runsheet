@@ -60,6 +60,7 @@ def _make_es_mock():
         return_value={"hits": {"hits": [], "total": {"value": 0}}}
     )
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     return es
 
 

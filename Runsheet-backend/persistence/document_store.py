@@ -891,6 +891,26 @@ class DocumentNotFound(LookupError):
         self.status_code = 404
 
 
+def is_document_not_found(exc: BaseException) -> bool:
+    """True when ``exc`` (or what it was raised from) is a missing-document error.
+
+    ``ElasticsearchService.update_document`` re-raises ``DocumentNotFound`` as
+    an ``AppException`` inside its ``except`` block, so the original stays on
+    ``__context__``. An Elasticsearch ``NotFoundError`` is matched by name, so
+    this module needn't import the ES client.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, DocumentNotFound):
+            return True
+        if type(current).__name__ == "NotFoundError":
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

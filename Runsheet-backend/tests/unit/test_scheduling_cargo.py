@@ -27,6 +27,7 @@ def _make_es_mock() -> MagicMock:
         return_value={"hits": {"hits": [], "total": {"value": 0}}}
     )
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     # There is no cluster behind ``.client``; any data-plane call on it is a bug.
     es.client = MagicMock()
     es.client.update = MagicMock(side_effect=AssertionError("raw client used"))

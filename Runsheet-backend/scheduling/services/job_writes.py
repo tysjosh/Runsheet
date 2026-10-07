@@ -55,22 +55,30 @@ async def update_job_fields(
         job_id: The job to update.
         fields: The partial update (top-level keys, unwrapped).
         job_doc: The job as the caller already read it. It is updated in
-            place and mirrored. When omitted the merged document is read back
-            from the store; if that read finds nothing, nothing is mirrored.
+            place from the merged document (callers read it afterwards).
+
+    The merged document is always read back from the store and mirrored, so
+    a field another writer changed between the caller's read and this write
+    (for example ``cargo_manifest``) isn't reverted in Postgres by a stale
+    snapshot (OI-31). If the read-back finds nothing, the caller's
+    ``job_doc`` plus ``fields`` is mirrored instead; with no ``job_doc``,
+    nothing is mirrored.
 
     Returns:
         The merged job document (``{}`` when ``job_doc`` was omitted and the
         read-back found nothing).
     """
     await es.update_document(JOBS_CURRENT_INDEX, job_id, fields)
-    if job_doc is None:
-        job_doc = await es.get_document(JOBS_CURRENT_INDEX, job_id)
-        if not isinstance(job_doc, dict) or not job_doc:
+    merged = await es.get_document(JOBS_CURRENT_INDEX, job_id)
+    if not isinstance(merged, dict) or not merged:
+        if job_doc is None:
             return {}
-    else:
-        job_doc.update(fields)
-    await mirror_job(job_doc, job_id)
-    return job_doc
+        merged = {**job_doc, **fields}
+    if job_doc is not None:
+        job_doc.update(merged)
+        merged = job_doc
+    await mirror_job(merged, job_id)
+    return merged
 
 
 async def atomic_update_job(

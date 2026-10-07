@@ -93,6 +93,9 @@ def _make_job_service() -> MagicMock:
     """Create a mock JobService with the methods used by driver endpoints."""
     es = MagicMock()
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    # update_job_fields reads the merged doc back (OI-31); None falls back
+    # to the caller's snapshot plus the fields.
+    es.get_document = AsyncMock(return_value=None)
 
     svc = MagicMock()
     svc._es = es

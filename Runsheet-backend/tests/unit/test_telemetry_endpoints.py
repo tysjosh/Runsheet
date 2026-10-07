@@ -93,15 +93,25 @@ class FakeBulkClient:
 class FakeES:
     """Elasticsearch service stand-in: a raw bulk client plus presence writes."""
 
-    def __init__(self, *, presence_exists: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        presence_exists: bool = True,
+        merge_error: Optional[Exception] = None,
+    ) -> None:
         self.client = FakeBulkClient()
         self.updates: List[tuple] = []
         self.indexed: List[tuple] = []
         self._presence_exists = presence_exists
+        self._merge_error = merge_error
 
     async def update_document(self, index, doc_id, partial_doc):
+        if index == DRIVER_PRESENCE_INDEX and self._merge_error is not None:
+            raise self._merge_error
         if index == DRIVER_PRESENCE_INDEX and not self._presence_exists:
-            raise RuntimeError("document_missing_exception")
+            from persistence.document_store import DocumentNotFound
+
+            raise DocumentNotFound(index, doc_id)
         self.updates.append((index, doc_id, dict(partial_doc)))
         return {"result": "updated"}
 
@@ -647,6 +657,17 @@ class TestPresenceRefresh:
         assert document["driver_id"] == DRIVER
         assert document["last_location"] == {"lat": 33.0, "lon": -95.0}
         assert "status" not in document
+
+    def test_presence_is_not_replaced_on_a_non_not_found_error(self):
+        """OI-31: a store error that isn't "missing" never replaces the record."""
+        es = FakeES(merge_error=RuntimeError("connection reset"))
+        client = TestClient(_make_app(es_service=es))
+
+        resp = _post(client, [_sample(latitude=33.0, longitude=-95.0)])
+
+        assert resp.status_code == 200
+        assert resp.json()["data"]["presence_updated"] is False
+        assert [c for c in es.indexed if c[0] == DRIVER_PRESENCE_INDEX] == []
 
 
 # ---------------------------------------------------------------------------

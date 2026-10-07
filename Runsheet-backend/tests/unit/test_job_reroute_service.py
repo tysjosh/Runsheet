@@ -38,6 +38,7 @@ def _make_es_service(job_doc=None):
             return_value={"hits": {"hits": []}}
         )
     es.update_document = AsyncMock()
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     es.index_document = AsyncMock()
     return es
 

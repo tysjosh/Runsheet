@@ -64,6 +64,45 @@ def _index_call(es, position: int = 0):
     return args[0], args[1], args[2]
 
 
+def _presence_call(es, position: int = 0):
+    """Return ``(index, doc_id, document)`` for one presence merge.
+
+    Presence is merged with ``update_document`` and only recreated with
+    ``index_document`` when the record is missing (OI-31).
+    """
+    args = es.update_document.await_args_list[position].args
+    return args[0], args[1], args[2]
+
+
+def _reset_writes(es):
+    es.index_document.reset_mock()
+    es.update_document.reset_mock()
+
+
+class _MergingStore:
+    """A store keyed on the document id with the real partial-merge contract.
+
+    ``update_document`` on a missing id raises ``DocumentNotFound``, as the
+    Postgres document store does.
+    """
+
+    def __init__(self):
+        self.docs: dict[tuple[str, str], dict] = {}
+
+    async def index_document(self, index, doc_id, document):
+        self.docs[(index, doc_id)] = dict(document)
+        return {"result": "created"}
+
+    async def update_document(self, index, doc_id, partial_doc):
+        from persistence.document_store import DocumentNotFound
+
+        existing = self.docs.get((index, doc_id))
+        if existing is None:
+            raise DocumentNotFound(index, doc_id)
+        existing.update(dict(partial_doc))
+        return {"result": "updated"}
+
+
 # ---------------------------------------------------------------------------
 # Tests: connect_driver
 # ---------------------------------------------------------------------------
@@ -147,8 +186,9 @@ class TestConnectDriver:
 
         await manager.connect_driver(ws, "driver-1", "tenant-1")
 
-        es.index_document.assert_awaited_once()
-        index, doc_id, body = _index_call(es)
+        es.update_document.assert_awaited_once()
+        es.index_document.assert_not_awaited()
+        index, doc_id, body = _presence_call(es)
         assert index == "driver_presence"
         assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "online"
@@ -192,12 +232,12 @@ class TestDisconnect:
         ws = _make_websocket()
 
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.index_document.reset_mock()
+        _reset_writes(es)
 
         await manager.disconnect(ws)
 
-        es.index_document.assert_awaited_once()
-        _, doc_id, body = _index_call(es)
+        es.update_document.assert_awaited_once()
+        _, doc_id, body = _presence_call(es)
         assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "offline"
 
@@ -547,7 +587,7 @@ class TestInboundRejection:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.index_document.reset_mock()
+        _reset_writes(es)
 
         await manager.handle_driver_message(
             ws, json.dumps({"type": msg_type, "data": payload})
@@ -571,7 +611,7 @@ class TestInboundRejection:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.index_document.reset_mock()
+        _reset_writes(es)
         before = manager.get_client_metadata(ws)["last_heartbeat"]
 
         await manager.handle_driver_message(
@@ -589,7 +629,7 @@ class TestInboundRejection:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.index_document.reset_mock()
+        _reset_writes(es)
 
         await manager.handle_driver_message(ws, json.dumps({"type": "wallet_topup"}))
 
@@ -608,12 +648,12 @@ class TestInboundRejection:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.index_document.reset_mock()
+        _reset_writes(es)
 
         await manager.handle_driver_message(ws, json.dumps({"type": "heartbeat"}))
 
-        es.index_document.assert_awaited_once()
-        _, doc_id, body = _index_call(es)
+        es.update_document.assert_awaited_once()
+        _, doc_id, body = _presence_call(es)
         assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "online"
         assert ws.send_json.call_args_list[1][0][0]["type"] == "heartbeat_ack"
@@ -624,6 +664,7 @@ class TestInboundRejection:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
+        _reset_writes(es)
         before = manager.get_client_metadata(ws)["last_heartbeat"]
 
         await manager.handle_driver_message(
@@ -643,7 +684,7 @@ class TestInboundRejection:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
-        es.index_document.reset_mock()
+        _reset_writes(es)
 
         await manager.handle_driver_message(ws, json.dumps({"type": "ping"}))
 
@@ -667,8 +708,8 @@ class TestUpdatePresence:
 
         await manager.update_presence("driver-1", "online", tenant_id="tenant-1")
 
-        es.index_document.assert_awaited_once()
-        index, doc_id, body = _index_call(es)
+        es.update_document.assert_awaited_once()
+        index, doc_id, body = _presence_call(es)
         assert index == "driver_presence"
         assert doc_id == "tenant-1:driver-1"
         assert body["status"] == "online"
@@ -683,7 +724,7 @@ class TestUpdatePresence:
 
         await manager.update_presence("driver-1", "offline", tenant_id="tenant-1")
 
-        _, _, body = _index_call(es)
+        _, _, body = _presence_call(es)
         assert body["status"] == "offline"
         assert "connected_at" not in body
 
@@ -697,7 +738,7 @@ class TestUpdatePresence:
             "driver-1", "online", tenant_id="tenant-1", location=location
         )
 
-        _, _, body = _index_call(es)
+        _, _, body = _presence_call(es)
         assert body["last_location"] == location
 
     @pytest.mark.asyncio
@@ -709,12 +750,50 @@ class TestUpdatePresence:
 
     @pytest.mark.asyncio
     async def test_update_presence_es_error_handled(self):
+        """A non-not-found merge error is logged and never replaces (OI-31)."""
         es = _make_es_service()
-        es.index_document.side_effect = Exception("ES down")
+        es.update_document.side_effect = Exception("ES down")
         manager = DriverWSManager(es_service=es)
 
         # Should not raise
         await manager.update_presence("driver-1", "online")
+        es.index_document.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_presence_recreates_a_missing_record(self):
+        from persistence.document_store import DocumentNotFound
+
+        es = _make_es_service()
+        es.update_document.side_effect = DocumentNotFound(
+            "driver_presence", "tenant-1:driver-1"
+        )
+        manager = DriverWSManager(es_service=es)
+
+        await manager.update_presence("driver-1", "online", tenant_id="tenant-1")
+
+        index, doc_id, body = _index_call(es)
+        assert (index, doc_id) == ("driver_presence", "tenant-1:driver-1")
+        assert body["status"] == "online"
+
+    @pytest.mark.asyncio
+    async def test_offline_transition_keeps_location_and_connected_at(self):
+        """OI-31: going offline merges, so the last fix and connect time survive."""
+        store = _MergingStore()
+        manager = DriverWSManager(es_service=store)
+        location = {"lat": 1.5, "lon": 2.5}
+
+        await manager.update_presence(
+            "driver-1", "online", tenant_id="tenant-1", location=location
+        )
+        connected_at = store.docs[("driver_presence", "tenant-1:driver-1")][
+            "connected_at"
+        ]
+        await manager.update_presence("driver-1", "offline", tenant_id="tenant-1")
+
+        doc = store.docs[("driver_presence", "tenant-1:driver-1")]
+        assert doc["status"] == "offline"
+        assert doc["last_location"] == location
+        assert doc["connected_at"] == connected_at
 
 
 # ---------------------------------------------------------------------------
@@ -739,21 +818,10 @@ class TestPresenceIsAsyncAndTenantScoped:
         A real store keyed on the document id, so "two records" is observed as
         two surviving documents rather than as two calls.
         """
-        store: dict[tuple[str, str], dict] = {}
+        merging = _MergingStore()
+        store = merging.docs
 
-        class _Store:
-            async def index_document(self, index, doc_id, document):
-                store[(index, doc_id)] = dict(document)
-                return {"result": "created"}
-
-            async def update_document(self, index, doc_id, partial_doc):
-                existing = store.get((index, doc_id))
-                if existing is None:
-                    raise KeyError(doc_id)
-                existing.update(dict(partial_doc))
-                return {"result": "updated"}
-
-        manager = DriverWSManager(es_service=_Store())
+        manager = DriverWSManager(es_service=merging)
 
         await manager.update_presence("driver-1", "online", tenant_id="tenant-a")
         await manager.update_presence("driver-1", "offline", tenant_id="tenant-b")
@@ -764,7 +832,7 @@ class TestPresenceIsAsyncAndTenantScoped:
         }
         assert store[("driver_presence", "tenant-a:driver-1")]["status"] == "online"
         assert store[("driver_presence", "tenant-b:driver-1")]["status"] == "offline"
-        # One record per pair, not one per write: a re-heartbeat replaces.
+        # One record per pair, not one per write: a re-heartbeat merges.
         await manager.update_presence("driver-1", "online", tenant_id="tenant-b")
         assert len(store) == 2
 
@@ -775,6 +843,7 @@ class TestPresenceIsAsyncAndTenantScoped:
         manager = DriverWSManager(es_service=es)
         ws = _make_websocket()
         await manager.connect_driver(ws, "driver-1", "tenant-1")
+        _reset_writes(es)
 
         location = {"lat": 1.5, "lon": 2.5}
         await manager.handle_driver_message(
@@ -791,8 +860,12 @@ class TestPresenceIsAsyncAndTenantScoped:
     @pytest.mark.asyncio
     async def test_location_update_recreates_a_missing_presence_record(self):
         """A merge against no record falls back to a full write, not a loss."""
+        from persistence.document_store import DocumentNotFound
+
         es = _make_es_service()
-        es.update_document.side_effect = Exception("document_missing_exception")
+        es.update_document.side_effect = DocumentNotFound(
+            "driver_presence", "tenant-1:driver-1"
+        )
         manager = DriverWSManager(es_service=es)
 
         location = {"lat": 1.5, "lon": 2.5}
@@ -814,6 +887,28 @@ class TestPresenceIsAsyncAndTenantScoped:
 
         # Should not raise
         await manager._update_driver_location("driver-1", {"lat": 1.0}, "tenant-1")
+        # A non-not-found merge error is not "recreated" over a live record.
+        es.index_document.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_location_update_recreates_through_the_facade_error(self):
+        """The facade re-raises DocumentNotFound as an AppException (OI-31)."""
+        from persistence.document_store import DocumentNotFound
+
+        es = _make_es_service()
+
+        async def _facade_missing(index, doc_id, partial):
+            try:
+                raise DocumentNotFound(index, doc_id)
+            except DocumentNotFound:
+                raise RuntimeError("Database operation failed: update_document")
+
+        es.update_document.side_effect = _facade_missing
+        manager = DriverWSManager(es_service=es)
+
+        await manager._update_driver_location("driver-1", {"lat": 1.0}, "tenant-1")
+
+        es.index_document.assert_awaited_once()
 
     def test_no_synchronous_client_call_remains_in_the_presence_paths(self):
         """R10.14: no ``self._es.client.*`` write survives in the module.

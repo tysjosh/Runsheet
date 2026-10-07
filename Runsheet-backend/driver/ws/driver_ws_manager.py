@@ -443,12 +443,18 @@ class DriverWSManager(BaseWSManager):
         if location:
             doc["last_location"] = location
 
+        from persistence.document_store import is_document_not_found
+
+        doc_id = presence_doc_id(tenant_id, driver_id)
         try:
-            await self._es.index_document(
-                DRIVER_PRESENCE_INDEX,
-                presence_doc_id(tenant_id, driver_id),
-                doc,
-            )
+            # Merge so an offline transition keeps last_location and
+            # connected_at; recreate only when no record exists (OI-31).
+            try:
+                await self._es.update_document(DRIVER_PRESENCE_INDEX, doc_id, doc)
+            except Exception as exc:
+                if not is_document_not_found(exc):
+                    raise
+                await self._es.index_document(DRIVER_PRESENCE_INDEX, doc_id, doc)
             logger.debug(
                 "Updated presence for driver %s: status=%s",
                 driver_id,
@@ -567,6 +573,8 @@ class DriverWSManager(BaseWSManager):
         doc_id = presence_doc_id(tenant_id, driver_id)
         now = datetime.now(timezone.utc).isoformat()
 
+        from persistence.document_store import is_document_not_found
+
         try:
             await self._es.update_document(
                 DRIVER_PRESENCE_INDEX,
@@ -574,6 +582,15 @@ class DriverWSManager(BaseWSManager):
                 {"last_location": location, "last_seen": now},
             )
         except Exception as exc:
+            if not is_document_not_found(exc):
+                # Recreating on any error would replace a live record with a
+                # partial one (OI-31); only a missing record is recreated.
+                logger.error(
+                    "Failed to update location for driver %s: %s",
+                    driver_id,
+                    exc,
+                )
+                return
             logger.warning(
                 "Presence location merge failed for driver %s; recreating "
                 "the record: %s",

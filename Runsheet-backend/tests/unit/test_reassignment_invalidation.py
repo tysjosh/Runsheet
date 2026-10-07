@@ -120,6 +120,7 @@ def _make_job_service() -> MagicMock:
     """Create a mock JobService with the methods used by driver endpoints."""
     es = MagicMock()
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
 
     svc = MagicMock()
     svc._es = es
@@ -204,6 +205,7 @@ def _make_es_service() -> MagicMock:
     es = MagicMock()
     es.index_document = AsyncMock()
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     es.search_documents = AsyncMock(return_value={
         "hits": {"hits": [], "total": {"value": 0}},
     })
@@ -590,6 +592,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -636,6 +639,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -678,6 +682,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -729,6 +734,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -767,6 +773,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
