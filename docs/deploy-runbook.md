@@ -146,6 +146,30 @@ after it any more; the document plane is in the dump. Do **not** rely on
 `0007_drop_shipments_current`: the table is dropped and the rows are gone, so the
 downgrade recreates an empty table and the data is only in the dump.
 
+## CSV import: operator notes
+
+- **Fleet re-import fails with "already in use" on legacy ids. This is by
+  design.** A fleet, inventory, fuel-station or jobs import writes each row
+  only if the importing tenant owns the id or the id is free. A legacy `trucks`
+  document with no `tenant_id` counts as owned by someone else, so a tenant
+  can't adopt it. A fleet CSV that reuses such an id gets
+  `truck_id '<id>' is already in use` for that row, at validate and at commit.
+  The message never names an owner. To tell a legacy row from another tenant's
+  row, look the id up in the document store:
+
+  ```sql
+  SELECT doc_id, tenant_id FROM es_documents
+  WHERE index_name = 'trucks' AND doc_id = '<id>';
+  ```
+
+  `tenant_id IS NULL` is a legacy tenantless row: give the truck a new id in
+  the CSV, or retire the legacy row deliberately. A non-null value is another
+  tenant's truck, and the import is right to refuse it.
+- **Bisecting the inventory fixes.** The B4 test
+  `test_adjust_records_the_user_as_actor` lands in the B3 commit `bcab7a3` and
+  fails there until the B4 fix `cb61edd`. Skip `bcab7a3` when bisecting
+  through that range. There's no runtime impact.
+
 ## Not covered here
 
 - **Infrastructure provisioning.** There is no Terraform/CDK/Kubernetes in this
