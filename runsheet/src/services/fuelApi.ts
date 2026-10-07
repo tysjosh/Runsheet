@@ -573,9 +573,28 @@ export interface CostConfig {
 // ─── Fuel Distribution MVP Types ─────────────────────────────────────────────
 
 /** One stage that finished its cycle without doing its job. */
+export interface PipelineDegradationReason {
+  reason_code?: string;
+  /** Readable explanation, e.g. why a loading plan was blocked. */
+  detail?: string;
+  [key: string]: unknown;
+}
+
 export interface PipelineDegradation {
   agent_id: string;
-  reasons: unknown[];
+  reasons: PipelineDegradationReason[];
+}
+
+/** An order the loading stage could not load this run, with the reason. */
+export interface UnplacedOrder {
+  order_id: string | null;
+  station_id: string;
+  product_code?: string | null;
+  liters: number;
+  /** e.g. no_truck_capacity, no_compatible_compartment, dyed_diesel_check_unavailable */
+  reason: string;
+  /** True when only part of the order's volume could not be loaded. */
+  partial?: boolean;
 }
 
 export interface GeneratePlanResponse {
@@ -590,6 +609,11 @@ export interface GeneratePlanResponse {
   status: string;
   degraded?: boolean;
   degradation_reasons?: PipelineDegradation[];
+  /** Orders this run could not load, one entry per order and reason. */
+  unplaced_orders?: UnplacedOrder[];
+  /** Set when `status` is `"failed"`: the stage that raised and why. */
+  failed_agent?: string | null;
+  error_message?: string | null;
 }
 
 export interface ReplanRequest {

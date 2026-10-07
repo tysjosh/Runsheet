@@ -87,6 +87,7 @@ import type {
   RouteAssignment,
   SafeToDelayBucket,
   StopVariance,
+  UnplacedOrder,
 } from "../../services/fuelApi";
 import {
   approvePlan,
@@ -119,6 +120,27 @@ import StormModeBanner from "./StormModeBanner";
 const PAGE_SIZE = 10;
 const GENERATED_PLAN_REFRESH_ATTEMPTS = 4;
 const GENERATED_PLAN_REFRESH_DELAY_MS = 750;
+const UNPLACED_ORDERS_SHOWN = 5;
+
+/** Short labels for the loading stage's per-order reasons (OI-02, OI-39). */
+const UNPLACED_REASON_LABELS: Record<string, string> = {
+  no_truck_capacity: "no truck capacity",
+  no_compatible_compartment: "no compatible compartment",
+  dyed_diesel_compartment_incompatible: "compartment not dyed-diesel compatible",
+  dyed_diesel_check_unavailable: "dyed-diesel check unavailable",
+};
+
+/** "N order(s) not loaded: ORD-1 (reason), …, +k more" for the generate toast. */
+function describeUnplacedOrders(orders: UnplacedOrder[]): string {
+  const items = orders.slice(0, UNPLACED_ORDERS_SHOWN).map((o) => {
+    const label = UNPLACED_REASON_LABELS[o.reason] ?? o.reason;
+    const who = o.order_id ?? o.station_id;
+    return `${who} (${label}${o.partial ? ", partly" : ""})`;
+  });
+  const more = orders.length - UNPLACED_ORDERS_SHOWN;
+  if (more > 0) items.push(`+${more} more`);
+  return `${orders.length} order(s) not loaded: ${items.join(", ")}`;
+}
 
 function activeTenantId(): string {
   return getCurrentTenantId();
@@ -2152,18 +2174,38 @@ function PlansTab() {
       // backend reports that as `degraded` rather than folding it into
       // `complete`, so an unconditional success toast here would be the last
       // place the silent skip got laundered into success.
-      if (response.degraded || response.status === "degraded") {
+      if (response.status === "failed") {
+        // A stage raised and the run stopped; never report that as success.
+        addToast(
+          `Plan generation failed: ${
+            response.error_message ?? response.failed_agent ?? "unknown error"
+          }`,
+          "error",
+        );
+      } else if (response.degraded || response.status === "degraded") {
+        // Prefer the backend's readable details (e.g. a plan blocked because
+        // the dyed-diesel check was unavailable) over bare stage names.
+        const details = (response.degradation_reasons ?? [])
+          .flatMap((d) => d.reasons ?? [])
+          .map((r) => (typeof r?.detail === "string" ? r.detail : ""))
+          .filter((detail) => detail.length > 0);
         const stages = (response.degradation_reasons ?? [])
           .map((d) => d.agent_id)
           .join(", ");
         addToast(
-          stages
-            ? `Plan generated with problems: ${stages} produced nothing`
-            : "Plan generated with problems: a stage produced nothing",
+          details.length > 0
+            ? `Plan generated with problems: ${details.join("; ")}`
+            : stages
+              ? `Plan generated with problems: ${stages} produced nothing`
+              : "Plan generated with problems: a stage produced nothing",
           "error",
         );
       } else {
         addToast("Plan generated successfully", "success");
+      }
+      const unplaced = response.unplaced_orders ?? [];
+      if (unplaced.length > 0) {
+        addToast(describeUnplacedOrders(unplaced), "error");
       }
 
       // Reset to page 1 and clear status filter to show the new plan

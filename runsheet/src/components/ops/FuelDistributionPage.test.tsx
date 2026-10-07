@@ -481,6 +481,119 @@ describe("FuelDistributionPage — Plans tab", () => {
     ).not.toBeInTheDocument();
   });
 
+  async function clickGenerate() {
+    mockListPlans.mockResolvedValue({
+      data: [],
+      pagination: { page: 1, size: 10, total: 0, total_pages: 1 },
+      request_id: "req-generate",
+    });
+    render(<FuelDistributionPage />);
+    await waitFor(() => {
+      expect(mockListPlans).toHaveBeenCalled();
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /Generate Plan/i }));
+    });
+  }
+
+  it("shows the backend detail when a dyed-diesel plan was blocked (OI-02)", async () => {
+    const detail =
+      "Dyed-diesel compliance check unavailable: 1 loading plan(s) blocked (trucks truck-A). Retry when the compliance service is back.";
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-blocked",
+      status: "degraded",
+      degraded: true,
+      degradation_reasons: [
+        {
+          agent_id: "compartment_loading",
+          reasons: [{ reason_code: "dyed_diesel_check_unavailable", detail }],
+        },
+      ],
+    });
+
+    await clickGenerate();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(`Plan generated with problems: ${detail}`),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Plan generated successfully"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("reports a failed run as a failure, not success", async () => {
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-failed",
+      status: "failed",
+      failed_agent: "compartment_loading",
+      error_message: "ES connection failed",
+    });
+
+    await clickGenerate();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Plan generation failed: ES connection failed"),
+      ).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText("Plan generated successfully"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lists orders that could not be loaded (OI-39)", async () => {
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-unplaced",
+      status: "complete",
+      unplaced_orders: [
+        {
+          order_id: "ORD-1",
+          station_id: "st-1",
+          product_code: "GASOLINE_REG",
+          liters: 4000,
+          reason: "no_compatible_compartment",
+          partial: false,
+        },
+      ],
+    });
+
+    await clickGenerate();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "1 order(s) not loaded: ORD-1 (no compatible compartment)",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(screen.getByText("Plan generated successfully")).toBeInTheDocument();
+  });
+
+  it("caps the unplaced list at five ids and shows unknown reasons verbatim", async () => {
+    mockGeneratePlan.mockResolvedValue({
+      run_id: "run-many",
+      status: "complete",
+      unplaced_orders: Array.from({ length: 7 }, (_, i) => ({
+        order_id: `ORD-${i + 1}`,
+        station_id: "st-1",
+        liters: 100,
+        reason: i === 0 ? "some_new_reason" : "no_truck_capacity",
+      })),
+    });
+
+    await clickGenerate();
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "7 order(s) not loaded: ORD-1 (some_new_reason), ORD-2 (no truck capacity), ORD-3 (no truck capacity), ORD-4 (no truck capacity), ORD-5 (no truck capacity), +2 more",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("renders a scheduled plan with a warning badge, Approve and no Reject (R12.7)", async () => {
     mockListPlans.mockResolvedValue({
       data: [
