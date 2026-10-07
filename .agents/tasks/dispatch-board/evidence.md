@@ -171,7 +171,7 @@ Commands (cwd `.worktrees/dispatch-board/Runsheet-backend`, same `$PY`):
 
 ### Phase 2: Publish and changes after publish
 
-Status: tasks 15, 16 and 17 done (plan ticked), on `feature/dispatch-board` (commit id recorded below). No staging, AWS or CodeBuild action. Everything sits behind the board flag (unset/`disabled` → 404 on every board route, unchanged); the publish route now answers 202 for an accepted publish (200 for the dry run). No new dependency.
+Status: tasks 15, 16 and 17 done (plan ticked), commit `46c90a3` on `feature/dispatch-board` (not pushed). No staging, AWS or CodeBuild action. Everything sits behind the board flag (unset/`disabled` → 404 on every board route, unchanged); the publish route now answers 202 for an accepted publish (200 for the dry run). No new dependency.
 
 #### What landed
 
