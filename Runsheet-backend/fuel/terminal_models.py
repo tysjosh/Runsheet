@@ -857,7 +857,18 @@ class _BaseTenantScopedRepository:
 
         doc = model.model_dump(mode="json", exclude_none=False)
         doc_id = getattr(model, self.id_field)
-        await self._es.index_document(self._index, doc_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace an entity another tenant owns (L1). Refused before either
+        # mirror write so the relational row can't be overwritten either.
+        created = await self._es.create_document(self._index, doc_id, doc)
+        if not created:
+            from errors.exceptions import already_exists
+
+            label = self.entity_type.replace("_", " ")
+            raise already_exists(
+                f"A {label} with this id already exists",
+                details={self.id_field: doc_id},
+            )
         # Dual-write master/config entities to the Postgres source-of-truth.
         _agg = _BASE_REPO_MIRROR_AGGREGATES.get(self.entity_type)
         if _agg is not None:

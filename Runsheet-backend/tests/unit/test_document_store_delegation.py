@@ -39,6 +39,7 @@ from config.settings import clear_settings_cache
 _DELEGATING_METHODS = (
     "index_document",
     "create_document",
+    "document_exists",
     "update_document",
     "bulk_index_documents",
     "search_documents",
@@ -113,6 +114,10 @@ class _RecordingStore:
         self.calls.append(("create_document", index, doc_id))
         return True
 
+    async def document_exists(self, index, doc_id):
+        self.calls.append(("document_exists", index, doc_id))
+        return True
+
     async def get_document(self, index, doc_id):
         self.calls.append(("get_document", index, doc_id))
         return None
@@ -153,6 +158,12 @@ async def test_create_is_served_by_the_store(service_with_stub_store):
     service, store = service_with_stub_store
     assert await service.create_document("some_index", "a", {"tenant_id": "t"}) is True
     assert store.calls == [("create_document", "some_index", "a")]
+
+
+async def test_document_exists_is_served_by_the_store(service_with_stub_store):
+    service, store = service_with_stub_store
+    assert await service.document_exists("some_index", "a") is True
+    assert store.calls == [("document_exists", "some_index", "a")]
 
 
 async def test_create_on_a_retired_index_reports_not_created(

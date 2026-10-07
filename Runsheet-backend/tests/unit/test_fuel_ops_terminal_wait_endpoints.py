@@ -84,6 +84,15 @@ class _FakeESService:
             {"index": index, "doc_id": doc_id, "doc": dict(document)}
         )
 
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
+
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int
     ) -> Dict[str, Any]:

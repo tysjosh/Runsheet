@@ -295,6 +295,18 @@ class ElasticsearchService:
         store = self._pg_store()
         return await store.create_document(index, doc_id, document)
 
+    async def document_exists(self, index: str, doc_id: str) -> bool:
+        """Whether any document (in any tenant) holds ``doc_id``.
+
+        For a create that must refuse a taken id before a side effect it can't
+        undo cheaply, such as minting a secret. ``create_document`` is still the
+        authority; this is only the early check.
+        """
+        if self._is_retired_index(index):
+            return False
+        store = self._pg_store()
+        return await store.document_exists(index, doc_id)
+
     async def update_document(self, index: str, doc_id: str, partial_doc: Dict[Any, Any]):
         """
         Partially update a document using the ES _update API with circuit breaker protection.

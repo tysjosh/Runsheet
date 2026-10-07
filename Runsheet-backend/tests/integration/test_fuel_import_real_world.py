@@ -77,6 +77,13 @@ class _InMemoryElasticsearch:
         self.documents[(index, document_id)] = deepcopy(document)
         return {"result": "created"}
 
+    async def create_document(self, index, document_id, document):
+        # Create-if-absent, like the real store (ids are global).
+        if (index, document_id) in self.documents:
+            return False
+        await self.index_document(index, document_id, document)
+        return True
+
     async def get_document(self, index, document_id):
         document = self.documents.get((index, document_id))
         return deepcopy(document) if document is not None else None

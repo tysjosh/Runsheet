@@ -202,6 +202,20 @@ class IntakeChannelRepository:
         """
         self._require_tenant(tenant_id)
 
+        from errors.exceptions import already_exists
+
+        def _taken() -> Exception:
+            return already_exists(
+                "An intake channel with this id already exists",
+                details={"channel_id": channel_id},
+            )
+
+        # Channel ids are global in the store, so a create on a taken id must
+        # be refused, never upserted over another tenant's channel (L1). Checked
+        # before minting a secret so a refused create leaves nothing behind.
+        if await self._es.document_exists(self._channels_index, channel_id):
+            raise _taken()
+
         # Generate a fresh HMAC secret
         plaintext_secret = stdlib_secrets.token_urlsafe(32)
 
@@ -232,9 +246,23 @@ class IntakeChannelRepository:
         model = IntakeChannel(**payload)
         doc = model.model_dump(mode="json", exclude_none=False)
 
-        await self._es.index_document(
+        created = await self._es.create_document(
             self._channels_index, model.channel_id, doc
         )
+        if not created:
+            # Lost a race with a concurrent create of the same id. The vault
+            # ref is per tenant, so this only avoids an orphaned secret.
+            try:
+                await self._vault.delete(tenant_id, vault_ref)
+            except Exception:  # noqa: BLE001 — best effort, the 409 still stands
+                logger.warning(
+                    "IntakeChannelRepository.create: could not delete the "
+                    "secret minted for refused channel=%s tenant=%s",
+                    channel_id,
+                    tenant_id,
+                    exc_info=True,
+                )
+            raise _taken()
 
         from commerce.services.commerce_persistence_bridge import (
             mirror_current_state_upsert,

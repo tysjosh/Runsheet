@@ -353,6 +353,7 @@ class CustomerTankRepository:
     trivially testable with a recording mock. The only interface the
     repository relies on is:
 
+        * ``await es.create_document(index, doc_id, document)`` → bool
         * ``await es.index_document(index, doc_id, document)``
         * ``await es.get_document(index, doc_id)`` — may raise / return None
         * ``await es.search_documents(index, query, size)``
@@ -447,7 +448,19 @@ class CustomerTankRepository:
         model = CustomerTank(**payload)
 
         doc = model.model_dump(mode="json", exclude_none=False)
-        await self._es.index_document(self._index, model.customer_tank_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a tank another tenant owns (L1). Refused before the mirror
+        # write so the relational row can't be overwritten either.
+        created = await self._es.create_document(
+            self._index, model.customer_tank_id, doc
+        )
+        if not created:
+            from errors.exceptions import already_exists
+
+            raise already_exists(
+                "A customer tank with this id already exists",
+                details={"customer_tank_id": model.customer_tank_id},
+            )
         # Postgres source of truth. ``customer_tanks`` used to exist only in
         # Elasticsearch, so recreating the cluster destroyed calibrated
         # k-factors and ATG level history outright. Best-effort during the

@@ -46,6 +46,16 @@ class FakeESService:
     async def index_document(self, index: str, doc_id: str, document: dict):
         self.indexed_docs[doc_id] = {"index": index, "document": document}
 
+    async def document_exists(self, index: str, doc_id: str) -> bool:
+        return doc_id in self.indexed_docs
+
+    async def create_document(self, index: str, doc_id: str, document: dict) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.indexed_docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
+
     async def search_documents(self, index: str, query: dict, size: int = 10):
         if self._search_call_count < len(self.search_responses):
             resp = self.search_responses[self._search_call_count]
@@ -150,6 +160,79 @@ def _wrap_in_search_response(sources: List[Dict[str, Any]]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Tests — Create
 # ---------------------------------------------------------------------------
+
+
+class TestCreateIsCreateIfAbsent:
+    """L1: a create on a taken channel_id is a 409 and mints nothing."""
+
+    async def _create(self, repo, tenant_id, name="Partner"):
+        return await repo.create(
+            tenant_id=tenant_id,
+            channel_id="shared-channel-01",
+            channel_type="api_partner",
+            display_name=name,
+            supported_schema_versions=["1.0"],
+        )
+
+    @pytest.mark.asyncio
+    async def test_other_tenant_is_refused_before_a_secret_is_minted(self):
+        from errors.codes import ErrorCode
+        from errors.exceptions import AppException
+
+        es = FakeESService()
+        vault = FakeCredentialsVault()
+        repo = IntakeChannelRepository(es, vault)
+        channel_a, _ = await self._create(repo, "tenant-a", "A's partner")
+        before = dict(es.indexed_docs["shared-channel-01"]["document"])
+        vault_before = dict(vault.stored)
+
+        with patch(
+            "commerce.services.commerce_persistence_bridge.mirror_current_state_upsert",
+            new=AsyncMock(),
+        ) as mirror, pytest.raises(AppException) as exc_info:
+            await self._create(repo, "tenant-b", "B's partner")
+
+        assert exc_info.value.error_code is ErrorCode.RESOURCE_ALREADY_EXISTS
+        assert exc_info.value.status_code == 409
+        assert "tenant-a" not in repr(exc_info.value.to_dict())
+        assert es.indexed_docs["shared-channel-01"]["document"] == before
+        assert before["hmac_secret_ref"] == channel_a.hmac_secret_ref
+        assert vault.stored == vault_before  # no put for B
+        mirror.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_same_tenant_duplicate_is_also_409(self):
+        from errors.exceptions import AppException
+
+        es = FakeESService()
+        vault = FakeCredentialsVault()
+        repo = IntakeChannelRepository(es, vault)
+        await self._create(repo, "tenant-a")
+        with pytest.raises(AppException) as exc_info:
+            await self._create(repo, "tenant-a", "again")
+        assert exc_info.value.status_code == 409
+        assert len(vault.stored) == 1
+
+    @pytest.mark.asyncio
+    async def test_lost_race_deletes_the_new_secret_and_keeps_the_winner(self):
+        from errors.exceptions import AppException
+
+        es = FakeESService()
+        vault = FakeCredentialsVault()
+        repo = IntakeChannelRepository(es, vault)
+        await self._create(repo, "tenant-a", "A's partner")
+        before = dict(es.indexed_docs["shared-channel-01"]["document"])
+        # The pre-check misses (the winner commits between check and insert).
+        es.document_exists = AsyncMock(return_value=False)
+
+        with pytest.raises(AppException) as exc_info:
+            await self._create(repo, "tenant-b", "B's partner")
+
+        assert exc_info.value.status_code == 409
+        assert es.indexed_docs["shared-channel-01"]["document"] == before
+        assert len(vault.deleted_refs) == 1
+        assert vault.deleted_refs[0].startswith("cred:tenant-b:")
+        assert before["hmac_secret_ref"] in vault.stored
 
 
 class TestCreate:

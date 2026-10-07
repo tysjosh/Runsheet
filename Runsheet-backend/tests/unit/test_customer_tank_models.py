@@ -76,6 +76,13 @@ class _FakeESService:
         self.docs[doc_id] = dict(document)
         return {"_id": doc_id, "result": "created"}
 
+    async def create_document(self, index: str, doc_id: str, document: Dict[str, Any]) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
+
     async def update_document(self, index: str, doc_id: str, partial_doc: Dict[str, Any]) -> Dict[str, Any]:
         self.update_calls.append({"index": index, "id": doc_id, "partial": dict(partial_doc)})
         existing = self.docs.get(doc_id, {})
@@ -329,6 +336,51 @@ class TestRepositoryCreate:
     ):
         with pytest.raises(TypeError):
             await repo.create("tenant-A", 123)  # type: ignore[arg-type]
+
+
+class TestRepositoryCreateIsCreateIfAbsent:
+    """L1: a create on a taken id is a 409, never an overwrite."""
+
+    async def test_other_tenant_cannot_create_over_an_existing_id(
+        self, repo: CustomerTankRepository, es: _FakeESService, monkeypatch
+    ):
+        from errors.codes import ErrorCode
+        from errors.exceptions import AppException
+
+        await repo.create("tenant-A", _base_tank_kwargs())
+        before = dict(es.docs["tank_001"])
+        mirror_calls: List[Any] = []
+
+        async def _record(*args, **kwargs):
+            mirror_calls.append((args, kwargs))
+
+        monkeypatch.setattr(
+            "fuel.customer_tank_models.mirror_current_state_upsert", _record
+        )
+        with pytest.raises(AppException) as exc_info:
+            await repo.create(
+                "tenant-B",
+                _base_tank_kwargs(tenant_id="tenant-B", customer_id="CUST-B"),
+            )
+
+        assert exc_info.value.error_code is ErrorCode.RESOURCE_ALREADY_EXISTS
+        assert exc_info.value.status_code == 409
+        assert "tenant-A" not in repr(exc_info.value.to_dict())
+        assert es.docs["tank_001"] == before
+        assert mirror_calls == []
+        assert await repo.get("tenant-B", "tank_001") is None
+        assert (await repo.get("tenant-A", "tank_001")).customer_id == "CUST-1"
+
+    async def test_same_tenant_duplicate_is_also_409(
+        self, repo: CustomerTankRepository, es: _FakeESService
+    ):
+        from errors.exceptions import AppException
+
+        await repo.create("tenant-A", _base_tank_kwargs())
+        with pytest.raises(AppException) as exc_info:
+            await repo.create("tenant-A", _base_tank_kwargs(customer_id="CUST-2"))
+        assert exc_info.value.status_code == 409
+        assert es.docs["tank_001"]["customer_id"] == "CUST-1"
 
 
 # ---------------------------------------------------------------------------
