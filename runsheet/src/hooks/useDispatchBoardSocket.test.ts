@@ -132,6 +132,29 @@ describe("connection", () => {
     expect(MockWebSocket.instances).toHaveLength(0);
   });
 
+  it("opens exactly one board socket when the date arrives after mount (null → date)", async () => {
+    const hook = renderHook(
+      ({ date }: { date: string | null }) =>
+        useDispatchBoardSocket(date, {}, { enabled: Boolean(date) }),
+      { initialProps: { date: null as string | null } },
+    );
+    await flush();
+    expect(sockets("/ws/dispatch-board")).toHaveLength(0);
+    hook.rerender({ date: "2026-10-08" });
+    await flush();
+    const created = sockets("/ws/dispatch-board");
+    expect(created).toHaveLength(1);
+    expect(
+      created.filter((s) => s.readyState !== MockWebSocket.CLOSED),
+    ).toHaveLength(1);
+    hook.unmount();
+    expect(
+      sockets("/ws/dispatch-board").every(
+        (s) => s.readyState === MockWebSocket.CLOSED,
+      ),
+    ).toBe(true);
+  });
+
   it("reconnects with the new day's URL", async () => {
     const hook = await mount({});
     act(() => board().open());
@@ -140,6 +163,11 @@ describe("connection", () => {
     expect(new URL(board().url).searchParams.get("service_date")).toBe(
       "2026-10-09",
     );
+    expect(
+      sockets("/ws/dispatch-board").filter(
+        (s) => s.readyState !== MockWebSocket.CLOSED,
+      ),
+    ).toHaveLength(1);
   });
 });
 

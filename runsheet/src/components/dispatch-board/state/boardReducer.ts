@@ -79,6 +79,8 @@ export type BoardAction =
       source: LaneSource;
       draftVersion?: number;
       actor?: { user_id: string; name: string | null } | null;
+      /** The signed-in user; their own echoed events don't name a lane actor. */
+      selfUserId?: string | null;
       at?: number;
     }
   | {
@@ -306,7 +308,11 @@ export function boardReducer(
         }
       }
       let laneActors = state.laneActors;
-      if (action.actor && action.source === "socket") {
+      if (
+        action.actor &&
+        action.source === "socket" &&
+        action.actor.user_id !== action.selfUserId
+      ) {
         laneActors = { ...laneActors };
         for (const lane of action.lanes) {
           laneActors[lane.truck_id] = {

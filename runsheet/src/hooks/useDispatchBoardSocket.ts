@@ -203,16 +203,23 @@ export function useDispatchBoardSocket(
 
   const { state, isConnected, connect, send } = useWebSocket("", wsOptions);
 
-  // `useWebSocket` opens and closes with `autoConnect`; a new day needs a new URL.
-  const lastDate = useRef(serviceDate);
+  // `useWebSocket` opens and closes with `autoConnect`; a new day on an
+  // already-live socket needs a new URL. Going live (e.g. `null` → date) is
+  // left to `autoConnect`, so only one socket opens.
+  const lastLive = useRef({ date: serviceDate, live });
   useEffect(() => {
-    if (lastDate.current === serviceDate) return;
-    lastDate.current = serviceDate;
-    if (live) {
+    const prev = lastLive.current;
+    lastLive.current = { date: serviceDate, live };
+    if (!live) return;
+    if (!prev.live) {
       everConnected.current = false;
       setDropped(false);
-      connect();
+      return;
     }
+    if (prev.date === serviceDate) return;
+    everConnected.current = false;
+    setDropped(false);
+    connect();
   }, [live, serviceDate, connect]);
 
   const paused = live && dropped && state !== "connected";

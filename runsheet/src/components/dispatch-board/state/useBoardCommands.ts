@@ -172,16 +172,37 @@ export function touchedLanes(
   return out;
 }
 
+/** Order ids of the command's target pool: the named load, else the whole lane. */
+function targetPool(
+  lane: LaneView | undefined,
+  loadId: string | null | undefined,
+): string[] {
+  if (!lane) return [];
+  if (loadId && loadId !== "new") {
+    return (lane.loads.find((x) => x.load_id === loadId)?.stops ?? []).map(
+      (s) => s.order_id,
+    );
+  }
+  return stopsOf(lane);
+}
+
 /**
  * True when a conflict's returned lanes already contain the command's
  * intended result, so the command (or an identical one) already landed
  * (K4.5, covers ids pruned after 24 h). Commands whose result can't be read
  * off the lanes return `false`.
+ *
+ * `before` is the lanes held when the command was sent. For assign/move, an
+ * explicit `target.index` must match the stops' position (the engine counts
+ * the index after the moved stops are taken out); without one, a reorder of
+ * stops that were already in the target pool can't be told apart from "not
+ * applied" and returns `false`.
  */
 export function isAlreadyApplied(
   command: BoardCommand,
   lanes: LaneView[],
   missingLanes: string[] = [],
+  before: LaneView[] = [],
 ): boolean {
   const lane = (t: string) => lanes.find((l) => l.truck_id === t);
   switch (command.type) {
@@ -200,14 +221,17 @@ export function isAlreadyApplied(
     case "move_stops": {
       const l = lane(command.truck_id);
       if (!l) return false;
-      const loadId = command.target.load_id;
-      const pool =
-        loadId && loadId !== "new"
-          ? (l.loads.find((x) => x.load_id === loadId)?.stops ?? []).map(
-              (s) => s.order_id,
-            )
-          : stopsOf(l);
-      return command.order_ids.every((id) => pool.includes(id));
+      const { load_id: loadId, index } = command.target;
+      const pool = targetPool(l, loadId);
+      if (!command.order_ids.every((id) => pool.includes(id))) return false;
+      if (loadId && loadId !== "new" && index != null) {
+        return command.order_ids.every((id, i) => pool[index + i] === id);
+      }
+      const prior = targetPool(
+        before.find((b) => b.truck_id === command.truck_id),
+        loadId,
+      );
+      return !command.order_ids.every((id) => prior.includes(id));
     }
     case "unassign_orders":
       return (
@@ -333,9 +357,19 @@ export function useBoardCommands({
   stateRef.current = state;
   const knownVersions = useRef<Record<string, number>>({});
   const queue = useRef<Promise<unknown>>(Promise.resolve());
-  const failed = useRef<Map<string, BoardCommand>>(new Map());
+  const failed = useRef<
+    Map<string, { command: BoardCommand; serviceDate: string }>
+  >(new Map());
   const outcomeRef = useRef(onOutcome);
   outcomeRef.current = onOutcome;
+  // Lane versions are per (tenant, service day): a new day starts with no
+  // known versions and no retryable commands.
+  const dayRef = useRef(serviceDate);
+  if (dayRef.current !== serviceDate) {
+    dayRef.current = serviceDate;
+    knownVersions.current = {};
+    failed.current = new Map();
+  }
 
   const versionOf = useCallback((truckId: string) => {
     const held = stateRef.current.lanesById[truckId]?.version ?? 0;
@@ -356,8 +390,11 @@ export function useBoardCommands({
     async (
       command: BoardCommand,
       touched: string[],
+      date: string,
     ): Promise<CommandOutcome> => {
       const id = command.client_command_id;
+      const sameDay = () => dayRef.current === date;
+      const before = Object.values(stateRef.current.lanesById);
       dispatch({
         type: "commandStarted",
         commandId: id,
@@ -373,7 +410,7 @@ export function useBoardCommands({
         draftVersion: number | undefined,
         undoable: boolean,
       ) => {
-        remember(lanes);
+        if (sameDay()) remember(lanes);
         startTransition(() => {
           dispatch({
             type: "commandSettled",
@@ -387,13 +424,13 @@ export function useBoardCommands({
         });
       };
       const refuse = (lanes?: LaneView[]) => {
-        if (lanes) remember(lanes);
+        if (lanes && sameDay()) remember(lanes);
         startTransition(() => {
           dispatch({ type: "commandFailed", commandId: id, lanes });
         });
       };
       try {
-        const response = await send(serviceDate, command);
+        const response = await send(date, command);
         failed.current.delete(id);
         settle(
           response.lanes,
@@ -411,7 +448,7 @@ export function useBoardCommands({
         const reason = boardErrorReason(err);
         const details = detailsOf(err);
         if (isNetworkFailure(err)) {
-          failed.current.set(id, command);
+          if (sameDay()) failed.current.set(id, { command, serviceDate: date });
           refuse();
           return { kind: "network", command, error: err };
         }
@@ -423,7 +460,7 @@ export function useBoardCommands({
           const missing = (
             Array.isArray(details.missing_lanes) ? details.missing_lanes : []
           ) as string[];
-          if (isAlreadyApplied(command, lanes, missing)) {
+          if (isAlreadyApplied(command, lanes, missing, before)) {
             settle(lanes, undefined, false);
             const response: CommandResponse = {
               draft_version: stateRef.current.draftVersion,
@@ -458,7 +495,7 @@ export function useBoardCommands({
         return { kind: "error", command, error: err, code, reason };
       }
     },
-    [dispatch, remember, send, serviceDate],
+    [dispatch, remember, send],
   );
 
   /**
@@ -471,6 +508,7 @@ export function useBoardCommands({
       command: BoardCommand,
       touched: string[],
       stampVersions: boolean,
+      date: string,
     ): Promise<CommandOutcome> => {
       let resolveOutcome: (o: CommandOutcome) => void = () => {};
       const result = new Promise<CommandOutcome>((resolve) => {
@@ -479,6 +517,23 @@ export function useBoardCommands({
       startTransition(async () => {
         addOptimistic(optimisticFor(command, touched));
         const step = queue.current.then(async () => {
+          // The board moved to another day (or hasn't loaded it yet) before
+          // this command's turn: its lanes and versions belong to another day.
+          const held = stateRef.current.snapshot?.service_date;
+          if (dayRef.current !== date || (held && held !== date)) {
+            const outcome: CommandOutcome = {
+              kind: "error",
+              command,
+              error: new Error("Not saved. The board changed to another day."),
+              code: "BOARD_DAY_CHANGED",
+            };
+            try {
+              outcomeRef.current?.(outcome);
+            } finally {
+              resolveOutcome(outcome);
+            }
+            return;
+          }
           let toSend = command;
           let lanes = touched;
           if (stampVersions) {
@@ -496,7 +551,7 @@ export function useBoardCommands({
               toSend = { ...command, expected_lane_versions: versions };
             }
           }
-          const outcome = await transmit(toSend, lanes);
+          const outcome = await transmit(toSend, lanes, date);
           try {
             outcomeRef.current?.(outcome);
           } finally {
@@ -521,21 +576,25 @@ export function useBoardCommands({
         expected_lane_versions: {},
         input_modality: modality,
       } as BoardCommand;
-      return enqueue(command, touched, true);
+      return enqueue(command, touched, true, dayRef.current);
     },
     [enqueue],
   );
 
-  /** Re-sends a command that failed on the network, with the same id and body. */
+  /**
+   * Re-sends a command that failed on the network, with the same id and body,
+   * to the day it was made for. Failed commands are dropped on a day change.
+   */
   const retry = useCallback(
     (commandId: string): Promise<CommandOutcome> | null => {
-      const command = failed.current.get(commandId);
-      if (!command) return null;
+      const entry = failed.current.get(commandId);
+      if (!entry || entry.serviceDate !== dayRef.current) return null;
+      const { command } = entry;
       const keys = Object.keys(command.expected_lane_versions);
       const touched = keys.length
         ? keys
         : touchedLanes(stateRef.current, command);
-      return enqueue(command, touched, false);
+      return enqueue(command, touched, false, entry.serviceDate);
     },
     [enqueue],
   );

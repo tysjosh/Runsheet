@@ -32,6 +32,7 @@ import {
   type LaneState,
   type LaneView,
 } from "../../services/dispatchBoardApi";
+import { getCurrentUserId } from "../../utils/auth";
 import {
   Badge,
   EmptyState,
@@ -61,10 +62,12 @@ import {
   clampDate,
   parseView,
   readStoredView,
+  readStoredZone,
   serverTrayFilters,
   todayIn,
   viewToParams,
   writeStoredView,
+  writeStoredZone,
   zoneAbbreviation,
 } from "./viewState";
 
@@ -147,12 +150,15 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   );
   const [state, dispatch] = useReducer(boardReducer, initialBoardState);
   const [failure, setFailure] = useState<LoadFailure | null>(null);
-  const [loading, setLoading] = useState(true);
   const [presence, setPresence] = useState<BoardPresenceUser[]>([]);
   const { toasts, addToast, dismissToast } = useToasts();
 
   const snapshot = state.snapshot;
-  const timezone = snapshot?.timezone ?? null;
+  const [storedZone] = useState(() => readStoredZone(storage()));
+  const timezone = snapshot?.timezone ?? storedZone;
+  useEffect(() => {
+    if (snapshot?.timezone) writeStoredZone(storage(), snapshot.timezone);
+  }, [snapshot?.timezone]);
   const today = todayIn(timezone);
   const serviceDate = clampDate(view.date ?? today, today);
 
@@ -191,7 +197,8 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       const controller = new AbortController();
       loadAbort.current = controller;
       const date = dateRef.current;
-      if (!background) setLoading(true);
+      // A foreground load shows the skeleton, not a previous failure.
+      if (!background) setFailure(null);
       try {
         const snap: BoardSnapshot = await getBoard(date, {
           filters: serverFiltering.current
@@ -205,15 +212,12 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
         setFailure(null);
       } catch (err) {
         if (isAbortError(err) || controller.signal.aborted) return;
-        // A background refresh keeps showing the last good board.
-        if (!background || !snapshotRef.current) {
+        // A background refresh keeps showing the last good board of this day.
+        if (!background || snapshotRef.current?.service_date !== date) {
           setFailure(classifyLoadError(err, "The board could not be loaded."));
         }
       } finally {
-        if (loadAbort.current === controller) {
-          loadAbort.current = null;
-          setLoading(false);
-        }
+        if (loadAbort.current === controller) loadAbort.current = null;
       }
     },
     [],
@@ -264,6 +268,17 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   // ── Live updates ──────────────────────────────────────────────────────────
   const lanesRef = useRef(state.lanesById);
   lanesRef.current = state.lanesById;
+  // Own echoed events must not name the current user as "the other dispatcher".
+  const selfUserId = useRef<string | null>(null);
+  useEffect(() => {
+    let active = true;
+    void getCurrentUserId().then((id) => {
+      if (active) selfUserId.current = id;
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
   const socket = useDispatchBoardSocket(
     snapshot ? serviceDate : null,
     {
@@ -278,6 +293,7 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
           lanes: e.lanes as LaneView[],
           draftVersion: e.draft_version,
           actor: e.actor,
+          selfUserId: selfUserId.current,
         });
       },
       onLaneStale: (e) => void loadLanes(e.truck_ids),
@@ -301,7 +317,15 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     (o: CommandOutcome) => {
       switch (o.kind) {
         case "conflict": {
-          const truck = o.lanes[0]?.truck_id ?? "";
+          // Name the lane whose version moved, not just the first returned.
+          const expected = o.command.expected_lane_versions;
+          const changed =
+            o.lanes.find(
+              (l) =>
+                expected[l.truck_id] !== undefined &&
+                l.version !== expected[l.truck_id],
+            ) ?? o.lanes[0];
+          const truck = changed?.truck_id ?? "";
           const actor = state.laneActors[truck]?.name;
           addToast(announceConflict(truck, actor), "error");
           break;
@@ -384,8 +408,10 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     />
   );
 
+  // The held snapshot is for another day while a day switch loads or failed.
+  const currentDay = snapshot?.service_date === serviceDate;
   let body: React.ReactNode;
-  if (failure && !snapshot) {
+  if (failure && !currentDay) {
     body = (
       <LoadErrorState
         failure={failure}
@@ -395,7 +421,7 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
         onRetry={() => void load()}
       />
     );
-  } else if (!snapshot || (loading && snapshot.service_date !== serviceDate)) {
+  } else if (!snapshot || !currentDay) {
     body = <BoardSkeleton />;
   } else if (
     snapshot.lanes.length === 0 &&
@@ -497,7 +523,7 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       data-zoom={view.zoom}
     >
       {toolbar}
-      {snapshot && (
+      {snapshot && currentDay && (
         <BoardBanners
           readOnlyReason={readOnly ? readOnlyReason : null}
           paused={socket.paused}

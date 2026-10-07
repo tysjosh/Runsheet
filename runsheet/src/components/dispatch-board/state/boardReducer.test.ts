@@ -109,6 +109,31 @@ describe("higher version wins", () => {
       at: 1000,
     });
   });
+
+  it("does not record the signed-in user's own echoed events as the lane actor", () => {
+    const state = run(
+      [
+        {
+          type: "lanesReceived",
+          source: "socket",
+          lanes: [makeLane("T1", 4)],
+          actor: { user_id: "u2", name: "ana" },
+          at: 1000,
+        },
+        {
+          type: "lanesReceived",
+          source: "socket",
+          lanes: [makeLane("T1", 5)],
+          actor: { user_id: "u1", name: "me" },
+          selfUserId: "u1",
+          at: 2000,
+        },
+      ],
+      loaded(),
+    );
+    expect(state.lanesById.T1.version).toBe(5);
+    expect(state.laneActors.T1).toMatchObject({ userId: "u2", name: "ana" });
+  });
 });
 
 describe("pending lanes hold events", () => {

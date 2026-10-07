@@ -23,6 +23,10 @@ jest.mock("../../services/dispatchBoardApi", () => {
   const actual = jest.requireActual("../../services/dispatchBoardApi");
   return { ...actual, getBoard: jest.fn(), sendBoardCommand: jest.fn() };
 });
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserId: jest.fn().mockResolvedValue("u1"),
+}));
 const socketState = { paused: false };
 let socketHandlers: import("../../hooks/useDispatchBoardSocket").BoardSocketHandlers =
   {};
@@ -157,6 +161,25 @@ describe("load states", () => {
     expect(await screen.findByText("Truck T1")).toBeInTheDocument();
   });
 
+  it("a failed day switch shows the error, not the previous day's board (R21.5)", async () => {
+    mockGetBoard.mockResolvedValueOnce(
+      snap({ read_only: true, read_only_reason: "past_service_day" }),
+    );
+    mockGetBoard.mockRejectedValueOnce(
+      new BoardApiError("Service temporarily unavailable.", 503),
+    );
+    renderBoard();
+    await screen.findByText("Truck T1");
+    fireEvent.click(screen.getByRole("button", { name: "Next day" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Service temporarily unavailable.",
+    );
+    expect(screen.queryByText("Truck T1")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Lanes" })).toBeNull();
+    expect(screen.queryByText(/This day is in the past/)).toBeNull();
+    expect(mockGetBoard.mock.calls[1][0]).not.toBe(today);
+  });
+
   it("renders lanes with their state badge", async () => {
     mockGetBoard.mockResolvedValue(
       snap({ lanes: [makeLane("T1", 1, { state: "modified" })] }),
@@ -192,7 +215,7 @@ describe("banners", () => {
 
   it("names each degraded source (R21.6)", async () => {
     mockGetBoard.mockResolvedValue(
-      snap({ degraded_sources: ["hos", "delivery_priorities"] }),
+      snap({ degraded_sources: ["hos", "delivery_priorities", "locations"] }),
     );
     renderBoard();
     const region = await screen.findByRole("status", {
@@ -203,6 +226,9 @@ describe("banners", () => {
     );
     expect(region).toHaveTextContent(
       "Delivery priorities unavailable, orders are sorted by delivery window.",
+    );
+    expect(region).toHaveTextContent(
+      "Delivery locations unavailable, stop times and route checks are estimates.",
     );
   });
 
@@ -261,6 +287,25 @@ describe("view state and toolbar", () => {
     expect(url.get("tab")).toBe("board");
     expect(url.get("date")).not.toBe(today);
     await waitFor(() => expect(mockGetBoard).toHaveBeenCalledTimes(2));
+  });
+
+  it("remembers the tenant zone so the first fetch uses the tenant's today (R2.2)", async () => {
+    mockGetBoard.mockResolvedValue(
+      snap({
+        timezone: "Pacific/Kiritimati",
+        service_date: todayIn("Pacific/Kiritimati"),
+      }),
+    );
+    const first = renderBoard();
+    await screen.findByText("Truck T1");
+    expect(
+      window.localStorage.getItem("runsheet.dispatchBoard.timezone.v1"),
+    ).toBe("Pacific/Kiritimati");
+    first.unmount();
+    mockGetBoard.mockClear();
+    renderBoard();
+    await screen.findByText("Truck T1");
+    expect(mockGetBoard.mock.calls[0][0]).toBe(todayIn("Pacific/Kiritimati"));
   });
 
   it("zoom, density and search go to the URL and local storage (R4.4)", async () => {

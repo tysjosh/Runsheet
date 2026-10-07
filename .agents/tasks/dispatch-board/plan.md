@@ -112,12 +112,12 @@ Decisions taken in planning:
 
 ## Phase 5: Board interactions
 
-- [ ] 26. Trays: `OrderTray` (cards with all fields, server order kept as the default sort, on-hold group built from `block_reason: "on_hold"` with Release hold and non-draggable cards, truncation banner "Showing the 1,000 earliest delivery windows. Filter to narrow the list."), `DriverTray` (qualification, HOS today only, ineligible reasons), `TruckTray` (add lane). RTL tests. — R3.1–R3.6
-- [ ] 27. Grid: `BoardGrid` windowing, `TimeAxis`, `Lane`, `LaneHeader` (driver slot with "Pair {name}" from `suggested_driver`, gauge, badges, accessible name), `LoadBlock`, `StopCard`, HOS window shading on today only, lane state badges, Timeline/Sequence layouts, collapsed lanes, `ReassignShelf`, lane menu with "Remove lane" disabled for ever-published lanes and the reason text. RTL tests incl. accessible names, the Pair button sending `pair_driver`, no shading on a future day, and the disabled Remove lane state. — R2.5, R2.6, R2.8, R2.9, R2.10, R4.3, R4.5, R6.5, R7.5, R10.2, R13.2, R13.5, R19.3
+- [ ] 26. Trays: `OrderTray` (cards with all fields, server order kept as the default sort, on-hold group built from `block_reason: "on_hold"` with Release hold and non-draggable cards, truncation banner "Showing the 1,000 earliest delivery windows. Filter to narrow the list."), `DriverTray` (qualification, HOS today only, ineligible reasons), `TruckTray` (add lane), toolbar filter chips and search applied to tray cards (matches highlighted, others dimmed, not removed). RTL tests. — R3.1–R3.6, R4.1, R4.2
+- [ ] 27. Grid: `BoardGrid` windowing, `TimeAxis`, `Lane`, `LaneHeader` (driver slot with "Pair {name}" from `suggested_driver`, gauge, badges, accessible name), `LoadBlock`, `StopCard`, HOS window shading on today only, lane state badges, Timeline/Sequence layouts, collapsed lanes, `ReassignShelf`, lane menu with "Remove lane" disabled for ever-published lanes and the reason text, `?truck=` deep link scrolls the windowed grid to that lane (Phase 4 selects `?order=` only), toolbar filter chips applied to lanes (R4.1) and search highlighting matches and dimming non-matching cards, never removing them (R4.2) (Phase 4 holds both as state only; tray side in task 26). RTL tests incl. accessible names, the Pair button sending `pair_driver`, no shading on a future day, the disabled Remove lane state, the `?truck=` scroll and filtered cards. — R1.6, R2.5, R2.6, R2.8, R2.9, R2.10, R4.1, R4.2, R4.3, R4.5, R6.5, R7.5, R10.2, R13.2, R13.5, R19.3
 - [ ] 28. `CompartmentGauge` and `CheckChip` with text alternatives and token colours; hover preview from candidate results. Tests: never colour-only, gauge text. — R5.3, R5.4, R19.4, R9.1, R9.2
 - [ ] 29. DnD adapter (`dnd/`) and wiring: draggable cards/stops/loads/drivers/trucks, lane/slot/driver/tray/shelf targets, insertion snap, custom preview chip, auto-scroll, drag-start batch validate, debounced position validate with abort, drop → `useBoardCommands`. Jest tests invoke drop handlers; Playwright drags in task 37. — R5.1, R5.2, R5.4, R5.7, R6.1, R7.1, R7.2, R8.3–R8.5, R4.5
 - [ ] 30. Non-drag paths: card menus, `AssignToMenu` with disabled blocked lanes and reasons, position step, Place mode with banner and Escape, multi-select. Tests assert payload parity with drag for every action. — R18.1–R18.3, R5.7, R6.1, R7.1–R7.3
-- [ ] 31. Keyboard model and shortcuts: roving-tabindex grid and listboxes, shortcut map, input suppression, single-key toggle, help dialog, focus return, focus-not-obscured margins. RTL tests. — R18.4–R18.6, R11.4
+- [ ] 31. Keyboard model and shortcuts: roving-tabindex grid and listboxes, shortcut map, input suppression, single-key toggle, help dialog, focus return, focus-not-obscured margins, `BoardToolbar` `role="toolbar"` given APG arrow-key roving (or changed to a labelled `role="group"`; Phase 4 review P4-7). RTL tests. — R18.4–R18.6, R11.4
 - [ ] 32. Live regions and announcements wired for every command result, conflict (with the other dispatcher's name), undo refusal, publish result (assertive for failures). RTL tests on region text. — R19.1, R19.2, R14.2, R11.2, R12.8
 
 ## Phase 6: Publish, after-publish, suggestions, map, history UI
@@ -144,10 +144,10 @@ Decisions taken in planning:
 | Requirement | Tasks |
 |---|---|
 | D8 | 5c, 11 |
-| R1 | 12, 13, 25, 41, 42 |
+| R1 | 12, 13, 25, 27, 41, 42 |
 | R2 | 8, 10, 11, 13, 25, 27 |
 | R3 | 9, 11, 25, 26 |
-| R4 | 25, 27, 29, 38 |
+| R4 | 25, 26, 27, 29, 38 |
 | R5 | 8, 9, 28, 29, 30, 33, 37 |
 | R6 (incl. R6.5) | 3, 9, 10, 11, 27, 29, 30, 37 |
 | R7 (incl. R7.5) | 9, 27, 29, 30, 37 |

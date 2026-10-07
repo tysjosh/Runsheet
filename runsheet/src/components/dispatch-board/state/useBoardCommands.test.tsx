@@ -181,6 +181,87 @@ describe("isAlreadyApplied", () => {
       ),
     ).toBe(expected);
   });
+
+  // Reorders: the stops were already in the target before the command.
+  const before = [
+    makeLane("T1", 3, { loads: [makeLoad("L1", ["O1", "O2", "O3"])] }),
+  ];
+  it.each([
+    [
+      "same-load reorder refused (position unchanged)",
+      {
+        type: "move_stops",
+        order_ids: ["O1"],
+        truck_id: "T1",
+        target: { load_id: "L1", index: 2 },
+      },
+      [makeLane("T1", 4, { loads: [makeLoad("L1", ["O1", "O3", "O2"])] })],
+      false,
+    ],
+    [
+      "same-load reorder landed at the index",
+      {
+        type: "move_stops",
+        order_ids: ["O1"],
+        truck_id: "T1",
+        target: { load_id: "L1", index: 2 },
+      },
+      [makeLane("T1", 4, { loads: [makeLoad("L1", ["O2", "O3", "O1"])] })],
+      true,
+    ],
+    [
+      "multi-stop move landed contiguously at the index",
+      {
+        type: "move_stops",
+        order_ids: ["O2", "O3"],
+        truck_id: "T1",
+        target: { load_id: "L1", index: 0 },
+      },
+      [makeLane("T1", 4, { loads: [makeLoad("L1", ["O2", "O3", "O1"])] })],
+      true,
+    ],
+    [
+      "same-lane best-fit move can't be inferred",
+      { type: "move_stops", order_ids: ["O1"], truck_id: "T1", target: {} },
+      [makeLane("T1", 4, { loads: [makeLoad("L1", ["O2", "O1", "O3"])] })],
+      false,
+    ],
+    [
+      "same-lane move to a new load can't be inferred",
+      {
+        type: "move_stops",
+        order_ids: ["O1"],
+        truck_id: "T1",
+        target: { load_id: "new" },
+      },
+      [makeLane("T1", 4, { loads: [makeLoad("L1", ["O1", "O2", "O3"])] })],
+      false,
+    ],
+    [
+      "move from another load into L2 landed",
+      {
+        type: "move_stops",
+        order_ids: ["O1"],
+        truck_id: "T1",
+        target: { load_id: "L2" },
+      },
+      [
+        makeLane("T1", 4, {
+          loads: [makeLoad("L1", ["O2", "O3"]), makeLoad("L2", ["O1"])],
+        }),
+      ],
+      true,
+    ],
+  ])("%s", (_n, c, lanes, expected) => {
+    expect(
+      isAlreadyApplied(
+        { ...meta, ...c } as BoardCommand,
+        lanes as LaneView[],
+        [],
+        before,
+      ),
+    ).toBe(expected);
+  });
 });
 
 describe("useBoardCommands", () => {
@@ -393,6 +474,114 @@ describe("useBoardCommands", () => {
     expect(result.current.state.redoStack.map((e) => e.commandId)).toEqual([
       id,
     ]);
+  });
+
+  describe("service-day change", () => {
+    function setupDays(send: Send, onOutcome?: (o: CommandOutcome) => void) {
+      return renderHook(
+        ({ date }: { date: string }) => {
+          const [state, dispatch] = useReducer(
+            boardReducer,
+            initialBoardState,
+            (s) =>
+              boardReducer(s, {
+                type: "snapshotLoaded",
+                snapshot: makeSnapshot({ lanes: startLanes() }),
+              }),
+          );
+          const commands = useBoardCommands({
+            serviceDate: date,
+            state,
+            dispatch,
+            send,
+            onOutcome,
+          });
+          return { state, dispatch, commands };
+        },
+        { initialProps: { date: "2026-10-08" } },
+      );
+    }
+
+    function loadDay(
+      hook: ReturnType<typeof setupDays>,
+      date: string,
+      lanes: LaneView[],
+    ) {
+      hook.rerender({ date });
+      act(() => {
+        hook.result.current.dispatch({
+          type: "snapshotLoaded",
+          snapshot: makeSnapshot({ service_date: date, lanes }),
+        });
+      });
+    }
+
+    it("a new day sends its own lane versions, not the previous day's higher ones", async () => {
+      const send: Send = jest
+        .fn()
+        .mockResolvedValueOnce(ok([makeLane("T1", 12, { driver_id: "D9" })]))
+        .mockResolvedValueOnce(ok([makeLane("T1", 3, { driver_id: "D9" })]));
+      const hook = setupDays(send);
+      await act(async () => {
+        await hook.result.current.commands.pair("T1", "D9");
+      });
+      expect(send.mock.calls[0][0]).toBe("2026-10-08");
+      loadDay(hook, "2026-10-09", [makeLane("T1", 2)]);
+      await act(async () => {
+        await hook.result.current.commands.pair("T1", "D9");
+      });
+      expect(send.mock.calls[1][0]).toBe("2026-10-09");
+      expect(send.mock.calls[1][1].expected_lane_versions).toEqual({ T1: 2 });
+    });
+
+    it("a network-failed command from the previous day can't be retried on the new day", async () => {
+      const send: Send = jest
+        .fn()
+        .mockRejectedValueOnce(new ApiTimeoutError("timed out"));
+      const hook = setupDays(send);
+      await act(async () => {
+        await hook.result.current.commands.assign(["O9"], "T2");
+      });
+      const id = send.mock.calls[0][1].client_command_id;
+      expect(hook.result.current.commands.hasFailed(id)).toBe(true);
+      loadDay(hook, "2026-10-09", [makeLane("T2", 1)]);
+      expect(hook.result.current.commands.hasFailed(id)).toBe(false);
+      expect(hook.result.current.commands.retry(id)).toBeNull();
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it("a command made before the new day's board loads is not sent", async () => {
+      const send: Send = jest.fn();
+      const outcomes: CommandOutcome[] = [];
+      const hook = setupDays(send, (o) => outcomes.push(o));
+      hook.rerender({ date: "2026-10-09" });
+      await act(async () => {
+        await hook.result.current.commands.pair("T1", "D9");
+      });
+      expect(send).not.toHaveBeenCalled();
+      expect(outcomes[0]).toMatchObject({
+        kind: "error",
+        code: "BOARD_DAY_CHANGED",
+      });
+      expect(hook.result.current.state.pending).toEqual({});
+    });
+  });
+
+  it("a refused same-load reorder is a conflict, not a success", async () => {
+    const lanes = [makeLane("T1", 9, { loads: [makeLoad("L1", ["O1"])] })];
+    const send: Send = jest.fn().mockRejectedValue(
+      new BoardApiError("conflict", 409, "BOARD_LANE_CONFLICT", {
+        reason: "version_changed",
+        lanes,
+        missing_lanes: [],
+      }),
+    );
+    const outcomes: CommandOutcome[] = [];
+    const { result } = setup(send, (o) => outcomes.push(o));
+    await act(async () => {
+      await result.current.commands.move(["O1"], "T1", {});
+    });
+    expect(outcomes[0].kind).toBe("conflict");
   });
 
   it("acknowledge sends no lane versions", async () => {

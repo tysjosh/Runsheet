@@ -207,6 +207,34 @@ export function viewToParams(
   return p;
 }
 
+/** Last tenant zone seen in a snapshot, so "today" is right before the first load. */
+export const ZONE_STORAGE_KEY = "runsheet.dispatchBoard.timezone.v1";
+
+export function readStoredZone(
+  storage: Storage | null | undefined,
+): string | null {
+  try {
+    const zone = storage?.getItem(ZONE_STORAGE_KEY) ?? null;
+    if (!zone || zone.length > 64) return null;
+    // Rejects anything that isn't a valid IANA zone.
+    new Intl.DateTimeFormat("en-CA", { timeZone: zone });
+    return zone;
+  } catch {
+    return null;
+  }
+}
+
+export function writeStoredZone(
+  storage: Storage | null | undefined,
+  zone: string,
+): void {
+  try {
+    storage?.setItem(ZONE_STORAGE_KEY, zone);
+  } catch {
+    // Storage full or blocked: the browser zone is used until the snapshot loads.
+  }
+}
+
 /** Today's calendar date in an IANA zone (falls back to the browser zone). */
 export function todayIn(
   timeZone: string | null | undefined,

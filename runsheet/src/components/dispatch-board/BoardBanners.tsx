@@ -31,6 +31,8 @@ export const DEGRADED_SOURCE_TEXT: Record<string, string> = {
   delivery_priorities:
     "Delivery priorities unavailable, orders are sorted by delivery window",
   suggestions: "Agent suggestions unavailable",
+  locations:
+    "Delivery locations unavailable, stop times and route checks are estimates",
 };
 
 export function degradedText(source: string): string {

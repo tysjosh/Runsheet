@@ -8,11 +8,14 @@ import {
   EMPTY_FILTERS,
   parseView,
   readStoredView,
+  readStoredZone,
   serverTrayFilters,
   todayIn,
   VIEW_STORAGE_KEY,
   viewToParams,
   writeStoredView,
+  writeStoredZone,
+  ZONE_STORAGE_KEY,
 } from "./viewState";
 
 beforeEach(() => window.localStorage.clear());
@@ -135,5 +138,18 @@ describe("serverTrayFilters", () => {
       product: undefined,
       window: undefined,
     });
+  });
+});
+
+describe("stored tenant zone", () => {
+  it("round-trips a valid zone and rejects bad or missing values", () => {
+    const s = window.localStorage;
+    expect(readStoredZone(s)).toBeNull();
+    writeStoredZone(s, "America/Chicago");
+    expect(s.getItem(ZONE_STORAGE_KEY)).toBe("America/Chicago");
+    expect(readStoredZone(s)).toBe("America/Chicago");
+    s.setItem(ZONE_STORAGE_KEY, "Not/AZone");
+    expect(readStoredZone(s)).toBeNull();
+    expect(readStoredZone(null)).toBeNull();
   });
 });

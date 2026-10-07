@@ -325,6 +325,29 @@ Status: tasks 21–25 done (no review file existed, so implemented from scratch)
 - **No-trucks setup link** goes to `/dashboard/fleet` (Truck Compartments is reached from the fleet table; there is no standalone route).
 - **Disk:** started at 6.1 GB free; cleared the uv cache (3.4 GB) and npm cache; 6.2 GB free at the end. No Docker build, no volume prune.
 
+#### Review fix iteration (phase4-review.json CHANGES_REQUESTED)
+Dependencies unchanged: `@atlaskit/pragmatic-drag-and-drop@4.0.0`, `-hitbox@3.0.0`, `-auto-scroll@3.2.1`, `-live-region@2.1.0` (exact pins, no lockfile change in this iteration). No user-visible behaviour beyond the spec was changed.
+
+| Finding | Fix | Tests |
+|---|---|---|
+| P4-1 HIGH (R14.1, R14.3) | `useBoardCommands` keeps `knownVersions` and the failed-command map per service day: both reset when `serviceDate` changes. Each command carries the day it was made for; `transmit` sends to that day and only records versions/failures if it is still the current day. A failed command stores its day; `retry` returns `null` for another day. A queued command whose turn comes after a day change (or before the new day's snapshot is loaded) is not sent and resolves `kind: "error", code: "BOARD_DAY_CHANGED"` ("Not saved. The board changed to another day."). | `useBoardCommands.test.tsx` "service-day change": new day sends its own lower versions to the new date; previous day's failed command can't be retried; command made before the new day loads isn't sent. |
+| P4-2 MEDIUM (R14.2) | `isAlreadyApplied(command, lanes, missing, before)`: for `assign_orders`/`move_stops` with `load_id` + `index`, the stops must sit contiguously at `index` (engine counts the index after the moved stops are taken out, `dispatch_board_engine._place`); without an index, stops already in the target pool before the command (a reorder) return `false`. The hook passes the lanes held when it sent. | 6 reorder cases in the `isAlreadyApplied` table (refused reorder, landed reorder, multi-stop at index, best-fit same-lane, same-lane to new load, move into another load) + hook test "a refused same-load reorder is a conflict". |
+| P4-3 MEDIUM (R15.6) | `useDispatchBoardSocket` reconnects on a date change only when the socket was already live on another date; going live (`null` → date, or enabled) is left to `useWebSocket`'s `autoConnect`, so one socket opens. | "opens exactly one board socket when the date arrives after mount (null → date)" (one created, one open, all closed on unmount); the day-change test also asserts a single open socket. |
+| P4-4 MEDIUM (R21.5, R2.2) | `DispatchBoard` shows `LoadErrorState` whenever a load failed and the held snapshot isn't for the selected day, the skeleton while the selected day isn't loaded, and banners only for the current day's snapshot. A foreground load clears the previous failure; a background failure is suppressed only when the held snapshot is for that day. The unused `loading` state was removed. | RTL "a failed day switch shows the error, not the previous day's board". |
+| P4-5 MEDIUM (R14.2, Q13) | The reducer skips `laneActors` for the signed-in user's own echoed events (`lanesReceived.selfUserId`, from `getCurrentUserId()`); the conflict toast names the lane whose version differs from the command's expected version instead of `lanes[0]`. The live-region wiring stays in task 32. | `boardReducer.test.ts` "does not record the signed-in user's own echoed events". |
+| P4-6 LOW (R2.2) | The last snapshot's tenant zone is stored (`runsheet.dispatchBoard.timezone.v1`, validated as an IANA zone) and used for "today" and the clamp before the first snapshot. A first-ever visit still uses the browser zone until the snapshot arrives. | `viewState.test.ts` round-trip/reject; RTL "remembers the tenant zone so the first fetch uses the tenant's today". |
+| P4-7 LOW (R18.4, N5) | Deferred to task 31 (plan text updated: APG arrow-key roving for the toolbar or a labelled group). | — |
+| P4-8 LOW (R1.6, R4.1, R4.2) | Plan updated: `?truck=` scroll in task 27; filters/search applied to lanes in task 27 and to tray cards in task 26; coverage table R1 → +27, R4 → +26. | — |
+| P4-9 LOW (R21.6) | `DEGRADED_SOURCE_TEXT.locations`: "Delivery locations unavailable, stop times and route checks are estimates". | Degraded-sources RTL test now includes `locations`. |
+
+Commands (cwd `.worktrees/dispatch-board/runsheet`; node_modules was present, no `npm ci` needed):
+- New tests run against the pre-fix code (`git stash` of the three fixed files): 9 failed; with the fixes they pass.
+- `npx tsc --noEmit` → exit 0.
+- `npm run lint` (`biome check`) → 400 files, no errors, no warnings (changed files formatted with `biome check --write`).
+- `npm test -- --ci` → **90 suites passed, 1082 passed, 1 skipped, 0 failed** (was 1067).
+- `npm run build` → **not run**: 2.0–3.0 GB free on the shared disk (other work is using it), well below the ~8 GB guideline, and nothing regenerable was left to reclaim (npm cache 228 MB, Homebrew 76 MB, Docker build cache 0 B; volumes are off-limits). The previous iteration's `next build` passed; CI runs `npm run build` on the commit.
+- Playwright not needed (no e2e spec until task 37).
+
 ### Phase 5: Board interactions
 Not started.
 
