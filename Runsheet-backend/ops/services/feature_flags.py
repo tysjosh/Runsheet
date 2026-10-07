@@ -196,8 +196,11 @@ class FeatureFlagService:
         """
         Delete all documents belonging to *tenant_id* from ops indices.
 
-        Uses ``delete_by_query`` on each ops index. Requires an
-        ``OpsElasticsearchService`` instance to be set.
+        Uses the document-store facade's ``delete_by_query`` on each ops index
+        (OI-40: after the Postgres cutover the raw client is ``NoClusterClient``,
+        whose ``indices.exists`` answers False, so the old path silently deleted
+        nothing). A retired index returns 0. Requires an
+        ``OpsElasticsearchService`` instance.
         """
         if self.ops_es_service is None:
             logger.warning(
@@ -216,24 +219,15 @@ class FeatureFlagService:
 
         for index_name in indices:
             try:
-                es_client = self.ops_es_service.client
-                if es_client.indices.exists(index=index_name):
-                    result = es_client.delete_by_query(
-                        index=index_name,
-                        body={
-                            "query": {
-                                "term": {"tenant_id": tenant_id}
-                            }
-                        },
-                        refresh=True,
-                    )
-                    deleted = result.get("deleted", 0)
-                    logger.info(
-                        "Purged %d documents from %s for tenant_id=%s",
-                        deleted,
-                        index_name,
-                        tenant_id,
-                    )
+                deleted = await self.ops_es_service.delete_by_query(
+                    index_name, {"term": {"tenant_id": tenant_id}}
+                )
+                logger.info(
+                    "Purged %d documents from %s for tenant_id=%s",
+                    deleted,
+                    index_name,
+                    tenant_id,
+                )
             except Exception as e:
                 logger.error(
                     "Failed to purge tenant data from %s for tenant_id=%s: %s",

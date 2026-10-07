@@ -95,6 +95,14 @@ class OpsElasticsearchService:
     async def delete_document(self, index, doc_id):
         return await self._es.delete_document(index, doc_id)
 
+    async def delete_by_query(self, index: str, query: Dict[str, Any]) -> int:
+        """Facade ``delete_by_query``: ``query`` is the clause, returns the count.
+
+        Returns 0 for a retired index. Callers such as the feature-flag purge use
+        this rather than ``client.delete_by_query`` (OI-40).
+        """
+        return await self._es.delete_by_query(index, query)
+
     @property
     def circuit_breaker(self):
         """Access the circuit breaker from the delegate service."""
