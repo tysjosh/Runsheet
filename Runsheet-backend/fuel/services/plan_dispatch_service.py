@@ -177,6 +177,17 @@ class FuelPlanDispatchService:
         run_id = self._run_id(plan_doc, routes, plan_id)
         orders = await self._resolve_orders(tenant_id, plan_doc, routes)
 
+        # ``placed`` orders are refused (owner decision OI-16): name every one
+        # so the dispatcher can confirm them, instead of the first order's
+        # generic "not ready for dispatch".
+        placed = sorted(
+            str(order.get("order_id") or "")
+            for order in orders
+            if order.get("status") == "placed"
+        )
+        if placed:
+            raise self._orders_not_confirmed(plan_id, placed)
+
         # Fail before the first write.  Elasticsearch cannot transact across
         # all of these projections, so complete preflight validation is what
         # prevents a known-invalid order late in the list from creating a
@@ -525,6 +536,8 @@ class FuelPlanDispatchService:
             # is unsafe to auto-dispatch; the operator must regenerate the plan
             # so it carries exact order ids.
             selected_by_id: Dict[str, Dict[str, Any]] = {}
+            # Stops whose only matching orders are ``placed`` (OI-16).
+            placed_ids: set = set()
             for station_id in sorted(station_ids):
                 candidates = [
                     order
@@ -549,6 +562,23 @@ class FuelPlanDispatchService:
                     )
                 if candidates:
                     selected_by_id[str(candidates[0]["order_id"])] = candidates[0]
+                else:
+                    placed_ids.update(
+                        str(order.get("order_id"))
+                        for order in all_orders
+                        if order.get("status") == "placed"
+                        and order.get("order_id")
+                        and station_id
+                        in {
+                            str(order.get("order_id") or ""),
+                            str(order.get("customer_tank_id") or ""),
+                            str(order.get("customer_id") or ""),
+                        }
+                    )
+            if placed_ids:
+                raise self._orders_not_confirmed(
+                    str(plan_doc.get("plan_id") or ""), sorted(placed_ids)
+                )
             selected = [selected_by_id[key] for key in sorted(selected_by_id)]
 
         if not selected:
@@ -725,6 +755,24 @@ class FuelPlanDispatchService:
             message=message,
             status_code=409,
             details=details,
+        )
+
+    #: Order ids named in the message; ``details.order_ids`` has all of them.
+    _MAX_IDS_IN_MESSAGE = 10
+
+    @classmethod
+    def _orders_not_confirmed(cls, plan_id: str, order_ids: List[str]) -> AppException:
+        """409 ``ORDERS_NOT_CONFIRMED`` naming the ``placed`` orders (OI-16)."""
+        shown = order_ids[: cls._MAX_IDS_IN_MESSAGE]
+        more = len(order_ids) - len(shown)
+        message = "Confirm these orders before dispatching: " + ", ".join(shown)
+        if more:
+            message += f" and {more} more"
+        return AppException(
+            error_code=ErrorCode.ORDERS_NOT_CONFIRMED,
+            message=message,
+            status_code=409,
+            details={"order_ids": list(order_ids), "plan_id": plan_id},
         )
 
 

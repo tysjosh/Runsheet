@@ -357,6 +357,49 @@ async def test_order_committed_elsewhere_is_refused_before_any_write():
     assert h.store.writes() == []
 
 
+async def test_placed_orders_are_refused_naming_every_one_before_any_write():
+    # OI-16: the refusal stays, but names all placed orders with their own code.
+    h = Harness([
+        _order("ord-3", status="placed"),
+        _order("ord-1", status="confirmed"),
+        _order("ord-2", status="placed"),
+    ])
+    exc = await h.dispatch_conflict()
+    assert exc.error_code.value == "ORDERS_NOT_CONFIRMED"
+    assert exc.details == {"order_ids": ["ord-2", "ord-3"], "plan_id": "plan-1"}
+    assert exc.message == "Confirm these orders before dispatching: ord-2, ord-3"
+    from errors.codes import ERROR_CODE_STATUS_MAP, ErrorCode
+
+    assert ERROR_CODE_STATUS_MAP[ErrorCode.ORDERS_NOT_CONFIRMED] == 409
+    assert h.claims == []
+    assert h.store.writes() == []
+    h.assert_nothing_dispatched()
+
+
+async def test_placed_refusal_message_caps_the_ids_but_details_has_all():
+    ids = [f"ord-{i:02d}" for i in range(12)]
+    h = Harness([_order(oid, status="placed") for oid in ids])
+    exc = await h.dispatch_conflict()
+    assert exc.details["order_ids"] == ids
+    assert exc.message == (
+        "Confirm these orders before dispatching: "
+        + ", ".join(ids[:10])
+        + " and 2 more"
+    )
+
+
+async def test_legacy_plan_whose_only_candidates_are_placed_is_orders_not_confirmed():
+    h = Harness(
+        [_order("ord-1", status="placed")],
+        plans=[_plan(order_ids=None)],
+        routes=[_route(order_ids=[])],
+    )
+    exc = await h.dispatch_conflict()
+    assert exc.error_code.value == "ORDERS_NOT_CONFIRMED"
+    assert exc.details["order_ids"] == ["ord-1"]
+    assert h.store.writes() == []
+
+
 async def test_blank_route_id_refuses_before_any_claim():
     h = Harness(_three(), routes=[_route(order_ids=THREE, route_id="")])
 

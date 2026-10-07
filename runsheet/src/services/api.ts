@@ -158,12 +158,20 @@ export class ApiError extends Error {
   status: number;
   /** Machine-readable error code from the response body (e.g. `CUSTOMERS_DISABLED`). */
   code?: string;
+  /** The error envelope's `details` object, when the body had one. */
+  details?: Record<string, unknown>;
 
-  constructor(message: string, status: number, code?: string) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
+    this.details = details;
   }
 }
 

@@ -112,6 +112,7 @@ import {
 import { getCurrentTenantId } from "../../services/tenant";
 import { getCurrentUserId } from "../../utils/auth";
 import AssetPicker from "./AssetPicker";
+import { approveErrorMessage } from "./dispatchErrors";
 import StationPicker from "./StationPicker";
 import StormModeBanner from "./StormModeBanner";
 
@@ -2253,10 +2254,7 @@ function PlansTab() {
           setSelectedPlanStatus("dispatched");
         }
       } catch (err) {
-        addToast(
-          err instanceof Error ? err.message : "Failed to approve plan",
-          "error",
-        );
+        addToast(approveErrorMessage(err), "error");
       } finally {
         setApproveLoading(null);
       }

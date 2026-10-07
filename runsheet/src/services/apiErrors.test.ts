@@ -160,6 +160,35 @@ describe("apiErrorFromResponse", () => {
     );
   });
 
+  it("carries the envelope details (OI-16)", async () => {
+    const err = await apiErrorFromResponse(
+      fakeResponse(409, async () => ({
+        error_code: "ORDERS_NOT_CONFIRMED",
+        message: "Confirm these orders before dispatching: ORD-1, ORD-2",
+        details: { order_ids: ["ORD-1", "ORD-2"], plan_id: "plan-1" },
+        request_id: "req-1",
+      })),
+    );
+    expect(err.code).toBe("ORDERS_NOT_CONFIRMED");
+    expect(err.details).toEqual({
+      order_ids: ["ORD-1", "ORD-2"],
+      plan_id: "plan-1",
+    });
+  });
+
+  it("reads details nested under detail, and none when absent", async () => {
+    const nested = await apiErrorFromResponse(
+      fakeResponse(409, async () => ({
+        detail: { error_code: "X", message: "m", details: { a: 1 } },
+      })),
+    );
+    expect(nested.details).toEqual({ a: 1 });
+    const none = await apiErrorFromResponse(
+      fakeResponse(409, async () => ({ error_code: "X", message: "m" })),
+    );
+    expect(none.details).toBeUndefined();
+  });
+
   it("falls back to the HTTP status message for non-JSON bodies", async () => {
     const err = await apiErrorFromResponse(
       fakeResponse(502, async () => {

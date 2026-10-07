@@ -101,6 +101,21 @@ export function extractApiErrorCode(body: unknown): string | undefined {
   return nested ?? codeOf(body);
 }
 
+/**
+ * The envelope's `details` object: top-level `details` (the AppException
+ * envelope), else `detail.details`.
+ */
+export function extractApiErrorDetails(
+  body: unknown,
+): Record<string, unknown> | undefined {
+  if (!isObject(body)) return undefined;
+  if (isObject(body.details)) return body.details;
+  if (isObject(body.detail) && isObject(body.detail.details)) {
+    return body.detail.details;
+  }
+  return undefined;
+}
+
 /** Builds an `ApiError` from a non-OK response, tolerating non-JSON bodies. */
 export async function apiErrorFromResponse(
   response: Response,
@@ -115,6 +130,7 @@ export async function apiErrorFromResponse(
     extractApiErrorMessage(body, `HTTP error! status: ${response.status}`),
     response.status,
     extractApiErrorCode(body),
+    extractApiErrorDetails(body),
   );
 }
 
