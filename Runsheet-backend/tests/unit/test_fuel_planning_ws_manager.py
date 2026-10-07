@@ -29,9 +29,10 @@ from fuel.services.fuel_planning_ws_manager import (
 @pytest.fixture
 def manager() -> FuelPlanningWSManager:
     mgr = FuelPlanningWSManager()
-    # Replace the base ``broadcast`` with a spy so we don't need real
-    # WebSocket clients; we only care about what the manager emits.
-    mgr.broadcast = AsyncMock(return_value=0)  # type: ignore[assignment]
+    # Replace the base ``broadcast_to_tenant`` with a spy so we don't need
+    # real WebSocket clients; we only care about what the manager emits.
+    # Events are tenant-scoped (OI-01), so ``broadcast`` is never used.
+    mgr.broadcast_to_tenant = AsyncMock(return_value=0)  # type: ignore[assignment]
     return mgr
 
 
@@ -47,8 +48,9 @@ class TestCustomerTankForecastReady:
             model_name="propane_k_factor",
         )
 
-        manager.broadcast.assert_awaited_once()
-        envelope = manager.broadcast.await_args.args[0]
+        manager.broadcast_to_tenant.assert_awaited_once()
+        tenant_arg, envelope = manager.broadcast_to_tenant.await_args.args
+        assert tenant_arg == "tenant-a"
         assert envelope["type"] == "customer_tank_forecast_ready"
         assert "timestamp" in envelope
         # Timestamp must be ISO-8601 parseable so the FE can ingest it.
@@ -84,7 +86,7 @@ class TestCustomerTankForecastReady:
             },
         )
 
-        envelope = manager.broadcast.await_args.args[0]
+        envelope = manager.broadcast_to_tenant.await_args.args[1]
         data = envelope["data"]
         # Required fields remain authoritative.
         assert data["run_id"] == "run-2"
@@ -103,7 +105,7 @@ class TestCustomerTankForecastReady:
             runout_risk_24h=1,  # int on purpose
             model_name="diesel_rolling",
         )
-        data = manager.broadcast.await_args.args[0]["data"]
+        data = manager.broadcast_to_tenant.await_args.args[1]["data"]
         assert data["runout_risk_24h"] == 1.0
         assert isinstance(data["runout_risk_24h"], float)
 
