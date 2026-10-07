@@ -350,7 +350,7 @@ Commands (cwd `.worktrees/dispatch-board/runsheet`; node_modules was present, no
 - Playwright not needed (no e2e spec until task 37).
 
 ### Phase 5: Board interactions
-Status: tasks 26–32 done (no `phase5-review.json` existed, so implemented from scratch). Commit on `feature/dispatch-board` (id recorded in the follow-up evidence commit). Frontend only; no backend, staging, AWS, deploy or CodeBuild action. The board stays behind the flag (tab only when `/status` answers a mode; backend default `disabled` → 404). No dependency or lockfile change (the four Pragmatic pins from task 21 are now imported).
+Status: tasks 26–32 done (no `phase5-review.json` existed, so implemented from scratch). Commit `dd6e360` on `feature/dispatch-board`. Frontend only; no backend, staging, AWS, deploy or CodeBuild action. The board stays behind the flag (tab only when `/status` answers a mode; backend default `disabled` → 404). No dependency or lockfile change (the four Pragmatic pins from task 21 are now imported).
 
 #### What landed (all under `runsheet/src/components/dispatch-board/`)
 | Task | Change | Tests |
