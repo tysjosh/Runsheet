@@ -108,7 +108,6 @@ function GoogleChart({
 }
 
 export default function Analytics() {
-  const [timeRange, setTimeRange] = useState("7d");
   const [selectedMetric, setSelectedMetric] = useState("delivery_performance");
   const [metrics, setMetrics] = useState<AnalyticsMetrics | null>(null);
   const [routePerformance, setRoutePerformance] = useState<RoutePerformance[]>(
@@ -120,7 +119,7 @@ export default function Analytics() {
     try {
       setLoading(true);
       const [metricsResponse, routesResponse] = await Promise.all([
-        apiService.getAnalyticsMetrics(timeRange),
+        apiService.getAnalyticsMetrics(),
         apiService.getAnalyticsRoutePerformance(),
       ]);
 
@@ -133,10 +132,13 @@ export default function Analytics() {
     }
   };
 
+  // Loads once on mount. There is no time-range selector: the backend
+  // ignores ranges (B6), so offering one would show the same numbers under
+  // a different label (OI-50).
   useEffect(() => {
     loadAnalyticsData();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeRange]);
+  }, []);
 
   const chartData = useMemo(() => {
     const metric = metrics?.[selectedMetric as keyof AnalyticsMetrics];
@@ -271,16 +273,6 @@ export default function Analytics() {
             </div>
           </div>
           <div className="flex gap-3">
-            <select
-              value={timeRange}
-              onChange={(e) => setTimeRange(e.target.value)}
-              className="px-4 py-2 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white font-medium"
-            >
-              <option value="24h">Last 24 Hours</option>
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="90d">Last 90 Days</option>
-            </select>
             <button className="bg-primary hover:bg-primary-hover text-white px-6 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2">
               <Download className="w-4 h-4" />
               Export Report
@@ -350,9 +342,6 @@ export default function Analytics() {
                       "Analytics"}{" "}
                     Trend
                   </h3>
-                  <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
-                    {timeRange}
-                  </span>
                 </div>
                 <GoogleChart
                   chartType="LineChart"

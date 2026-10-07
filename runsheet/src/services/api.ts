@@ -682,12 +682,9 @@ class ApiService {
   // update were never implemented: `POST /api/support/tickets` returns 405.
 
   // Analytics
-  async getAnalyticsMetrics(
-    timeRange: string = "7d",
-  ): Promise<ApiResponse<AnalyticsMetrics>> {
-    return this.request<AnalyticsMetrics>(
-      `/analytics/metrics?timeRange=${timeRange}`,
-    );
+  // No timeRange: the backend ignores it (B6, OI-50).
+  async getAnalyticsMetrics(): Promise<ApiResponse<AnalyticsMetrics>> {
+    return this.request<AnalyticsMetrics>("/analytics/metrics");
   }
 
   async getAnalyticsRoutePerformance(): Promise<ApiResponse<any[]>> {
