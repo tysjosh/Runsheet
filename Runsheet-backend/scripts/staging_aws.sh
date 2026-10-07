@@ -186,6 +186,22 @@ SG_ALB="${PREFIX}-alb-sg"
 SG_TASK="${PREFIX}-task-sg"
 SG_DB="${PREFIX}-db-sg"
 
+#: OI-09. The env files this script reads (.env.staging, .env.development,
+#: runsheet/.env.local) are gitignored, so a deploy from a pinned git worktree found
+#: none of them and silently lost STAGING_DOMAIN, the staging SuperTokens core and
+#: the HubSpot GUID. Prints <local_path> when it exists, else the main checkout's
+#: copy (the git common dir's parent + <repo_relative_path>) when that exists, else
+#: <local_path> so callers' existing missing-file handling still applies.
+main_checkout_file() {
+  local local_path="$1" rel="$2" common
+  if [ -f "$local_path" ]; then printf '%s\n' "$local_path"; return 0; fi
+  common="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  case "$common" in
+    /*) if [ -f "$(dirname "$common")/${rel}" ]; then printf '%s\n' "$(dirname "$common")/${rel}"; return 0; fi ;;
+  esac
+  printf '%s\n' "$local_path"
+}
+
 #: Custom domain, and the whole TLS story is conditional on it. Unset, this script
 #: behaves exactly as it did before: HTTP on the ALB's own DNS name, no certificate,
 #: no Route 53. Set, it additionally creates the hosted zone, an ACM certificate
@@ -217,11 +233,11 @@ DOMAIN="${DOMAIN:-}"
 #: bare `deploy` from the main checkout keeps the HTTPS origins. log() is not defined
 #: yet, hence the direct printf.
 DOMAIN_SOURCE=""
-_env_file="$(dirname "$0")/../.env.${ENV_NAME}"
+_env_file="$(main_checkout_file "$(dirname "$0")/../.env.${ENV_NAME}" "Runsheet-backend/.env.${ENV_NAME}")"
 if [ -z "$DOMAIN" ] && [ -f "$_env_file" ]; then
   DOMAIN="$(grep -E '^STAGING_DOMAIN=' "$_env_file" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"\047\r ' || true)"
   if [ -n "$DOMAIN" ]; then
-    DOMAIN_SOURCE=".env.${ENV_NAME}"
+    DOMAIN_SOURCE="$_env_file"
     printf '  .. DOMAIN=%s (from STAGING_DOMAIN in %s)\n' "$DOMAIN" "$DOMAIN_SOURCE" >&2
   fi
 fi
@@ -276,7 +292,8 @@ cmd_plan() {
   # Built here rather than with ${DOMAIN:+...}${DOMAIN:-...} inside the heredoc.
   # That trick printed the domain itself in the DOMAIN-set case, because
   # ${VAR:-default} expands to VAR's VALUE when set, not to nothing.
-  local _plan_tls _plan_zone=""
+  local _plan_tls _plan_zone="" _plan_env
+  _plan_env="$(main_checkout_file "$(dirname "$0")/../.env.${ENV_NAME}" "Runsheet-backend/.env.${ENV_NAME}")"
   if [ -n "$DOMAIN" ]; then
     _plan_tls="HTTPS :443 (ACM certificate, free) + :80 -> :443 redirect"
     _plan_zone="
@@ -321,8 +338,8 @@ Not created (and why):
                      two ElastiCache alarms and nothing else would misrepresent
                      the coverage. Monitoring is its own piece of work.
 
-SuperTokens core .... ${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$(dirname "$0")/../.env.${ENV_NAME}" 2>/dev/null | cut -d= -f2- || true)}
-                      ${ST_URI:+(from ST_URI)}${ST_URI:-$([ -f "$(dirname "$0")/../.env.${ENV_NAME}" ] && echo "(from .env.${ENV_NAME})" || echo "NONE FOUND — will fall back to the DEVELOPMENT core")}
+SuperTokens core .... ${ST_URI:-$(grep -E '^SUPERTOKENS_CONNECTION_URI=' "$_plan_env" 2>/dev/null | cut -d= -f2- || true)}
+                      ${ST_URI:+(from ST_URI)}${ST_URI:-$([ -f "$_plan_env" ] && echo "(from .env.${ENV_NAME})" || echo "NONE FOUND — will fall back to the DEVELOPMENT core")}
 
 Tear down with:  ./scripts/staging_aws.sh down
 PLAN
@@ -490,8 +507,9 @@ resolve_supertokens() {
   #: store — same users, same sessions — even once a staging core existed. Reading
   #: .env.staging first makes the per-environment file the natural place to put it,
   #: and the development fallback stays only so a fresh environment can still boot.
-  local env_file="$(dirname "$0")/../.env.${ENV_NAME}"
-  local dev_file="$(dirname "$0")/../.env.development"
+  local env_file dev_file
+  env_file="$(main_checkout_file "$(dirname "$0")/../.env.${ENV_NAME}" "Runsheet-backend/.env.${ENV_NAME}")"
+  dev_file="$(main_checkout_file "$(dirname "$0")/../.env.development" "Runsheet-backend/.env.development")"
 
   #: Braces are load-bearing for the reader, not the shell: || and && bind equally and
   #: left to right, so the unbraced form already means "(missing either) and file
@@ -1248,12 +1266,8 @@ BUILDSPEC
 #: The Maps key from runsheet/.env.local. A worktree has no .env.local (it is
 #: gitignored), so this falls back to the main checkout's copy.
 maps_key() {
-  local f main
-  f="$(dirname "$0")/../../runsheet/.env.local"
-  if [ ! -f "$f" ]; then
-    main="$(git -C "$(dirname "$0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-    if [ -n "$main" ]; then f="$(dirname "$main")/runsheet/.env.local"; fi
-  fi
+  local f
+  f="$(main_checkout_file "$(dirname "$0")/../../runsheet/.env.local" "runsheet/.env.local")"
   grep -E '^NEXT_PUBLIC_GOOGLE_MAPS_API_KEY=' "$f" 2>/dev/null | tail -1 | cut -d= -f2- || true
 }
 
@@ -1710,6 +1724,39 @@ PY
 cmd_deploy_ui() {
   require_tls_domain deploy-ui
   [ -n "$DOMAIN" ] || die "deploy-ui needs DOMAIN: the build refuses a non-https API origin"
+
+  #: Read from runsheet/.env.local so a local developer and the deployed task agree
+  #: on the same HubSpot form, the same way the Maps key is sourced below. An
+  #: explicit environment variable still wins, so CI can override without editing
+  #: a gitignored file. Resolved before the build so the guard below fails fast.
+  local ui_env live_td live_guid
+  ui_env="$(main_checkout_file "$(dirname "$0")/../../runsheet/.env.local" "runsheet/.env.local")"
+  HUBSPOT_PORTAL_ID="${HUBSPOT_PORTAL_ID:-$(grep -E '^HUBSPOT_PORTAL_ID=' "$ui_env" 2>/dev/null | cut -d= -f2- || true)}"
+  HUBSPOT_FORM_GUID="${HUBSPOT_FORM_GUID:-$(grep -E '^HUBSPOT_FORM_GUID=' "$ui_env" 2>/dev/null | cut -d= -f2- || true)}"
+  #: OI-09. A deploy from a tree with no .env.local used to register a task
+  #: definition without HUBSPOT_FORM_GUID and silently switch off lead capture.
+  #: Refuse when the live task definition has one and this deploy would drop it.
+  live_td="$(aws ecs describe-services --cluster "${CLUSTER}" --services "${UI_SERVICE}" \
+    --query 'services[0].taskDefinition' --output text 2>/dev/null)" \
+    || die "deploy-ui refused: could not read the live ${UI_SERVICE} service to check HUBSPOT_FORM_GUID; retry"
+  if [ -n "$live_td" ] && [ "$live_td" != "None" ]; then
+    live_guid="$(aws ecs describe-task-definition --task-definition "$live_td" \
+      --query "taskDefinition.containerDefinitions[0].environment[?name=='HUBSPOT_FORM_GUID'].value | [0]" \
+      --output text 2>/dev/null)" \
+      || die "deploy-ui refused: could not read ${live_td} to check HUBSPOT_FORM_GUID; retry"
+    [ "$live_guid" = "None" ] && live_guid=""
+    if [ -n "$live_guid" ] && [ -z "${HUBSPOT_FORM_GUID:-}" ]; then
+      die "deploy-ui refused: the live ${UI_SERVICE} task definition sets HUBSPOT_FORM_GUID but none was found in runsheet/.env.local (${ui_env}) or the environment, so this deploy would switch off lead capture. Add it to runsheet/.env.local or re-run with HUBSPOT_FORM_GUID=<guid> ./scripts/staging_aws.sh deploy-ui."
+    fi
+  fi
+  if [ -n "${HUBSPOT_FORM_GUID:-}" ]; then
+    ok "hubspot lead capture -> portal ${HUBSPOT_PORTAL_ID:-246986931}"
+  else
+    warn "no HUBSPOT_FORM_GUID — /api/pilot-request will return 503 and the"
+    warn "Request a Pilot page will tell prospects to email instead. Set it in"
+    warn "runsheet/.env.local or pass HUBSPOT_FORM_GUID to capture leads."
+  fi
+
   local sha image api app
   sha="$(git rev-parse --short HEAD)"
   image="${REGISTRY}/${UI_ECR_REPO}:${sha}"
@@ -1764,20 +1811,6 @@ cmd_deploy_ui() {
   fi
 
   log "Registering the UI task definition"
-  #: Read from runsheet/.env.local so a local developer and the deployed task agree
-  #: on the same HubSpot form, the same way the Maps key is sourced above. An
-  #: explicit environment variable still wins, so CI can override without editing
-  #: a gitignored file.
-  local ui_env="$(dirname "$0")/../../runsheet/.env.local"
-  HUBSPOT_PORTAL_ID="${HUBSPOT_PORTAL_ID:-$(grep -E '^HUBSPOT_PORTAL_ID=' "$ui_env" 2>/dev/null | cut -d= -f2- || true)}"
-  HUBSPOT_FORM_GUID="${HUBSPOT_FORM_GUID:-$(grep -E '^HUBSPOT_FORM_GUID=' "$ui_env" 2>/dev/null | cut -d= -f2- || true)}"
-  if [ -n "${HUBSPOT_FORM_GUID:-}" ]; then
-    ok "hubspot lead capture -> portal ${HUBSPOT_PORTAL_ID:-246986931}"
-  else
-    warn "no HUBSPOT_FORM_GUID — /api/pilot-request will return 503 and the"
-    warn "Request a Pilot page will tell prospects to email instead. Set it in"
-    warn "runsheet/.env.local or pass HUBSPOT_FORM_GUID to capture leads."
-  fi
   export UI_TASK_FAMILY UI_CPU UI_MEM UI_PORT UI_LOG_GROUP AWS_REGION
   export HUBSPOT_PORTAL_ID="${HUBSPOT_PORTAL_ID:-}" HUBSPOT_FORM_GUID="${HUBSPOT_FORM_GUID:-}"
   local td; td="$(register_ui_task_def "$image")"

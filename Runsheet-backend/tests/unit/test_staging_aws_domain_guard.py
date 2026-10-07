@@ -41,6 +41,15 @@ case "$1 $2" in
         fi ;;
     esac ;;
   "acm describe-certificate") echo api.staging.runsheetops.com ;;
+  # OI-09: a live UI task definition that carries a HubSpot form GUID.
+  "ecs describe-services")
+    if [ "${STUB_LIVE_HUBSPOT:-0}" = "1" ] && [[ "$args" == *"services[0].taskDefinition"* ]]; then
+      echo arn:aws:ecs:us-east-2:224535575204:task-definition/runsheet-staging-ui:7
+    else
+      echo None
+    fi ;;
+  "ecs describe-task-definition")
+    if [ "${STUB_LIVE_HUBSPOT:-0}" = "1" ]; then echo live-form-guid; else echo None; fi ;;
   # No image in ECR yet, so the deploy reaches the build step (the sentinel).
   "ecr describe-images") exit 1 ;;
   *) echo None ;;
@@ -56,6 +65,11 @@ exit 0
 
 GIT_STUB = r"""#!/usr/bin/env bash
 echo "$0 $*" >> "$STUB_LOG"
+# OI-09: `git -C <dir> rev-parse --path-format=absolute --git-common-dir` points at
+# a fake main checkout's .git when the test sets STUB_GIT_COMMON_DIR.
+case "$*" in
+  *--git-common-dir*) [ -n "${STUB_GIT_COMMON_DIR:-}" ] && echo "$STUB_GIT_COMMON_DIR"; exit 0 ;;
+esac
 [ "$1" = "rev-parse" ] && echo abc1234
 exit 0
 """
@@ -80,7 +94,7 @@ def harness(tmp_path):
     log = tmp_path / "stub.log"
     log.write_text("")
 
-    def run(*args, https=False, domain=None, env_file=None):
+    def run(*args, https=False, domain=None, env_file=None, extra_env=None, stdin=None):
         if env_file is not None:
             (tree / ".env.staging").write_text(env_file)
         env = {
@@ -97,12 +111,14 @@ def harness(tmp_path):
         }
         if domain is not None:
             env["DOMAIN"] = domain
+        env.update(extra_env or {})
         # The script must only ever see the stubbed aws CLI.
         assert shutil.which("aws", path=env["PATH"]) == str(bin_dir / "aws")
         log.write_text("")
         proc = subprocess.run(
             ["bash", str(script), *args],
             env=env,
+            input=stdin,
             capture_output=True,
             text=True,
             timeout=60,
@@ -111,6 +127,16 @@ def harness(tmp_path):
         return proc, log.read_text()
 
     return run
+
+
+@pytest.fixture
+def fake_main(tmp_path):
+    """A main checkout whose .git is the worktree's git common dir (OI-09)."""
+    root = tmp_path / "main"
+    (root / ".git").mkdir(parents=True)
+    (root / "Runsheet-backend").mkdir()
+    (root / "runsheet").mkdir()
+    return root
 
 
 def test_syntax():
@@ -173,3 +199,45 @@ def test_e_staging_domain_from_env_file(harness):
 def test_f_read_only_commands_work_without_domain(harness, command):
     proc, _ = harness(command, https=True)
     assert proc.returncode == 0, proc.stderr
+
+
+def test_g_staging_domain_from_main_checkout(harness, fake_main):
+    """OI-09: a worktree with no .env.staging uses the main checkout's copy."""
+    (fake_main / "Runsheet-backend" / ".env.staging").write_text(
+        "STAGING_DOMAIN=staging.runsheetops.com\n"
+    )
+    proc, log = harness(
+        "deploy", https=True, extra_env={"STUB_GIT_COMMON_DIR": str(fake_main / ".git")}
+    )
+    assert proc.returncode == 97, proc.stderr
+    assert "docker build" in log
+    assert str(fake_main / "Runsheet-backend" / ".env.staging") in proc.stderr
+
+
+def test_h_deploy_ui_refuses_to_drop_live_hubspot_guid(harness, fake_main):
+    """OI-09: the live UI has a form GUID and none is resolvable, so no build."""
+    proc, log = harness(
+        "deploy-ui",
+        https=True,
+        domain="staging.runsheetops.com",
+        extra_env={"STUB_LIVE_HUBSPOT": "1", "STUB_GIT_COMMON_DIR": str(fake_main / ".git")},
+    )
+    assert proc.returncode not in (0, 97), proc.stderr
+    assert "HUBSPOT_FORM_GUID" in proc.stderr
+    assert "runsheet/.env.local" in proc.stderr
+    assert "docker build" not in log
+    assert "register-task-definition" not in log
+
+
+def test_i_deploy_ui_uses_main_checkout_hubspot_guid(harness, fake_main):
+    (fake_main / "runsheet" / ".env.local").write_text("HUBSPOT_FORM_GUID=main-form-guid\n")
+    proc, log = harness(
+        "deploy-ui",
+        https=True,
+        domain="staging.runsheetops.com",
+        extra_env={"STUB_LIVE_HUBSPOT": "1", "STUB_GIT_COMMON_DIR": str(fake_main / ".git")},
+    )
+    assert proc.returncode == 97, proc.stderr
+    assert "ecs describe-task-definition" in log, "the live-GUID guard did not run"
+    assert "docker build" in log
+    assert "hubspot lead capture" in proc.stderr
