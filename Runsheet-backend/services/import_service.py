@@ -46,6 +46,9 @@ NON_CANONICAL_ID_FIELDS = {
     "fuel_stations": "station_id",
     "jobs": "job_id",
 }
+#: Non-canonical types whose rows are completed and validated against the
+#: model their list endpoint reads, at validate and again at commit.
+MODEL_CHECKED_TYPES = frozenset({"inventory", "fuel_stations"})
 
 
 #: Catalog categories (``fuel_product_catalog.FuelCategory``) a tank of each
@@ -85,6 +88,46 @@ def _check_fuel_family(fuel_type: Optional[str], product_code: Optional[str]) ->
             f"fuel_product_code '{product_code}' ({category}) does not match "
             f"fuel_type '{fuel_type}'",
         )
+
+
+def _resolve_station_fuel_type(raw: str) -> str:
+    """Resolve an imported station's ``fuel_types`` cell to one catalog code.
+
+    ``FuelStation`` holds a single ``fuel_type``, so a row names exactly one
+    product: a catalog code or alias (``DIESEL_2``, ``AGO``), or a category
+    that maps to exactly one code (``diesel``, ``propane``).
+    """
+    from fuel.services.fuel_product_catalog import (
+        UnknownFuelProductError,
+        canonicalize,
+        resolve_product_filter,
+    )
+
+    values = [part.strip() for part in str(raw or "").split(",") if part.strip()]
+    if not values:
+        raise _RowFieldError("fuel_types", "fuel_types is required")
+    if len(values) > 1:
+        raise _RowFieldError(
+            "fuel_types",
+            "Import one fuel type per row; got " + ", ".join(values),
+        )
+    value = values[0]
+    try:
+        return canonicalize(value)
+    except UnknownFuelProductError:
+        pass
+    try:
+        codes = resolve_product_filter(value)
+    except UnknownFuelProductError:
+        raise _RowFieldError(
+            "fuel_types", f"Unknown fuel product '{value}'"
+        ) from None
+    if len(codes) != 1:
+        raise _RowFieldError(
+            "fuel_types",
+            f"Fuel type '{value}' is ambiguous; use one of: " + ", ".join(codes),
+        )
+    return codes[0]
 
 
 class _ActiveSession:
@@ -389,8 +432,8 @@ class ImportService:
                 session, field_mapping, result
             )
         elif session.data_type in NON_CANONICAL_ID_FIELDS:
-            if session.data_type == "inventory":
-                self._append_inventory_issues(session, field_mapping, result)
+            if session.data_type in MODEL_CHECKED_TYPES:
+                self._append_model_issues(session, field_mapping, result)
             await self._append_ownership_issues(session, field_mapping, result)
         # Stamp the session_id onto the result
         result.session_id = session_id
@@ -765,6 +808,96 @@ class ImportService:
         doc.update(item.model_dump(mode="json", exclude_none=True))
         return doc
 
+    def _complete_fuel_station_document(
+        self, document: dict[str, Any], tenant_id: str
+    ) -> dict[str, Any]:
+        """Turn a ``fuel_stations`` template row into a loadable ``FuelStation``.
+
+        The template speaks gallons, a comma list of fuel types, a text
+        ``location`` and an operational ``status``; the list endpoint reads
+        ``FuelStation`` (liters, one ``fuel_type``, ``GeoPoint`` location, stock
+        status). A row that can't be mapped raises ``_RowFieldError`` naming
+        the template field, and ``FuelStation`` validation errors propagate,
+        so a stored station always loads in ``GET /api/fuel/stations``.
+        """
+        from fuel.models import FuelStation, GeoPoint
+        from fuel.services.fuel_service import FuelService
+        from services.unit_conversion import from_canonical_volume
+
+        doc = dict(document)
+        fuel_type = _resolve_station_fuel_type(doc.pop("fuel_types", ""))
+
+        capacity_gal = doc.pop("capacity_gallons", None)
+        if capacity_gal is None:
+            raise _RowFieldError("capacity_gallons", "capacity_gallons is required")
+        if capacity_gal <= 0:
+            raise _RowFieldError(
+                "capacity_gallons", "capacity_gallons must be greater than 0"
+            )
+        stock_gal = doc.pop("current_stock_gallons", None)
+        if stock_gal is None:
+            raise _RowFieldError(
+                "current_stock_gallons", "current_stock_gallons is required"
+            )
+        if stock_gal < 0 or stock_gal > capacity_gal:
+            raise _RowFieldError(
+                "current_stock_gallons",
+                "current_stock_gallons must be between 0 and capacity_gallons",
+            )
+
+        coordinates = doc.pop("coordinates", None)
+        location_text = doc.pop("location", None)
+        if coordinates:
+            try:
+                lat, lon = (float(part) for part in str(coordinates).split(","))
+                doc["location"] = GeoPoint(lat=lat, lon=lon).model_dump()
+            except (TypeError, ValueError):  # includes pydantic ValidationError
+                raise _RowFieldError(
+                    "coordinates",
+                    "coordinates must be 'lat,lon' with lat -90..90 and lon -180..180",
+                ) from None
+        if location_text:
+            doc["location_name"] = location_text
+        if "status" in doc:
+            doc["operational_status"] = doc.pop("status")
+
+        fuel_service = FuelService(self.es_service)
+        capacity_l = from_canonical_volume(capacity_gal, "l")
+        stock_l = from_canonical_volume(stock_gal, "l")
+        threshold_pct = 20.0
+        daily_rate = 0.0
+        days_empty = fuel_service._calculate_days_until_empty(stock_l, daily_rate)
+        now = utcnow().isoformat()
+        doc.update(
+            {
+                "fuel_type": fuel_type,
+                "capacity_liters": capacity_l,
+                "current_stock_liters": stock_l,
+                "daily_consumption_rate": daily_rate,
+                "days_until_empty": days_empty,
+                "alert_threshold_pct": threshold_pct,
+                "status": fuel_service._determine_status(
+                    stock_l, capacity_l, threshold_pct, days_empty
+                ),
+                "tenant_id": tenant_id or doc.get("tenant_id") or "",
+                "created_at": now,
+                "last_updated": now,
+            }
+        )
+        station = FuelStation.model_validate(doc)
+        doc.update(station.model_dump(mode="json", exclude_none=True))
+        return doc
+
+    def _complete_document(
+        self, data_type: str, document: dict[str, Any], tenant_id: str
+    ) -> dict[str, Any]:
+        """Complete a row into the model its list endpoint reads, if checked."""
+        if data_type == "inventory":
+            return self._complete_inventory_document(document, tenant_id)
+        if data_type == "fuel_stations":
+            return self._complete_fuel_station_document(document, tenant_id)
+        return document
+
     @staticmethod
     def _pydantic_issues(
         row_number: int, exc: PydanticValidationError
@@ -781,13 +914,13 @@ class ImportService:
             )
         return issues
 
-    def _append_inventory_issues(
+    def _append_model_issues(
         self,
         session: _ActiveSession,
         field_mapping: dict[str, str],
         result: ValidationResult,
     ) -> None:
-        """Report inventory rows that can't become an ``InventoryItem`` (OI-27)."""
+        """Report rows that can't become their list model (OI-27, station 500)."""
         rows_with_errors = {issue.row_number for issue in result.errors}
         for row_index, row in enumerate(session.rows, start=1):
             if row_index in rows_with_errors:
@@ -796,11 +929,20 @@ class ImportService:
                 document = self._map_and_coerce_row(
                     row, field_mapping, session.data_type
                 )
-                self._complete_inventory_document(
-                    document, session.tenant_id or "import"
+                self._complete_document(
+                    session.data_type, document, session.tenant_id or "import"
                 )
             except PydanticValidationError as exc:
                 result.errors.extend(self._pydantic_issues(row_index, exc))
+                rows_with_errors.add(row_index)
+            except _RowFieldError as exc:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name=exc.field_name,
+                        description=str(exc),
+                    )
+                )
                 rows_with_errors.add(row_index)
             except (TypeError, ValueError) as exc:
                 result.errors.append(
@@ -1106,9 +1248,9 @@ class ImportService:
                 errors.append(f"row {row_number}: missing {id_field}")
                 continue
             in_use = f"row {row_number}: {id_field} '{doc_id}' is already in use"
-            if session.data_type == "inventory":
+            if session.data_type in MODEL_CHECKED_TYPES:
                 try:
-                    doc = self._complete_inventory_document(doc, tenant_id)
+                    doc = self._complete_document(session.data_type, doc, tenant_id)
                 except (PydanticValidationError, TypeError, ValueError) as exc:
                     failed += 1
                     if isinstance(exc, PydanticValidationError):
@@ -1116,6 +1258,8 @@ class ImportService:
                             f"{issue.field_name}: {issue.description}"
                             for issue in self._pydantic_issues(row_number, exc)
                         )
+                    elif isinstance(exc, _RowFieldError):
+                        detail = f"{exc.field_name}: {exc}"
                     else:
                         detail = str(exc)
                     errors.append(f"row {row_number}: {detail}")

@@ -143,9 +143,9 @@ class SchemaTemplates:
                 FieldDef(name="name", type=FieldType.STRING, required=True, description="Station name"),
                 FieldDef(name="location", type=FieldType.STRING, required=False, description="Station address or location description"),
                 FieldDef(name="coordinates", type=FieldType.GEO_POINT, required=False, description="GPS coordinates (lat,lon)"),
-                FieldDef(name="fuel_types", type=FieldType.STRING, required=False, description="Available fuel types (comma-separated)"),
-                FieldDef(name="capacity_gallons", type=FieldType.NUMBER, required=False, description="Total fuel storage capacity in gallons"),
-                FieldDef(name="current_stock_gallons", type=FieldType.NUMBER, required=False, description="Current fuel stock in gallons"),
+                FieldDef(name="fuel_types", type=FieldType.STRING, required=True, description="Fuel product code, one per row (for example DIESEL_2, PROPANE)"),
+                FieldDef(name="capacity_gallons", type=FieldType.NUMBER, required=True, description="Total fuel storage capacity in gallons"),
+                FieldDef(name="current_stock_gallons", type=FieldType.NUMBER, required=True, description="Current fuel stock in gallons"),
                 FieldDef(name="price_per_gallon", type=FieldType.NUMBER, required=False, description="Current price per gallon"),
                 FieldDef(name="status", type=FieldType.ENUM, required=True, description="Station operational status", enum_values=["open", "closed", "maintenance"]),
                 FieldDef(name="operating_hours", type=FieldType.STRING, required=False, description="Operating hours (e.g. 06:00-22:00)"),
@@ -223,9 +223,9 @@ class SchemaTemplates:
         ],
 
         "fuel_stations": [
-            {"station_id": "FS-001", "name": "Central Depot Fuel Station", "location": "4500 Industrial Blvd, Houston, TX 77001", "coordinates": "29.7604,-95.3698", "fuel_types": "diesel,gasoline", "capacity_gallons": "50000", "current_stock_gallons": "35000", "price_per_gallon": "3.85", "status": "open", "operating_hours": "06:00-22:00", "last_restocked": "2024-03-14T06:00:00Z"},
-            {"station_id": "FS-002", "name": "I-10 Corridor Stop", "location": "Mile 45, I-10 Corridor, TX", "coordinates": "29.8500,-95.8000", "fuel_types": "diesel", "capacity_gallons": "30000", "current_stock_gallons": "8000", "price_per_gallon": "3.95", "status": "open", "operating_hours": "00:00-23:59", "last_restocked": "2024-03-10T08:00:00Z"},
-            {"station_id": "FS-003", "name": "Port Area Station", "location": "1200 Dock Rd, Houston, TX 77015", "coordinates": "29.7350,-95.2800", "fuel_types": "diesel,gasoline,propane", "capacity_gallons": "75000", "current_stock_gallons": "60000", "price_per_gallon": "3.79", "status": "maintenance", "operating_hours": "06:00-20:00", "last_restocked": "2024-03-12T10:00:00Z"},
+            {"station_id": "FS-001", "name": "Central Depot Fuel Station", "location": "4500 Industrial Blvd, Houston, TX 77001", "coordinates": "29.7604,-95.3698", "fuel_types": "DIESEL_2", "capacity_gallons": "50000", "current_stock_gallons": "35000", "price_per_gallon": "3.85", "status": "open", "operating_hours": "06:00-22:00", "last_restocked": "2024-03-14T06:00:00Z"},
+            {"station_id": "FS-002", "name": "I-10 Corridor Stop", "location": "Mile 45, I-10 Corridor, TX", "coordinates": "29.8500,-95.8000", "fuel_types": "DIESEL_2", "capacity_gallons": "30000", "current_stock_gallons": "8000", "price_per_gallon": "3.95", "status": "open", "operating_hours": "00:00-23:59", "last_restocked": "2024-03-10T08:00:00Z"},
+            {"station_id": "FS-003", "name": "Port Area Station", "location": "1200 Dock Rd, Houston, TX 77015", "coordinates": "29.7350,-95.2800", "fuel_types": "PROPANE", "capacity_gallons": "75000", "current_stock_gallons": "60000", "price_per_gallon": "3.79", "status": "maintenance", "operating_hours": "06:00-20:00", "last_restocked": "2024-03-12T10:00:00Z"},
         ],
         "inventory": [
             {"item_id": "INV-001", "name": "Brake Pads Set", "category": "brake_parts", "quantity": "150", "unit": "sets", "location": "Warehouse A, Shelf 3", "status": "in_stock", "last_updated": "2024-03-15T08:00:00Z"},

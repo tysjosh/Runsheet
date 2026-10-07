@@ -39,6 +39,7 @@ from fuel.models import (
     UpdateFuelStation,
 )
 from fuel.services.fuel_es_mappings import FUEL_EVENTS_INDEX, FUEL_STATIONS_INDEX
+from services.document_loading import load_valid_documents
 from services.elasticsearch_service import ElasticsearchService
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -200,9 +201,13 @@ class FuelService:
         )
 
         total = response["hits"]["total"]["value"]
-        stations = [
-            FuelStation(**hit["_source"]) for hit in response["hits"]["hits"]
-        ]
+        # One malformed document must not 500 the whole list.
+        stations, _ = load_valid_documents(
+            response["hits"]["hits"],
+            FuelStation,
+            index=FUEL_STATIONS_INDEX,
+            tenant_id=tenant_id,
+        )
 
         return PaginatedResponse[FuelStation](
             data=stations,

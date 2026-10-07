@@ -24,6 +24,7 @@ from inventory.models import (
     StockAdjustmentResult,
     UpdateInventoryItem,
 )
+from services.document_loading import load_valid_documents
 from services.elasticsearch_service import ElasticsearchService
 from fuel.services.fuel_product_catalog import canonicalize_or_warn
 
@@ -133,9 +134,13 @@ class InventoryService:
         )
 
         total = response["hits"]["total"]["value"]
-        items = [
-            InventoryItem(**hit["_source"]) for hit in response["hits"]["hits"]
-        ]
+        # One malformed document must not 500 the whole list.
+        items, _ = load_valid_documents(
+            response["hits"]["hits"],
+            InventoryItem,
+            index=INVENTORY_INDEX,
+            tenant_id=tenant_id,
+        )
 
         return {"items": items, "total": total, "page": page, "size": size}
 
@@ -443,9 +448,13 @@ class InventoryService:
             INVENTORY_INDEX, query, size=200
         )
 
-        return [
-            InventoryItem(**hit["_source"]) for hit in response["hits"]["hits"]
-        ]
+        items, _ = load_valid_documents(
+            response["hits"]["hits"],
+            InventoryItem,
+            index=INVENTORY_INDEX,
+            tenant_id=tenant_id,
+        )
+        return items
 
     # ------------------------------------------------------------------
     # Summary / aggregation
