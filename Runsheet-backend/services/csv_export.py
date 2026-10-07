@@ -289,6 +289,9 @@ async def stream_csv_export(
                 "user_id": tenant.user_id,
             }},
         )
+        # Every export attempt leaves one audit line, including a count that
+        # fails before streaming starts (OI-24).
+        audit("failed", 0)
         raise
 
     if total > cap:

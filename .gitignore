@@ -121,6 +121,9 @@ runsheet/.env.local
 # =============================================================================
 # Everything under .kiro/ stays local, except the data-export spec, which is
 # committed with its implementation so reviewers can read the design it follows.
+# A .kiro/ below the root (e.g. Runsheet-backend/.kiro/) is always local. The
+# pattern skips the root so the data-export negation below still works.
+/*/**/.kiro/
 .kiro/*
 !.kiro/specs/
 .kiro/specs/*

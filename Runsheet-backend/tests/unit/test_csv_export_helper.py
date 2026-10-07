@@ -171,6 +171,25 @@ def test_mid_stream_failure_is_failed(caplog):
     assert rec.extra_data["row_count"] == 1
 
 
+def test_count_failure_emits_one_failed_audit_line(caplog):
+    """OI-24: a count() that raises still leaves an audit line."""
+    class CountBoom(StaticSource):
+        async def count(self):
+            raise RuntimeError("store down")
+
+    caplog.set_level(logging.INFO, logger="services.csv_export")
+    with pytest.raises(RuntimeError):
+        _run(stream_csv_export(
+            request=_request(), tenant=TENANT, export_type="orders", columns=COLUMNS,
+            source=CountBoom([]), filters={"status": "pending"},
+        ))
+    (rec,) = _audit_records(caplog)
+    assert rec.levelno == logging.WARNING
+    assert rec.extra_data["outcome"] == "failed"
+    assert rec.extra_data["row_count"] == 0
+    assert rec.extra_data["filters"] == {"status": "pending"}
+
+
 def test_audit_line_fields_and_q_redaction(caplog):
     caplog.set_level(logging.INFO, logger="services.csv_export")
 
