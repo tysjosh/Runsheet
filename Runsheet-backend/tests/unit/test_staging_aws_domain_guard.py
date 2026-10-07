@@ -118,6 +118,17 @@ def test_syntax():
     assert proc.returncode == 0, proc.stderr
 
 
+def test_dispatcher_wrapped_in_main():
+    """OI-46: the dispatcher runs from a fully parsed function, and nothing after it."""
+    lines = [ln for ln in SCRIPT.read_text().splitlines() if ln.strip()]
+    assert lines[-1] == 'main "$@"; exit $?'
+    assert "main() {" in lines
+    # No top-level dispatcher left behind: every case on $1 lives inside main().
+    body = SCRIPT.read_text()
+    assert body.count('case "${1:-plan}" in') == 1
+    assert body.index("main() {") < body.index('case "${1:-plan}" in')
+
+
 def test_a_deploy_refused_with_https_and_no_domain(harness):
     proc, log = harness("deploy", https=True)
     assert proc.returncode != 0

@@ -2373,24 +2373,33 @@ WARNING
   ok "staging destroyed"
 }
 
-case "$BUILD_MODE" in
-  codebuild|local) ;;
-  *) die "BUILD_MODE must be codebuild (default) or local, got '${BUILD_MODE}'" ;;
-esac
+#: OI-46. Bash reads a script incrementally, so editing this file while a long
+#: `deploy` runs (a branch switch, a rebase) used to splice new bytes into the
+#: running command. Wrapping the dispatcher in a function makes bash parse it whole
+#: before calling it, and the `exit` on the same line as the call stops bash from
+#: reading anything appended after it. Keep `main "$@"; exit $?` the last line.
+main() {
+  case "$BUILD_MODE" in
+    codebuild|local) ;;
+    *) die "BUILD_MODE must be codebuild (default) or local, got '${BUILD_MODE}'" ;;
+  esac
 
-case "${1:-plan}" in
-  plan)    cmd_plan    ;;
-  codebuild-setup) cmd_codebuild_setup ;;
-  build-backend) cmd_build_backend ;;
-  up)      cmd_up      ;;
-  deploy)  cmd_deploy  ;;
-  deploy-ui) cmd_deploy_ui ;;
-  files-bucket) cmd_files_bucket ;;
-  migrate) cmd_migrate ;;
-  verify)  cmd_verify  ;;
-  status)  cmd_status  ;;
-  logs)    cmd_logs "${2:-10m}" ;;
-  frontend-env) cmd_frontend_env ;;
-  down)    cmd_down    ;;
-  *)       die "unknown command '$1' — one of plan|up|codebuild-setup|build-backend|deploy|deploy-ui|migrate|verify|status|logs|frontend-env|down" ;;
-esac
+  case "${1:-plan}" in
+    plan)    cmd_plan    ;;
+    codebuild-setup) cmd_codebuild_setup ;;
+    build-backend) cmd_build_backend ;;
+    up)      cmd_up      ;;
+    deploy)  cmd_deploy  ;;
+    deploy-ui) cmd_deploy_ui ;;
+    files-bucket) cmd_files_bucket ;;
+    migrate) cmd_migrate ;;
+    verify)  cmd_verify  ;;
+    status)  cmd_status  ;;
+    logs)    cmd_logs "${2:-10m}" ;;
+    frontend-env) cmd_frontend_env ;;
+    down)    cmd_down    ;;
+    *)       die "unknown command '$1' — one of plan|up|codebuild-setup|build-backend|deploy|deploy-ui|migrate|verify|status|logs|frontend-env|down" ;;
+  esac
+}
+
+main "$@"; exit $?
