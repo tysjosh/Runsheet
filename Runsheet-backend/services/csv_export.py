@@ -51,7 +51,11 @@ EXPORT_PAGE_SIZE: int = 200
 #: Per user, per export route.
 EXPORT_RATE_LIMIT: str = f"{get_settings().export_rate_limit}/minute"
 
-ExportType = Literal["ifta", "orders", "jobs", "reconciliation", "invoices"]
+ExportType = Literal[
+    "ifta", "orders", "jobs", "reconciliation", "invoices",
+    # OI-20 / OI-57 (owner decision 2026-10-07), admin only.
+    "driver_hours", "driver_qualifications",
+]
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 _FREE_TEXT_FILTERS = frozenset({"q"})

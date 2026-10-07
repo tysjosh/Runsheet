@@ -14,11 +14,17 @@ Offset paging (``page`` / ``size``, max 200) with the same contract as the
 orders and jobs lists, capped at the store's 10,000-row result window.
 The driver-facing ``GET /api/driver/hos`` and ``POST /api/driver/inspections``
 are untouched.
+
+* ``GET /api/compliance/hos-records/daily-summary/export`` — CSV of duty-status
+  minutes per driver per UTC day (OI-20, owner decision 2026-10-07). Admin
+  only, advisory (Runsheet is not an ELD); see
+  :mod:`compliance.services.driver_hours_summary`.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Sequence
 
 from fastapi import APIRouter, Depends, Query, Request
 
@@ -26,19 +32,34 @@ from compliance.api._authz import (
     compliance_admin_dependency,
     compliance_ops_dependency,
 )
+from compliance.services.driver_hours_summary import (
+    STATUS_COLUMNS,
+    summarize_duty_status_days,
+)
 from driver.services.driver_es_mappings import (
     DUTY_STATUS_EVENTS_INDEX,
     VEHICLE_INSPECTIONS_INDEX,
 )
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
+from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
     inject_tenant_filter,
 )
 from schemas.common import paginated_response_dict
+from services.csv_export import (
+    EXPORT_PAGE_SIZE,
+    EXPORT_RATE_LIMIT,
+    MAX_EXPORT_ROWS,
+    ExportColumn,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 from services.date_range import doc_range_clause, parse_date_range
+from services.keyset_pagination import raw_keyset_info
 
 logger = logging.getLogger(__name__)
 
@@ -186,4 +207,153 @@ async def list_inspections(
         index=VEHICLE_INSPECTIONS_INDEX, date_field="inspection_timestamp",
         id_field="inspection_id", driver_id=driver_id,
         start_date=start_date, end_date=end_date, page=page, size=size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/compliance/hos-records/daily-summary/export (OI-20)
+# ---------------------------------------------------------------------------
+
+#: Longest range one driver hours export may cover.
+DRIVER_HOURS_MAX_DAYS = 31
+
+#: No name, phone, email or licence number (data-export FR4).
+_DRIVER_HOURS_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "date", "driver_id", *STATUS_COLUMNS.values(), "event_count",
+        "first_event_at", "last_event_at", "basis",
+    )
+]
+
+
+class _DriverHoursSource:
+    """ExportSource that reads the range's events, then aggregates them.
+
+    ``count()`` returns the number of *events* when it is over the cap, so
+    ``stream_csv_export`` answers 413 (and audits ``rejected_too_large``)
+    before reading them all; otherwise it reads every event with a 2-key
+    keyset sort and returns the number of summary rows.
+    """
+
+    def __init__(
+        self,
+        es: Any,
+        tenant_id: str,
+        base_query: Dict[str, Any],
+        range_start: datetime,
+        range_end: datetime,
+        max_events: int,
+    ) -> None:
+        self._es = es
+        self._tenant_id = tenant_id
+        self._base_query = base_query
+        self._range_start = range_start
+        self._range_end = range_end
+        self._max_events = max_events
+        self._rows: List[Dict[str, Any]] = []
+
+    async def _page(self, after: Optional[tuple]) -> tuple[List[Dict[str, Any]], int, Optional[tuple], int]:
+        query = dict(self._base_query)
+        query["sort"] = [
+            {"event_timestamp": {"order": "asc"}},
+            {"event_id": {"order": "asc"}},
+        ]
+        query["from"] = 0
+        query["size"] = EXPORT_PAGE_SIZE
+        if after is not None:
+            query["search_after"] = [after[0], after[1]]
+        resp = await self._es.search_documents(
+            DUTY_STATUS_EVENTS_INDEX, query, EXPORT_PAGE_SIZE
+        )
+        raw_count, last_key = raw_keyset_info(resp, keyset=True)
+        hits_outer = resp.get("hits", {}) if hasattr(resp, "get") else {}
+        total_block = hits_outer.get("total", {}) or {}
+        total = (
+            int(total_block.get("value", 0) or 0)
+            if hasattr(total_block, "get") else int(total_block or 0)
+        )
+        events: List[Dict[str, Any]] = []
+        for hit in hits_outer.get("hits", []) or []:
+            source = hit.get("_source") if hasattr(hit, "get") else None
+            if not source:
+                continue
+            if source.get("tenant_id") != self._tenant_id:
+                logger.warning(
+                    "compliance.driver_hours_export: dropping event with "
+                    "mismatched tenant_id %s (expected %s)",
+                    source.get("tenant_id"), self._tenant_id,
+                )
+                continue
+            events.append(source)
+        return events, raw_count, last_key, total
+
+    async def count(self) -> int:
+        events, raw_count, last_key, total = await self._page(None)
+        if total > self._max_events:
+            return total
+        collected = list(events)
+        while raw_count >= EXPORT_PAGE_SIZE and last_key is not None:
+            events, raw_count, last_key, _ = await self._page(last_key)
+            collected.extend(events)
+            if len(collected) > self._max_events:
+                return len(collected)
+        self._rows = summarize_duty_status_days(
+            collected, self._range_start, self._range_end,
+            datetime.now(timezone.utc),
+        )
+        return len(self._rows)
+
+    async def pages(self) -> AsyncIterator[Sequence[Mapping[str, Any]]]:
+        for start in range(0, len(self._rows), EXPORT_PAGE_SIZE):
+            yield self._rows[start:start + EXPORT_PAGE_SIZE]
+
+
+@router.get("/hos-records/daily-summary/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_driver_hours_summary(
+    request: Request,
+    tenant: TenantContext = Depends(export_guard("admin", base=get_tenant_context)),
+    driver_id: Optional[str] = Query(default=None, description="Filter to one driver."),
+    start_date: str = Query(..., description="YYYY-MM-DD or ISO-8601 (UTC)."),
+    end_date: str = Query(
+        ..., description="YYYY-MM-DD (whole day included) or ISO-8601."
+    ),
+):
+    """CSV of duty-status minutes per driver per UTC day (admin, advisory).
+
+    The time between two consecutive events belongs to the earlier event's
+    status, split at UTC midnight; the last event runs to the range end or
+    now, whichever is earlier. Time before a driver's first event in the
+    range is not attributed — ``first_event_at`` shows where counting
+    starts. Runsheet is not an ELD, so ``basis`` labels every row advisory.
+    Over 50,000 events in the range is a 413 ``EXPORT_TOO_LARGE``.
+    """
+    date_range = parse_date_range(start_date, end_date)
+    range_start = date_range.gte
+    range_end = date_range.lt or date_range.lte
+    if range_start is None or range_end is None:  # pragma: no cover — both required
+        raise _validation("start_date", start_date)
+    if range_end - range_start > timedelta(days=DRIVER_HOURS_MAX_DAYS):
+        raise _validation("end_date", end_date, reason="range_over_31_days")
+    driver = driver_id.strip() if driver_id else None
+    if driver and len(driver) > _MAX_DRIVER_ID_LEN:
+        raise _validation("driver_id", driver[:_MAX_DRIVER_ID_LEN])
+
+    must: List[Dict[str, Any]] = []
+    if driver:
+        must.append({"term": {"driver_id": driver}})
+    clause = doc_range_clause("event_timestamp", date_range, z_suffix=False)
+    if clause is not None:
+        must.append(clause)
+    base_query = inject_tenant_filter({"query": {"bool": {"must": must}}}, tenant.tenant_id)
+
+    source = _DriverHoursSource(
+        _get_es(), tenant.tenant_id, base_query, range_start, range_end,
+        MAX_EXPORT_ROWS,
+    )
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="driver_hours",
+        columns=_DRIVER_HOURS_COLUMNS, source=source,
+        filters={"driver_id": driver, "start_date": start_date, "end_date": end_date},
     )
