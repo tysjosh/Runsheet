@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -151,12 +151,10 @@ async def get_calibration_dashboard(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.dashboard_failed",
+            message="Failed to retrieve K-factor calibration dashboard.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.dashboard_failed",
-                "message": "Failed to retrieve K-factor calibration dashboard.",
-            },
         )
 
     logger.info(
@@ -224,12 +222,10 @@ async def approve_kfactor_adjustment(
             tank_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.approve_failed",
+            message="Failed to approve K-factor adjustment.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.approve_failed",
-                "message": "Failed to approve K-factor adjustment.",
-            },
         )
 
     logger.info(
@@ -290,12 +286,17 @@ async def get_variance(
             status_code=422,
         )
     except RuntimeError as exc:
-        raise HTTPException(
+        # A 5xx body never carries exception text (OI-36); it goes to the log.
+        logger.warning(
+            "kfactor.variance: weather provider unavailable for tenant=%s tank=%s: %s",
+            tenant.tenant_id,
+            tank_id,
+            exc,
+        )
+        raise AppException(
+            error_code="kfactor.weather_provider_unavailable",
+            message="The weather provider is unavailable. Try again later.",
             status_code=503,
-            detail={
-                "error_code": "kfactor.weather_provider_unavailable",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -306,12 +307,10 @@ async def get_variance(
             delivery_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.variance_failed",
+            message="Failed to compute K-factor variance.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.variance_failed",
-                "message": "Failed to compute K-factor variance.",
-            },
         )
 
     logger.info(
@@ -428,12 +427,10 @@ async def suggest_kfactor(
             tank_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.suggest_failed",
+            message="Failed to compute suggested K-factor.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.suggest_failed",
-                "message": "Failed to compute suggested K-factor.",
-            },
         )
 
     logger.info(

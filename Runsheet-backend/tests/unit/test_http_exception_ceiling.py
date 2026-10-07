@@ -5,8 +5,10 @@ added to the codebase.
 Handlers should raise through ``errors/exceptions.py`` (``forbidden``,
 ``internal_error``, ``resource_not_found``, ``validation_error``, ...)
 so every response goes through the structured ``ErrorResponse`` envelope
-the frontend parses. The existing 185 raw-``HTTPException`` call sites
-are tolerated as tech debt but cannot grow.
+the frontend parses. The remaining 37 raw-``HTTPException`` call sites
+are tolerated as tech debt but cannot grow. (A raw one that does slip
+through still renders the envelope via ``errors.handlers.handle_http_exception``,
+OI-35.)
 
 This test freezes a per-file counter. A migration that removes call
 sites will cause the freeze to drift below the counter and the test
@@ -41,17 +43,7 @@ EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
     "integrations/api/integrations_endpoints.py": 7,
     "integrations/api/stripe_endpoints.py": 7,
     "import_endpoints.py": 12,
-    # Commerce endpoints (commerce-backbone spec) — raw HTTPException tech
-    # debt frozen at introduction; migrate to errors.exceptions over time.
-    # Compliance endpoints (fuel-compliance-backbone spec) — same tech-debt
-    # freeze; structured-envelope migration tracked separately.
-    "compliance/api/asset_certification_endpoints.py": 5,
-    "compliance/api/driver_endpoints.py": 7,
-    "compliance/api/ifta_endpoints.py": 7,
-    "compliance/api/kfactor_endpoints.py": 5,
-    "compliance/api/meter_endpoints.py": 4,
-    "compliance/api/tax_endpoints.py": 3,
-    "compliance/api/terminal_bol_endpoints.py": 5,
+    # compliance/api/* migrated to AppException (OI-35).
 }
 
 #: Total ceiling — sum of per-file counts. A handy second gate that

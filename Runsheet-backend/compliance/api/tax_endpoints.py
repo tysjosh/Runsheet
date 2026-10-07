@@ -41,7 +41,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -57,6 +57,7 @@ from compliance.services.tax_engine import (
     TaxEngine,
     TaxJurisdictionNotFoundError,
 )
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -290,7 +291,7 @@ class TaxExemptionCreateRequest(BaseModel):
 
 def _jurisdiction_not_found_to_http(
     exc: TaxJurisdictionNotFoundError,
-) -> HTTPException:
+) -> AppException:
     """Translate :class:`TaxJurisdictionNotFoundError` to HTTP 400.
 
     Req 1.9 requires the caller to receive a structured rejection when
@@ -311,11 +312,11 @@ def _jurisdiction_not_found_to_http(
     missing row to operators.
     """
 
-    return HTTPException(
+    return AppException(
+        error_code=exc.error_code,
+        message=str(exc),
         status_code=400,
-        detail={
-            "error_code": exc.error_code,
-            "message": str(exc),
+        details={
             "fips_code": exc.fips_code,
             "jurisdiction_level": exc.jurisdiction_level,
             "tax_type": exc.tax_type,
@@ -377,12 +378,10 @@ async def compute_tax(
         # without a statutory rate, malformed FIPS, etc.) are surfaced
         # as HTTP 422 so the client can distinguish them from the
         # missing-row case above.
-        raise HTTPException(
+        raise AppException(
+            error_code="tax.compute_invalid_input",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "tax.compute_invalid_input",
-                "message": str(exc),
-            },
         )
 
     return {
@@ -562,12 +561,10 @@ async def create_tax_jurisdiction(
     try:
         rate = JurisdictionRate.model_validate(payload)
     except Exception as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="tax_jurisdiction.invalid_payload",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "tax_jurisdiction.invalid_payload",
-                "message": str(exc),
-            },
         )
 
     document = rate.model_dump(mode="json")
@@ -778,12 +775,10 @@ async def create_exemption(
     try:
         exemption = TaxExemption.model_validate(payload)
     except Exception as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="tax_exemption.invalid_payload",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "tax_exemption.invalid_payload",
-                "message": str(exc),
-            },
         )
 
     document = exemption.model_dump(mode="json")

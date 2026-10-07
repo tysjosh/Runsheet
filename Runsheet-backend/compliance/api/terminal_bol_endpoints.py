@@ -37,7 +37,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, Depends, Query, Request, UploadFile, File
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -249,12 +249,10 @@ async def ingest_edi(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.ingest_edi_failed",
+            message="Failed to ingest EDI payload.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.ingest_edi_failed",
-                "message": "Failed to ingest EDI payload.",
-            },
         )
 
     logger.info(
@@ -322,12 +320,10 @@ async def upload_manual_bol(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.upload_failed",
+            message="Failed to process manual BOL upload.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.upload_failed",
-                "message": "Failed to process manual BOL upload.",
-            },
         )
 
     logger.info(
@@ -397,12 +393,10 @@ async def confirm_manual_bol(
             bol_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.confirm_failed",
+            message="Failed to confirm manual BOL.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.confirm_failed",
-                "message": "Failed to confirm manual BOL.",
-            },
         )
 
     logger.info(
@@ -458,12 +452,10 @@ async def link_bol_to_load_plan(
             bol_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.link_failed",
+            message="Failed to link BOL to load plan.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.link_failed",
-                "message": "Failed to link BOL to load plan.",
-            },
         )
 
     logger.info(
@@ -574,12 +566,10 @@ async def list_terminal_bols(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.list_failed",
+            message="Failed to list terminal BOLs.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.list_failed",
-                "message": "Failed to list terminal BOLs.",
-            },
         )
 
     hits = ((response or {}).get("hits") or {}).get("hits") or []

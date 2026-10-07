@@ -33,7 +33,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -181,12 +181,10 @@ async def list_meters(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.list_failed",
+            message="Failed to list meters.",
             status_code=500,
-            detail={
-                "error_code": "meters.list_failed",
-                "message": "Failed to list meters.",
-            },
         )
 
     return {
@@ -245,12 +243,10 @@ async def create_meter(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.create_failed",
+            message="Failed to register meter.",
             status_code=500,
-            detail={
-                "error_code": "meters.create_failed",
-                "message": "Failed to register meter.",
-            },
         )
 
     logger.info(
@@ -298,12 +294,10 @@ async def get_meter(
             meter_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.get_failed",
+            message="Failed to retrieve meter.",
             status_code=500,
-            detail={
-                "error_code": "meters.get_failed",
-                "message": "Failed to retrieve meter.",
-            },
         )
 
     return {
@@ -363,12 +357,10 @@ async def get_meter_audit_trail(
             meter_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.audit_trail_failed",
+            message="Failed to retrieve meter audit trail.",
             status_code=500,
-            detail={
-                "error_code": "meters.audit_trail_failed",
-                "message": "Failed to retrieve meter audit trail.",
-            },
         )
 
     return {

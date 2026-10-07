@@ -37,7 +37,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -108,18 +108,16 @@ def _validate_quarter(quarter: str) -> None:
     """Validate the quarter format (YYYY-Q[1-4]).
 
     Raises:
-        HTTPException: If the quarter format is invalid.
+        AppException: If the quarter format is invalid.
     """
     if not _QUARTER_PATTERN.match(quarter):
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.invalid_quarter_format",
+            message=(
+                f"Invalid quarter format: '{quarter}'. "
+                "Expected format: YYYY-Q[1-4] (e.g., '2026-Q1')."
+            ),
             status_code=400,
-            detail={
-                "error_code": "ifta.invalid_quarter_format",
-                "message": (
-                    f"Invalid quarter format: '{quarter}'. "
-                    "Expected format: YYYY-Q[1-4] (e.g., '2026-Q1')."
-                ),
-            },
         )
 
 
@@ -200,12 +198,10 @@ async def get_ifta_report(
             quarter,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.report_failed",
+            message="Failed to generate IFTA quarterly report.",
             status_code=500,
-            detail={
-                "error_code": "ifta.report_failed",
-                "message": "Failed to generate IFTA quarterly report.",
-            },
         )
 
     logger.info(
@@ -343,12 +339,10 @@ async def get_fleet_mpg(
             quarter,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.fleet_mpg_failed",
+            message="Failed to compute fleet MPG.",
             status_code=500,
-            detail={
-                "error_code": "ifta.fleet_mpg_failed",
-                "message": "Failed to compute fleet MPG.",
-            },
         )
 
     return {
@@ -402,12 +396,10 @@ async def create_mileage_adjustment(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.invalid_adjustment",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "ifta.invalid_adjustment",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -415,12 +407,10 @@ async def create_mileage_adjustment(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.adjustment_failed",
+            message="Failed to record mileage adjustment.",
             status_code=500,
-            detail={
-                "error_code": "ifta.adjustment_failed",
-                "message": "Failed to record mileage adjustment.",
-            },
         )
 
     logger.info(
@@ -476,12 +466,10 @@ async def get_adjustment_history(
             quarter,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.adjustments_list_failed",
+            message="Failed to retrieve adjustment history.",
             status_code=500,
-            detail={
-                "error_code": "ifta.adjustments_list_failed",
-                "message": "Failed to retrieve adjustment history.",
-            },
         )
 
     return {
@@ -527,12 +515,10 @@ async def check_data_completeness(
             quarter,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="ifta.completeness_check_failed",
+            message="Failed to check data completeness.",
             status_code=500,
-            detail={
-                "error_code": "ifta.completeness_check_failed",
-                "message": "Failed to check data completeness.",
-            },
         )
 
     return {

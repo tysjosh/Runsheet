@@ -35,7 +35,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -262,12 +262,10 @@ async def list_drivers(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.list_failed",
+            message="Failed to list drivers.",
             status_code=500,
-            detail={
-                "error_code": "drivers.list_failed",
-                "message": "Failed to list drivers.",
-            },
         )
 
     return {
@@ -308,12 +306,10 @@ async def get_driver_dashboard(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.dashboard_failed",
+            message="Failed to generate DQF dashboard.",
             status_code=500,
-            detail={
-                "error_code": "drivers.dashboard_failed",
-                "message": "Failed to generate DQF dashboard.",
-            },
         )
 
     return {
@@ -362,12 +358,10 @@ async def create_driver(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.invalid_payload",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "drivers.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -375,12 +369,10 @@ async def create_driver(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.create_failed",
+            message="Failed to create driver.",
             status_code=500,
-            detail={
-                "error_code": "drivers.create_failed",
-                "message": "Failed to create driver.",
-            },
         )
 
     logger.info(
@@ -427,12 +419,10 @@ async def get_driver(
             driver_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.get_failed",
+            message="Failed to retrieve driver.",
             status_code=500,
-            detail={
-                "error_code": "drivers.get_failed",
-                "message": "Failed to retrieve driver.",
-            },
         )
 
     return {
@@ -504,12 +494,10 @@ async def update_driver(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.invalid_payload",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "drivers.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -518,12 +506,10 @@ async def update_driver(
             driver_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.update_failed",
+            message="Failed to update driver.",
             status_code=500,
-            detail={
-                "error_code": "drivers.update_failed",
-                "message": "Failed to update driver.",
-            },
         )
 
     logger.info(
