@@ -41,6 +41,7 @@ from fuel.services.dispatch_board_models import (
     HistoryQuery,
     Lane,
     LaneView,
+    MoveStopsCommand,
     ReapplyCommand,
     RevertCommand,
     Snapshot,
@@ -358,8 +359,9 @@ class DispatchBoardService:
         degraded: Set[str] = set(ctx.degraded_sources())
 
         # Stale re-validation with write-back only when the lane version is unchanged (K5).
+        # Shadow recomputes for the response but saves nothing (review P1-3).
         if not past:
-            await self._refresh_stale(draft, lane_ids, ctx)
+            await self._refresh_stale(draft, lane_ids, ctx, write_back=mode != "shadow")
 
         suggested: Dict[str, Optional[SuggestedDriver]] = {}
         trays = Trays()
@@ -385,7 +387,9 @@ class DispatchBoardService:
         self.telemetry.metric(tm.SNAPSHOT_MS, (_time.monotonic() - started) * 1000, tenant_id=tenant_id, endpoint="snapshot", outcome="ok")
         return snap.model_dump(mode="json")
 
-    async def _refresh_stale(self, draft: BoardDraft, lane_ids: Sequence[str], ctx: ValidationContext) -> None:
+    async def _refresh_stale(
+        self, draft: BoardDraft, lane_ids: Sequence[str], ctx: ValidationContext, *, write_back: bool = True
+    ) -> None:
         now = self.now()
         refreshed: Dict[str, Tuple[int, List[Check]]] = {}
         for truck_id in lane_ids:
@@ -398,7 +402,7 @@ class DispatchBoardService:
             lane.checks_computed_at = now
             lane.checks_stale = False
             refreshed[truck_id] = (lane.version, checks)
-        if not refreshed or draft.created_at is None and draft.draft_version == 0:
+        if not write_back or not refreshed or draft.created_at is None and draft.draft_version == 0:
             return
 
         def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -749,6 +753,8 @@ class DispatchBoardService:
             if lane is not None:
                 checks[truck_id] = lane_checks(ctx, lane, draft=applied.draft)
         blocked = {t: [c for c in cs if c.outcome == "block"] for t, cs in checks.items()}
+        if any(blocked.values()) and self._move_back_adds_no_block(draft, applied, command, ctx, blocked):
+            blocked = {}
         if any(blocked.values()):
             await self._log_refused(tenant_id, service_date, command, payload, phash, user_id, "blocked", draft, applied.touched, checks)
             first = next(c for cs in blocked.values() for c in cs)
@@ -766,6 +772,57 @@ class DispatchBoardService:
         return await self._commit(
             draft, applied, command, payload, phash, user_id, checks, log_id, ctx, target_log=target_log
         )
+
+    @staticmethod
+    def _order_location(draft: BoardDraft, order_id: str) -> Optional[Tuple[str, Optional[str]]]:
+        truck_id = draft.order_index.get(order_id)
+        lane = draft.lanes.get(truck_id) if truck_id else None
+        if lane is None:
+            return None
+        for load in lane.loads:
+            if any(s.order_id == order_id for s in load.stops):
+                return (truck_id, load.load_id)
+        return (truck_id, None)
+
+    def _move_back_adds_no_block(
+        self,
+        draft: BoardDraft,
+        applied: Any,
+        command: Any,
+        ctx: ValidationContext,
+        blocked: Dict[str, List[Check]],
+    ) -> bool:
+        """Freeze rule 11 (e) narrowing (Phase 1 review P1-2).
+
+        A ``move_stops`` whose every order is pinned, was away from the load its
+        ``assigned_run_id`` names, and now sits on that load commits as long as
+        it adds no block the touched lanes didn't already have. Blocks that were
+        there before (a lapsed driver qualification, an unavailable source)
+        don't keep a started order from going home.
+        """
+        if not isinstance(command, MoveStopsCommand) or not command.order_ids:
+            return False
+        runs = engine.published_run_ids(applied.draft)
+        for order_id in command.order_ids:
+            order = ctx.orders.get(order_id)
+            if not engine.is_pinned(order):
+                return False
+            home = runs.get((order or {}).get("assigned_run_id") or "")
+            if home is None or self._order_location(draft, order_id) == home:
+                return False
+            if self._order_location(applied.draft, order_id) != home:
+                return False
+
+        def key(truck_id: str, c: Check) -> Tuple[str, str, str, str]:
+            return (truck_id, c.check, c.reason_code, c.warning_id or "")
+
+        before: Set[Tuple[str, str, str, str]] = set()
+        for truck_id in applied.touched:
+            lane = draft.lanes.get(truck_id)
+            if lane is not None:
+                before |= {key(truck_id, c) for c in lane_checks(ctx, lane, draft=draft) if c.outcome == "block"}
+        after = {key(t, c) for t, cs in blocked.items() for c in cs}
+        return after <= before
 
     def _content_orders(self, contents: Optional[Dict[str, Optional[Dict[str, Any]]]]) -> List[str]:
         out: List[str] = []

@@ -1215,10 +1215,15 @@ def _pairing_checks(ctx: ValidationContext, lane: Lane, draft: BoardDraft) -> Li
 
 
 def _qualification_checks(ctx: ValidationContext, lane: Lane) -> List[Check]:
-    if not lane.driver_id or lane.driver_id not in ctx.drivers:
+    if not lane.driver_id:
         return []
     scope = _scope(lane)
     source = "DriverQualificationService"
+    # Driver data down: qualification can't run, and it blocks (K3.4, Q5).
+    if "drivers" in ctx.unavailable:
+        return [_unavailable("driver_qualification", source, scope)]
+    if lane.driver_id not in ctx.drivers:
+        return []
     if "qualification" in ctx.unavailable or lane.driver_id not in ctx.qualification:
         return [_unavailable("driver_qualification", source, scope)]
     result = ctx.qualification[lane.driver_id] or {}
@@ -1251,7 +1256,9 @@ def _lane_hours(ctx: ValidationContext, lane: Lane) -> Tuple[float, float]:
 
 
 def _hos_checks(ctx: ValidationContext, lane: Lane) -> List[Check]:
-    if not lane.driver_id or lane.driver_id not in ctx.drivers:
+    if not lane.driver_id:
+        return []
+    if lane.driver_id not in ctx.drivers and "drivers" not in ctx.unavailable:
         return []
     scope = _scope(lane)
     source = "HOSAdvisoryService"
@@ -1304,6 +1311,14 @@ def _certification_checks(ctx: ValidationContext, lane: Lane) -> List[Check]:
     ]
 
 
+def _load_has_dyed(ctx: ValidationContext, load: Load) -> bool:
+    """Whether any order or allocation on the load carries a dyed product."""
+    for stop in load.stops:
+        if _canonical((ctx.orders.get(stop.order_id) or {}).get("product_code")) in _DYED_CODES:
+            return True
+    return any(_canonical(a.product_code) in _DYED_CODES for a in load.allocations)
+
+
 def _compartment_checks(ctx: ValidationContext, lane: Lane) -> List[Check]:
     from Agents.support.compartment_solver import check_feasibility, compartment_accepts, segregation_key
     from fuel.services.compatibility_matrix import check_compatibility
@@ -1320,6 +1335,9 @@ def _compartment_checks(ctx: ValidationContext, lane: Lane) -> List[Check]:
         scope = _scope(lane, load)
         if "compartments" in ctx.unavailable:
             out.append(_unavailable("compartment_fit", "TruckCompartments", scope))
+            # Dyed diesel still blocks without compartment data (K3.4, Q5).
+            if _load_has_dyed(ctx, load):
+                out.append(_unavailable("dyed_diesel", "DyedDieselEnforcer", scope))
             continue
         requests = engine.delivery_requests(load, ctx)
         if not comps:

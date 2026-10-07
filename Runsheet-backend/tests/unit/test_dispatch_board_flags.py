@@ -164,9 +164,11 @@ def test_admin_flag_pair_scope_and_state_checks():
     flags = FakeFlags({})
     assert _admin_client(flags, roles=("dispatcher",)).get(f"/api/ops/admin/feature-flags/{T}/dispatch-board").status_code == 403
     assert _admin_client(flags, tenant_id=OTHER).post(f"/api/ops/admin/feature-flags/{T}/dispatch-board/active_gated").status_code == 403
-    bad = _admin_client(flags).post(f"/api/ops/admin/feature-flags/{T}/dispatch-board/on")
+    bad = _admin_client(flags).post(f"/api/ops/admin/feature-flags/{T}/dispatch-board/zzsecretzz")
     intake = _admin_client(flags).post(f"/api/ops/admin/feature-flags/{T}/order-intake-pipeline/on")
     assert bad.status_code == intake.status_code and bad.status_code in (400, 422)
+    # Review P1-4: the submitted state is not echoed back.
+    assert "zzsecretzz" not in bad.text and "provided" not in bad.json().get("details", {})
     assert flags.states == {}
 
 

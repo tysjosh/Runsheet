@@ -395,6 +395,37 @@ def test_dyed_diesel_rows():
     assert [(c.outcome, c.reason_code) for c in by_check(lane_checks(ctx, lane, draft=d), "dyed_diesel")] == [("block", "check_unavailable")]
 
 
+def test_drivers_source_down_blocks_qualification_for_a_paired_lane():
+    """Review P1-1: with the driver repository down, qualification can't run and blocks (K3.4)."""
+    ctx = make_ctx([order("o1")])
+    d, lane = lane_with(ctx, "o1")
+    ctx.drivers.clear()
+    ctx.qualification.clear()
+    ctx.hos_verdicts.clear()
+    ctx.unavailable.add("drivers")
+    checks = lane_checks(ctx, lane, draft=d)
+    assert [(c.outcome, c.reason_code) for c in by_check(checks, "driver_qualification")] == [("block", "check_unavailable")]
+    assert [(c.outcome, c.reason_code) for c in by_check(checks, "driver_pairing")] == [("warn", "check_unavailable")]
+    assert [(c.outcome, c.reason_code) for c in by_check(checks, "hos")] == [("warn", "check_unavailable")]
+    lane.driver_id = None
+    assert by_check(lane_checks(ctx, lane, draft=d), "driver_qualification") == []
+
+
+def test_compartments_source_down_blocks_dyed_diesel():
+    """Review P1-1: with compartments down, a dyed load still blocks on dyed_diesel (K3.4)."""
+    ctx = make_ctx([order("o1", product_code="OFF_ROAD_DIESEL"), order("o2")])
+    d, lane = lane_with(ctx, "o1")
+    ctx.unavailable.add("compartments")
+    lane.loads[0].allocations = []
+    rows = by_check(lane_checks(ctx, lane, draft=d), "dyed_diesel")
+    assert [(c.outcome, c.reason_code) for c in rows] == [("block", "check_unavailable")]
+    # A clear-diesel load warns on compartment_fit only.
+    d2, lane2 = lane_with(ctx, "o2")
+    checks = lane_checks(ctx, lane2, draft=d2)
+    assert by_check(checks, "dyed_diesel") == []
+    assert [(c.outcome, c.reason_code) for c in by_check(checks, "compartment_fit")] == [("warn", "check_unavailable")]
+
+
 async def test_dyed_enforcer_called_only_for_dyed_products():
     store = BoardStore()
     _seed(store)

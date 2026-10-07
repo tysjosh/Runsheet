@@ -283,11 +283,12 @@ async def transition_order_status(
             event_payload_extra={"hos_gate": hos_record} if hos_record else None,
             guard_stored_state=True,
         )
-    except (OrderChangedConcurrentlyError, OrderWriteDiscardedError):
+    except (OrderChangedConcurrentlyError, OrderWriteDiscardedError) as exc:
         logger.info(
             "Driver transition refused: order=%s changed since it was read",
             order_id,
         )
+        _record_guard_refusal(ref.tenant_id, type(exc).__name__)
         raise AppException(
             error_code=ErrorCode.ORDER_CHANGED_CONCURRENTLY,
             message="The order changed. Refresh and try again.",
@@ -298,6 +299,32 @@ async def transition_order_status(
     result = _envelope(updated, status_changed=True, request_id=request_id)
     await _store(idempotency, tenant.tenant_id, result)
     return result
+
+
+#: Counts guarded-write refusals. The base read can come from the relational
+#: projection (``commerce_read_from_postgres``) while the guard compares
+#: against ``es_documents``; if a best-effort mirror write failed, the same
+#: order keeps refusing until its next mirrored write. A sustained count for
+#: one tenant with ``read_source=projection`` is that stuck case (Phase 0
+#: review issue 1, Phase 1 review P1-5).
+GUARD_REFUSAL_METRIC = "driver.transition.guard_refused.count"
+
+
+def _record_guard_refusal(tenant_id: str, reason: str) -> None:
+    try:
+        from telemetry.service import get_telemetry_service
+
+        service = get_telemetry_service()
+        if service is None:
+            return
+        read_source = "projection" if get_settings().commerce_read_from_postgres else "documents"
+        service.record_metric(
+            GUARD_REFUSAL_METRIC,
+            1.0,
+            {"tenant_id": tenant_id, "reason": reason, "read_source": read_source},
+        )
+    except Exception as exc:  # metrics never fail the request
+        logger.debug("guard refusal metric not recorded: %s", type(exc).__name__)
 
 
 async def _store(

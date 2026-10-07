@@ -206,6 +206,47 @@ def test_same_key_retry_succeeds_when_nothing_moved_the_order(idempotency_store)
     assert store.doc(ORDERS, ORDER)["status"] == "in_transit"
 
 
+class _Metrics:
+    def __init__(self) -> None:
+        self.metrics: list[tuple[str, float, dict]] = []
+
+    def record_metric(self, name, value, tags=None):
+        self.metrics.append((name, value, dict(tags or {})))
+
+
+def test_stale_projection_read_keeps_refusing_and_is_counted(monkeypatch):
+    """Phase 0 review issue 1 / Phase 1 P1-5: the base read serves a stale copy
+    (a failed best-effort mirror under read cutover) while the guard compares
+    against the stored document. Every retry refuses until the next mirrored
+    write, and each refusal is counted so the stuck case shows up."""
+    import driver.api.transition_endpoints as endpoints
+    import telemetry.service as telemetry_service
+    from driver.services.order_transition_service import get_work_ref_resolver
+
+    app, store, _ = _harness()
+    stale = dict(store.doc(ORDERS, ORDER))
+    store.poke(ORDERS, ORDER, last_event_timestamp="2026-07-29T12:30:00+00:00")
+    repo = get_work_ref_resolver()._order_repository
+
+    async def stale_get(tenant_id, order_id):
+        return dict(stale)
+
+    monkeypatch.setattr(repo, "get", stale_get)
+    sink = _Metrics()
+    monkeypatch.setattr(telemetry_service, "get_telemetry_service", lambda: sink)
+    for _ in range(3):
+        resp = _post(app)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["error_code"] == "ORDER_CHANGED_CONCURRENTLY"
+    assert store.doc(ORDERS, ORDER)["status"] == "dispatched"
+    counted = [m for m in sink.metrics if m[0] == endpoints.GUARD_REFUSAL_METRIC]
+    assert len(counted) == 3
+    assert counted[0][2]["tenant_id"] == T and counted[0][2]["read_source"] in {"projection", "documents"}
+    # The next mirrored write heals it: the base read is fresh again.
+    monkeypatch.undo()
+    assert _post(app).status_code == 200
+
+
 def test_unguarded_happy_path_still_transitions():
     app, store, _ = _harness()
     resp = _post(app)

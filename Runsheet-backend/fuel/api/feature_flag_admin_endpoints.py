@@ -270,9 +270,10 @@ async def set_dispatch_board_state(
     )
 
     if new_state not in VALID_STATES:
+        # No echo of the submitted value (N3; review P1-4).
         raise invalid_request(
-            message=f"Invalid state '{new_state}'. Must be one of: {', '.join(sorted(VALID_STATES))}",
-            details={"valid_states": sorted(VALID_STATES), "provided": new_state},
+            message=f"Invalid state. Must be one of: {', '.join(sorted(VALID_STATES))}",
+            details={"valid_states": sorted(VALID_STATES)},
         )
 
     if _feature_flag_service is None:

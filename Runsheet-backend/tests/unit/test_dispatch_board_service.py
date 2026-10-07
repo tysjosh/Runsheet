@@ -30,6 +30,7 @@ from fuel.services.dispatch_board_models import (
 from fuel.services.dispatch_board_service import DispatchBoardService
 from tests.unit._dispatch_board_fakes import (
     COMMANDS,
+    COMPARTMENTS,
     DRAFTS,
     NOW,
     ORDERS,
@@ -259,6 +260,108 @@ async def test_future_day_lane_with_blocked_driver_commits(h):
     await h.run("add_lane", truck_id="T2", lanes=("T2",))
     exc = await expect(ErrorCode.BOARD_COMMAND_BLOCKED, h.run("pair_driver", truck_id="T2", driver_id="d1", lanes=("T2",)))
     assert exc.details["reason"] == "hos_gate_blocked"
+
+
+async def _pinned_away_from_home(h):
+    """T1 published with o1+o2; after a rollback o1 sits on T2 and has started."""
+    for o in ("o1", "o2"):
+        h.seed_order(o)
+    await h.lane_with("T1", "o1", "o2", driver_id="d1")
+    await h.run("add_lane", truck_id="T2", lanes=("T2",))
+    doc = h.store.docs[DRAFTS][draft_doc_id(T, TODAY)]
+    lane = h.draft().lanes["T1"]
+    load_id = lane.loads[0].load_id
+    plan = PublishedPlan(plan_id=f"bp-{load_id}-r1", route_id=f"br-{load_id}-r1", run_id=f"bp-{load_id}-r1", revision=1)
+    publish = LanePublish(state="published", published_version=lane.version, published_content=lane.content(), published_hash=engine.content_hash(lane), plans={load_id: plan})
+    doc["lanes"]["T1"]["publish"] = publish.model_dump(mode="json")
+    doc["lanes"]["T1"]["loads"][0]["stops"] = [s for s in doc["lanes"]["T1"]["loads"][0]["stops"] if s["order_id"] != "o1"]
+    doc["lanes"]["T2"]["loads"] = [dict(doc["lanes"]["T1"]["loads"][0], load_id="LB", stops=[lane.loads[0].stops[0].model_dump(mode="json")])]
+    doc["order_index"]["o1"] = "T2"
+    h.store.poke(ORDERS, "o1", status="in_transit", assigned_run_id=plan.run_id)
+    h.store.poke(ORDERS, "o2", status="dispatched", assigned_run_id=plan.run_id)
+    return load_id
+
+
+async def test_move_back_commits_despite_a_persistent_block_on_the_home_lane(h):
+    """Review P1-2 freeze narrowing: a pure move-back that adds no new block commits."""
+    load_id = await _pinned_away_from_home(h)
+    # The home lane's driver lapsed mid-day; the driver can't change on a started lane.
+    h.qualification.ineligible = {"d1": ["cdl_expired"]}
+    h.validation.cache.clear()
+    exc = await expect(ErrorCode.BOARD_COMMAND_BLOCKED, h.run("pair_driver", truck_id="T1", driver_id="d2", lanes=("T1",)))
+    assert "load_started" in [c["reason_code"] for c in exc.details["checks"]["T1"] if c["outcome"] == "block"]
+    # Any other change to T1 is still refused by the persistent block.
+    h.seed_order("o3")
+    exc = await expect(ErrorCode.BOARD_COMMAND_BLOCKED, h.run("assign_orders", order_ids=["o3"], truck_id="T1", target={"load_id": "new"}, lanes=("T1",)))
+    assert "cdl_expired" in [c["reason_code"] for c in exc.details["checks"]["T1"] if c["outcome"] == "block"]
+    # The move back commits; the old block stays on T1, B's stop_pinned is gone.
+    result = await h.run("move_stops", order_ids=["o1"], truck_id="T1", target={"load_id": load_id, "index": 0}, lanes=("T1", "T2"))
+    assert {l["truck_id"] for l in result["lanes"]} == {"T1", "T2"}
+    draft = h.draft()
+    assert draft.order_index["o1"] == "T1"
+    assert ("block", "cdl_expired") in [(c.outcome, c.reason_code) for c in draft.lanes["T1"].checks]
+    assert "stop_pinned" not in [c.reason_code for c in draft.lanes["T2"].checks]
+
+
+async def test_move_back_that_adds_a_new_block_is_refused(h):
+    load_id = await _pinned_away_from_home(h)
+    # o1 has grown past T1's capacity: moving it home adds a compartment_fit
+    # block to T1 that T1 didn't have before, so the move back is refused.
+    h.store.poke(ORDERS, "o1", gallons_requested=50000.0)
+    h.validation.cache.clear()
+    exc = await expect(
+        ErrorCode.BOARD_COMMAND_BLOCKED,
+        h.run("move_stops", order_ids=["o1"], truck_id="T1", target={"load_id": load_id, "index": 0}, lanes=("T1", "T2")),
+    )
+    t1_blocks = [c["reason_code"] for c in exc.details["checks"]["T1"] if c["outcome"] == "block"]
+    assert "total_overage" in t1_blocks
+    assert h.draft().order_index["o1"] == "T2"
+
+
+async def test_pair_driver_with_driver_repository_down_is_blocked(h):
+    """Review P1-1: qualification can't run, so it blocks (K3.4)."""
+    h.seed_order("o1")
+    await h.lane_with("T1", "o1")
+
+    async def down(tenant_id, driver_id):
+        raise TimeoutError("driver store timed out")
+
+    h.drivers.get = down
+    h.validation.cache.clear()
+    exc = await expect(ErrorCode.BOARD_COMMAND_BLOCKED, h.run("pair_driver", truck_id="T1", driver_id="d1", lanes=("T1",)))
+    assert exc.status_code == 422
+    blocked = [(c["check"], c["reason_code"]) for c in exc.details["checks"]["T1"] if c["outcome"] == "block"]
+    assert ("driver_qualification", "check_unavailable") in blocked
+    assert h.draft().lanes["T1"].driver_id is None
+
+
+async def test_dyed_order_with_compartments_down_is_blocked(h):
+    """Review P1-1: dyed_diesel blocks when compartment data is unavailable (K3.4)."""
+    h.seed_order("o1", product_code="OFF_ROAD_DIESEL")
+    await h.run("add_lane", truck_id="T1", lanes=("T1",))
+    h.validation.cache.clear()
+    h.store.fail_on("search_documents", COMPARTMENTS, times=100)
+    exc = await expect(ErrorCode.BOARD_COMMAND_BLOCKED, h.run("assign_orders", order_ids=["o1"], truck_id="T1", target={"load_id": "new"}, lanes=("T1",)))
+    assert exc.status_code == 422
+    blocked = [(c["check"], c["reason_code"]) for c in exc.details["checks"]["T1"] if c["outcome"] == "block"]
+    assert ("dyed_diesel", "check_unavailable") in blocked
+    assert h.draft().order_ids == []
+
+
+async def test_shadow_snapshot_writes_nothing(h):
+    """Review P1-3: shadow recomputes stale checks for the response but saves nothing."""
+    h.seed_order("o1")
+    await h.lane_with("T1", "o1", driver_id="d1")
+    doc_id = draft_doc_id(T, TODAY)
+    h.store.docs[DRAFTS][doc_id]["lanes"]["T1"]["checks_stale"] = True
+    before = len(h.store.writes(DRAFTS))
+    snap = await h.service.snapshot(T, TODAY, mode="shadow", tz=TZ)
+    assert snap["read_only"] is True and snap["lanes"][0]["truck_id"] == "T1"
+    assert len(h.store.writes(DRAFTS)) == before
+    assert h.store.docs[DRAFTS][doc_id]["lanes"]["T1"]["checks_stale"] is True
+    await h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ)
+    assert len(h.store.writes(DRAFTS)) == before + 1
+    assert h.store.docs[DRAFTS][doc_id]["lanes"]["T1"]["checks_stale"] is False
 
 
 async def test_freeze_rule_11e_move_back_commits(h):

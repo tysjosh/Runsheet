@@ -133,6 +133,21 @@ cwd `.worktrees/dispatch-board/Runsheet-backend`, `PY=/Users/olukotunjosh/Downlo
 - Broadcasts go through an optional `ws_manager.broadcast_board_event(...)`; nothing is sent until Phase 3 provides the manager.
 - Test-environment note: `tests/postgres/conftest.py` deletes every `pytest_docstore_%` row at teardown, so a Postgres test run from another checkout on the same local database wipes rows mid-test. Two early runs of the new Postgres test failed that way while another agent's pytest was running; isolated reruns pass.
 
+#### Phase 1 review fix pass (phase1-review.json)
+| Finding | Fix | Tests |
+|---|---|---|
+| P1-1 regulatory checks silent in an outage | `_qualification_checks`: a paired lane with `drivers` unavailable gets `driver_qualification check_unavailable` (block); `_hos_checks` gives `hos check_unavailable` (warn, today) in the same case instead of nothing. `_compartment_checks`: with `compartments` unavailable, a load whose orders or allocations carry a dyed product also gets `dyed_diesel check_unavailable` (block), via `_load_has_dyed`. | `test_dispatch_validation.py::test_drivers_source_down_blocks_qualification_for_a_paired_lane`, `::test_compartments_source_down_blocks_dyed_diesel`; `test_dispatch_board_service.py::test_pair_driver_with_driver_repository_down_is_blocked`, `::test_dyed_order_with_compartments_down_is_blocked` (both 422 `BOARD_COMMAND_BLOCKED`, nothing committed). |
+| P1-2 move back refused by unrelated blocks | Freeze narrowing written into design freeze rule 11 (e) and plan task 16 (j): `DispatchBoardService._move_back_adds_no_block` lets a `move_stops` that only returns pinned orders to their `assigned_run_id` load commit when the touched lanes' block set (lane, check, reason, warning id) after is a subset of before. Every other command keeps the any-block rule. | `test_move_back_commits_despite_a_persistent_block_on_the_home_lane` (lapsed qualification on started T1: driver change and new load still refused, move back commits); `test_move_back_that_adds_a_new_block_is_refused` (move back that adds `total_overage` to T1 is refused). |
+| P1-3 shadow snapshot writes | `_refresh_stale(..., write_back=mode != "shadow")`: shadow recomputes for the response and saves nothing. | `test_shadow_snapshot_writes_nothing` (no draft write in shadow; one in `active_gated`). |
+| P1-4 flag pair echoes state | 422 message and details no longer include the submitted value (`valid_states` only). The order-intake pair is unchanged. | `test_admin_flag_pair_scope_and_state_checks` asserts the value isn't in the body. |
+| P1-5 projection read vs `es_documents` guard | Took the behavior-preserving option the review lists (test + metric), not the `get_current` switch, which would be a design deviation needing the owner. Guarded-write refusals on `POST /api/driver/orders/{id}/status` now record `driver.transition.guard_refused.count` (tags `tenant_id`, `reason` = exception type, `read_source` = `projection`/`documents`). A sustained count for one tenant with `read_source=projection` is the stuck case. Responses don't change. Switching the base read to `get_current` stays open for the owner before Phase 2. | `test_driver_transition_guards.py::test_stale_projection_read_keeps_refusing_and_is_counted` (a stale base read refuses on every retry, each refusal is counted, and a fresh read heals it). |
+
+Commands (same cwd and `$PY`):
+- `ENVIRONMENT=test JWT_SECRET=x REDIS_URL=redis://localhost:6379 $PY -m pytest --no-cov -q -p no:cacheprovider -o log_cli=false tests/unit/test_driver_transition_guards.py tests/unit/test_dispatch_board_*.py tests/unit/test_dispatch_validation.py` → **260 passed** (before the flag-echo assertion was added); `tests/unit/test_dispatch_board_flags.py` → 12 passed afterwards.
+- Registry: `ENVIRONMENT=test REDIS_URL=redis://localhost:6379 JWT_SECRET=x $PY scripts/generate_endpoint_registry.py` → 353 entries; `git diff --exit-code --stat -- docs/endpoint-registry.md` → clean.
+- Full suite, CI env (`REDIS_URL=redis://localhost:6379 JWT_SECRET=ci-test-jwt-secret JWT_ALGORITHM=HS256 ENVIRONMENT=test $PY -m pytest --no-cov -q -p no:cacheprovider -o log_cli=false`) → **13017 passed, 237 skipped, 0 failed** (4 m 25 s). Coverage wasn't measured locally.
+- Postgres suite, CI env → **232 passed**.
+
 ### Phase 2: Publish and changes after publish
 Not started.
 
