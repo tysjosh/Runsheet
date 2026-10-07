@@ -264,7 +264,7 @@ Free disk: 9.5 GB. Scratch file under `Runsheet/tmp/` deleted.
 
 ### Phase 3: Realtime and suggestions
 
-Commit: see `git log` (`feat(dispatch-board): Phase 3 ...`).
+Commit `02975db`.
 
 | Task | Code | Tests |
 |---|---|---|
