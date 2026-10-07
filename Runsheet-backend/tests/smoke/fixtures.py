@@ -520,6 +520,34 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
     "GET /api/integrations": RouteFixture(),
     "GET /api/integrations/providers": RouteFixture(),
     "GET /api/import/history": RouteFixture(),
+    # ---- Customer portal (OI-06); 404 PORTAL_DISABLED unless the flag is on ----
+    "GET /api/portal/me": RouteFixture(),
+    "GET /api/portal/orders": RouteFixture(),
+    "GET /api/portal/orders/{order_id}": RouteFixture(
+        path_params={"order_id": "ord_portal_0000000000000001"},
+    ),
+    "POST /api/portal/orders": RouteFixture(
+        method="POST",
+        json={
+            "client_event_id": "00000000-0000-4000-8000-000000000001",
+            "customer_tank_id": "QA-TANK-001",
+            "quantity": {"mode": "fill_to_full"},
+            "window_start": "2026-10-09T08:00:00+00:00",
+            "window_end": "2026-10-09T16:00:00+00:00",
+        },
+    ),
+    "POST /api/portal/orders/{order_id}/cancel": RouteFixture(
+        method="POST",
+        path_params={"order_id": "ord_portal_0000000000000001"},
+        json={},
+    ),
+    "GET /api/portal/tanks": RouteFixture(),
+    "GET /api/portal/tanks/{customer_tank_id}": RouteFixture(
+        path_params={"customer_tank_id": "QA-TANK-001"},
+    ),
+    "GET /api/portal/tanks/{customer_tank_id}/deliveries": RouteFixture(
+        path_params={"customer_tank_id": "QA-TANK-001"},
+    ),
 }
 
 

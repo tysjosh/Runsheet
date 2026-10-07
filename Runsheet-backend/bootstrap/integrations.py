@@ -125,6 +125,29 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.warning("Canonical import wiring failed: %s", exc)
 
+    # Customer portal orders and tanks (OI-06, design §2.4, §4). Wired here
+    # because the customer-tank repository is created just above; it needs the
+    # pipeline and order repository (fuel) and CustomerService (core, only
+    # with the commerce backbone). Without them the routes answer 503.
+    try:
+        needed = (
+            "order_intake_pipeline", "order_repository",
+            "customer_tank_repository", "commerce_customer_service",
+        )
+        if all(container.has(name) for name in needed):
+            from portal.services.portal_order_service import wire_portal_orders
+
+            wire_portal_orders(
+                es_service=es_service,
+                order_repository=container.order_repository,
+                tank_repository=container.customer_tank_repository,
+                pipeline=container.order_intake_pipeline,
+                customer_service=container.commerce_customer_service,
+            )
+            logger.info("Customer portal orders and tanks configured")
+    except Exception as exc:
+        logger.warning("Customer portal order wiring failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Dinee voice integration (Surface A submission bridge + Surface B
     # read/driver endpoints). Wired here — the last bootstrap module — so the

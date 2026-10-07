@@ -127,6 +127,14 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
         except Exception as exc:
             logger.warning("Failed to register dispatcher adapter: %s", exc)
+        try:
+            # Customer-portal delivery requests (OI-06, design §4.2).
+            from fuel.intake.web_portal_adapter import WebPortalIntakeAdapter
+            adapter_registry.register(
+                WebPortalIntakeAdapter(), channel_type="web_portal", schema_version="1.0"
+            )
+        except Exception as exc:
+            logger.warning("Failed to register web_portal adapter: %s", exc)
 
         try:
             from fuel.intake.csv_adapter import CsvIntakeAdapter

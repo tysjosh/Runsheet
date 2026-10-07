@@ -22,6 +22,11 @@ Fixtures later FEATs reuse:
   pipeline, invoice service, spies).
 * ``handler_spy``: records every ``APIRoute.handle`` call.
 * ``portal_routes()`` / ``fill_path()`` / ``audit_records()`` helpers.
+* ``portal_orders`` (FEAT-003): :class:`OrderHarness` — a real
+  ``OrderIntakePipeline`` / ``FuelOrderRepository`` / ``CustomerTankRepository``
+  over one ``InMemoryDocumentStore``, wired as the portal readers and
+  ``PortalOrderService`` (and as the /me pipeline). Without it the order and
+  tank routes answer 503 ``PORTAL_UNAVAILABLE``.
 """
 from __future__ import annotations
 
@@ -29,6 +34,7 @@ import re
 import sys
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 from unittest.mock import MagicMock
@@ -752,3 +758,296 @@ def health_container() -> SimpleNamespace:
             return {"status": "healthy", "timestamp": "2026-10-08T00:00:00Z"}
 
     return SimpleNamespace(health_check_service=_Health())
+
+
+# ---------------------------------------------------------------------------
+# Orders and tanks (FEAT-003)
+# ---------------------------------------------------------------------------
+
+
+class FakeIdempotency:
+    """The pipeline's idempotency marker store (Redis in production)."""
+
+    def __init__(self) -> None:
+        self.keys: set = set()
+
+    async def is_duplicate(self, event_id, *, tenant_id):
+        return (tenant_id, event_id) in self.keys
+
+    async def mark_processed(self, event_id, *, tenant_id):
+        self.keys.add((tenant_id, event_id))
+
+    def clear(self) -> None:
+        self.keys.clear()
+
+
+class FakeOverlayFlags:
+    """``order_intake_pipeline`` overlay state. ``states`` (a list) is consumed
+    one read at a time before falling back to ``state``."""
+
+    def __init__(self, state: str = "shadow") -> None:
+        self.state = state
+        self.states: List[str] = []
+
+    async def get_overlay_state(self, key, tenant_id):
+        assert key == "order_intake_pipeline"
+        return self.states.pop(0) if self.states else self.state
+
+
+class _Sink:
+    def __init__(self) -> None:
+        self.calls: List[Dict[str, Any]] = []
+
+    async def store_failed_event(self, **kwargs):
+        self.calls.append(kwargs)
+
+    async def broadcast(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+def iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+@dataclass
+class OrderHarness:
+    store: Any
+    order_repo: Any
+    tank_repo: Any
+    pipeline: Any
+    flags: FakeOverlayFlags
+    idempotency: FakeIdempotency
+    poison: _Sink
+    service: Any
+    ingest_calls: List[Dict[str, Any]]
+    now: datetime
+
+    # -- seeding -----------------------------------------------------------
+
+    def add_tank(
+        self,
+        tenant_id: str,
+        customer_id: str,
+        customer_tank_id: str,
+        *,
+        status: str = "active",
+        capacity: float = 500.0,
+        level: float = 250.0,
+        external_tank_id: Optional[str] = None,
+        last_reading_at: Any = "now",
+        product: str = "PROPANE",
+        lat: float = 41.5,
+        lon: float = -88.1,
+    ) -> Dict[str, Any]:
+        from fuel.customer_tank_models import CustomerTank
+
+        reading = self.now if last_reading_at == "now" else last_reading_at
+        doc = CustomerTank(
+            customer_tank_id=customer_tank_id,
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            external_tank_id=external_tank_id,
+            customer_type="residential",
+            fuel_type="propane",
+            fuel_product_code=product,
+            capacity_gallons=capacity,
+            current_level_gallons=level,
+            last_reading_at=reading,
+            location_lat=lat,
+            location_lon=lon,
+            zip_code="60601",
+            k_factor=0.12,
+            source_system="QA-ERP",
+            status=status,
+        ).model_dump(mode="json")
+        self.store.seed("customer_tanks", customer_tank_id, doc)
+        return doc
+
+    def add_order(
+        self,
+        tenant_id: str,
+        customer_id: str,
+        order_id: str,
+        *,
+        customer_tank_id: Optional[str] = None,
+        status: str = "placed",
+        hold_reason: Optional[str] = None,
+        channel: str = "dispatcher",
+        created_at: Optional[datetime] = None,
+        window_start: Optional[datetime] = None,
+        **overrides: Any,
+    ) -> Dict[str, Any]:
+        from fuel.order_models import FuelOrder
+
+        created = created_at or self.now - timedelta(hours=1)
+        start = window_start or self.now + timedelta(days=1)
+        payload: Dict[str, Any] = {
+            "order_id": order_id,
+            "tenant_id": tenant_id,
+            "customer_id": customer_id,
+            "customer_name": f"Customer {customer_id[-1]}",
+            "customer_phone": "+15550100",
+            "customer_email": "buyer@example.test",
+            "ship_to_address": "1 QA Road",
+            "ship_to_lat": 41.5,
+            "ship_to_lon": -88.1,
+            "customer_tank_id": customer_tank_id,
+            "product_code": "PROPANE",
+            "gallons_requested": 100.0,
+            "call_type": "will_call",
+            "delivery_window_start": iso(start),
+            "delivery_window_end": iso(start + timedelta(hours=4)),
+            "intake_channel": channel,
+            "intake_channel_id": "ch-qa",
+            "status": status,
+            "hold_reason": hold_reason,
+            "special_instructions": "gate code 1234",
+            "source_schema_version": "1.0",
+            "trace_id": "trace-qa",
+            "created_at": iso(created),
+            "updated_at": iso(created),
+            "last_event_timestamp": iso(created),
+        }
+        payload.update(overrides)
+        doc = FuelOrder(**payload).model_dump(mode="json")
+        self.store.seed("fuel_orders_current", order_id, doc)
+        return doc
+
+    def add_forecast(
+        self,
+        tenant_id: str,
+        customer_id: str,
+        customer_tank_id: str,
+        *,
+        timestamp: datetime,
+        hours: float,
+    ) -> None:
+        fid = f"fc-{uuid.uuid4().hex[:8]}"
+        self.store.seed("mvp_tank_forecasts", fid, {
+            "forecast_id": fid,
+            "tenant_id": tenant_id,
+            "customer_id": customer_id,
+            "customer_tank_id": customer_tank_id,
+            "hours_to_runout_p50": hours,
+            "hours_to_runout_p90": hours * 0.8,
+            "timestamp": iso(timestamp),
+        })
+
+    # -- inspection --------------------------------------------------------
+
+    def order(self, order_id: str) -> Optional[Dict[str, Any]]:
+        return self.store.doc("fuel_orders_current", order_id)
+
+    def orders(self) -> List[Dict[str, Any]]:
+        return list(self.store.docs["fuel_orders_current"].values())
+
+    def order_writes(self) -> int:
+        return self.store.write_count(index="fuel_orders_current")
+
+
+def build_order_harness(customer_service: Any) -> OrderHarness:
+    """The real intake/order/tank stack over one in-memory document store."""
+    from fuel.customer_tank_models import CustomerTankRepository
+    from fuel.intake.adapter_base import IntakeAdapterRegistry
+    from fuel.intake.web_portal_adapter import WebPortalIntakeAdapter
+    from fuel.order_repository import FuelOrderRepository
+    from fuel.services.order_intake_pipeline import OrderIntakePipeline
+    from portal.services.portal_order_service import wire_portal_orders
+    from tests.unit._loading_plan_fakes import InMemoryDocumentStore
+
+    store = InMemoryDocumentStore()
+    order_repo = FuelOrderRepository(store)
+    tank_repo = CustomerTankRepository(store)
+    registry = IntakeAdapterRegistry()
+    registry.register(WebPortalIntakeAdapter(), channel_type="web_portal", schema_version="1.0")
+    flags = FakeOverlayFlags()
+    idempotency = FakeIdempotency()
+    poison = _Sink()
+    pipeline = OrderIntakePipeline(
+        es_service=store,
+        intake_channel_repo=None,
+        adapter_registry=registry,
+        idempotency_service=idempotency,
+        feature_flag_service=flags,
+        poison_queue_service=poison,
+        ws_manager=_Sink(),
+        credentials_vault=None,
+        customer_tank_repo=tank_repo,
+    )
+    calls: List[Dict[str, Any]] = []
+    original = pipeline.ingest_portal
+
+    async def _spy(**kwargs):
+        calls.append(kwargs)
+        return await original(**kwargs)
+
+    pipeline.ingest_portal = _spy
+    service = wire_portal_orders(
+        es_service=store,
+        order_repository=order_repo,
+        tank_repository=tank_repo,
+        pipeline=pipeline,
+        customer_service=customer_service,
+    )
+    return OrderHarness(
+        store=store, order_repo=order_repo, tank_repo=tank_repo, pipeline=pipeline,
+        flags=flags, idempotency=idempotency, poison=poison, service=service,
+        ingest_calls=calls, now=datetime.now(timezone.utc),
+    )
+
+
+@pytest.fixture
+def portal_orders(portal_fakes) -> Iterator[OrderHarness]:
+    """Wire :class:`OrderHarness` as the portal readers/order service and the
+    /me pipeline (``portal_fakes`` restores /me); restore the registries after."""
+    import portal.api.me_endpoints as me
+    from portal.services import portal_order_service as pos
+    from portal.services import scoped_readers as sr
+
+    saved = (sr.get_configured_readers(), pos.get_configured_order_service())
+    harness = build_order_harness(portal_fakes.customers)
+    me.configure_portal_me(order_intake_pipeline=harness.pipeline)
+    try:
+        yield harness
+    finally:
+        sr.configure_portal_readers(saved[0])
+        pos.configure_portal_orders(saved[1])
+
+
+@dataclass
+class IsolationIds:
+    tank_a: str = "QA-TANK-A1"
+    tank_a_inactive: str = "QA-TANK-A2"
+    tank_b: str = "QA-TANK-B1"
+    tank_c: str = "QA-TANK-C1"
+    order_a: str = "QA-ORD-A1"
+    order_a_portal: str = "QA-ORD-A2"
+    order_b: str = "QA-ORD-B1"
+    order_b_portal: str = "QA-ORD-B2"
+    order_c: str = "QA-ORD-C1"
+    order_c_portal: str = "QA-ORD-C2"
+
+
+def seed_isolation(h: OrderHarness) -> IsolationIds:
+    """Customers A, B (T1) and C (T2): one active and (A) one inactive tank,
+    orders on two channels, a forecast and an open next delivery each."""
+    from fuel.order_models import PORTAL_REVIEW_HOLD_REASON
+
+    ids = IsolationIds()
+    tanks = ((T1, CUSTOMER_A, ids.tank_a), (T1, CUSTOMER_B, ids.tank_b), (T2, CUSTOMER_C, ids.tank_c))
+    h.add_tank(T1, CUSTOMER_A, ids.tank_a_inactive, status="inactive")
+    orders = {
+        ids.tank_a: (ids.order_a, ids.order_a_portal),
+        ids.tank_b: (ids.order_b, ids.order_b_portal),
+        ids.tank_c: (ids.order_c, ids.order_c_portal),
+    }
+    for i, (tenant, customer, tank) in enumerate(tanks):
+        h.add_tank(tenant, customer, tank)
+        h.add_forecast(tenant, customer, tank, timestamp=h.now - timedelta(hours=1), hours=72)
+        plain, portal = orders[tank]
+        h.add_order(tenant, customer, plain, customer_tank_id=tank, status="scheduled",
+                    created_at=h.now - timedelta(hours=3 + i))
+        h.add_order(tenant, customer, portal, customer_tank_id=tank, status="on_hold",
+                    hold_reason=PORTAL_REVIEW_HOLD_REASON, channel="web_portal",
+                    created_at=h.now - timedelta(hours=2 + i))
+    return ids

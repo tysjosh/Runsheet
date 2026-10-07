@@ -55,6 +55,12 @@ OrderStatus = Literal[
 #: (staging N2: ``placed`` orders ended up as ``unresolvable_stop_locations``).
 LOADABLE_ORDER_STATUSES: Tuple[str, ...] = ("placed", "confirmed", "scheduled")
 
+#: Hold reason the intake pipeline stamps on a customer-portal request
+#: (``web_portal``) that no hook held. ``on_hold`` is not loadable, so the
+#: request stays out of planning until a dispatcher confirms it with
+#: ``release-hold`` (customer portal design §4.2, step i3).
+PORTAL_REVIEW_HOLD_REASON: str = "awaiting_dispatcher_confirmation"
+
 CallType = Literal["will_call", "auto_fill", "keep_full", "one_off"]
 
 IntakeChannelType = Literal[
@@ -403,6 +409,7 @@ class Driver(BaseModel):
 __all__ = [
     "OrderStatus",
     "LOADABLE_ORDER_STATUSES",
+    "PORTAL_REVIEW_HOLD_REASON",
     "CallType",
     "IntakeChannelType",
     "DriverStatus",

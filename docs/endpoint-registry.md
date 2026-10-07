@@ -298,6 +298,13 @@
 | POST | `/api/orders/{order_id}/release-hold` | /api/orders | session_required | — | — | OrderResponse |
 | PATCH | `/api/orders/{order_id}/status` | /api/orders | session_required | — | — | OrderResponse |
 | GET | `/api/portal/me` | — | session_required | — | — | PortalMeEnvelope |
+| GET | `/api/portal/orders` | — | session_required | — | — | PortalOrderListEnvelope |
+| POST | `/api/portal/orders` | — | session_required | — | — | PortalOrderEnvelope |
+| GET | `/api/portal/orders/{order_id}` | — | session_required | — | — | PortalOrderEnvelope |
+| POST | `/api/portal/orders/{order_id}/cancel` | — | session_required | — | — | PortalOrderEnvelope |
+| GET | `/api/portal/tanks` | — | session_required | — | — | PortalTankListEnvelope |
+| GET | `/api/portal/tanks/{customer_tank_id}` | — | session_required | — | — | PortalTankEnvelope |
+| GET | `/api/portal/tanks/{customer_tank_id}/deliveries` | — | session_required | — | — | PortalTankDeliveryListEnvelope |
 | GET | `/api/scheduling/cargo/search` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs` | /api/scheduling | session_required | — | CreateJob | dict |

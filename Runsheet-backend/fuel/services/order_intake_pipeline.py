@@ -58,7 +58,7 @@ from fuel.intake.adapter_base import (
     IntakeAdapterRegistry,
     IntakeContext,
 )
-from fuel.order_models import FuelOrder
+from fuel.order_models import PORTAL_REVIEW_HOLD_REASON, FuelOrder
 from fuel.services.order_id_generator import mint_event_id, mint_order_id
 from ops.webhooks.hmac_util import verify_hmac_sha256_hex
 from fuel.services.order_metrics import (
@@ -164,6 +164,49 @@ class _CsvImportChannel:
     channel_type: str = "csv"
     supported_schema_versions: List[str] = field(default_factory=lambda: ["1.0"])
     enabled: bool = True
+
+
+@dataclass
+class _PortalChannel:
+    """Ephemeral channel for customer-portal requests (``web_portal``).
+
+    The portal session is already verified and scoped by the portal guard,
+    so, like the CSV importer, it needs no persisted HMAC intake channel.
+    """
+
+    tenant_id: str
+    channel_id: str = "web-portal"
+    channel_type: str = "web_portal"
+    supported_schema_versions: List[str] = field(default_factory=lambda: ["1.0"])
+    enabled: bool = True
+
+
+def portal_event_id(user_id: str, client_event_id: str) -> str:
+    """Tenant-scoped idempotency key of a portal request, namespaced per user.
+
+    Two portal users of one tenant who happen to send the same
+    ``client_event_id`` never collide (customer portal design §4.2, D5).
+    """
+    return f"portal:{user_id}:{client_event_id}"
+
+
+def portal_order_id(tenant_id: str, user_id: str, client_event_id: str) -> str:
+    """Deterministic ``order_id`` of a portal request (design D5).
+
+    A replay of the same ``client_event_id`` by the same user maps to the
+    same order, so the portal can answer it with the original order without
+    a lookup table.
+    """
+    digest = hashlib.sha256(
+        f"{tenant_id}|{user_id}|{client_event_id}".encode()
+    ).hexdigest()[:32]
+    return f"ord_portal_{digest}"
+
+
+def _portal_client_event_id(event_id: str, user_id: Optional[str]) -> str:
+    """Recover the client id from :func:`portal_event_id`'s namespaced key."""
+    prefix = f"portal:{user_id}:"
+    return event_id[len(prefix):] if event_id.startswith(prefix) else event_id
 
 
 # ---------------------------------------------------------------------------
@@ -448,6 +491,32 @@ class OrderIntakePipeline:
             client_event_id=client_event_id,
         )
 
+    async def ingest_portal(
+        self,
+        *,
+        scope: Any,
+        payload: Dict[str, Any],
+        request_id: str,
+        client_event_id: str,
+    ) -> IntakeResponse:
+        """Ingest one customer-portal delivery request (design §4.2).
+
+        ``scope`` is the verified ``PortalScope``; the actor is its user and
+        the idempotency key is :func:`portal_event_id`. The order id is
+        :func:`portal_order_id`, an existing order with that id is answered as
+        ``duplicate`` without hooks or writes, and an order no hook held lands
+        on the portal review hold.
+        """
+        if not client_event_id:
+            raise missing_client_event_id(details={"path": "web_portal"})
+        return await self._ingest_common(
+            channel=_PortalChannel(tenant_id=scope.tenant_id),
+            payload=payload,
+            request_id=request_id,
+            actor_user_id=scope.user_id,
+            client_event_id=portal_event_id(scope.user_id, client_event_id),
+        )
+
     # ------------------------------------------------------------------
     # Core pipeline logic
     # ------------------------------------------------------------------
@@ -584,6 +653,34 @@ class OrderIntakePipeline:
             result.order_doc, context, event_id
         )
 
+        # (g2) Portal existing-id guard (customer portal review H3). The id is
+        # deterministic, so an existing order means this request was already
+        # accepted (e.g. two concurrent first submits, or the idempotency
+        # marker was lost). Answer ``duplicate`` without hooks or writes, like
+        # the CSV ``stale`` branch below, so it can never be overwritten. A
+        # repository error propagates: treating it as "missing" would reopen
+        # the overwrite.
+        if intake_channel_type == "web_portal":
+            from fuel.order_repository import FuelOrderRepository
+
+            existing = await FuelOrderRepository(self._es).get(
+                tenant_id, order_doc["order_id"]
+            )
+            if existing is not None:
+                await self._idempotency_service.mark_processed(
+                    event_id, tenant_id=tenant_id
+                )
+                orders_intake_processed_total.labels(
+                    tenant_id=tenant_id,
+                    intake_channel=intake_channel_type,
+                    status="duplicate",
+                ).inc()
+                return IntakeResponse(
+                    event_id=event_id,
+                    status="duplicate",
+                    order_id=order_doc["order_id"],
+                )
+
         # ERP files can contain a newer snapshot of an order imported earlier.
         # Reuse the same source-linked order_id, preserve lifecycle state, and
         # refuse an older/equal source version before it can overwrite current
@@ -625,6 +722,15 @@ class OrderIntakePipeline:
                 # Re-raise hook exceptions — they signal order rejection
                 # (e.g. PricingError.no_rule_matched).
                 raise hook_exc
+
+        # (i3) Portal review hold (customer portal design §4.2, D9). Inline,
+        # not a hook, so it doesn't depend on hook registration order across
+        # bootstrap modules. Only an order no hook held is stamped: a hold a
+        # hook set (e.g. credit) is never replaced, because release-hold does
+        # not re-run that check.
+        if intake_channel_type == "web_portal" and order_doc.get("status") == "placed":
+            order_doc["status"] = "on_hold"
+            order_doc["hold_reason"] = PORTAL_REVIEW_HOLD_REASON
 
         # (j) Validate via FuelOrder.model_validate BEFORE writing.
         #
@@ -859,6 +965,12 @@ class OrderIntakePipeline:
                 ).encode()
             ).hexdigest()[:32]
             order_doc["order_id"] = f"ord_import_{digest}"
+        elif getattr(context.channel, "channel_type", None) == "web_portal":
+            order_doc["order_id"] = portal_order_id(
+                context.tenant_id,
+                context.actor_user_id,
+                _portal_client_event_id(event_id, context.actor_user_id),
+            )
         else:
             order_doc["order_id"] = mint_order_id()
         order_doc["tenant_id"] = context.tenant_id

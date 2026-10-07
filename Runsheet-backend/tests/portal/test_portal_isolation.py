@@ -103,3 +103,92 @@ def test_revoked_customer_has_no_session(
     again = call(client, "POST", BASE, admin, json={"email": EMAIL})
     assert again.status_code == 201
     assert access.db.user(EMAIL)["st_user_id"] not in (None, uid)
+
+
+# ---------------------------------------------------------------------------
+# Orders and tanks (FEAT-003): ISO-C-1, ISO-C-2, ISO-T-1
+# ---------------------------------------------------------------------------
+
+import json  # noqa: E402
+
+from tests.portal.conftest import seed_isolation  # noqa: E402
+
+
+def _id_routes(ids_order: str, ids_tank: str):
+    """Every order/tank id route, as (method, path, json)."""
+    return [
+        ("GET", f"/api/portal/orders/{ids_order}", None),
+        ("POST", f"/api/portal/orders/{ids_order}/cancel", {}),
+        ("GET", f"/api/portal/tanks/{ids_tank}", None),
+        ("GET", f"/api/portal/tanks/{ids_tank}/deliveries", None),
+    ]
+
+
+def _normalized(resp, *idents):
+    body = dict(resp.json())
+    body.pop("request_id", None)
+    text = json.dumps(body, sort_keys=True)
+    for ident in idents:
+        text = text.replace(ident, "<id>")
+    return text
+
+
+def _assert_like_unknown(client, session, foreign_order, foreign_tank):
+    unknown_order, unknown_tank = "QA-ORD-UNKNOWN-1", "QA-TANK-UNKNOWN-1"
+    unknown = _id_routes(unknown_order, unknown_tank)
+    foreign = _id_routes(foreign_order, foreign_tank)
+    for (m, path_u, js), (_m, path_f, _js) in zip(unknown, foreign):
+        miss = call(client, m, path_u, session, json=js)
+        hit = call(client, m, path_f, session, json=js)
+        assert miss.status_code == 404, (path_u, miss.text)
+        assert hit.status_code == 404, (path_f, hit.text)
+        assert miss.json()["error_code"] == "RESOURCE_NOT_FOUND"
+        assert _normalized(hit, foreign_order, foreign_tank) == _normalized(
+            miss, unknown_order, unknown_tank
+        ), path_f
+
+
+def test_customer_a_cannot_read_b(client, portal_on, portal_orders, cA):
+    """ISO-C-1 (order/tank part): B's ids answer exactly like unknown ids."""
+    ids = seed_isolation(portal_orders)
+    for order_id in (ids.order_b, ids.order_b_portal):
+        _assert_like_unknown(client, cA, order_id, ids.tank_b)
+    # B's portal order is untouched by A's cancel attempt.
+    assert portal_orders.order(ids.order_b_portal)["status"] == "on_hold"
+
+
+def _list_ids(client, session):
+    orders = call(client, "GET", "/api/portal/orders", session)
+    tanks = call(client, "GET", "/api/portal/tanks", session)
+    assert orders.status_code == 200 and tanks.status_code == 200
+    order_ids = {o["order_id"] for o in orders.json()["data"]}
+    tank_data = tanks.json()["data"]
+    tank_ids = {t["customer_tank_id"] for t in tank_data}
+    next_ids = {t["next_delivery"]["order_id"] for t in tank_data if t["next_delivery"]}
+    order_tanks = {o["tank"]["customer_tank_id"] for o in orders.json()["data"] if o["tank"]}
+    return order_ids, tank_ids, next_ids, order_tanks
+
+
+def test_lists_contain_only_own_rows(client, portal_on, portal_orders, cA):
+    """ISO-C-2 (order/tank part)."""
+    ids = seed_isolation(portal_orders)
+    order_ids, tank_ids, next_ids, order_tanks = _list_ids(client, cA)
+    assert order_ids == {ids.order_a, ids.order_a_portal}
+    assert tank_ids == {ids.tank_a}
+    assert next_ids == {ids.order_a}
+    assert order_tanks == {ids.tank_a}
+    history = call(client, "GET", f"/api/portal/tanks/{ids.tank_a}/deliveries", cA)
+    assert history.status_code == 200 and history.json()["data"] == []
+
+
+def test_tenant_boundary(client, portal_on, portal_orders, cA, cC):
+    """ISO-T-1 (order/tank part): T2 ids are unknown to cA; cC sees only T2."""
+    ids = seed_isolation(portal_orders)
+    for order_id in (ids.order_c, ids.order_c_portal):
+        _assert_like_unknown(client, cA, order_id, ids.tank_c)
+    order_ids, tank_ids, next_ids, _ = _list_ids(client, cC)
+    assert order_ids == {ids.order_c, ids.order_c_portal}
+    assert tank_ids == {ids.tank_c}
+    assert next_ids == {ids.order_c}
+    # And the reverse: cC can't reach A's rows.
+    _assert_like_unknown(client, cC, ids.order_a_portal, ids.tank_a)

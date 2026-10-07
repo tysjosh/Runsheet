@@ -55,6 +55,7 @@ from fuel.order_state_machine import (
     assert_transition,
     is_terminal_status,
 )
+from fuel.services import order_actions
 from fuel.services.order_id_generator import mint_event_id
 from fuel.services.order_service import transition_order_guarded
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -800,6 +801,13 @@ async def list_orders(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     intake_channel: Optional[str] = Query(default=None),
+    hold_reason: Optional[str] = Query(
+        default=None,
+        description=(
+            "Exact hold reason, e.g. awaiting_dispatcher_confirmation for "
+            "customer-portal requests waiting to be confirmed."
+        ),
+    ),
     q: Optional[str] = Query(
         default=None,
         description=(
@@ -839,6 +847,7 @@ async def list_orders(
         page=page,
         size=size,
         sort=sort,
+        **({"hold_reason": hold_reason} if hold_reason else {}),
     )
     items = [OrderResponse.from_model(o) for o in result["orders"]]
     return OrderListResponse(
@@ -1208,50 +1217,20 @@ async def cancel_order(
 
     assert_transition(order.status, "cancelled")
 
-    now = utcnow()
-    update_fields: Dict[str, Any] = {
-        "status": "cancelled",
-        "updated_at": now.isoformat(),
-        "last_event_timestamp": now.isoformat(),
-    }
-    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
-
-    event_doc = {
-        "event_id": mint_event_id(),
-        "order_id": order_id,
-        "tenant_id": tenant.tenant_id,
-        "event_type": "order_cancelled",
-        "event_payload": {
-            "old_status": order.status,
-            "reason": body.reason,
-            "notes": body.notes,
-            "actor_user_id": tenant.user_id,
-        },
-        "event_timestamp": now.isoformat(),
-        "ingested_at": now.isoformat(),
-        "source_schema_version": "1.0",
-        "trace_id": str(uuid.uuid4()),
-    }
-    await repo.append_event(tenant.tenant_id, event_doc)
-
-    # Decrement driver's active_order_count on cancel from dispatched
-    counter_svc = _get_driver_counter_service()
-    if counter_svc is not None and order.assigned_driver_id:
-        if order.status in ("dispatched",):
-            try:
-                await counter_svc.increment_counters(
-                    driver_id=order.assigned_driver_id,
-                    tenant_id=tenant.tenant_id,
-                    delta_active=-1,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "order_endpoints.cancel: counter decrement failed for "
-                    "driver=%s, order=%s: %s",
-                    order.assigned_driver_id,
-                    order_id,
-                    exc,
-                )
+    # Compare-and-set on the status read above (customer portal F3): a
+    # concurrent change between the read and this write gives 409.
+    cancelled = await order_actions.cancel_order(
+        repo,
+        tenant.tenant_id,
+        order_id,
+        actor_user_id=tenant.user_id,
+        reason=body.reason,
+        notes=body.notes,
+        expected_status=order.status,
+        counter_service=_get_driver_counter_service(),
+    )
+    if cancelled is None:
+        raise _changed_concurrently(order_id, order.status)
 
     updated_order = await repo.get(tenant.tenant_id, order_id)
     if updated_order is None:
@@ -1260,6 +1239,17 @@ async def cancel_order(
             details={"order_id": order_id},
         )
     return OrderResponse.from_model(updated_order)
+
+
+def _changed_concurrently(order_id: str, expected_status: str) -> AppException:
+    """409 ``INVALID_STATUS_TRANSITION`` for a lost compare-and-set."""
+    from errors.exceptions import conflict
+
+    return conflict(
+        message=f"Order '{order_id}' changed while this request was processed",
+        error_code="INVALID_STATUS_TRANSITION",
+        details={"order_id": order_id, "expected_status": expected_status},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1421,14 +1411,25 @@ async def release_hold_order(
         }
         await repo.append_event(tenant.tenant_id, event_doc)
     else:
-        # All hooks passed — transition back to placed
+        # All hooks passed — transition back to placed. Compare-and-set on
+        # the hold read above (F3): a customer cancel or another release in
+        # between gives 409 instead of resurrecting the order.
         update_fields = {
             "status": "placed",
             "hold_reason": None,
             "updated_at": now.isoformat(),
             "last_event_timestamp": now.isoformat(),
         }
-        await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
+        released = await order_actions.transition_order_if(
+            repo,
+            tenant.tenant_id,
+            order_id,
+            expected_status="on_hold",
+            expected_hold_reason=order.hold_reason,
+            update_fields=update_fields,
+        )
+        if released is None:
+            raise _changed_concurrently(order_id, "on_hold")
 
         event_doc = {
             "event_id": mint_event_id(),

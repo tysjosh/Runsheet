@@ -19,6 +19,7 @@ Implements :class:`FuelOrderRepository` with:
 * ``get_current`` — the authoritative stored document (no hybrid read).
 * ``claim_assignment`` / ``release_assignment`` — run-link CAS and release
   by claim-id ownership (loading-plan-executor K5, FREEZE rule 2).
+* ``transition_if`` — compare-and-set status write (customer portal F3).
 * ``append_event`` — append an immutable event to ``fuel_order_events``.
 * ``get_events_for_order`` — retrieve the event timeline for an order.
 
@@ -53,6 +54,9 @@ _ts = parse_ts
 
 #: "Argument not given" for guards where ``None`` is a meaningful value.
 _UNSET: Any = object()
+
+#: ``transition_if`` default: accept any stored ``hold_reason``.
+ANY_HOLD_REASON: Any = object()
 
 #: Statuses an order's run links can no longer be released from (P3).
 _UNRELEASABLE_STATUSES = frozenset({"dispatched", "in_transit", "delivered"})
@@ -706,6 +710,56 @@ class FuelOrderRepository:
         return stored
 
     # ------------------------------------------------------------------
+    # Compare-and-set status transition (customer portal FREEZE F3)
+    # ------------------------------------------------------------------
+
+    async def transition_if(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        expected_status: str,
+        expected_hold_reason: Any = ANY_HOLD_REASON,
+        update_fields: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Apply ``update_fields`` only if the stored order still matches.
+
+        One ``atomic_update`` (row lock / seq-no CAS): the write applies only
+        when the stored order is the caller's tenant's, its ``status`` equals
+        ``expected_status`` and, unless ``expected_hold_reason`` is
+        :data:`ANY_HOLD_REASON`, its ``hold_reason`` equals it (``None``
+        included). Returns the new document, or ``None`` when the order is
+        missing, cross-tenant or has changed, so a confirm and a customer
+        cancel can't both win.
+
+        Writes ``es_documents`` only; the caller mirrors the returned document
+        to Postgres with ``mirror_current_state_upsert``, as
+        ``_apply_order_update`` does.
+        """
+        self._require_tenant(tenant_id)
+        if not order_id or not order_id.strip():
+            raise ValueError("order_id must be a non-empty string")
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("tenant_id") != tenant_id:
+                return None
+            if current.get("status") != expected_status:
+                return None
+            if (
+                expected_hold_reason is not ANY_HOLD_REASON
+                and current.get("hold_reason") != expected_hold_reason
+            ):
+                return None
+            return {**current, **update_fields}
+
+        doc, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if not applied or doc is None:
+            return None
+        return dict(doc)
+
+    # ------------------------------------------------------------------
     # List for tenant
     # ------------------------------------------------------------------
 
@@ -791,6 +845,9 @@ class FuelOrderRepository:
         size: int = DEFAULT_PAGE_SIZE,
         sort: Optional[str] = None,
         keyset: bool = False,
+        customer_tank_id: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None,
+        hold_reason: Optional[str] = None,
         after: Optional[tuple] = None,
         with_total: bool = True,
     ) -> Dict[str, Any]:
@@ -819,6 +876,10 @@ class FuelOrderRepository:
             after: ``(sort_value, order_id)`` of the previous page's last raw
                 row. Requires ``keyset=True``.
             with_total: ``False`` skips the count on the Postgres path.
+            customer_tank_id: Filter by customer_tank_id.
+            statuses: Filter by any of these statuses (ES ``terms`` /
+                Postgres ``in_filters``). ANDed with ``status``.
+            hold_reason: Filter by hold_reason (exact match).
 
         Returns:
             A dict with ``orders`` (list of FuelOrder), ``total`` (int),
@@ -851,7 +912,12 @@ class FuelOrderRepository:
             "call_type": call_type,
             "product_code": product_code,
             "intake_channel": intake_channel,
+            "customer_tank_id": customer_tank_id,
+            "hold_reason": hold_reason,
         }
+        status_values = [
+            s for s in (statuses or ()) if isinstance(s, str) and s.strip()
+        ]
         if sort:
             parts = sort.split(":")
             pg_sort_field = parts[0]
@@ -861,6 +927,7 @@ class FuelOrderRepository:
         pg = await read_hybrid_search(
             "fuel_order", tenant_id,
             term_filters=term_filters,
+            in_filters={"status": status_values} if status_values else None,
             range_field="created_at", range_gte=start_date, range_lte=end_date,
             text_query=q,
             text_fields=[
@@ -904,6 +971,12 @@ class FuelOrderRepository:
             filters.append({"term": {"product_code": product_code}})
         if intake_channel:
             filters.append({"term": {"intake_channel": intake_channel}})
+        if customer_tank_id:
+            filters.append({"term": {"customer_tank_id": customer_tank_id}})
+        if status_values:
+            filters.append({"terms": {"status": status_values}})
+        if hold_reason:
+            filters.append({"term": {"hold_reason": hold_reason}})
 
         # Date range filter on created_at
         if start_date or end_date:
