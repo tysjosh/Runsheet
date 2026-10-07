@@ -245,8 +245,12 @@ async def _validate_assigned_truck(tenant_id: str, truck_id: Optional[str]) -> N
     resolver = _get_ref_resolver()
     try:
         registered = "asset" in resolver.registered_types()
-    except Exception:  # noqa: BLE001 - defensive; never block a write on this
-        registered = False
+    except Exception:  # noqa: BLE001 - fail closed: let resolve() decide (OI-30)
+        logger.warning(
+            "asset loader lookup failed; resolving assigned_truck_id anyway",
+            exc_info=True,
+        )
+        registered = True
     if not registered:
         return
     ref = await resolver.resolve(tenant_id, "asset", truck_id)

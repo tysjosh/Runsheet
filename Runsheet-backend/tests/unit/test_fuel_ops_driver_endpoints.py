@@ -1008,3 +1008,21 @@ class TestAssignedTruckMustResolve:
             "/api/ops/drivers/drv-001", json={"assigned_truck_id": None}
         )
         assert resp.status_code == 200, resp.text
+
+    def test_registered_types_failure_fails_closed(self, client, monkeypatch):
+        """OI-30: a broken ``registered_types()`` no longer skips the check."""
+        import fuel.api.driver_endpoints as driver_endpoints
+
+        client, repo = client
+        resolver = driver_endpoints._ref_resolver
+
+        def _boom():
+            raise RuntimeError("registry unavailable")
+
+        monkeypatch.setattr(resolver, "registered_types", _boom)
+        resp = client.post(
+            "/api/ops/drivers", json={**self._BODY, "assigned_truck_id": "truck-nope"}
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["details"] == {"assigned_truck_id": "truck-nope"}
+        assert repo._drivers.get("tenant-A::drv-new") is None
