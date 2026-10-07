@@ -257,3 +257,33 @@ class TestTerminalBOLWiring:
         calc = container.get("vcf_calculator")
         assert isinstance(calc, VCFCalculator)
         assert container.terminal_bol_ingestion_service._vcf_calculator is calc
+
+
+class TestInvoicePricingFactory:
+    """OI-14: the invoice pricing factory wires the price-protection resolver.
+
+    It used to build ``SalesPricingEngine`` without ``PriceProtectionService``,
+    so active contracts priced ``POST /pricing/resolve`` but never an invoice.
+    """
+
+    @pytest.mark.asyncio
+    async def test_factory_builds_a_contract_aware_engine(
+        self, container, captured_jobs
+    ):
+        from commerce.services.price_protection_service import (
+            PriceProtectionService,
+        )
+        from commerce.services.sales_pricing_engine import SalesPricingEngine
+
+        _jobs, compliance_mod = captured_jobs
+        invoice_service = MagicMock()
+        invoice_service._sales_pricing_engine_factory = None
+        container.commerce_invoice_service = invoice_service
+
+        await compliance_mod.initialize(MagicMock(), container)
+
+        factory = invoice_service._sales_pricing_engine_factory
+        assert callable(factory)
+        engine = factory("demo-tenant")
+        assert isinstance(engine, SalesPricingEngine)
+        assert isinstance(engine._price_protection_service, PriceProtectionService)

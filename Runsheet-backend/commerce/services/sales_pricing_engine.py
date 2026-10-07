@@ -952,3 +952,21 @@ class SalesPricingEngine:
             f"in rule_id={rule_id!r}. Ensure tier_thresholds covers "
             "the full gallon range."
         )
+
+
+def build_sales_pricing_engine(es_service: Any, tenant_id: str) -> SalesPricingEngine:
+    """Build the tenant-scoped engine with the price-protection resolver wired.
+
+    The single builder for ``POST /api/commerce/pricing/resolve`` and for
+    the :class:`InvoiceService` pricing factory, so an invoice line is
+    priced exactly as the resolve endpoint quotes it (OI-14). Before this,
+    the invoice factory built the engine without the contract resolver,
+    so active fixed/cap/collar contracts never reached an invoice.
+    """
+    return SalesPricingEngine(
+        es_service=es_service,
+        tenant_id=tenant_id,
+        price_protection_service=PriceProtectionService(
+            es_service, tenant_id=tenant_id
+        ),
+    )

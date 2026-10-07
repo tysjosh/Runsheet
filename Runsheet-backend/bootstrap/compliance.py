@@ -260,12 +260,14 @@ async def initialize(app, container: ServiceContainer) -> None:
     # before tax computation. Backwards compatible — if the factory
     # is absent, existing line item prices are used as-is.
     try:
-        from commerce.services.sales_pricing_engine import SalesPricingEngine
+        from commerce.services.sales_pricing_engine import (
+            build_sales_pricing_engine,
+        )
 
+        # Same builder as POST /pricing/resolve, so active price-protection
+        # contracts price invoice lines too (OI-14).
         def _sales_pricing_engine_factory(tenant_id: str):
-            return SalesPricingEngine(
-                es_service=es_service, tenant_id=tenant_id
-            )
+            return build_sales_pricing_engine(es_service, tenant_id)
 
         if container.has("commerce_invoice_service"):
             inv_svc = container.commerce_invoice_service

@@ -106,6 +106,57 @@ def _invoice_must_clauses(
     return must_clauses
 
 
+def _contract_split_lines(
+    item: Dict[str, Any],
+    resolution: Any,
+    contract_price_micros: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Split a priced line when the contract covers only part of it (OI-14).
+
+    The price-protection resolver reports a split when the contract's
+    ``remaining_gallons`` is below the delivery: the contracted gallons
+    bill at the contract price and the excess at the market price. Without
+    the split, every gallon would bill at the contract price.
+
+    Returns ``None`` for a single-price resolution (the caller keeps the
+    line it already priced). Otherwise returns the replacement lines: the
+    contract-priced portion (omitted when no contract gallons remain) and
+    the market-priced excess. Each subtotal is rounded once with
+    :func:`line_subtotal_cents`, so the contract price is applied only to
+    the contracted gallons.
+    """
+    contract_gallons = getattr(resolution, "split_gallons_at_contract_price", None)
+    market_gallons = getattr(resolution, "split_gallons_at_market_price", None)
+    if contract_gallons is None or market_gallons is None or market_gallons <= 0:
+        return None
+
+    total = float(item.get("quantity_gallons", item.get("quantity", 0)) or 0)
+    contract_qty = max(0.0, min(float(contract_gallons), total))
+    # Derive the excess from the line total so the two quantities always
+    # sum to the delivered gallons (no float drift from the resolver).
+    market_qty = round(total - contract_qty, 6)
+    market_price_micros = int(resolution.market_price_cents) * MICROS_PER_CENT
+
+    def _line(qty: float, micros: int, *, first: bool) -> Dict[str, Any]:
+        line = dict(item)
+        if not first:
+            line["line_id"] = f"line_{uuid4()}"
+        line["quantity_gallons"] = qty
+        if "quantity" in item:
+            line["quantity"] = qty
+        line["unit_price_micros"] = micros
+        line["unit_price_cents"] = legacy_unit_price_cents(micros)
+        line["subtotal_cents"] = line_subtotal_cents(qty, micros)
+        return line
+
+    lines: List[Dict[str, Any]] = []
+    if contract_qty > 0:
+        lines.append(_line(contract_qty, contract_price_micros, first=True))
+    if market_qty > 0:
+        lines.append(_line(market_qty, market_price_micros, first=not lines))
+    return lines or None
+
+
 class InvoiceService:
     """Service layer for Invoice lifecycle management with event sourcing.
 
@@ -735,6 +786,10 @@ class InvoiceService:
         # resolve the sell price for each line item before tax
         # computation and update unit_price_cents on the line.
         # Backwards compatible — if no factory, use existing prices.
+        # A contract split (remaining contract gallons below the
+        # delivery) replaces the line with a contract-priced line and a
+        # market-priced line (OI-14); keyed by id() of the original line.
+        split_by_line: Dict[int, List[Dict[str, Any]]] = {}
         if self._sales_pricing_engine_factory is not None:
             try:
                 pricing_engine = self._sales_pricing_engine_factory(tenant_id)
@@ -790,6 +845,11 @@ class InvoiceService:
                             qty,
                             int(effective_price_micros),
                         )
+                        split_lines = _contract_split_lines(
+                            item, resolution, int(effective_price_micros)
+                        )
+                        if split_lines is not None:
+                            split_by_line[id(item)] = split_lines
                     except Exception as exc:
                         # Pricing failure for a single line item should
                         # not block the entire invoice — log and keep
@@ -823,6 +883,16 @@ class InvoiceService:
                                 qty,
                                 item["unit_price_micros"],
                             )
+
+        # Tax is computed on each delivered line's total gallons, so a
+        # contract split doesn't change tax rounding (OI-14).
+        tax_basis_items = line_items
+        if split_by_line:
+            line_items = [
+                line
+                for item in line_items
+                for line in split_by_line.get(id(item), [item])
+            ]
 
         # Compute totals from line items (integer cents only, C1)
         subtotal_cents = sum(item.get("subtotal_cents", 0) for item in line_items)
@@ -859,7 +929,7 @@ class InvoiceService:
                         tenant_id=tenant_id,
                         order_id=order_id,
                         customer_id=customer_id,
-                        line_items=line_items,
+                        line_items=tax_basis_items,
                         destination_fips=destination_fips,
                         effective_date=effective_date,
                     )

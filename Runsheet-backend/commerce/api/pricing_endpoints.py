@@ -36,11 +36,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from commerce.api._authz import commerce_staff_dependency
 from commerce.api.price_book_endpoints import require_pricing_enabled
 from commerce.models.pricing_rule import PricingRule
-from commerce.services.price_protection_service import PriceProtectionService
 from commerce.services.sales_pricing_engine import (
     PricingNoRuleMatchedError,
     PricingRackPriceUnavailableError,
-    SalesPricingEngine,
+    build_sales_pricing_engine,
 )
 from compliance.services.compliance_es_mappings import PRICING_RULES_INDEX
 from errors.codes import ErrorCode
@@ -343,13 +342,8 @@ async def resolve_price(
     es = _get_es_service()
     # An active price-protection contract is the first-priority price
     # (Req 3.8); without the resolver it was never consulted (N-CFV-4).
-    engine = SalesPricingEngine(
-        es_service=es,
-        tenant_id=tenant.tenant_id,
-        price_protection_service=PriceProtectionService(
-            es, tenant_id=tenant.tenant_id
-        ),
-    )
+    # The invoice factory uses the same builder (OI-14).
+    engine = build_sales_pricing_engine(es, tenant.tenant_id)
 
     try:
         resolution = await engine.resolve_price(
