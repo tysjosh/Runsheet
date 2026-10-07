@@ -268,6 +268,67 @@ async def test_get_eta_returns_estimated_arrival():
     assert result["scheduled_time"] == "2026-03-12T10:00:00+00:00"
 
 
+def _eta_hit(status: str, estimated_arrival):
+    return {
+        "hits": {
+            "hits": [{
+                "_source": {
+                    "job_id": "JOB_11",
+                    "estimated_arrival": estimated_arrival,
+                    "delayed": False,
+                    "delay_duration_minutes": None,
+                    "status": status,
+                    "scheduled_time": "2026-03-12T10:00:00+00:00",
+                }
+            }],
+            "total": {"value": 1},
+        }
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_eta_in_progress_includes_eta_minutes():
+    """An in_progress job gets eta_minutes, rounded up (OI-49)."""
+    es = _make_es_mock()
+    arrival = datetime.now(timezone.utc) + timedelta(minutes=41, seconds=30)
+    es.search_documents = AsyncMock(
+        return_value=_eta_hit("in_progress", arrival.isoformat())
+    )
+    result = await _make_service(es).get_eta("JOB_11", "tenant_a")
+    assert result["eta_minutes"] == 42
+
+
+@pytest.mark.asyncio
+async def test_get_eta_overdue_in_progress_floors_eta_minutes_at_zero():
+    es = _make_es_mock()
+    arrival = datetime.now(timezone.utc) - timedelta(minutes=10)
+    es.search_documents = AsyncMock(
+        return_value=_eta_hit("in_progress", arrival.isoformat())
+    )
+    result = await _make_service(es).get_eta("JOB_11", "tenant_a")
+    assert result["eta_minutes"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,arrival",
+    [
+        ("scheduled", "future"),
+        ("assigned", "future"),
+        ("in_progress", None),
+        ("in_progress", "not-a-date"),
+    ],
+)
+async def test_get_eta_omits_eta_minutes_without_a_live_eta(status, arrival):
+    """Not in_progress, or no parseable estimated_arrival: no eta_minutes."""
+    if arrival == "future":
+        arrival = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    es = _make_es_mock()
+    es.search_documents = AsyncMock(return_value=_eta_hit(status, arrival))
+    result = await _make_service(es).get_eta("JOB_11", "tenant_a")
+    assert "eta_minutes" not in result
+
+
 @pytest.mark.asyncio
 async def test_get_eta_not_found_raises_404():
     """get_eta should raise 404 when the job is not found.

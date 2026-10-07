@@ -19,6 +19,9 @@ type SortField =
 
 type SortOrder = "asc" | "desc";
 
+const STICKY_ACTIONS =
+  "sticky right-0 shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.15)]";
+
 interface JobBoardProps {
   jobs: Job[];
   onTransition: (
@@ -235,6 +238,11 @@ export default function JobBoard({
     {
       key: "actions",
       label: "Actions",
+      // Pinned to the right edge so Reject stays visible when the table
+      // scrolls horizontally (e.g. at 1280 px). Opaque backgrounds and a left
+      // shadow keep scrolled cells from showing through.
+      headerClassName: `${STICKY_ACTIONS} bg-gray-50`,
+      className: `${STICKY_ACTIONS} bg-white`,
       // Stop row-click propagation so action buttons don't trigger navigation.
       render: (job) => (
         <div onClick={(e) => e.stopPropagation()}>

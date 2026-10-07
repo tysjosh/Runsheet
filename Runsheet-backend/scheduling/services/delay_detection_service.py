@@ -15,6 +15,7 @@ Requirements covered:
 """
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -23,6 +24,22 @@ from scheduling.services.job_writes import update_job_fields
 from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
 
 logger = logging.getLogger(__name__)
+
+
+def _minutes_until(value: Any) -> Optional[int]:
+    """Whole minutes from now until ``value`` (ISO 8601), rounded up and
+    floored at 0. A naive timestamp is read as UTC. None if it doesn't parse.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        eta_dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if eta_dt.tzinfo is None:
+        eta_dt = eta_dt.replace(tzinfo=timezone.utc)
+    seconds = (eta_dt - datetime.now(timezone.utc)).total_seconds()
+    return max(0, math.ceil(seconds / 60))
 
 
 class DelayDetectionService:
@@ -162,8 +179,11 @@ class DelayDetectionService:
             tenant_id: Tenant scope from JWT.
 
         Returns:
-            Dict with job_id, estimated_arrival, delayed, and
-            delay_duration_minutes.
+            Dict with job_id, estimated_arrival, delayed,
+            delay_duration_minutes, status and scheduled_time. For an
+            in_progress job whose estimated_arrival parses, it also carries
+            ``eta_minutes`` (whole minutes until arrival, rounded up, never
+            negative). It is omitted otherwise.
 
         Raises:
             AppException: 404 if job not found for this tenant.
@@ -204,7 +224,7 @@ class DelayDetectionService:
             )
 
         source = hits[0]["_source"]
-        return {
+        result = {
             "job_id": source["job_id"],
             "estimated_arrival": source.get("estimated_arrival"),
             "delayed": source.get("delayed", False),
@@ -212,6 +232,13 @@ class DelayDetectionService:
             "status": source.get("status"),
             "scheduled_time": source.get("scheduled_time"),
         }
+        eta_minutes = _minutes_until(source.get("estimated_arrival"))
+        if (
+            source.get("status") == JobStatus.IN_PROGRESS.value
+            and eta_minutes is not None
+        ):
+            result["eta_minutes"] = eta_minutes
+        return result
 
     # ------------------------------------------------------------------
     # Delay Metrics  (Requirement 7.5)
