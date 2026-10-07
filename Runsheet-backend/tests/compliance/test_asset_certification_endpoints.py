@@ -112,3 +112,46 @@ def test_expiry_before_certification_date_is_422(real_service_client):
     assert resp.status_code == 422, resp.text
     assert _error_code(resp.json()) == "asset_certifications.invalid_payload"
     es.index_document.assert_not_called()
+
+
+def test_update_with_reversed_dates_is_422_with_the_create_code():
+    """OI-33: PUT returns the same 422 code as POST for reversed dates."""
+    from compliance.services.asset_certification_service import AssetCertificationService
+
+    cert = {
+        "cert_id": "QA-CERT-1",
+        "tenant_id": TENANT,
+        "asset_id": "QA-TRUCK-01",
+        "certification_type": "V_test",
+        "certification_date": "2026-01-01",
+        "expiry_date": "2027-01-01",
+        "inspector_name": "QA Inspector",
+        "certificate_number": "QA-CN-1",
+        "status": "valid",
+    }
+    es = MagicMock()
+    es.search_documents = AsyncMock(
+        return_value={"hits": {"hits": [{"_source": cert}], "total": {"value": 1}}}
+    )
+    es.update_document = AsyncMock(return_value=None)
+    ep.configure_asset_certification_api(
+        asset_certification_service=AssetCertificationService(es),
+        ref_resolver=RefResolver(),
+    )
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(ep.router)
+    install_test_auth(app)
+    try:
+        resp = TestClient(app).put(
+            f"{URL}/QA-CERT-1",
+            json={"expiry_date": "2025-01-01"},
+            headers=auth_headers(TENANT, roles=["admin"]),
+        )
+    finally:
+        ep._asset_cert_service = None
+        ep._ref_resolver = None
+
+    assert resp.status_code == 422, resp.text
+    assert _error_code(resp.json()) == "asset_certifications.invalid_payload"
+    es.update_document.assert_not_called()

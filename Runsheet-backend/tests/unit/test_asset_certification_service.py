@@ -2560,7 +2560,8 @@ class TestDerivedCertificationStatus:
         assert result["status"] == "valid"
 
     @pytest.mark.asyncio
-    async def test_update_with_reversed_merged_dates_is_400(self):
+    async def test_update_with_reversed_merged_dates_is_422_like_create(self):
+        """OI-33: update returns create's 422 code, not a 400 VALIDATION_ERROR."""
         es = _make_es_service()
         es.search_documents = AsyncMock(
             return_value=_es_search_response(
@@ -2572,9 +2573,27 @@ class TestDerivedCertificationStatus:
         with pytest.raises(AppException) as exc_info:
             await service.update(_TENANT_ID, "cert_test123", expiry_date=date(2024, 1, 1))
 
-        assert exc_info.value.status_code == 400
-        assert exc_info.value.error_code.value == "VALIDATION_ERROR"
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.error_code.value == "asset_certifications.invalid_payload"
         es.update_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_update_explicit_valid_with_past_expiry_is_stored_expired(self):
+        """OI-33: an explicit status is derived the same way create derives it."""
+        es = _make_es_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_search_response(
+                [_make_cert_doc(expiry_date=_days(-5).isoformat())]
+            )
+        )
+
+        result = await AssetCertificationService(es).update(
+            _TENANT_ID, "cert_test123", status="valid"
+        )
+
+        assert result["status"] == "expired"
+        partial = es.update_document.call_args[0][2]
+        assert partial["status"] == "expired"
 
     @pytest.mark.asyncio
     async def test_update_new_expiry_rederives_status(self):
@@ -2645,3 +2664,91 @@ class TestDerivedCertificationStatus:
 
         statuses = sorted(s.status for s in summaries)
         assert statuses == ["expired", "expiring_soon", "valid"]
+
+
+class _MatchingStore:
+    """In-memory store that evaluates queries with the real DSL matcher.
+
+    Using ``persistence.document_matcher`` (the Python twin of the Postgres
+    translator) checks that the sweep's ``should``/``must_not`` query selects
+    what the store would select.
+    """
+
+    def __init__(self):
+        self.docs: Dict[str, Dict[str, Any]] = {}
+
+    async def index_document(self, index, doc_id, document):
+        self.docs[doc_id] = dict(document)
+
+    async def update_document(self, index, doc_id, partial):
+        self.docs[doc_id].update(partial)
+
+    async def search_documents(self, index, query, size=10):
+        from persistence.document_matcher import matches
+
+        hits = [
+            {"_id": doc_id, "_source": dict(doc)}
+            for doc_id, doc in self.docs.items()
+            if matches(doc, query.get("query"), doc_id=doc_id)
+        ]
+        return {"hits": {"hits": hits, "total": {"value": len(hits)}}}
+
+
+class TestExpiredCertAlertsOnce:
+    """OI-33: a cert created already expired alerts exactly once."""
+
+    @pytest.mark.asyncio
+    async def test_created_expired_cert_alerts_once_across_two_sweeps(self):
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        created = await _create(service, _days(-3))
+        assert created["status"] == "expired"
+
+        first = await service.check_expiry_alerts(_TENANT_ID)
+        second = await service.check_expiry_alerts(_TENANT_ID)
+
+        assert [(a.cert_id, a.severity) for a in first] == [
+            (created["cert_id"], "critical")
+        ]
+        assert second == []
+        assert store.docs[created["cert_id"]]["expired_alert_sent"] is True
+        assert store.docs[created["cert_id"]]["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_cert_expiring_through_the_sweep_alerts_once(self):
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        created = await _create(service, _days(3))
+        assert created["status"] == "expiring_soon"
+
+        first = await service.check_expiry_alerts(_TENANT_ID)
+        second = await service.check_expiry_alerts(_TENANT_ID)
+
+        assert [a.severity for a in first] == ["critical"]
+        assert second == []
+
+    @pytest.mark.asyncio
+    async def test_other_tenant_expired_cert_is_not_swept(self):
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        created = await _create(service, _days(-3))
+        store.docs[created["cert_id"]]["tenant_id"] = "other-tenant"
+
+        assert await service.check_expiry_alerts(_TENANT_ID) == []
+
+    @pytest.mark.asyncio
+    async def test_renewed_cert_alerts_again_after_a_later_expiry(self):
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        created = await _create(service, _days(-3))
+        await service.check_expiry_alerts(_TENANT_ID)
+
+        cert_id = created["cert_id"]
+        renewed = await service.update(_TENANT_ID, cert_id, expiry_date=_days(400))
+        assert renewed["status"] == "valid"
+        assert store.docs[cert_id]["expired_alert_sent"] is False
+        # Time passes: the renewed cert nears expiry again.
+        store.docs[cert_id]["expiry_date"] = _days(2).isoformat()
+
+        alerts = await service.check_expiry_alerts(_TENANT_ID)
+        assert [a.severity for a in alerts] == ["critical"]

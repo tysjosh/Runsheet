@@ -30,7 +30,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.models.asset_certification import AssetCertification, CertificationType
 from compliance.services.compliance_es_mappings import ASSET_CERTIFICATIONS_INDEX
-from errors.exceptions import resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -532,9 +533,8 @@ class AssetCertificationService:
                     "status must be valid, expiring_soon, expired, or superseded",
                     details={"status": status},
                 )
-            partial["status"] = status
 
-        if not partial:
+        if not partial and status is None:
             return existing
 
         # N-CFV-1: the merged dates must stay in order.
@@ -549,8 +549,11 @@ class AssetCertificationService:
             and merged_expiry is not None
             and merged_expiry < merged_cert_date
         ):
-            raise validation_error(
+            # Same 422 code create returns for reversed dates (OI-33).
+            raise AppException(
+                ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD,
                 "expiry_date must be on or after certification_date",
+                status_code=422,
                 details={
                     "certification_date": merged_cert_date.isoformat(),
                     "expiry_date": merged_expiry.isoformat(),
@@ -562,11 +565,20 @@ class AssetCertificationService:
         # (``existing`` already carries the read-derived status, so its
         # ``expired`` may only reflect the old expiry date).
         dates_changed = "certification_date" in partial or "expiry_date" in partial
-        if dates_changed and status is None:
+        if status is not None:
+            # An explicit status goes through the same derivation create
+            # uses, so "valid" with a past expiry is stored expired (OI-33).
+            partial["status"] = derive_certification_status(
+                status, merged_expiry, date.today()
+            )
+        elif dates_changed:
             base = "superseded" if existing.get("status") == "superseded" else "valid"
             partial["status"] = derive_certification_status(
                 base, merged_expiry, date.today()
             )
+        if partial.get("status") not in (None, "expired"):
+            # Back in force: a later expiry must alert again (OI-33).
+            partial["expired_alert_sent"] = False
 
         partial["updated_at"] = utcnow().isoformat()
 
@@ -614,7 +626,8 @@ class AssetCertificationService:
         alerts: List[CertAlert] = []
         today = date.today()
 
-        # Query all non-expired certifications for this tenant
+        # Query all non-expired certifications for this tenant, plus expired
+        # ones that have never alerted (OI-33).
         certifications = await self._get_all_non_expired_certifications(tenant_id)
 
         for cert_doc in certifications:
@@ -633,17 +646,25 @@ class AssetCertificationService:
 
             days_until_expiry = (expiry_date - today).days
 
+            # A cert stored ``expired`` (created already expired, or set by
+            # hand) that never alerted gets one critical alert, whatever its
+            # date. The flag set below keeps it from alerting again (OI-33).
+            unalerted_expired = current_status == "expired" and not cert_doc.get(
+                "expired_alert_sent"
+            )
+
             # Only generate alerts for dates within 60 days
-            if days_until_expiry > ALERT_THRESHOLD_WARNING_DAYS:
+            if days_until_expiry > ALERT_THRESHOLD_WARNING_DAYS and not unalerted_expired:
                 continue
 
             # Determine severity based on thresholds (most severe first)
-            if days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
+            if unalerted_expired or days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
                 severity = "critical"
-                # Req 13.4: Transition status to expired when ≤7 days or past
-                # Idempotent: skip if already expired
-                if current_status != "expired":
-                    await self._transition_to_expired(tenant_id, cert_id)
+                # Req 13.4: Transition status to expired when ≤7 days or past.
+                # The same write records that the critical alert went out.
+                if current_status == "expired" and cert_doc.get("expired_alert_sent"):
+                    continue  # already alerted; the query shouldn't return it
+                await self._transition_to_expired(tenant_id, cert_id)
             elif days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
                 severity = "urgent"
                 # Transition valid → expiring_soon when ≤30 days but >7 days
@@ -674,10 +695,13 @@ class AssetCertificationService:
     async def _get_all_non_expired_certifications(
         self, tenant_id: str
     ) -> List[Dict[str, Any]]:
-        """Retrieve all non-expired certifications for a tenant using search_after pagination.
+        """Retrieve the certifications the expiry sweep acts on, with search_after pagination.
 
-        Fetches certifications with status in ("valid", "expiring_soon")
-        to avoid re-alerting on already-expired certifications.
+        Fetches certifications with status in ("valid", "expiring_soon"),
+        plus ``expired`` ones without ``expired_alert_sent: true``. The
+        second group covers a cert created (or set) already expired, which
+        used to skip the critical alert entirely (OI-33). Once alerted, the
+        flag keeps an expired cert out of the sweep.
         """
         all_certs: List[Dict[str, Any]] = []
         search_after: Optional[list] = None
@@ -686,13 +710,18 @@ class AssetCertificationService:
             base_query: Dict[str, Any] = {
                 "query": {
                     "bool": {
-                        "must": [
+                        "should": [
+                            {"terms": {"status": ["valid", "expiring_soon"]}},
                             {
-                                "terms": {
-                                    "status": ["valid", "expiring_soon"]
+                                "bool": {
+                                    "must": [{"term": {"status": "expired"}}],
+                                    "must_not": [
+                                        {"term": {"expired_alert_sent": True}}
+                                    ],
                                 }
                             },
-                        ]
+                        ],
+                        "minimum_should_match": 1,
                     }
                 },
                 "size": _MAX_PAGE_LIMIT,
@@ -735,13 +764,16 @@ class AssetCertificationService:
         """Transition a certification to expired status.
 
         Called when a certification is within 7 days of expiry or has
-        already passed. Updates the status to "expired" in ES.
+        already passed. Updates the status to "expired" in ES and records
+        that its critical alert went out (``expired_alert_sent``), so the
+        sweep alerts each expired cert exactly once (OI-33).
 
         Validates: Requirement 13.4
         """
         try:
             partial: Dict[str, Any] = {
                 "status": "expired",
+                "expired_alert_sent": True,
                 "updated_at": utcnow().isoformat(),
             }
             await self._es.update_document(
