@@ -2752,3 +2752,122 @@ class TestExpiredCertAlertsOnce:
 
         alerts = await service.check_expiry_alerts(_TENANT_ID)
         assert [a.severity for a in alerts] == ["critical"]
+
+
+def _legacy_expired(cert_id: str, asset_id: str, expiry: date, tenant_id: str = _TENANT_ID):
+    """A pre-flag doc: stored expired, no ``expired_alert_sent`` key at all."""
+    doc = _make_cert_doc(
+        cert_id=cert_id,
+        tenant_id=tenant_id,
+        asset_id=asset_id,
+        status="expired",
+        expiry_date=expiry.isoformat(),
+    )
+    assert "expired_alert_sent" not in doc
+    return doc
+
+
+class TestLegacyExpiredSummary:
+    """OI-33: legacy expired certs produce one summary alert per tenant."""
+
+    @pytest.mark.asyncio
+    async def test_legacy_certs_summarized_new_expiry_alerted_individually(self, caplog):
+        from compliance.services.asset_certification_service import (
+            LegacyExpiredCertSummaryAlert,
+        )
+
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        for cid, asset, days in (
+            ("cert_l2", "truck_b", -400),
+            ("cert_l1", "truck_a", -900),
+            ("cert_l3", "truck_a", -30),
+        ):
+            store.docs[cid] = _legacy_expired(cid, asset, _days(days))
+        new = await _create(service, _days(3))
+
+        with caplog.at_level("DEBUG", logger="compliance.services.asset_certification_service"):
+            alerts = await service.check_expiry_alerts(_TENANT_ID)
+
+        summaries = [a for a in alerts if isinstance(a, LegacyExpiredCertSummaryAlert)]
+        individual = [a for a in alerts if isinstance(a, CertAlert)]
+        assert len(summaries) == 1
+        summary = summaries[0]
+        assert summary.count == 3
+        assert summary.cert_ids == ["cert_l1", "cert_l2", "cert_l3"]
+        assert summary.asset_ids == ["truck_a", "truck_b"]
+        assert summary.oldest_expiry_date == _days(-900)
+        assert summary.severity == "critical"
+        assert summary.tenant_id == _TENANT_ID
+        assert [(a.cert_id, a.severity) for a in individual] == [
+            (new["cert_id"], "critical")
+        ]
+        for cid in ("cert_l1", "cert_l2", "cert_l3"):
+            assert store.docs[cid]["expired_alert_sent"] is True
+            assert store.docs[cid]["status"] == "expired"
+        # One WARNING for the batch, no per-legacy-cert WARNING.
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("3 legacy expired certification(s)" in m for m in warnings)
+        assert not any(
+            "Transitioned certification cert_l" in m for m in warnings
+        )
+
+        assert await service.check_expiry_alerts(_TENANT_ID) == []
+
+    @pytest.mark.asyncio
+    async def test_summary_is_per_tenant(self):
+        from compliance.services.asset_certification_service import (
+            LegacyExpiredCertSummaryAlert,
+        )
+
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        store.docs["cert_a"] = _legacy_expired("cert_a", "truck_a", _days(-100))
+        store.docs["cert_b"] = _legacy_expired(
+            "cert_b", "truck_b", _days(-100), tenant_id="other-tenant"
+        )
+
+        alerts = await service.check_expiry_alerts(_TENANT_ID)
+
+        assert len(alerts) == 1
+        assert isinstance(alerts[0], LegacyExpiredCertSummaryAlert)
+        assert alerts[0].cert_ids == ["cert_a"]
+        assert "expired_alert_sent" not in store.docs["cert_b"]
+
+    @pytest.mark.asyncio
+    async def test_cert_created_already_expired_keeps_individual_alert(self):
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        created = await _create(service, _days(-3))
+        assert store.docs[created["cert_id"]]["expired_alert_sent"] is False
+
+        alerts = await service.check_expiry_alerts(_TENANT_ID)
+
+        assert [(type(a), a.cert_id, a.severity) for a in alerts] == [
+            (CertAlert, created["cert_id"], "critical")
+        ]
+
+    @pytest.mark.asyncio
+    async def test_create_stores_expired_alert_sent_false(self):
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        created = await _create(service, _days(400))
+        assert created["expired_alert_sent"] is False
+        assert store.docs[created["cert_id"]]["expired_alert_sent"] is False
+
+    @pytest.mark.asyncio
+    async def test_stored_valid_past_expiry_without_key_is_a_new_expiry(self):
+        """A stored ``valid`` doc crossing expiry is not legacy: individual alert."""
+        store = _MatchingStore()
+        service = AssetCertificationService(store)
+        doc = _make_cert_doc(
+            cert_id="cert_v", status="valid", expiry_date=_days(-7).isoformat()
+        )
+        store.docs["cert_v"] = doc
+
+        alerts = await service.check_expiry_alerts(_TENANT_ID)
+
+        assert [(type(a), a.cert_id, a.severity) for a in alerts] == [
+            (CertAlert, "cert_v", "critical")
+        ]
+        assert store.docs["cert_v"]["expired_alert_sent"] is True

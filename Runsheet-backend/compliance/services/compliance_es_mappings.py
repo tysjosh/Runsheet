@@ -222,6 +222,9 @@ ASSET_CERTIFICATIONS_MAPPING = {
             "issuing_authority":    {"type": "keyword"},
             # valid | expiring_soon | expired
             "status":               {"type": "keyword"},
+            # The expiry sweep's critical alert went out (OI-33). create()
+            # writes False; absent means a legacy pre-flag doc.
+            "expired_alert_sent":   {"type": "boolean"},
             # Tracks the 3-year retest requirement for cargo tank certs
             # (Req 13.6). Independent of expiry_date so short-cycle
             # certifications (e.g. annual V-test) can still be flagged

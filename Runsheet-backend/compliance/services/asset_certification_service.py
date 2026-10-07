@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -103,6 +103,38 @@ class CertAlert(BaseModel):
     days_until_expiry: int
     severity: str  # warning | urgent | critical
     generated_at: datetime = Field(default_factory=utcnow)
+
+
+class LegacyExpiredCertSummaryAlert(BaseModel):
+    """One critical alert summarizing a tenant's legacy expired certs (OI-33).
+
+    A legacy cert is stored ``expired`` with no ``expired_alert_sent`` key at
+    all: it was expired (and, under the old sweep, alerted) before the flag
+    existed. The first sweep after the flag shipped would otherwise send one
+    critical alert per such cert; it sends this single summary instead and
+    flags every cert it lists.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str
+    severity: Literal["critical"] = "critical"
+    alert_type: Literal["legacy_expired_summary"] = "legacy_expired_summary"
+    cert_ids: List[str]
+    asset_ids: List[str]
+    count: int
+    oldest_expiry_date: date
+    generated_at: datetime = Field(default_factory=utcnow)
+
+
+def _is_legacy_expired(doc: Dict[str, Any]) -> bool:
+    """Stored ``expired`` and no ``expired_alert_sent`` key at all (OI-33).
+
+    Provenance by key presence, not a date cutoff: ``create()`` writes the key
+    (False) for every new cert, so a new cert never matches, including one
+    created already expired. ``False`` is not legacy; only an absent key is.
+    """
+    return doc.get("status") == "expired" and "expired_alert_sent" not in doc
 
 
 class AssetEligibility(BaseModel):
@@ -199,6 +231,10 @@ class AssetCertificationService:
         )
 
         doc = self._serialize_cert(cert)
+        # Every new cert carries the flag, so the legacy-expired summary in
+        # check_expiry_alerts (keyed on its absence) never swallows a new
+        # expiry's individual critical alert (OI-33).
+        doc["expired_alert_sent"] = False
 
         await self._es.index_document(
             ASSET_CERTIFICATIONS_INDEX, cert.cert_id, doc
@@ -605,7 +641,9 @@ class AssetCertificationService:
     # Expiry alerts (Task 8.3)
     # ------------------------------------------------------------------
 
-    async def check_expiry_alerts(self, tenant_id: str) -> List[CertAlert]:
+    async def check_expiry_alerts(
+        self, tenant_id: str
+    ) -> List[Union[CertAlert, LegacyExpiredCertSummaryAlert]]:
         """Scan all certifications for upcoming expirations.
 
         Queries all non-expired certifications for the tenant and checks
@@ -618,12 +656,19 @@ class AssetCertificationService:
         - ≤30 days → "urgent"   (Req 13.3)
         - ≤60 days → "warning"  (Req 13.2)
 
+        Legacy expired certs (stored ``expired`` with no
+        ``expired_alert_sent`` key, see :func:`_is_legacy_expired`) do not get
+        one critical alert each: they are flagged and summarized in one
+        :class:`LegacyExpiredCertSummaryAlert` for the tenant (OI-33). New
+        expiries keep their individual critical alert.
+
         Uses paginated ES queries (search_after) to handle large fleets
         without hitting page size limits.
 
         Validates: Requirements 13.2, 13.3, 13.4
         """
-        alerts: List[CertAlert] = []
+        alerts: List[Union[CertAlert, LegacyExpiredCertSummaryAlert]] = []
+        legacy: List[tuple] = []  # (cert_id, asset_id, expiry_date)
         today = date.today()
 
         # Query all non-expired certifications for this tenant, plus expired
@@ -642,6 +687,10 @@ class AssetCertificationService:
 
             expiry_date = self._parse_date(expiry_raw)
             if expiry_date is None:
+                continue
+
+            if _is_legacy_expired(cert_doc):
+                legacy.append((cert_id, asset_id, expiry_date))
                 continue
 
             days_until_expiry = (expiry_date - today).days
@@ -684,6 +733,23 @@ class AssetCertificationService:
                 severity=severity,
             )
             alerts.append(alert)
+
+        if legacy:
+            for cert_id, _, _ in legacy:
+                await self._transition_to_expired(tenant_id, cert_id, quiet=True)
+            logger.warning(
+                "%d legacy expired certification(s) for tenant %s summarized "
+                "into one alert",
+                len(legacy),
+                tenant_id,
+            )
+            alerts.append(LegacyExpiredCertSummaryAlert(
+                tenant_id=tenant_id,
+                cert_ids=sorted(c for c, _, _ in legacy),
+                asset_ids=sorted({a for _, a, _ in legacy}),
+                count=len(legacy),
+                oldest_expiry_date=min(e for _, _, e in legacy),
+            ))
 
         logger.info(
             "Generated %d expiry alerts for tenant %s",
@@ -760,13 +826,18 @@ class AssetCertificationService:
 
         return all_certs
 
-    async def _transition_to_expired(self, tenant_id: str, cert_id: str) -> None:
+    async def _transition_to_expired(
+        self, tenant_id: str, cert_id: str, *, quiet: bool = False
+    ) -> None:
         """Transition a certification to expired status.
 
         Called when a certification is within 7 days of expiry or has
         already passed. Updates the status to "expired" in ES and records
         that its critical alert went out (``expired_alert_sent``), so the
         sweep alerts each expired cert exactly once (OI-33).
+
+        ``quiet=True`` logs at DEBUG instead of WARNING; the legacy-expired
+        summary uses it and logs one WARNING for the whole batch.
 
         Validates: Requirement 13.4
         """
@@ -786,7 +857,7 @@ class AssetCertificationService:
             await mirror_current_state_fields(
                 "asset_certification", tenant_id, cert_id, partial
             )
-            logger.warning(
+            (logger.debug if quiet else logger.warning)(
                 "Transitioned certification %s to expired for tenant %s",
                 cert_id,
                 tenant_id,
