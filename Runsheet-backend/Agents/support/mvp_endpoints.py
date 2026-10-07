@@ -83,11 +83,18 @@ class GeneratePlanResponse(BaseModel):
     outcome explicitly so a caller that only inspects a boolean, or only renders
     a message, is not obliged to know the state vocabulary to avoid reporting a
     silent skip as success.
+
+    ``unplaced_orders`` lists every order the loading stage could not load,
+    one entry per order and reason (OI-39). ``failed_agent`` and
+    ``error_message`` explain a ``"failed"`` run so the dispatcher sees why.
     """
     run_id: str
     status: str
     degraded: bool = False
     degradation_reasons: List[Dict[str, Any]] = Field(default_factory=list)
+    unplaced_orders: List[Dict[str, Any]] = Field(default_factory=list)
+    failed_agent: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class ReplanRequest(BaseModel):
@@ -301,7 +308,14 @@ async def generate_plan(
             status=status_info.get("state", "pending"),
             degraded=bool(status_info.get("degraded", False)),
             degradation_reasons=list(status_info.get("degradations") or []),
+            unplaced_orders=list(status_info.get("unplaced_orders") or []),
+            failed_agent=status_info.get("failed_agent"),
+            error_message=status_info.get("error_message"),
         )
+    except AppException:
+        # A typed error (e.g. DYED_DIESEL_CHECK_UNAVAILABLE, 503) keeps its
+        # own code and status in the standard envelope.
+        raise
     except Exception as e:
         logger.error("Failed to generate plan: %s", e)
         raise internal_error(message="Plan could not be generated", details={"tenant_id": tenant_id}) from e
@@ -495,6 +509,8 @@ async def replan(
             "status": "replan_triggered",
             "disruption_type": body.disruption_type,
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.error("Failed to trigger replan for %s: %s", plan_id, e)
         raise internal_error(message="Replan could not be started", details={"plan_id": plan_id}) from e

@@ -29,6 +29,7 @@ from Agents.support.fuel_distribution_pipeline import (
     WS_EVENT_REPLAN_APPLIED,
     WS_EVENT_REPLAN_FAILED,
     broadcast_pipeline_event,
+    read_agent_unplaced_orders,
 )
 
 
@@ -94,6 +95,76 @@ class TestPipelineRun:
         run.started_at = datetime(2024, 1, 1, tzinfo=timezone.utc)
         d = run.to_dict()
         assert d["started_at"] is not None
+
+    def test_to_dict_carries_unplaced_orders(self):
+        run = PipelineRun(run_id="run-1", tenant_id="t1")
+        assert run.to_dict()["unplaced_orders"] == []
+        run.unplaced_orders.append({"order_id": "ORD-1", "reason": "no_truck_capacity"})
+        assert run.to_dict()["unplaced_orders"] == [
+            {"order_id": "ORD-1", "reason": "no_truck_capacity"}
+        ]
+
+
+class TestUnplacedOrders:
+    """OI-39: the loading stage's per-order report reaches the run status."""
+
+    def test_magicmock_agent_reads_as_empty(self):
+        assert read_agent_unplaced_orders(MagicMock()) == []
+
+    def test_only_mappings_in_a_real_list_count(self):
+        agent = MagicMock()
+        agent.last_unplaced_orders = [{"order_id": "A"}, "junk", None]
+        assert read_agent_unplaced_orders(agent) == [{"order_id": "A"}]
+
+    @pytest.mark.asyncio
+    async def test_run_copies_unplaced_orders_without_degrading(self):
+        entry = {
+            "order_id": "ORD-1",
+            "station_id": "st-1",
+            "product_code": "GASOLINE_REG",
+            "liters": 4000.0,
+            "reason": "no_compatible_compartment",
+            "partial": False,
+        }
+        loading = _make_mock_agent("compartment_loading")
+
+        async def _cycle():
+            loading.last_unplaced_orders = [entry]
+            return ([], [])
+
+        loading.last_unplaced_orders = [{"order_id": "STALE"}]
+        loading.monitor_cycle = AsyncMock(side_effect=_cycle)
+        pipeline, _, _ = _make_pipeline(agents={
+            "tank_forecasting": _make_mock_agent("tank_forecasting"),
+            "delivery_prioritization": _make_mock_agent("delivery_prioritization"),
+            "compartment_loading": loading,
+            "route_planning": _make_mock_agent("route_planning"),
+        })
+
+        run_id = await pipeline.run("tenant-1")
+        status = await pipeline.get_status(run_id)
+
+        assert status["unplaced_orders"] == [entry]
+        assert status["stage_results"]["compartment_loading"]["unplaced_orders"] == [entry]
+        assert status["degraded"] is False
+        assert status["state"] == "complete"
+
+    @pytest.mark.asyncio
+    async def test_stale_report_is_cleared_when_evaluate_does_not_run(self):
+        loading = _make_mock_agent("compartment_loading")
+        loading.last_unplaced_orders = [{"order_id": "STALE"}]
+        pipeline, _, _ = _make_pipeline(agents={
+            "tank_forecasting": _make_mock_agent("tank_forecasting"),
+            "delivery_prioritization": _make_mock_agent("delivery_prioritization"),
+            "compartment_loading": loading,
+            "route_planning": _make_mock_agent("route_planning"),
+        })
+
+        run_id = await pipeline.run("tenant-1")
+        status = await pipeline.get_status(run_id)
+
+        assert status["unplaced_orders"] == []
+        assert "unplaced_orders" not in status["stage_results"]["compartment_loading"]
 
 
 # ---------------------------------------------------------------------------

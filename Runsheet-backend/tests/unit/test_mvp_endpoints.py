@@ -210,6 +210,73 @@ class TestGeneratePlan:
         resp = client.post("/api/fuel/mvp/plan/generate")
         assert resp.status_code == 500
 
+    def test_forwards_unplaced_orders(self):
+        """OI-39: orders the loading stage could not load reach the response."""
+        pipeline = _make_mock_pipeline()
+        unplaced = [{
+            "order_id": "ORD-1",
+            "station_id": "st-1",
+            "product_code": "GASOLINE_REG",
+            "liters": 4000.0,
+            "reason": "no_compatible_compartment",
+            "partial": False,
+        }]
+        status = dict(pipeline.get_status.return_value)
+        status["unplaced_orders"] = unplaced
+        pipeline.get_status = AsyncMock(return_value=status)
+        app, _, _ = _create_test_app(pipeline=pipeline)
+
+        resp = TestClient(app).post("/api/fuel/mvp/plan/generate")
+
+        assert resp.status_code == 200
+        assert resp.json()["unplaced_orders"] == unplaced
+
+    def test_failed_run_carries_error_message(self):
+        """A FAILED run says why, so the dispatcher UI never shows success."""
+        pipeline = _make_mock_pipeline()
+        status = dict(pipeline.get_status.return_value)
+        status.update({
+            "state": "failed",
+            "failed_agent": "compartment_loading",
+            "error_message": "Dyed-diesel compliance check unavailable",
+        })
+        pipeline.get_status = AsyncMock(return_value=status)
+        app, _, _ = _create_test_app(pipeline=pipeline)
+
+        resp = TestClient(app).post("/api/fuel/mvp/plan/generate")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "failed"
+        assert data["failed_agent"] == "compartment_loading"
+        assert data["error_message"] == "Dyed-diesel compliance check unavailable"
+        assert data["unplaced_orders"] == []
+
+    def test_typed_error_renders_its_own_envelope(self):
+        """OI-02: a typed AppException is not flattened into a 500."""
+        from compliance.services.dyed_diesel_enforcer import (
+            DyedDieselCheckUnavailable,
+        )
+
+        pipeline = _make_mock_pipeline()
+        pipeline.run = AsyncMock(side_effect=DyedDieselCheckUnavailable(
+            reason="enforcer_error",
+            tenant_id=TEST_TENANT_ID,
+            plan_id="p1",
+            truck_id="truck-1",
+            cause="RuntimeError",
+        ))
+        app, _, _ = _create_test_app(pipeline=pipeline)
+
+        resp = TestClient(app).post("/api/fuel/mvp/plan/generate")
+
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["error_code"] == "DYED_DIESEL_CHECK_UNAVAILABLE"
+        assert "blocked" in body["message"]
+        assert "request_id" in body
+        assert body["details"]["reason"] == "enforcer_error"
+
 
 # ---------------------------------------------------------------------------
 # Tests: GET /api/fuel/mvp/plan/{plan_id} (Req 8.2)
@@ -332,6 +399,28 @@ class TestReplan:
             json={"disruption_type": "delay"},
         )
         assert resp.status_code == 503
+
+    def test_typed_error_keeps_its_envelope(self):
+        """A typed AppException from the replan cycle is not a bare 500."""
+        from compliance.services.dyed_diesel_enforcer import (
+            DyedDieselCheckUnavailable,
+        )
+
+        replanning_agent = _make_mock_replanning_agent()
+        replanning_agent.monitor_cycle = AsyncMock(side_effect=DyedDieselCheckUnavailable(
+            reason="enforcer_not_wired",
+            tenant_id=TEST_TENANT_ID,
+            plan_id="plan-1",
+            truck_id="truck-1",
+        ))
+        app, _, _ = _create_test_app(replanning_agent=replanning_agent)
+
+        resp = TestClient(app).post(
+            "/api/fuel/mvp/plan/plan-1/replan", json={"disruption_type": "delay"},
+        )
+
+        assert resp.status_code == 503
+        assert resp.json()["error_code"] == "DYED_DIESEL_CHECK_UNAVAILABLE"
 
 
 class TestApprovePlan:
