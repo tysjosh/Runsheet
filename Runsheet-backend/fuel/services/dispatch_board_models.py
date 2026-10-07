@@ -237,6 +237,14 @@ class PublishResult(_Strict):
     recovery: Optional[str] = None
     dropped_orders: List[str] = Field(default_factory=list)
     notifications_failed: List[str] = Field(default_factory=list)
+    #: Phase 2 (K8.4): the order a relink refused on and the status it had.
+    order_id: Optional[str] = None
+    observed_status: Optional[str] = None
+    #: Amend kept a stop a driver completed concurrently (K8.4 phase 4).
+    kept_completed_stops: List[str] = Field(default_factory=list)
+    #: Drivers with no manifest while a forward recovery is pending (banner, Q16).
+    drivers_without_routes: List[str] = Field(default_factory=list)
+    publish_id: Optional[str] = None
     at: Optional[datetime] = None
 
 

@@ -27,10 +27,13 @@ PUBLISH_LANE_COUNT = "board.publish.lane.count"
 REDISPATCH_COUNT = "board.redispatch.count"
 SUGGESTION_COUNT = "board.suggestion.count"
 UNDO_COUNT = "board.undo.count"
+#: Rollback met an order state the guards exclude (K8.4 Recovery).
+RECOVERY_INCONSISTENT = "dispatch_board.recovery_inconsistent"
 
 METRIC_NAMES = frozenset({
     SNAPSHOT_MS, VALIDATE_MS, COMMAND_MS, COMMAND_COUNT, CONFLICT_COUNT, OVERRIDE_COUNT,
     PUBLISH_LANE_MS, PUBLISH_LANE_COUNT, REDISPATCH_COUNT, SUGGESTION_COUNT, UNDO_COUNT,
+    RECOVERY_INCONSISTENT,
 })
 
 #: The only tag keys a board metric may carry.

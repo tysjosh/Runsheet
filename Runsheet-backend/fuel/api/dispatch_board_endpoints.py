@@ -15,8 +15,9 @@ Bodies are ``Body(Any)`` and validated in the handler with ``parse_body`` so a
 422 never echoes submitted values (External input validation). Tenant and
 actor ids come only from the verified session.
 
-Publish (Phase 2) and suggestion reject (Phase 3) parse and validate their
-bodies here; until their services are configured they answer 503.
+Publish answers 200 for a dry run and 202 when a publish is accepted (K7.1).
+Publish and suggestion reject (Phase 3) parse and validate their bodies here;
+until their services are configured they answer 503.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from datetime import date
 from typing import Any, Callable, List, Optional
 
 from fastapi import APIRouter, Body, Depends, Request
+from fastapi.responses import JSONResponse
 
 from auth.router_guards import roles_dependency
 from errors.codes import ErrorCode
@@ -259,6 +261,9 @@ async def publish_board(
         body=parsed,
         tz=_tz(tenant),
     )
+    if isinstance(data, dict) and data.get("publish_id"):
+        # Accepted: the worker runs in the background (K7.1).
+        return JSONResponse(status_code=202, content=_envelope(request, data))
     return _envelope(request, data)
 
 

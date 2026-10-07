@@ -234,6 +234,66 @@ def test_publish_body_rules(env):
     assert publish.calls[-1]["tenant_id"] == T and publish.calls[-1]["user_id"] == "user-1"
 
 
+def test_accepted_publish_answers_202_and_dry_run_200(env):
+    h, session, flags, _client, _ = env
+
+    class Accepting(FakePublish):
+        async def handle(self, **kwargs):
+            self.calls.append(kwargs)
+            if type(kwargs["body"]).__name__ == "PublishPreviewBody":
+                return {"ready": True}
+            return {"publish_id": "pub-1", "lanes": [], "groups": []}
+
+    client = TestClient(make_app(h, flags, session, publish=Accepting()))
+    lanes = [{"truck_id": "T1", "expected_version": 1}]
+    resp = client.post(f"{BASE}/{DAY}/publish", json={"client_request_id": str(uuid.uuid4()), "lanes": lanes})
+    assert resp.status_code == 202 and resp.json()["data"]["publish_id"] == "pub-1" and "request_id" in resp.json()
+    resp = client.post(f"{BASE}/{DAY}/publish", json={"dry_run": True, "lanes": lanes})
+    assert resp.status_code == 200 and resp.json()["data"] == {"ready": True}
+
+
+def test_bootstrap_wires_publish_when_executor_and_dispatch_exist():
+    from bootstrap.agents import _wire_dispatch_board
+    from bootstrap.container import ServiceContainer
+    from fuel.services.dispatch_board_publish import BoardPublishService
+
+    h = Harness()
+    container = ServiceContainer()
+    container.ops_feature_flags = FakeFlags({T: "active_gated"})
+    container.order_repository = h.orders
+    container.driver_repository = h.drivers
+    container.loading_plan_executor = object()
+    container.plan_dispatch_service = object()
+    app = FastAPI()
+    try:
+        _wire_dispatch_board(app, container, h.store, None, plan_execution_service=object())
+        publish = container.dispatch_board_publish_service
+        assert isinstance(publish, BoardPublishService) and board_api._publish_service is publish
+        assert publish.redispatch._invalidate is not None
+    finally:
+        board_api.configure_dispatch_board_endpoints(board_service=None, feature_flag_service=None)
+
+
+async def test_work_cache_invalidator_resolves_the_work_service_at_call_time(monkeypatch):
+    from bootstrap.agents import _invalidate_driver_work
+    from driver.api import work_endpoints
+
+    monkeypatch.setattr(work_endpoints, "_work_service", None)
+    await _invalidate_driver_work(T, "o1")  # no service yet: a no-op
+
+    class Work:
+        def __init__(self):
+            self.calls = []
+
+        async def invalidate(self, tenant_id, order_id):
+            self.calls.append((tenant_id, order_id))
+
+    work = Work()
+    monkeypatch.setattr(work_endpoints, "_work_service", work)
+    await _invalidate_driver_work(T, "o1")
+    assert work.calls == [(T, "o1")]
+
+
 def test_publish_and_reject_without_services_are_503(env):
     h, session, flags, _client, _ = env
     client = TestClient(make_app(h, flags, session, publish=None))

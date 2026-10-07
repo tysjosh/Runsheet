@@ -40,8 +40,10 @@ from fuel.services.dispatch_board_models import (
     HistoryPage,
     HistoryQuery,
     Lane,
+    LanePublish,
     LaneView,
     MoveStopsCommand,
+    PublishResult,
     ReapplyCommand,
     RevertCommand,
     Snapshot,
@@ -214,6 +216,20 @@ class DispatchBoardService:
             return "modified" if engine.content_hash(lane) != publish.published_hash else "published"
         return "draft"
 
+    def _presented_publish(self, lane: Lane) -> LanePublish:
+        """K7.5: a ``publishing`` lane whose lease ran out reads as an interrupted failure."""
+        publish = lane.publish
+        if publish.state == "publishing" and publish.lease_until is not None and publish.lease_until < self.now():
+            return publish.model_copy(
+                update={
+                    "last_result": PublishResult(
+                        state="failed", reason="interrupted", writes_made="unknown", retryable=True,
+                        publish_id=publish.attempt_id, at=publish.lease_until,
+                    )
+                }
+            )
+        return publish
+
     def lane_view(self, lane: Lane, ctx: Optional[ValidationContext] = None, *, suggested: Optional[SuggestedDriver] = None) -> LaneView:
         state = self._lane_state(lane)
         driver = None
@@ -247,7 +263,7 @@ class DispatchBoardService:
             checks_computed_at=lane.checks_computed_at,
             checks_stale=lane.checks_stale,
             outcome=worst_outcome(lane.checks),
-            publish=lane.publish,
+            publish=self._presented_publish(lane),
             state=state,
             modified=state == "modified",
             ever_published=lane.publish.published_version is not None or bool(lane.publish.plans),

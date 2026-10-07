@@ -1126,7 +1126,9 @@ def _order_state_checks(ctx: ValidationContext, lane: Lane, draft: BoardDraft) -
                 continue
             status = order.get("status")
             run = order.get("assigned_run_id") or ""
-            linked_here = bool(run) and run in runs
+            # This load's own board run counts as here even before finalize, so a
+            # retry after a dispatch-stage failure can complete (K7.5).
+            linked_here = bool(run) and (run in runs or run.startswith(f"bp-{load.load_id}-r"))
             if status == "on_hold":
                 out.append(_mk("order_state", "block", "on_hold", f"Order {oid} is on hold.", source, scope, fix_link=fix))
             elif status in _TERMINAL_ORDER_STATES and not (linked_here and status in ("delivered", "failed")):

@@ -225,7 +225,7 @@ async def _seed_fuel_ops_feature_flag_defaults(
         )
 
 
-def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_client) -> None:
+def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_client, plan_execution_service=None) -> None:
     """Build the Dispatch Board services and configure ``/api/fuel/board`` (K11).
 
     The router is also included by ``main.py`` at import time (so the endpoint
@@ -273,12 +273,67 @@ def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_cli
     )
     container.dispatch_validation_service = validation
     container.dispatch_board_service = board_service
+    publish_service = _build_board_publish(container, es_service, board_service, plan_execution_service, _from_container)
+    if publish_service is not None:
+        container.dispatch_board_publish_service = publish_service
     configure_dispatch_board_endpoints(
         board_service=board_service,
         feature_flag_service=container.ops_feature_flags if container.has("ops_feature_flags") else None,
+        publish_service=publish_service,
     )
     mount_router(app, dispatch_board_router)
     logger.info("Dispatch Board endpoints configured and router registered")
+
+
+async def _invalidate_driver_work(tenant_id: str, order_id: str) -> None:
+    """Drop every cached driver work bundle of an order (dispatch-board K8.4 phase 5).
+
+    Resolves the work service at call time: ``bootstrap/driver.py`` configures
+    it after this module, and a missing service is a no-op.
+    """
+    from driver.api.work_endpoints import get_work_service
+
+    service = get_work_service()
+    if service is None:
+        logger.debug("Driver work service not configured; cache invalidation skipped")
+        return
+    await service.invalidate(tenant_id, order_id)
+
+
+def _build_board_publish(container: ServiceContainer, es_service, board_service, plan_execution_service, from_container):
+    """Publish and redispatch services (dispatch-board K7, K8; plan tasks 15-16).
+
+    Needs the executor, the dispatch service and the order repository; without
+    them the publish route keeps answering 503 ``service_not_configured``.
+    """
+    needed = ("loading_plan_executor", "plan_dispatch_service", "order_repository")
+    if not all(container.has(name) for name in needed):
+        logger.warning(
+            "Dispatch Board publish not wired; missing: %s",
+            ", ".join(name for name in needed if not container.has(name)),
+        )
+        return None
+    from fuel.services.dispatch_board_publish import BoardPublishService, BoardRedispatchService
+
+    redispatch = BoardRedispatchService(
+        es_service=es_service,
+        order_repository=container.get("order_repository"),
+        executor=container.get("loading_plan_executor"),
+        dispatch_service=container.get("plan_dispatch_service"),
+        execution_service=plan_execution_service,
+        driver_ws_manager=from_container("driver_ws_manager"),
+        orders_ws_manager=from_container("orders_ws_manager"),
+        work_cache_invalidator=_invalidate_driver_work,
+        telemetry=board_service.telemetry,
+        clock=board_service.now,
+    )
+    return BoardPublishService(
+        es_service=es_service,
+        board_service=board_service,
+        executor=container.get("loading_plan_executor"),
+        dispatch_service=container.get("plan_dispatch_service"),
+        redispatch_service=redispatch,
+    )
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -1160,7 +1215,10 @@ async def initialize(app, container: ServiceContainer) -> None:
     # ``bootstrap/driver.py`` builds after this module: every collaborator is
     # resolved at call time through ``Lazy`` so a later registration is seen.
     try:
-        _wire_dispatch_board(app, container, es_service, _agent_redis_client)
+        _wire_dispatch_board(
+            app, container, es_service, _agent_redis_client,
+            plan_execution_service=plan_execution_service,
+        )
     except Exception as exc:
         logger.error("Dispatch Board not wired: %s", type(exc).__name__, exc_info=True)
 
