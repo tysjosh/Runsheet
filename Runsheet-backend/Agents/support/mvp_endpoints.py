@@ -32,6 +32,7 @@ from driver.middleware.idempotency import (
 from driver.models import GeoPoint
 from errors.exceptions import (
     AppException,
+    already_exists,
     ambiguous_volume_unit,
     elasticsearch_unavailable,
     internal_error,
@@ -650,6 +651,21 @@ async def configure_compartments(
     )
 
     try:
+        # Pre-read every target document before writing any (OI-07). The
+        # composite ids are global, so a truck_id another tenant already uses
+        # would otherwise be overwritten. Refuse with a generic 409 that never
+        # names the owner, and write nothing.
+        existing_docs: Dict[str, Any] = {}
+        for compartment in body.compartments:
+            doc_id = f"{truck_id}_{compartment.compartment_id}"
+            existing = await es.get_document(TRUCK_COMPARTMENTS_INDEX, doc_id)
+            if isinstance(existing, dict) and existing.get("tenant_id") != tenant_id:
+                raise already_exists(
+                    "Truck compartments are already in use",
+                    details={"truck_id": truck_id},
+                )
+            existing_docs[doc_id] = existing
+
         # Write each compartment document to the truck_compartments index
         written_compartments = []
         for compartment in body.compartments:
@@ -688,7 +704,7 @@ async def configure_compartments(
             # maintains. Re-configuring a compartment must not erase what it
             # last carried — the cross-contamination guard reads it — so carry
             # those fields over from this tenant's existing document.
-            existing = await es.get_document(TRUCK_COMPARTMENTS_INDEX, doc_id)
+            existing = existing_docs.get(doc_id)
             if isinstance(existing, dict) and existing.get("tenant_id") == tenant_id:
                 for field in _COMPARTMENT_STATE_FIELDS:
                     if field in existing:
