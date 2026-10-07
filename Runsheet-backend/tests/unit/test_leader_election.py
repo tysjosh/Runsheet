@@ -44,6 +44,7 @@ from persistence.leader_election import (
     role_object_id,
     run_periodic,
     set_sweep_leader,
+    wait_for_leadership,
 )
 
 
@@ -479,6 +480,47 @@ class TestRunPeriodic:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+    @pytest.mark.asyncio
+    async def test_a_long_interval_job_runs_soon_after_takeover(self):
+        """A follower used to sleep a whole interval after each skipped check.
+        For a daily job, a process that became leader after its first check
+        waited 24 h, so on an environment redeployed more often the job never
+        ran."""
+        follower = _FakeLeader(False)
+        set_sweep_leader(follower)
+        ran = asyncio.Event()
+
+        async def cycle():
+            ran.set()
+
+        with patch("persistence.leader_election.FOLLOWER_RECHECK_SECONDS", 0.01):
+            task = asyncio.create_task(
+                run_periodic("t", 86_400.0, cycle, run_immediately=True)
+            )
+            await asyncio.sleep(0.05)
+            assert not ran.is_set()
+            follower._is_leader = True
+            await asyncio.wait_for(ran.wait(), timeout=1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_wait_for_leadership_uses_the_election_event(self):
+        leader = SweepLeader()
+        set_sweep_leader(leader)
+        waiter = asyncio.create_task(wait_for_leadership(86_400.0))
+        await asyncio.sleep(0.01)
+        assert not waiter.done()
+        leader._leader.set()
+        assert await asyncio.wait_for(waiter, timeout=1.0) is True
+
+    @pytest.mark.asyncio
+    async def test_wait_for_leadership_times_out_as_a_follower(self):
+        set_sweep_leader(_FakeLeader(False))
+        with patch("persistence.leader_election.FOLLOWER_RECHECK_SECONDS", 0.005):
+            assert await wait_for_leadership(0.02) is False
 
     @pytest.mark.asyncio
     async def test_default_sleeps_before_the_first_cycle(self):

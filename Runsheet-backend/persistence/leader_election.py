@@ -440,6 +440,35 @@ def is_sweep_leader() -> bool:
     return _leader is None or _leader.is_leader
 
 
+#: Fallback re-check period for :func:`wait_for_leadership` when the registered
+#: leader cannot signal (a test double without ``wait_until_leader``).
+FOLLOWER_RECHECK_SECONDS = 5.0
+
+
+async def wait_for_leadership(timeout: float) -> bool:
+    """Wait up to ``timeout`` seconds for this process to become sweep leader.
+
+    Returns True as soon as it is leader, False on timeout. A follower uses
+    this instead of sleeping a whole job interval: leadership usually arrives
+    a minute or two after boot (the old task holds the lock until it drains),
+    and a daily job that slept 24 h on its first follower check never ran on
+    an environment redeployed more often than that.
+    """
+    if is_sweep_leader():
+        return True
+    leader = _leader
+    if isinstance(leader, SweepLeader):
+        return await leader.wait_until_leader(timeout=timeout)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not is_sweep_leader():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(FOLLOWER_RECHECK_SECONDS, remaining))
+    return True
+
+
 async def run_periodic(
     name: str,
     interval_seconds: float,
@@ -454,7 +483,10 @@ async def run_periodic(
     right individually:
 
     * A follower skips the cycle instead of exiting, so leadership can move to
-      this process later without restarting it.
+      this process later without restarting it. It waits for leadership
+      rather than another full interval, and runs the cycle as soon as it
+      takes over, so a long-interval job still runs on a process that became
+      leader after its first check.
     * An exception inside ``cycle`` is logged and the loop continues. A sweep
       that dies on one bad row must not stay dead until the next deploy.
     * ``asyncio.CancelledError`` propagates, so shutdown is not swallowed.
@@ -472,9 +504,9 @@ async def run_periodic(
                 await asyncio.sleep(interval_seconds)
             first = False
 
-            if not is_sweep_leader():
+            while not is_sweep_leader():
                 logger.debug("Periodic job %r skipped — not the sweep leader", name)
-                continue
+                await wait_for_leadership(interval_seconds)
 
             try:
                 await cycle()
@@ -498,6 +530,7 @@ __all__ = [
     "is_sweep_leader",
     "role_object_id",
     "run_periodic",
+    "wait_for_leadership",
     "set_sweep_leader",
     "try_advisory_lock",
     "try_advisory_lock_pair",

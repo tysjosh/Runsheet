@@ -127,7 +127,7 @@ class AutonomousAgentBase(ABC):
         Exceptions inside ``monitor_cycle`` are caught and logged so the
         loop never dies unexpectedly.
         """
-        from persistence.leader_election import is_sweep_leader
+        from persistence.leader_election import is_sweep_leader, wait_for_leadership
 
         while self._running:
             # Only the sweep leader acts. Two processes running the same agent
@@ -135,8 +135,14 @@ class AutonomousAgentBase(ABC):
             # per-process memory, so each copy has its own idea of what it has
             # already handled and both re-escalate the same entity. Standing
             # down keeps the loop alive so leadership can move here later.
+            #
+            # A follower waits for leadership, not for a whole poll interval,
+            # and cycles as soon as it takes over. Leadership arrives a minute
+            # or two after boot, so sleeping ``poll_interval`` (24 h for the
+            # compliance crons) meant those crons never ran on an environment
+            # redeployed more often than daily.
             if not is_sweep_leader():
-                await asyncio.sleep(self.poll_interval)
+                await wait_for_leadership(self.poll_interval)
                 continue
 
             cycle_start = datetime.now(timezone.utc)
@@ -174,7 +180,7 @@ class AutonomousAgentBase(ABC):
             tenant_id: counts
             for tenant_id, counts in self._tenant_activity.items()
             if counts[0] or counts[1]
-        } or self._group_by_tenant(detections, actions)
+        } or self._cycle_counts_by_tenant(detections, actions)
 
         for tenant_id, (detection_count, action_count) in per_tenant.items():
             await self._activity_log.log_monitoring_cycle(
@@ -186,10 +192,15 @@ class AutonomousAgentBase(ABC):
             )
 
     @staticmethod
-    def _group_by_tenant(
+    def _cycle_counts_by_tenant(
         detections: List[Any], actions: List[Any]
     ) -> Dict[Optional[str], List[int]]:
-        """Group cycle results by the ``tenant_id`` each item carries.
+        """Count cycle results by the ``tenant_id`` each item carries.
+
+        Deliberately not named ``_group_by_tenant``: ``OverlayAgentBase``
+        defines an instance method of that name with a different signature,
+        which shadowed this one and made ``_log_cycle`` raise ``TypeError``
+        for every overlay agent cycle that detected something.
 
         Dicts and objects with a string ``tenant_id`` group under it; bare
         ids and anything else group under ``None``.

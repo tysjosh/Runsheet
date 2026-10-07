@@ -490,3 +490,76 @@ class TestPerTenantCycleLogging:
         await _run(_ScriptedAgent([([], [])], activity_log_service=log))
 
         log.log_monitoring_cycle.assert_not_called()
+
+    async def test_overlay_agent_cycle_with_detections_is_logged(self):
+        """Staging 2026-10-07: ``exception_commander`` raised ``TypeError:
+        OverlayAgentBase._group_by_tenant() takes 2 positional arguments but 3
+        were given`` from ``_log_cycle``, so its monitoring_cycle entry was lost.
+        The overlay base's own ``_group_by_tenant(signals)`` shadowed the
+        autonomous base's two-argument helper."""
+        from Agents.overlay.base_overlay_agent import OverlayAgentBase
+
+        class _Alert:
+            def __init__(self, tenant_id):
+                self.tenant_id = tenant_id
+
+        class _Overlay(OverlayAgentBase):
+            async def evaluate(self, signals):
+                return []
+
+            async def monitor_cycle(self):
+                self._running = False
+                return ([_Alert("t1"), _Alert("t1")], [{"tenant_id": "t1"}])
+
+        log = _spy_log()
+        agent = _Overlay(
+            agent_id="overlay_stub", signal_bus=MagicMock(), subscriptions=[],
+            activity_log_service=log, ws_manager=None, confirmation_protocol=None,
+            autonomy_config_service=None, feature_flag_service=None, es_service=None,
+            poll_interval=0,
+        )
+        with patch.object(agent.logger, "exception") as logged_error:
+            await _run(agent)
+
+        logged_error.assert_not_called()
+        assert _cycle_calls(log) == [("t1", 2, 1)]
+
+
+class TestFollowerWaitsForLeadership:
+    """Staging 2026-10-07: the daily compliance crons never ran.
+
+    A process that wasn't leader on its first loop slept ``poll_interval``
+    (24 h) before checking again. Leadership arrives a minute or two after
+    boot and staging redeploys more often than daily, so the sweep never ran.
+    """
+
+    async def test_follower_cycles_soon_after_taking_over(self):
+        from persistence import leader_election
+
+        class _Leader:
+            is_leader = False
+
+        leader = _Leader()
+        ran = asyncio.Event()
+
+        def cycle(agent):
+            ran.set()
+            return ([], [])
+
+        agent = _ScriptedAgent([cycle], poll_interval_seconds=86_400,
+                               activity_log_service=_spy_log())
+        agent._running = True
+        original = leader_election.get_sweep_leader()
+        leader_election.set_sweep_leader(leader)
+        try:
+            with patch.object(leader_election, "FOLLOWER_RECHECK_SECONDS", 0.01):
+                task = asyncio.create_task(agent._run_loop())
+                await asyncio.sleep(0.05)
+                assert not ran.is_set(), "a follower ran the cycle"
+                leader.is_leader = True  # election moved leadership here
+                await asyncio.wait_for(ran.wait(), timeout=1.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            leader_election.set_sweep_leader(original)
