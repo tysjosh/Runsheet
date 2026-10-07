@@ -129,6 +129,7 @@ def _make_job_service(job_doc):
     es.search_documents = AsyncMock(return_value=_es_search_response([job_doc]))
     es.index_document = AsyncMock()
     es.update_document = AsyncMock()
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     return JobService(es, redis_url=None)
 
 
