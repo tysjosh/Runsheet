@@ -749,6 +749,14 @@ async def update_cargo_item_status(
 
     Validates: Requirements 6.3, 6.4
     """
+    if data.item_id != item_id:
+        # The path names the item; a different body id is a client bug (OI-32).
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Body item_id does not match the path",
+            status_code=422,
+            details={"item_id": item_id},
+        )
     svc = _get_cargo_service()
     item = await svc.update_cargo_item_status(
         job_id, item_id, data.item_status, tenant.tenant_id, actor_id=tenant.user_id

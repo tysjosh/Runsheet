@@ -434,6 +434,46 @@ class TestInputValidation:
 # ---------------------------------------------------------------------------
 
 
+class TestCargoItemStatusIdMatch:
+    """OI-32: PATCH .../cargo/{item_id}/status refuses a different body item_id."""
+
+    _URL = "/api/scheduling/jobs/JOB_1/cargo/ITEM_1/status"
+
+    def test_mismatched_body_item_id_is_422(self):
+        es = _make_es_mock()
+        _, client = _build_app(es)
+        update = AsyncMock()
+
+        with patch.object(CargoService, "update_cargo_item_status", update):
+            resp = client.patch(
+                self._URL,
+                headers=_auth_headers(),
+                json={"item_id": "ITEM_2", "item_status": "loaded"},
+            )
+
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["details"] == {"item_id": "ITEM_1"}
+        update.assert_not_awaited()
+
+    def test_matching_body_item_id_is_200(self):
+        es = _make_es_mock()
+        _, client = _build_app(es)
+        update = AsyncMock(return_value={"item_id": "ITEM_1", "item_status": "loaded"})
+
+        with patch.object(CargoService, "update_cargo_item_status", update):
+            resp = client.patch(
+                self._URL,
+                headers=_auth_headers(),
+                json={"item_id": "ITEM_1", "item_status": "loaded"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"]["item_status"] == "loaded"
+        assert update.await_args.args[:2] == ("JOB_1", "ITEM_1")
+
+
 class TestPagination:
     """Verify total_pages = ceil(total / size)."""
 
