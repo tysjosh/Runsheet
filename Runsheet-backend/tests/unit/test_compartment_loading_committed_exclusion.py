@@ -372,3 +372,47 @@ class TestOrderSnapshots:
         await agent.evaluate([])  # empty buffer
 
         assert agent._order_snapshots == {}
+
+
+# ---------------------------------------------------------------------------
+# OI-18 (OQ11): trucks holding an applied, undispatched plan are not offered
+# ---------------------------------------------------------------------------
+
+
+class TestCommittedTruckExclusion:
+    @staticmethod
+    def _agent(*orders):
+        store = InMemoryDocStore()
+        seed_fleet(store, tenant_id=TENANT, trucks=("truck-1", "truck-2"))
+        for order in orders:
+            store.seed(ORDERS, order["order_id"], order)
+        return store, loading_agent(store)
+
+    async def test_truck_with_a_scheduled_linked_order_is_not_offered(self):
+        _, agent = self._agent(fuel_order_doc(
+            "ord-1", tenant_id=TENANT, status="scheduled",
+            assigned_run_id="run-1", assigned_asset_id="truck-1",
+        ))
+        trucks = await agent._query_trucks_with_equipment_check(TENANT)
+        assert set(trucks) == {"truck-2"}
+
+    async def test_the_same_truck_is_offered_after_release_clears_the_links(self):
+        _, agent = self._agent(fuel_order_doc(
+            "ord-1", tenant_id=TENANT, status="placed",
+            assigned_run_id=None, assigned_asset_id=None,
+        ))
+        trucks = await agent._query_trucks_with_equipment_check(TENANT)
+        assert set(trucks) == {"truck-1", "truck-2"}
+
+    async def test_truck_whose_orders_are_all_dispatched_is_offered(self):
+        _, agent = self._agent(fuel_order_doc(
+            "ord-1", tenant_id=TENANT, status="dispatched",
+            assigned_run_id="run-1", assigned_asset_id="truck-1",
+        ))
+        trucks = await agent._query_trucks_with_equipment_check(TENANT)
+        assert set(trucks) == {"truck-1", "truck-2"}
+
+    async def test_order_read_failure_offers_no_trucks(self):
+        store, agent = self._agent()
+        store.fail_on("search_documents", ORDERS, exc=RuntimeError("store down"))
+        assert await agent._query_trucks_with_equipment_check(TENANT) == {}

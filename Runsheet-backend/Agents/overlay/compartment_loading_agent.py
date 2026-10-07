@@ -1879,6 +1879,48 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
             return True, []
 
+    async def _drop_committed_trucks(
+        self, tenant_id: str, trucks: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Leave out trucks holding an applied, not-yet-dispatched plan (OI-18, OQ11).
+
+        A truck is committed while any ``confirmed``/``scheduled`` order has a
+        run link and ``assigned_asset_id`` equal to the truck. Derived from the
+        order links rather than plan status, so a truck frees itself when its
+        plan dispatches or hold → release clears the links; a stale plan can't
+        hold it forever. A failed order read plans nothing (no trucks), as
+        ``_query_trucks`` does on its own read failure: a second plan on a
+        committed truck would give the driver the wrong manifest.
+        """
+        if not trucks:
+            return trucks
+        try:
+            committed_orders = await self._read_orders(
+                tenant_id, ("confirmed", "scheduled"), linked=True
+            )
+        except Exception as e:
+            logger.error(
+                "CompartmentLoadingAgent: committed-truck read failed for "
+                "tenant %s (%s); planning no trucks",
+                tenant_id,
+                e,
+            )
+            return {}
+        committed = {
+            str(o.get("assigned_asset_id"))
+            for o in committed_orders
+            if o.get("assigned_asset_id")
+        } & set(trucks)
+        if committed:
+            logger.info(
+                "CompartmentLoadingAgent: leaving out %d truck(s) with an applied, "
+                "undispatched plan for tenant %s: %s",
+                len(committed),
+                tenant_id,
+                sorted(committed),
+            )
+        return {tid: data for tid, data in trucks.items() if tid not in committed}
+
     async def _query_trucks_with_equipment_check(
         self, tenant_id: str
     ) -> Dict[str, Dict[str, Any]]:
@@ -1904,6 +1946,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             len(trucks),
             tenant_id,
         )
+        trucks = await self._drop_committed_trucks(tenant_id, trucks)
         if not trucks:
             return trucks
 

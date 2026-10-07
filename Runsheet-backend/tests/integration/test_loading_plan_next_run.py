@@ -17,7 +17,7 @@ from Agents.overlay.base_overlay_agent import (
     DEGRADATION_KIND_NO_INPUT,
 )
 from tests.integration._loading_plan_world import TENANT, World, no_llm
-from tests.unit._loading_plan_fakes import ORDERS, PLANS, fuel_order_doc
+from tests.unit._loading_plan_fakes import ORDERS, PLANS, fuel_order_doc, seed_fleet
 
 APPLIED = ("ord-1", "ord-2")
 # Big tanks so the committed-draw read runs on every known tank.
@@ -80,6 +80,9 @@ async def test_next_run_plans_only_the_new_uncommitted_order(monkeypatch):
     # R8.4: a new order on a different tank arrives after the apply.
     world.store.seed(ORDERS, "ord-3", fuel_order_doc(
         "ord-3", tenant_id=TENANT, gallons_requested=250.0))
+    # OI-18 (OQ11): truck-1 holds the applied, undispatched plan, so the new
+    # order needs another truck.
+    seed_fleet(world.store, tenant_id=TENANT, trucks=("truck-2",))
 
     proposals = await world.propose((*APPLIED, "ord-3"))
 
@@ -91,6 +94,7 @@ async def test_next_run_plans_only_the_new_uncommitted_order(monkeypatch):
     ]
     assert len(new_plans) == 1
     assert _plan_order_ids(new_plans[0]) == ["ord-3"]
+    assert new_plans[0]["truck_id"] == "truck-2"
     for plan in new_plans:
         assert not set(_plan_order_ids(plan)) & set(APPLIED)
     (pending,) = world.entries("pending")
@@ -99,3 +103,14 @@ async def test_next_run_plans_only_the_new_uncommitted_order(monkeypatch):
     # The applied orders are untouched by the second run.
     for oid in APPLIED:
         assert world.h.order(oid)["status"] == "scheduled"
+
+
+async def test_next_run_does_not_put_a_new_order_on_the_committed_truck(monkeypatch):
+    """OI-18 (OQ11): the only truck holds an applied plan, so nothing is planned."""
+    world = await _applied_world(monkeypatch)
+    plans_before = set(world.store.docs[PLANS])
+    world.store.seed(ORDERS, "ord-3", fuel_order_doc(
+        "ord-3", tenant_id=TENANT, gallons_requested=250.0))
+    proposals = await world.propose((*APPLIED, "ord-3"))
+    assert proposals == []
+    assert set(world.store.docs[PLANS]) == plans_before

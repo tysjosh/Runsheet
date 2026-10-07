@@ -494,13 +494,33 @@ class OrderService:
                 )
                 return order
 
-        # All hooks passed — transition back to placed
-        return await self.apply_status_transition(
-            order=order,
-            new_status="placed",
-            reason="released_from_hold",
-            actor_user_id=actor_user_id,
-        )
+        # All hooks passed — transition back to placed. The order leaves any
+        # applied loading plan in the same write (OI-18, OQ10): the run, truck
+        # and claim links are cleared so the next loading run can plan it
+        # again. The driver link is kept (OQ4). The released links go in the
+        # event for audit.
+        released = {
+            key: order.get(key)
+            for key in ("assigned_run_id", "assigned_asset_id", "assigned_claim_id")
+        }
+        for key in released:
+            order[key] = None
+        try:
+            return await self.apply_status_transition(
+                order=order,
+                new_status="placed",
+                reason="released_from_hold",
+                actor_user_id=actor_user_id,
+                event_payload_extra={
+                    "released_run_id": released["assigned_run_id"],
+                    "released_asset_id": released["assigned_asset_id"],
+                },
+            )
+        except BaseException:
+            # The transition did not complete (e.g. refused by the state
+            # machine); give the caller back its dict with the links.
+            order.update(released)
+            raise
 
     # ------------------------------------------------------------------
     # Private helpers

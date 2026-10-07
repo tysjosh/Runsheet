@@ -828,3 +828,63 @@ async def test_approval_and_executor_attempt_ids_are_correlated(caplog):
     (logged,) = h.activity.of("loading_plan_execution")
     assert logged["details"]["attempt_id"] == approval_attempt
     assert logged["details"]["executor_attempt_id"] == executor_attempt
+
+
+# ---------------------------------------------------------------------------
+# OI-18 (OQ10): a released order no longer holds an executed plan's overlap
+# ---------------------------------------------------------------------------
+
+
+async def _hold_and_release(h: ApprovalHarness, order_id: str) -> None:
+    order = h.order(order_id)
+    order = await h.order_service.place_on_hold(order, "customer asked to wait", "user-1")
+    await h.order_service.release_hold(order, "user-1")
+
+
+async def test_oi18_executed_holder_whose_order_was_released_lets_a_later_plan_approve():
+    h = ApprovalHarness(_orders("o1"))
+    h.svc.set_order_repository(h.repo)
+    h.add_plan("A", ["o1"])
+    assert (await h.approve("A"))["status"] == "executed"
+    assert h.links("o1") == ("run-A", "truck-A")
+
+    await _hold_and_release(h, "o1")
+    assert h.links("o1") == (None, None)
+    assert h.order("o1")["status"] == "placed"
+
+    h.add_plan("B", ["o1"])
+    b = await h.approve("B")
+    assert b["status"] == "executed", b.get("execution_result")
+    assert h.links("o1") == ("run-B", "truck-B")
+    assert h.status("A") == "executed"
+
+
+async def test_oi18_executed_holder_whose_order_is_still_linked_still_refuses():
+    h = ApprovalHarness(_orders("o1"))
+    h.svc.set_order_repository(h.repo)
+    h.add_plan("A", ["o1"])
+    await h.approve("A")
+    h.add_plan("B", ["o1"])
+    await _raises(h.approve("B"), LoadingPlanOverlapError)
+    assert h.status("B") == "pending"
+
+
+async def test_oi18_incomplete_holder_still_refuses_even_with_the_order_unlinked():
+    h = ApprovalHarness(_orders("o1", "o2"))
+    h.svc.set_order_repository(h.repo)
+    h.add_plan(
+        "X", ["o1"], status="incomplete",
+        execution_result={"attempt_id": "a0", "outcome": "incomplete", "writes_made": True},
+    )
+    assert h.links("o1") == (None, None)
+    h.add_plan("P", ["o1", "o2"])
+    await _raises(h.approve("P"), LoadingPlanOverlapError)
+
+
+async def test_oi18_without_an_order_repository_the_executed_hold_stays_sticky():
+    h = ApprovalHarness(_orders("o1"))
+    h.add_plan("A", ["o1"])
+    await h.approve("A")
+    await _hold_and_release(h, "o1")
+    h.add_plan("B", ["o1"])
+    await _raises(h.approve("B"), LoadingPlanOverlapError)

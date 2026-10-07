@@ -313,6 +313,9 @@ class ApprovalQueueService:
         self._activity_log = activity_log_service
         self._confirmation_protocol = confirmation_protocol
         self._feedback = feedback_service
+        # Set by bootstrap once the order services exist (OI-18); None keeps
+        # executed loading plans' sticky hold.
+        self._order_repository = None
         self.INDEX = "agent_approval_queue"
 
     # ------------------------------------------------------------------
@@ -981,6 +984,57 @@ class ApprovalQueueService:
         """Alias of :func:`loading_plan_order_ids` for existing callers."""
         return loading_plan_order_ids(parameters)
 
+    def set_order_repository(self, order_repository) -> None:
+        """Register the order repository :meth:`_still_holds` reads (OI-18)."""
+        self._order_repository = order_repository
+
+    async def _still_holds(self, tenant_id: Optional[str], holder: dict, shared: set) -> bool:
+        """Whether an ``executed`` holder still holds one of ``shared`` (OI-18).
+
+        An executed plan holds an order only while the order's current
+        ``assigned_run_id`` is still the holder's run. Hold → release clears
+        the links (``OrderService.release_hold``), so a released (or re-linked)
+        order is free for a later plan. The holder's run is the one the
+        executor wrote (``execution_result.run_id``), falling back to
+        ``parameters.run_id`` and then ``plan_id`` as the executor does.
+
+        ``incomplete`` and in-flight ``approved`` holders keep the sticky hold
+        (they may still be writing), as does any holder when no order
+        repository is wired, the run is unknown, or an order read fails.
+        """
+        if holder.get("status") != "executed":
+            return True
+        repo = self._order_repository
+        params = holder.get("parameters") or {}
+        run_id = (
+            (holder.get("execution_result") or {}).get("run_id")
+            or params.get("run_id")
+            or params.get("plan_id")
+        )
+        if repo is None or not tenant_id or not run_id:
+            return True
+        from fuel.order_repository import _link
+
+        for order_id in sorted(shared):
+            try:
+                order = await repo.get(tenant_id, order_id)
+            except Exception:
+                logger.warning(
+                    "loading overlap: order %s read failed; treating holder %s as holding",
+                    order_id, holder.get("action_id"),
+                )
+                return True
+            if order is None:
+                continue
+            current_run = (
+                order.get("assigned_run_id")
+                if isinstance(order, dict)
+                else getattr(order, "assigned_run_id", None)
+            )
+            if _link(current_run) == run_id:
+                return True
+        return False
+
     async def _supersede_overlapping_loading_plans(
         self, entry: dict, action_id: str
     ) -> None:
@@ -1081,7 +1135,9 @@ class ApprovalQueueService:
             query = {**query, "search_after": hits[-1]["sort"]}
 
         for other, shared in overlapping:
-            if _holds_orders(other):
+            if _holds_orders(other) and await self._still_holds(
+                tenant_id, other, shared
+            ):
                 raise LoadingPlanOverlapError(
                     f"Cannot approve action {action_id}: conflicts with "
                     f"approved loading plan {other['action_id']} for order(s) "

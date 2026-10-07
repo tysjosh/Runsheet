@@ -1090,6 +1090,8 @@ async def initialize(app, container: ServiceContainer) -> None:
         )
         container.loading_plan_executor = loading_plan_executor
         confirmation_protocol.set_loading_plan_executor(loading_plan_executor)
+        # A released order no longer holds an executed plan's overlap (OI-18).
+        approval_queue_service.set_order_repository(container.get("order_repository"))
         logger.info("LoadingPlanExecutor registered")
     else:
         logger.error(
