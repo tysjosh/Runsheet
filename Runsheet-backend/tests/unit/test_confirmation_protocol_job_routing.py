@@ -231,3 +231,39 @@ async def test_approved_cancel_job_that_job_service_refuses_records_failure():
     assert result["execution_result"]["success"] is False
     assert "Cannot transition from 'completed' to 'cancelled'" in result["execution_result"]["error"]
     assert jobs.calls[0][0] == "transition_status"
+
+
+class TestChatFormatting:
+    """The chat reply for a refused immediate mutation must not say "queued"."""
+
+    def test_immediate_not_executed_renders_as_not_executed(self):
+        from Agents.confirmation_protocol import MutationResult
+        from Agents.tools.mutation_tools import _format_mutation_result
+
+        text = _format_mutation_result(
+            MutationResult(
+                executed=False,
+                result="Job tools are disabled: JobService is not wired",
+                risk_level="medium",
+                confirmation_method="immediate",
+            )
+        )
+        assert text.startswith("❌ Action not executed (risk: medium)")
+        assert "JobService is not wired" in text
+        assert "queued" not in text
+        assert "Approval ID" not in text
+
+    def test_queued_result_still_renders_as_queued(self):
+        from Agents.confirmation_protocol import MutationResult
+        from Agents.tools.mutation_tools import _format_mutation_result
+
+        text = _format_mutation_result(
+            MutationResult(
+                executed=False,
+                approval_id="action-9",
+                risk_level="high",
+                confirmation_method="approval_queue",
+            )
+        )
+        assert text.startswith("⏳ Action queued for approval (risk: high)")
+        assert "Approval ID: action-9" in text
