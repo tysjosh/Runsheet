@@ -252,7 +252,13 @@ class ExecutionPlanner:
     # ------------------------------------------------------------------
 
     async def create_plan(
-        self, request: str, target_domains: list
+        self,
+        request: str,
+        target_domains: list,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> ExecutionPlan:
         """Create an execution plan from a request string and target domains.
 
@@ -262,6 +268,11 @@ class ExecutionPlanner:
         Args:
             request: The user's natural language request.
             target_domains: List of specialist domain names to involve.
+            tenant_id: Tenant the request belongs to. Stamped on the
+                ``plan_created`` activity entry so it is only pushed to that
+                tenant (L2). ``None`` persists the entry and pushes it nowhere.
+            user_id: Requesting user, stamped on the activity entry.
+            session_id: Chat session, stamped on the activity entry.
 
         Returns:
             An ExecutionPlan with steps for each target domain.
@@ -301,9 +312,9 @@ class ExecutionPlanner:
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": None,
-            "user_id": None,
-            "session_id": None,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
             "details": {
                 "event": "plan_created",
                 "plan_id": plan_id,
@@ -661,7 +672,7 @@ class ExecutionPlanner:
             "risk_level": None,
             "outcome": "rolled_back",
             "duration_ms": rollback_duration_ms,
-            "tenant_id": None,
+            "tenant_id": tenant_id,
             "user_id": None,
             "session_id": None,
             "details": {

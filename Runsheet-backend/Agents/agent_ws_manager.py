@@ -21,6 +21,54 @@ from websocket.base_ws_manager import BaseWSManager
 
 logger = logging.getLogger(__name__)
 
+#: Top-level activity-log fields pushed live. Everything else (``parameters``,
+#: which holds the orchestrator's ``{"message": <user prompt>}``, plus
+#: ``user_id`` and ``session_id``) stays in the persisted log only (L2).
+_ACTIVITY_BROADCAST_KEYS = frozenset(
+    {
+        "log_id",
+        "agent_id",
+        "action_type",
+        "tool_name",
+        "risk_level",
+        "outcome",
+        "duration_ms",
+        "tenant_id",
+        "timestamp",
+    }
+)
+
+#: ``details`` fields pushed live: counts, ids and codes, never free text such
+#: as the plan ``goal`` (the user's prompt), ``step_results`` or ``result``.
+_ACTIVITY_DETAIL_KEYS = frozenset(
+    {
+        "event",
+        "plan_id",
+        "step_count",
+        "target_domains",
+        "targets",
+        "is_complex",
+        "detection_count",
+        "action_count",
+        "confirmation_method",
+        "response_length",
+        "failed_targets",
+        "error_codes",
+        "dropped_targets",
+    }
+)
+
+
+def _activity_projection(data: Dict[str, Any]) -> Dict[str, Any]:
+    """The allowlisted subset of an activity entry that is safe to push live."""
+    projected = {k: v for k, v in data.items() if k in _ACTIVITY_BROADCAST_KEYS}
+    details = data.get("details")
+    if isinstance(details, dict):
+        projected["details"] = {
+            k: v for k, v in details.items() if k in _ACTIVITY_DETAIL_KEYS
+        }
+    return projected
+
 
 class AgentActivityWSManager(BaseWSManager):
     """
@@ -65,28 +113,35 @@ class AgentActivityWSManager(BaseWSManager):
 
     async def broadcast_activity(self, data: dict) -> int:
         """
-        Broadcast an activity log event to all connected clients.
+        Broadcast an activity log event to the entry's tenant only.
 
-        Wraps the data in a standard message envelope with type
-        ``agent_activity`` and a timestamp.
+        Wraps a redacted projection of the entry (:func:`_activity_projection`)
+        in a standard message envelope with type ``agent_activity`` and a
+        timestamp.
 
         Returns the number of clients that successfully received the message.
 
-        An entry that carries a ``tenant_id`` goes only to that tenant's
-        sockets (loading-plan-executor K9); system entries without one keep
-        the all-clients behaviour.
+        An entry without a ``tenant_id`` is dropped with a WARNING (fail
+        closed, L2). It used to go to every connected client in every tenant,
+        and the planner's ``plan_created`` entry carried no tenant and the
+        user's chat prompt verbatim. The persisted activity log keeps the full
+        entry; only the live push is narrowed.
 
         Validates: Requirement 8.7
         """
+        tenant_id = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if not tenant_id:
+            logger.warning(
+                "agent_activity %s without tenant_id dropped",
+                (data or {}).get("action_type") if isinstance(data, dict) else None,
+            )
+            return 0
         message = {
             "type": "agent_activity",
-            "data": data,
+            "data": _activity_projection(data),
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        tenant_id = (data or {}).get("tenant_id") if isinstance(data, dict) else None
-        if tenant_id:
-            return await self.broadcast_to_tenant(tenant_id, message)
-        return await self.broadcast(message)
+        return await self.broadcast_to_tenant(tenant_id, message)
 
     async def broadcast_approval_event(self, event_type: str, data: dict) -> int:
         """

@@ -354,7 +354,7 @@ class AgentOrchestrator:
         if is_complex:
             events = self._stream_complex_request(
                 user_message, targets, tenant_id, session_id, request_id, failures,
-                dropped,
+                dropped, user_id=user_id,
             )
         else:
             events = self._stream_simple_request(
@@ -745,6 +745,7 @@ class AgentOrchestrator:
         request_id: Optional[str],
         failures: Dict[str, Optional[AgentServiceError]],
         dropped: Optional[List[str]] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Run a complex request through the ExecutionPlanner.
 
@@ -763,7 +764,15 @@ class AgentOrchestrator:
         token = _plan_run.set(run)
         try:
             try:
-                plan = await self._planner.create_plan(user_message, targets)
+                # Tenant-scoped so the plan_created activity entry (which
+                # carries the prompt as its goal) reaches only this tenant (L2).
+                plan = await self._planner.create_plan(
+                    user_message,
+                    targets,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
                 executed_plan = await self._planner.execute_plan(plan, tenant_id)
             except Exception:
                 logger.exception(

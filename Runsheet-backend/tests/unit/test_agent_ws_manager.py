@@ -147,15 +147,15 @@ class TestBroadcastActivity:
     """Tests for the broadcast_activity method."""
 
     @pytest.mark.asyncio
-    async def test_broadcast_activity_sends_to_all_clients(self):
+    async def test_broadcast_activity_sends_to_all_clients_of_the_tenant(self):
         manager = AgentActivityWSManager()
         ws1 = _make_websocket()
         ws2 = _make_websocket()
 
-        await manager.connect(ws1)
-        await manager.connect(ws2)
+        await manager.connect(ws1, tenant_id="t1")
+        await manager.connect(ws2, tenant_id="t1")
 
-        data = {"agent_id": "test_agent", "action_type": "query"}
+        data = {"agent_id": "test_agent", "action_type": "query", "tenant_id": "t1"}
         count = await manager.broadcast_activity(data)
 
         assert count == 2
@@ -168,9 +168,9 @@ class TestBroadcastActivity:
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
 
-        data = {"agent_id": "test_agent", "action_type": "mutation"}
+        data = {"agent_id": "test_agent", "action_type": "mutation", "tenant_id": "t1"}
         await manager.broadcast_activity(data)
 
         # Second call is the broadcast (first is connection confirmation)
@@ -193,16 +193,16 @@ class TestBroadcastActivity:
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="t1")
         # Manually add the dead client with metadata dict (since connect sends a message which would fail)
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "t1",
             "pending_count": 0,
         }
 
-        data = {"agent_id": "test_agent"}
+        data = {"agent_id": "test_agent", "tenant_id": "t1"}
         count = await manager.broadcast_activity(data)
 
         assert count == 1  # Only the alive client received it
@@ -310,14 +310,15 @@ class TestTenantScopedBroadcasts:
         assert any("without tenant_id dropped" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_activity_with_tenant_is_scoped_and_without_reaches_all(self):
+    async def test_activity_with_tenant_is_scoped_and_without_reaches_nobody(self):
+        """L2: a tenantless entry is dropped, never sent to every tenant."""
         manager, ws1, ws2 = await self._two_tenants()
         assert await manager.broadcast_activity({"action_type": "x", "tenant_id": "t2"}) == 1
         assert self._received(ws1) == []
         assert len(self._received(ws2)) == 1
-        assert await manager.broadcast_activity({"action_type": "system"}) == 2
-        assert len(self._received(ws1)) == 1
-        assert len(self._received(ws2)) == 2
+        assert await manager.broadcast_activity({"action_type": "system"}) == 0
+        assert self._received(ws1) == []
+        assert len(self._received(ws2)) == 1
 
     @pytest.mark.asyncio
     async def test_tenant_broadcast_keeps_backpressure_and_dead_cleanup(self):

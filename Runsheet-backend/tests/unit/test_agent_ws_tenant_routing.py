@@ -106,3 +106,85 @@ async def test_helper_extra_cannot_override_tenant():
 
     assert len(_received(ws_a)) == 1
     assert _received(ws_b) == []
+
+
+# ---------------------------------------------------------------------------
+# L2: broadcast_activity is tenant-only and redacted
+# ---------------------------------------------------------------------------
+
+
+async def test_activity_without_tenant_reaches_nobody(caplog):
+    manager = AgentActivityWSManager()
+    ws_a, ws_b = await _two_tenants(manager)
+    with caplog.at_level(logging.WARNING):
+        count = await manager.broadcast_activity(
+            {"action_type": "plan", "details": {"goal": "secret prompt"}}
+        )
+    assert count == 0
+    assert _received(ws_a) == [] and _received(ws_b) == []
+    assert "without tenant_id dropped" in caplog.text
+
+
+async def test_activity_reaches_only_its_tenant_with_a_redacted_payload():
+    manager = AgentActivityWSManager()
+    ws_a, ws_b = await _two_tenants(manager)
+    entry = {
+        "log_id": "L1",
+        "agent_id": "orchestrator",
+        "action_type": "monitoring_cycle",
+        "tool_name": "search_orders",
+        "parameters": {"message": "what did customer X order?"},
+        "tenant_id": "tenant-A",
+        "user_id": "user-1",
+        "session_id": "sess-1",
+        "details": {
+            "goal": "what did customer X order?",
+            "step_results": [{"output": "..."}],
+            "result": "raw",
+            "detection_count": 3,
+            "action_count": 1,
+            "plan_id": "p1",
+        },
+    }
+    assert await manager.broadcast_activity(entry) == 1
+    assert _received(ws_b) == []
+    (msg,) = _received(ws_a)
+    data = msg["data"]
+    assert msg["type"] == "agent_activity"
+    for dropped in ("parameters", "user_id", "session_id"):
+        assert dropped not in data
+    for dropped in ("goal", "step_results", "result"):
+        assert dropped not in data["details"]
+    assert data["action_type"] == "monitoring_cycle"
+    assert data["tool_name"] == "search_orders"
+    assert data["details"] == {"detection_count": 3, "action_count": 1, "plan_id": "p1"}
+    assert "customer X" not in repr(msg)
+    # The caller's entry (persisted copy) is untouched.
+    assert entry["details"]["goal"] == "what did customer X order?"
+
+
+async def test_plan_created_from_tenant_a_never_reaches_tenant_b():
+    """End to end: planner -> real ActivityLogService -> real WS manager."""
+    from Agents.activity_log_service import ActivityLogService
+    from Agents.execution_planner import ExecutionPlanner
+
+    manager = AgentActivityWSManager()
+    ws_a, ws_b = await _two_tenants(manager)
+    es = MagicMock()
+    es.index_document = AsyncMock(return_value={"result": "created"})
+    planner = ExecutionPlanner(ActivityLogService(es, ws_manager=manager))
+
+    await planner.create_plan(
+        "tenant A's private question", ["fuel"], tenant_id="tenant-A", user_id="u1"
+    )
+
+    assert _received(ws_b) == []
+    (msg,) = _received(ws_a)
+    assert "private question" not in repr(msg)
+    persisted = es.index_document.await_args.args[2]
+    assert persisted["tenant_id"] == "tenant-A"
+    assert persisted["details"]["goal"] == "tenant A's private question"
+
+    # A plan with no tenant is persisted but pushed to nobody.
+    await planner.create_plan("tenantless", ["fuel"])
+    assert len(_received(ws_a)) == 1 and _received(ws_b) == []

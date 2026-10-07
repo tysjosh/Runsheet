@@ -342,6 +342,25 @@ class TestCreatePlan:
         call_args = planner._activity_log.log.call_args[0][0]
         assert call_args["details"]["event"] == "plan_created"
 
+    async def test_plan_created_entry_carries_tenant_scope(self):
+        """L2: the entry is tenant-stamped so the live push is tenant-only."""
+        planner = _make_planner()
+        await planner.create_plan(
+            "Test", ["fleet"], tenant_id="t-a", user_id="u1", session_id="s1"
+        )
+        entry = planner._activity_log.log.call_args[0][0]
+        assert entry["tenant_id"] == "t-a"
+        assert entry["user_id"] == "u1"
+        assert entry["session_id"] == "s1"
+
+    async def test_rollback_entry_carries_tenant(self):
+        planner = _make_planner()
+        plan = ExecutionPlan(plan_id="p1", goal="Test", steps=[])
+        await planner.rollback_plan(plan, tenant_id="t-a")
+        entry = planner._activity_log.log.call_args[0][0]
+        assert entry["details"]["event"] == "plan_rolled_back"
+        assert entry["tenant_id"] == "t-a"
+
     async def test_empty_domains_creates_empty_plan(self):
         planner = _make_planner()
         plan = await planner.create_plan("Test", [])

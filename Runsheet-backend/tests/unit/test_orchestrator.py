@@ -456,6 +456,17 @@ class TestRouteComplex:
         assert "fleet" in targets
         assert "fuel" in targets
 
+    async def test_complex_request_passes_tenant_to_planner(self):
+        """L2: plan_created must be tenant-stamped so it isn't broadcast to all."""
+        planner = _make_planner()
+        orch = _make_orchestrator(planner=planner)
+
+        await orch.route(
+            "Check truck status and show fuel levels", "tenant-1"
+        )
+
+        assert planner.create_plan.call_args.kwargs["tenant_id"] == "tenant-1"
+
     async def test_complex_request_falls_back_on_planner_error(self):
         planner = _make_planner()
         planner.create_plan = AsyncMock(side_effect=RuntimeError("Planner failed"))
