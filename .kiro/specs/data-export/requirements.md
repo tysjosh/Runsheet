@@ -236,3 +236,16 @@ All scope, format, role and PII choices below were decided by the owner. They ar
 - Adding a role check to the existing reconciliation list endpoint (see A5).
 - The CSV import side (`import_endpoints.py`, `services/import_service.py`, `fuel/intake/csv_adapter.py`), owned by the data-integrations investigation.
 - Staging deploy. Deploys follow `.kiro/steering/autonomy.md` (pinned worktree, CI green on the exact commit, UI ancestor check, CodeBuild ownership by the other agent).
+
+## Owner decision 2026-10-07 (OI-20 / OI-57)
+
+The owner accepted the open-issues register defaults ("accept all defaults except 7"). D3 no longer defers these two exports; both use the shared helper (FR1) with the same safeguards (tenant filter plus per-row re-check, 50,000 cap with 413, `EXPORT_RATE_LIMIT`, one `data_export` audit line, formula escaping):
+
+| Export | Route | Roles | Columns | PII |
+|---|---|---|---|---|
+| Driver hours (`driver_hours`) | `GET /api/compliance/hos-records/daily-summary/export?start_date&end_date[&driver_id]` (range required, ≤ 31 days) | admin | `date, driver_id, active_minutes, on_break_minutes, off_duty_minutes, inactive_minutes, event_count, first_event_at, last_event_at, basis` | driver id only. `basis = runsheet_app_duty_status_advisory_not_eld`: Runsheet is not an ELD, so this is advisory. The cap counts duty-status events. |
+| Driver qualification expiry (`driver_qualifications`) | `GET /api/compliance/drivers/export[?status]` | admin | `driver_id, full_name, driver_status, cdl/medical/hazmat/tanker expiry dates, nearest_expiry_date, nearest_expiry_type, days_until_nearest_expiry, overall_status` | `full_name` included (operational, like customer names under D6). CDL/licence number, phone and email excluded (FR4). |
+
+Driver hours is backend only: there is no admin HOS page. Driver qualifications has an Export CSV button on the Driver Qualifications list (admin only), passing the status filter.
+
+Still deferred: E6 Failure Analytics CSV (its source, `shipments_current`, has no writer since the Dinee webhook was deleted and is behind `legacy_ng_delivery_enabled`, default off) and X1–X3.

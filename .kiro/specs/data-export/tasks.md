@@ -176,3 +176,9 @@ Shared test file: `Runsheet-backend/tests/unit/test_data_export_endpoints.py` (n
 - G4 path. The step prompt names `.worktrees/data-export/.kiro/specs/frontend-feature-parity/tasks.md:142`, but that file doesn't exist in the worktree. Requirements A6 and design §6 both name the main-checkout copy, and that copy has `- [x] 10.3 Add CSV export functionality` at line 142. Task 16 edits the main-checkout copy.
 - Rebase. Before the PR (release step, not this plan), rebase onto the current `production-readiness/go-live-blockers` (now `8b50e68`). `fleet-fuel-fixes` may conflict in `fuel/api/fuel_ops_endpoints.py`.
 - No staging deploy happens in this plan. The workflow's later `deploy-verify` step owns that, under the steering deploy rules (pinned worktree, CI green on the exact commit, UI ancestor check, CodeBuild owned by the other agent).
+
+## G. Owner decision 2026-10-07 (OI-20 / OI-57)
+
+- [x] 18. Driver hours export: `GET /api/compliance/hos-records/daily-summary/export` (admin, range required ≤ 31 days, advisory `basis`), pure aggregation in `compliance/services/driver_hours_summary.py`. Backend only (no HOS page). Tests: `tests/unit/test_driver_hours_summary.py`, `tests/unit/test_driver_hours_export.py`.
+- [x] 19. Driver qualification expiry export: `GET /api/compliance/drivers/export` (admin, `status` filter, no CDL number/phone/email), `overall_status` from `DriverQualificationService.summarize_qualifications`; Export CSV button on `DriverQualificationsView`. Tests: `tests/unit/test_driver_qualification_export.py`, `DriverQualificationsView.test.tsx`, `exportApi.test.ts`.
+- [ ] 20. E6 Failure Analytics CSV: deferred. `GET /ops/shipments/failures` reads the retired `shipment` aggregate (no Postgres table since rev 0007, no writer since the Dinee webhook was removed, behind `legacy_ng_delivery_enabled` = false). Revisit only if failure analytics moves to fuel orders.
