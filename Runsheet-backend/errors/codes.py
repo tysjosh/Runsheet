@@ -172,6 +172,15 @@ class ErrorCode(str, Enum):
     and the previous behaviour did exactly that while returning 200.
     """
 
+    DYED_DIESEL_CHECK_UNAVAILABLE = "DYED_DIESEL_CHECK_UNAVAILABLE"
+    """The dyed-diesel compliance check could not run, so the loading plan was blocked (HTTP 503).
+
+    Fail closed (OI-02): a plan carrying dyed diesel is never produced as
+    compliant when the DyedDieselEnforcer is not wired or raised. 503 because
+    the dispatcher did nothing wrong and the plan is worth retrying once the
+    compliance service is back.
+    """
+
     COMMERCE_PAYMENT_DUPLICATE = "COMMERCE_PAYMENT_DUPLICATE"
     """Duplicate payment detected via IdempotencyService (HTTP 409)"""
 
@@ -463,6 +472,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.COMMERCE_INVOICE_INVALID_STATE: 409,
     ErrorCode.COMMERCE_INVOICE_ALREADY_VOIDED: 409,
     ErrorCode.COMMERCE_INVOICE_NUMBERING_UNAVAILABLE: 503,
+    ErrorCode.DYED_DIESEL_CHECK_UNAVAILABLE: 503,
     ErrorCode.COMMERCE_PAYMENT_DUPLICATE: 409,
     ErrorCode.COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE: 422,
     # Order Intake Pipeline error codes

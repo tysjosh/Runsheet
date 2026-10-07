@@ -576,3 +576,214 @@ class TestResilientWrites:
         signals = _contamination_signals(deps["signal_bus"])
         assert len(signals) == 1
         assert signals[0].context["reason"] == REASON_CROSS_CONTAMINATION_BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Tests — OI-39: stripped assignments are re-placed in the same run
+# ---------------------------------------------------------------------------
+
+
+def _fail_order_signals(signal_bus, reason: str) -> List[RiskSignal]:
+    out: List[RiskSignal] = []
+    for call in signal_bus.publish.call_args_list:
+        signal = call.args[0] if call.args else call.kwargs.get("signal")
+        if (
+            isinstance(signal, RiskSignal)
+            and signal.entity_type == "fuel_order"
+            and signal.context.get("reason") == reason
+        ):
+            out.append(signal)
+    return out
+
+
+class TestReplacement:
+    @pytest.mark.asyncio
+    async def test_stripped_order_replaced_on_second_truck(self):
+        """truck-1/c1 last held HEATING_OIL (PMS blocked); truck-2/c1 is clean."""
+
+        agent, deps = _make_agent()
+        _install_compartments(
+            deps,
+            _compartment_hit(
+                compartment_id="c1",
+                truck_id="truck-1",
+                capacity_liters=12000.0,
+                last_loaded_product="HEATING_OIL",
+                last_loaded_at=NOW - timedelta(days=2),
+                state="loaded",
+            ),
+            _compartment_hit(
+                compartment_id="c1",
+                truck_id="truck-2",
+                capacity_liters=8000.0,
+                last_loaded_product=None,
+                state="clean",
+            ),
+        )
+        agent._priority_buffer.append(_priority_list(fuel_grade=FuelGrade.PMS))
+
+        proposals = await agent.evaluate([])
+
+        assert len(proposals) == 1
+        plans = [c.args[2] for c in _load_plan_index_calls(deps["es_service"])]
+        assert len(plans) == 1
+        plan = plans[0]
+        assert plan["truck_id"] == "truck-2"
+        assert {a["fuel_grade"] for a in plan["assignments"]} == {"GASOLINE_REG"}
+        assert sum(a["quantity_liters"] for a in plan["assignments"]) > 0
+        assert plan["run_id"] == "run-1"
+        params = proposals[0].actions[0]["parameters"]
+        assert params["truck_id"] == "truck-2"
+
+        # The attempted pairing on truck-1 is still on the audit trail, once.
+        violations = _violation_index_calls(deps["es_service"])
+        assert len(violations) == 1
+        assert violations[0].args[2]["compartment_id"] == "truck-1_c1"
+        assert len(_contamination_signals(deps["signal_bus"])) == 1
+
+        assert agent.last_unplaced_orders == []
+
+    @pytest.mark.asyncio
+    async def test_unplaceable_order_reported_with_reason(self):
+        """Every compatible-grade compartment is blocked: reported, not dropped."""
+
+        agent, deps = _make_agent()
+        _install_compartments(
+            deps,
+            _compartment_hit(
+                compartment_id="c1",
+                truck_id="truck-1",
+                last_loaded_product="HEATING_OIL",
+                last_loaded_at=NOW - timedelta(days=2),
+                state="loaded",
+            ),
+            _compartment_hit(
+                compartment_id="c1",
+                truck_id="truck-2",
+                capacity_liters=8000.0,
+                last_loaded_product="HEATING_OIL",
+                last_loaded_at=NOW - timedelta(days=2),
+                state="loaded",
+            ),
+        )
+        agent._priority_buffer.append(_priority_list(fuel_grade=FuelGrade.PMS))
+
+        proposals = await agent.evaluate([])
+
+        assert proposals == []
+        assert _load_plan_index_calls(deps["es_service"]) == []
+        assert len(agent.last_unplaced_orders) == 1
+        entry = agent.last_unplaced_orders[0]
+        assert entry["reason"] == "no_compatible_compartment"
+        assert entry["station_id"] == "s1"
+        assert entry["product_code"] is None  # legacy station demand
+        assert entry["liters"] > 0
+        assert entry["partial"] is False
+        # Legacy station demand has no order to fail, so no per-order signal.
+        assert _fail_order_signals(deps["signal_bus"], "no_compatible_compartment") == []
+
+    @pytest.mark.asyncio
+    async def test_unplaceable_order_backed_request_publishes_fail_signal(self):
+        """Order-backed variant: the RiskSignal names the order and the reason."""
+
+        signal_bus_deps = _make_deps()
+        orders = [{
+            "order_id": "ord_G",
+            "customer_id": "cust-G",
+            "customer_tank_id": None,
+            "product_code": "GASOLINE_REG",
+            "gallons_requested": 300.0,
+            "fill_to_full": False,
+            "status": "placed",
+            "tenant_id": "tenant-1",
+        }]
+        hit = _compartment_hit(
+            compartment_id="c1",
+            truck_id="truck-1",
+            last_loaded_product="HEATING_OIL",
+            last_loaded_at=NOW - timedelta(days=2),
+            state="loaded",
+        )
+
+        async def _search(index, query=None, size=None):
+            if index == "fuel_orders_current":
+                return {"hits": {"hits": [{"_source": o} for o in orders]}}
+            if index == "truck_compartments":
+                return {"hits": {"hits": [hit]}}
+            return {"hits": {"hits": []}}
+
+        signal_bus_deps["es_service"].search_documents = AsyncMock(side_effect=_search)
+        agent, deps = _make_agent(**signal_bus_deps)
+        agent._priority_buffer.append(DeliveryPriorityList(
+            priorities=[DeliveryPriority(
+                station_id="ord_G",
+                fuel_grade=FuelGrade.PMS,
+                priority_score=0.9,
+                priority_bucket=PriorityBucket.CRITICAL,
+            )],
+            tenant_id="tenant-1",
+            run_id="run-1",
+        ))
+
+        proposals = await agent.evaluate([])
+
+        assert proposals == []
+        assert [e["order_id"] for e in agent.last_unplaced_orders] == ["ord_G"]
+        assert agent.last_unplaced_orders[0]["reason"] == "no_compatible_compartment"
+        assert agent.last_unplaced_orders[0]["product_code"] == "GASOLINE_REG"
+        [signal] = _fail_order_signals(deps["signal_bus"], "no_compatible_compartment")
+        assert signal.entity_id == "ord_G"
+        assert signal.context["order_id"] == "ord_G"
+        assert signal.context["run_id"] == "run-1"
+
+    @pytest.mark.asyncio
+    async def test_no_change_when_nothing_stripped(self, monkeypatch):
+        """A clean fleet: plans are exactly the allocator's, no re-placement pass."""
+
+        import Agents.overlay.compartment_loading_agent as cla
+
+        captured = {}
+        real_allocate = cla.allocate_across_trucks
+
+        def _spy_allocate(*args, **kwargs):
+            captured["allocation"] = real_allocate(*args, **kwargs)
+            return captured["allocation"]
+
+        def _no_replace(*args, **kwargs):  # pragma: no cover - must not run
+            raise AssertionError("replace_stripped must not run when nothing is stripped")
+
+        monkeypatch.setattr(cla, "allocate_across_trucks", _spy_allocate)
+        monkeypatch.setattr(cla, "replace_stripped", _no_replace)
+
+        agent, deps = _make_agent()
+        _install_compartments(
+            deps,
+            _compartment_hit(compartment_id="c1", truck_id="truck-1", state="clean"),
+            _compartment_hit(
+                compartment_id="c1", truck_id="truck-2",
+                capacity_liters=8000.0, state="clean",
+            ),
+        )
+        agent._priority_buffer.append(_priority_list(fuel_grade=FuelGrade.PMS))
+
+        proposals = await agent.evaluate([])
+
+        allocation = captured["allocation"]
+        plans = [c.args[2] for c in _load_plan_index_calls(deps["es_service"])]
+        assert len(proposals) == len(allocation.plans) == len(plans) == 1
+        expected = allocation.plans[plans[0]["truck_id"]]
+        assert plans[0]["assignments"] == [
+            a.model_dump(mode="json") for a in expected.assignments
+        ]
+        assert plans[0]["unserved_demand_liters"] == expected.unserved_demand_liters
+        assert agent.last_unplaced_orders == [
+            {
+                "order_id": u.order_id,
+                "station_id": u.station_id,
+                "product_code": u.product_code,
+                "liters": u.planned_liters,
+                "reason": "no_truck_capacity",
+                "partial": False,
+            }
+            for u in allocation.unassigned
+        ]

@@ -942,7 +942,8 @@ async def initialize(app, container: ServiceContainer) -> None:
     else:
         logger.warning(
             "DyedDieselEnforcer not in container; CompartmentLoadingAgent "
-            "runs without the dyed-diesel compartment check (task 9.8)"
+            "will block every loading plan that carries dyed diesel "
+            "(fail closed, task 9.8 / OI-02)"
         )
     route_planning_agent = RoutePlanningAgent(**overlay_common_args)
     exception_replanning_agent = ExceptionReplanningAgent(**overlay_common_args)

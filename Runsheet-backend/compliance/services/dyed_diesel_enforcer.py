@@ -28,6 +28,8 @@ from compliance.services.compliance_es_mappings import (
     DYED_DIESEL_AUDIT_LOG_INDEX,
     TAX_EXEMPTIONS_INDEX,
 )
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -75,6 +77,47 @@ class ValidationResult(BaseModel):
     valid: bool
     error_code: Optional[str] = None
     message: Optional[str] = None
+
+
+class DyedDieselCheckUnavailable(AppException):
+    """The dyed-diesel check could not run, so the loading plan is blocked.
+
+    OI-02 (fail closed): raised when a plan carries dyed diesel and the
+    enforcer is not wired (``reason="enforcer_not_wired"``) or raised
+    (``reason="enforcer_error"``). ``details`` carries ids and the cause's
+    class name only, never payloads.
+    """
+
+    MESSAGE = "Dyed-diesel compliance check unavailable; the loading plan was blocked"
+
+    def __init__(
+        self,
+        *,
+        reason: str,
+        tenant_id: str,
+        plan_id: str,
+        truck_id: str,
+        compartment_id: Optional[str] = None,
+        cause: Optional[str] = None,
+    ) -> None:
+        self.reason = reason
+        self.tenant_id = tenant_id
+        self.plan_id = plan_id
+        self.truck_id = truck_id
+        self.compartment_id = compartment_id
+        self.cause = cause
+        super().__init__(
+            error_code=ErrorCode.DYED_DIESEL_CHECK_UNAVAILABLE,
+            message=self.MESSAGE,
+            details={
+                "reason": reason,
+                "tenant_id": tenant_id,
+                "plan_id": plan_id,
+                "truck_id": truck_id,
+                "compartment_id": compartment_id,
+                "cause": cause,
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

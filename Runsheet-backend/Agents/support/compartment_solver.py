@@ -6,12 +6,12 @@ Pure functions. No side effects.
 Validates: Requirements 3.2, 3.3, 3.4, 3.5, 3.6, 3.7
 """
 import math
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from Agents.support.compartment_models import (
     Compartment, CompartmentAssignment, ConstraintViolation,
     DeliveryRequest, FeasibilityResult, FleetAllocation, FuelGrade,
-    LoadingPlan, TruckSpec, UnservedOrder,
+    LoadingPlan, ReplacementResult, TruckSpec, UnservedOrder,
 )
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -76,6 +76,10 @@ DEFAULT_UNCERTAINTY_BUFFER_PCT = 10.0
 #: Shortfalls below this are floor-rounding residue (assignments are rounded
 #: down to 0.01 L), not unserved demand.
 ROUNDING_TOLERANCE_LITERS = 0.01
+
+#: ``(truck_id, compartment, segregation key) -> bool``: extra per-compartment
+#: gate for :func:`replace_stripped` (the caller's compatibility check).
+CompartmentPredicate = Callable[[str, "Compartment", str], bool]
 
 
 def floor_liters(value: float) -> float:
@@ -461,8 +465,14 @@ def request_key(req: DeliveryRequest) -> str:
 class _TruckState:
     """Mutable per-truck bookkeeping for :func:`allocate_across_trucks`."""
 
-    def __init__(self, truck: TruckSpec):
+    def __init__(
+        self,
+        truck: TruckSpec,
+        is_allowed: Optional[CompartmentPredicate] = None,
+    ):
         self.truck = truck
+        #: Optional extra gate; ``None`` keeps the allocator's behaviour.
+        self.is_allowed = is_allowed
         # compartment_id -> [segregation key or None, remaining litres]
         self.slots: Dict[str, list] = {
             c.compartment_id: [None, c.capacity_liters]
@@ -483,8 +493,30 @@ class _TruckState:
                 continue
             if not compartment_accepts(comp, key):
                 continue
+            if self.is_allowed is not None and not self.is_allowed(
+                self.truck.truck_id, comp, key
+            ):
+                continue
             out.append(comp)
         return out
+
+    def seed(self, assignments: List[CompartmentAssignment]) -> None:
+        """Mark capacity and weight already used by kept ``assignments``.
+
+        Seeded assignments are not added to :attr:`assignments`; only what
+        :meth:`place` adds afterwards is new.
+        """
+        for a in assignments:
+            slot = self.slots.get(a.compartment_id)
+            if slot is None:
+                continue
+            slot[0] = segregation_key(
+                product_code=a.product_code, fuel_grade=a.fuel_grade
+            )
+            slot[1] -= a.quantity_liters
+            self.loaded_weight_kg += a.quantity_liters * fuel_density_kg_per_liter(
+                product_code=a.product_code, fuel_grade=a.fuel_grade,
+            )
 
     def weight_headroom_liters(self, density: float) -> float:
         if self.truck.max_weight_kg is None:
@@ -566,6 +598,30 @@ class _TruckState:
         )
 
 
+def _allocation_order(trucks: List[TruckSpec]) -> List[TruckSpec]:
+    """Trucks with compartments, largest total capacity first, then ``truck_id``."""
+    return sorted(
+        (t for t in trucks if t.compartments),
+        key=lambda t: (-sum(c.capacity_liters for c in t.compartments), t.truck_id),
+    )
+
+
+def _choose_state(
+    states: List[_TruckState], key: str, density: float, planned: float
+) -> Optional[_TruckState]:
+    """The first truck that fits ``planned`` whole, else the one with most room."""
+    fits = [(state, state.fit(key, density)) for state in states]
+    chosen = next(
+        (s for s, f in fits if f >= planned - ROUNDING_TOLERANCE_LITERS),
+        None,
+    )
+    if chosen is None:
+        best_fit = max((f for _, f in fits), default=0.0)
+        if best_fit >= ROUNDING_TOLERANCE_LITERS:
+            chosen = next(s for s, f in fits if f == best_fit)
+    return chosen
+
+
 def allocate_across_trucks(
     trucks: List[TruckSpec],
     requests: List[DeliveryRequest],
@@ -590,11 +646,7 @@ def allocate_across_trucks(
     an empty ``run_id`` (the caller stamps it).
     """
     buffer_mult = 1.0 + (uncertainty_buffer_pct / 100.0)
-    ordered = sorted(
-        (t for t in trucks if t.compartments),
-        key=lambda t: (-sum(c.capacity_liters for c in t.compartments), t.truck_id),
-    )
-    states = [_TruckState(t) for t in ordered]
+    states = [_TruckState(t) for t in _allocation_order(trucks)]
     allocation = FleetAllocation()
 
     for req in requests:
@@ -607,16 +659,7 @@ def allocate_across_trucks(
         planned = planned_liters(req, buffer_mult, buffer_orders=False)
         order_key = request_key(req)
 
-        fits = [(state, state.fit(key, density)) for state in states]
-        chosen = next(
-            (s for s, f in fits if f >= planned - ROUNDING_TOLERANCE_LITERS),
-            None,
-        )
-        if chosen is None:
-            best_fit = max((f for _, f in fits), default=0.0)
-            if best_fit >= ROUNDING_TOLERANCE_LITERS:
-                chosen = next(s for s, f in fits if f == best_fit)
-
+        chosen = _choose_state(states, key, density, planned)
         placed = (
             chosen.place(req, key, density, planned) if chosen is not None else 0.0
         )
@@ -642,3 +685,65 @@ def allocate_across_trucks(
             tenant_id = state.truck.compartments[0].tenant_id
             allocation.plans[state.truck.truck_id] = state.to_plan(tenant_id)
     return allocation
+
+
+def replace_stripped(
+    trucks: List[TruckSpec],
+    kept: Dict[str, List[CompartmentAssignment]],
+    stripped: List[Tuple[DeliveryRequest, float]],
+    is_allowed: CompartmentPredicate,
+) -> ReplacementResult:
+    """Re-place stripped litres on the fleet's residual capacity (OI-39).
+
+    One pass, no iteration. ``kept`` holds each truck's assignments that
+    survived enforcement; they are seeded as used capacity and weight.
+    ``stripped`` is ``(request, litres)`` in priority order. Each is offered
+    to the trucks in allocator order with the allocator's rule (fits whole,
+    else most room), considering only compartments ``is_allowed`` accepts.
+
+    * Nothing placed: an :class:`UnservedOrder` with
+      ``reason="no_compatible_compartment"`` in ``unplaced``.
+    * Partly placed: the shortfall in ``partial[order_key]``.
+    * New assignments in ``placed[truck_id]`` (seeded ones are not repeated).
+
+    Pure function.
+    """
+    result = ReplacementResult()
+    if not stripped:
+        return result
+    states = [_TruckState(t, is_allowed) for t in _allocation_order(trucks)]
+    for state in states:
+        state.seed(kept.get(state.truck.truck_id, []))
+
+    for req, liters in stripped:
+        key = segregation_key(
+            product_code=req.product_code, fuel_grade=req.fuel_grade.value
+        )
+        density = fuel_density_kg_per_liter(
+            product_code=req.product_code, fuel_grade=req.fuel_grade.value,
+        )
+        order_key = request_key(req)
+        chosen = _choose_state(states, key, density, liters)
+        placed = (
+            chosen.place(req, key, density, liters) if chosen is not None else 0.0
+        )
+        if placed <= 0:
+            result.unplaced.append(UnservedOrder(
+                order_key=order_key,
+                station_id=req.station_id,
+                order_id=req.order_id,
+                product_code=req.product_code,
+                planned_liters=round(liters, 2),
+                reason="no_compatible_compartment",
+            ))
+            continue
+        shortfall = liters - placed
+        if shortfall >= ROUNDING_TOLERANCE_LITERS:
+            result.partial[order_key] = round(
+                result.partial.get(order_key, 0.0) + shortfall, 2
+            )
+
+    for state in states:
+        if state.assignments:
+            result.placed[state.truck.truck_id] = list(state.assignments)
+    return result

@@ -166,6 +166,18 @@ class FleetAllocation(BaseModel):
     partial: Dict[str, float] = Field(default_factory=dict)
 
 
+class ReplacementResult(BaseModel):
+    """Result of re-placing stripped litres on residual capacity (OI-39).
+
+    ``placed`` maps a truck id to the *new* assignments for it. ``unplaced``
+    lists requests none of whose stripped litres fit anywhere; ``partial``
+    maps an order key to the stripped litres that did not fit.
+    """
+    placed: Dict[str, List[CompartmentAssignment]] = Field(default_factory=dict)
+    unplaced: List[UnservedOrder] = Field(default_factory=list)
+    partial: Dict[str, float] = Field(default_factory=dict)
+
+
 class ConstraintViolation(BaseModel):
     violation_type: str
     fuel_grade: Optional[str] = None
