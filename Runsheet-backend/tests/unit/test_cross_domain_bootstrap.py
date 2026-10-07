@@ -259,3 +259,32 @@ class TestShutdownOrder:
         assert "delay_response_agent" in lists["l0_agents"]
         assert "fuel_management_agent" in lists["l0_agents"]
         assert "sla_guardian_agent" in lists["l0_agents"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: margin-feed RevenueGuard wiring (FR5, design "Modified files")
+# ---------------------------------------------------------------------------
+
+
+class TestRevenueGuardMarginWiring:
+    """RevenueGuard gets the margin repository; the margin service gets the bus."""
+
+    def test_revenue_guard_gets_margin_repository_when_present(self):
+        source = _get_function_source("initialize")
+        construct = source.index("revenue_guard = RevenueGuard(")
+        guard = source.index('if container.has("margin_repository"):')
+        wire = source.index("revenue_guard.set_margin_repository(container.margin_repository)")
+        assert construct < guard < wire
+
+    def test_margin_service_gets_signal_bus_after_bus_creation(self):
+        source = _get_function_source("initialize")
+        bus = source.index("signal_bus = SignalBus(")
+        guard = source.index('if container.has("margin_service"):')
+        wire = source.index("container.margin_service.set_signal_bus(signal_bus)")
+        assert bus < guard < wire
+
+    def test_revenue_guard_registered_after_wiring(self):
+        source = _get_function_source("initialize")
+        wire = source.index("revenue_guard.set_margin_repository(")
+        register = source.index("scheduler.register(revenue_guard,")
+        assert wire < register

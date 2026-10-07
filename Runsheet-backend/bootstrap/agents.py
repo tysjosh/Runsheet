@@ -866,6 +866,13 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     exception_commander = ExceptionCommander(**overlay_common_args)
     revenue_guard = RevenueGuard(**overlay_common_args)
+    # Margin feed (FR5): RevenueGuard drains the margin DB queue, and the
+    # margin service publishes its ids-only hints on this bus. Both are set
+    # by bootstrap/core.wire_margin_feed when the commerce backbone is on.
+    if container.has("margin_repository"):
+        revenue_guard.set_margin_repository(container.margin_repository)
+    if container.has("margin_service"):
+        container.margin_service.set_signal_bus(signal_bus)
     customer_promise = CustomerPromise(**overlay_common_args)
     learning_policy_agent = LearningPolicyAgent(
         **overlay_common_args,

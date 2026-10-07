@@ -79,6 +79,8 @@ from commerce.services.margin_cost_basis import (
     parse_doc_datetime,
 )
 from commerce.services.margin_repository import (
+    MarginAlertNotFoundError,
+    MarginAlertStateError,
     MarginCandidate,
     MarginRecomputeRunningError,
     MarginRepository,
@@ -1408,6 +1410,58 @@ class MarginService:
         self._runs.add(task)
         task.add_done_callback(self._runs.discard)
         return {"run_id": run_id}
+
+    # -- alert resolution ---------------------------------------------------
+
+    async def transition_alert(
+        self,
+        tenant_id: str,
+        actor: str,
+        alert_id: str,
+        action: str,
+        *,
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Acknowledge / approve / dismiss an alert and audit it (``margin_alert_resolved``).
+
+        Approval only records the decision; nothing executes (FR5.9). The
+        audit carries ids and statuses, never the note or any amount.
+        """
+
+        try:
+            transition = await self._repo.transition_alert(
+                tenant_id, alert_id, action=action, actor=actor, note=note, now=self._clock()
+            )
+        except MarginAlertNotFoundError:
+            raise AppException(
+                ErrorCode.RESOURCE_NOT_FOUND, "Margin alert not found", status_code=404
+            ) from None
+        except MarginAlertStateError:
+            raise AppException(
+                ErrorCode.CONFLICT,
+                f"The margin alert does not allow '{action}' in its current state",
+                status_code=409,
+            ) from None
+        alert = transition.alert
+        details: Dict[str, Any] = {
+            "tenant_id": tenant_id,
+            "alert_type": alert["alert_type"],
+            "from_status": transition.from_status,
+            "to_status": alert["status"],
+        }
+        if alert.get("proposal_id"):
+            details["proposal_id"] = alert["proposal_id"]
+        _audit(
+            self._telemetry,
+            event_type="margin_alert_resolved",
+            actor=actor,
+            resource_type="margin_alert",
+            resource_id=alert_id,
+            action=action,
+            details=details,
+            tenant_id=tenant_id,
+        )
+        return alert
 
     def audit(self, **kwargs: Any) -> None:
         _audit(self._telemetry, **kwargs)
