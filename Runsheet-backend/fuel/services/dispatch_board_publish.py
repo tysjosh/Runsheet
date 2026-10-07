@@ -589,15 +589,17 @@ def _is_rollback_retired_stage(doc: Mapping[str, Any], attempt_id: Optional[str]
 
 
 async def upsert_board_plan(es: Any, doc: Dict[str, Any], *, attempt_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """K7.3 step 2: create as ``draft``; while still ``draft`` overwrite the
-    assignments; any other status means already applied (the executor replays)."""
+    """K7.3 step 2: create as ``draft``; while still ``draft`` overwrite the whole
+    K7.3a header (terminal, shift, load order, driver, assignments) so an edit
+    between a failed publish and its Retry lands (P10); any other status means
+    already applied (the executor replays)."""
     tenant_id = doc["tenant_id"]
 
     def transform(cur: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if cur.get("tenant_id") != tenant_id or cur.get("board_load_id") != doc["board_load_id"]:
             return None
         if cur.get("status") == "draft":
-            patched = {**cur, "assignments": doc["assignments"], "driver_id": doc["driver_id"], "updated_at": doc["updated_at"]}
+            patched = {**cur, **{k: v for k, v in doc.items() if k != "created_at"}}
             if attempt_id:
                 patched["created_by_attempt"] = attempt_id
             return patched
@@ -902,6 +904,22 @@ class BoardRedispatchService:
         if self.on_phase is not None:
             await self.on_phase(name, {"publish_id": run.publish_id, "attempt_id": run.attempt_id, "truck_ids": list(run.truck_ids)})
 
+    async def _renew(self, run: _Run) -> None:
+        """Renew ``lease_until`` on every group lane before each load, relink and
+        in-place retry (K7.3, freeze rule 5). Refused once a Retry has taken the
+        group over, which stops this worker before its next write."""
+        lease = self.now() + timedelta(seconds=self._lease)
+
+        def mutate(lane: Lane) -> None:
+            lane.publish.lease_until = lease
+
+        stored = await update_lanes(
+            self._es, run.tenant_id, run.service_date, run.truck_ids, mutate,
+            owner=run.publish_id, attempt_id=run.attempt_id, now=self.now(),
+        )
+        if stored is None:
+            raise _LeaseLost()
+
     def _old(self, run: _Run, load_id: str) -> PublishedPlan:
         return run.lane(run.load_lane[load_id]).publish.plans[load_id]
 
@@ -920,6 +938,7 @@ class BoardRedispatchService:
 
     async def _retire(self, run: _Run) -> None:
         for lane, _load, load_id, al, _seq in run.items(("new_revision", "removed")):
+            await self._renew(run)
             old = self._old(run, load_id)
             new_plan_id = al.plan_id if al.load_class == "new_revision" else None
             await self._retire_executions(run, old)
@@ -984,6 +1003,7 @@ class BoardRedispatchService:
         now = self.now()
         for lane, load, load_id, al, seq in run.items(("new", "new_revision")):
             assert load is not None
+            await self._renew(run)
             supersedes = (None, None)
             if al.load_class == "new_revision":
                 old = self._old(run, load_id)
@@ -1001,6 +1021,7 @@ class BoardRedispatchService:
 
     async def _relink(self, run: _Run) -> None:
         for entry in run.attempt.relinks:
+            await self._renew(run)
             outcome = await self._relink_one(run, entry.order_id, entry.from_link, entry.to)
             if outcome == "refused":
                 current = await self._orders.get_current(run.tenant_id, entry.order_id)
@@ -1061,11 +1082,12 @@ class BoardRedispatchService:
 
     # -- phase 3: apply ------------------------------------------------------
 
-    async def _with_retries(self, stage: str, step: Callable[[], Awaitable[None]]) -> None:
+    async def _with_retries(self, run: _Run, stage: str, step: Callable[[], Awaitable[None]]) -> None:
         last: Optional[_StepError] = None
         for attempt, delay in enumerate((0.0,) + self._retry_delays):
             if attempt:
                 await self._sleep(delay)
+            await self._renew(run)
             try:
                 await step()
                 return
@@ -1087,7 +1109,7 @@ class BoardRedispatchService:
     async def _apply(self, run: _Run) -> None:
         for lane, load, load_id, al, _seq in run.items(("new", "new_revision")):
             assert load is not None
-            await self._with_retries("apply", lambda lane=lane, load=load, al=al: self._apply_load(run, lane, load, al))
+            await self._with_retries(run, "apply", lambda lane=lane, load=load, al=al: self._apply_load(run, lane, load, al))
 
     async def _apply_load(self, run: _Run, lane: Lane, load: Load, al: AttemptLoad) -> None:
         tenant_id = run.tenant_id
@@ -1198,7 +1220,7 @@ class BoardRedispatchService:
 
     async def _amend(self, run: _Run) -> None:
         for lane, load, load_id, al, _seq in run.items(("amend",)):
-            await self._with_retries("amend", lambda lane=lane, load=load, al=al: self._amend_load(run, lane, load, al))
+            await self._with_retries(run, "amend", lambda lane=lane, load=load, al=al: self._amend_load(run, lane, load, al))
 
     async def _amend_load(self, run: _Run, lane: Lane, load: Optional[Load], al: AttemptLoad) -> None:
         tenant_id = run.tenant_id
@@ -1428,6 +1450,7 @@ class BoardRedispatchService:
                 dropped_orders=list(dropped.get(truck_id, [])),
                 kept_completed_stops=list(run.kept_completed.get(truck_id, [])),
                 notifications_failed=list(run.notifications_failed),
+                group_truck_ids=list(run.truck_ids),
                 at=now,
             )
 
@@ -1454,7 +1477,8 @@ class BoardRedispatchService:
             lane.publish.last_result = _result(
                 state="failed", stage=err.stage, reason=err.reason, writes_made=True, retryable=True,
                 recovery="forward", failures=list(err.failures), publish_id=run.publish_id,
-                dropped_orders=list(run.dropped.get(lane.truck_id, [])), drivers_without_routes=drivers, at=now,
+                dropped_orders=list(run.dropped.get(lane.truck_id, [])), drivers_without_routes=drivers,
+                group_truck_ids=list(run.truck_ids), at=now,
             )
 
         if await update_lanes(self._es, run.tenant_id, run.service_date, run.truck_ids, mutate, owner=run.publish_id, attempt_id=run.attempt_id, now=now) is None:
@@ -1538,6 +1562,7 @@ class BoardRedispatchService:
                 rolled_back=True,
                 retryable=True,
                 publish_id=run.publish_id,
+                group_truck_ids=list(run.truck_ids),
                 at=now,
             )
 
@@ -1556,7 +1581,8 @@ class BoardRedispatchService:
             lane.publish.attempt.recovery = "rollback"
             lane.publish.last_result = _result(
                 state="failed", stage=failure["stage"], reason=failure["reason"], writes_made=True,
-                retryable=True, recovery="rollback", publish_id=run.publish_id, at=now,
+                retryable=True, recovery="rollback", publish_id=run.publish_id,
+                group_truck_ids=list(run.truck_ids), at=now,
             )
 
         await update_lanes(self._es, run.tenant_id, run.service_date, run.truck_ids, mutate, owner=run.publish_id, attempt_id=run.attempt_id, now=now)
@@ -1564,6 +1590,7 @@ class BoardRedispatchService:
     async def _relink_back(self, run: _Run) -> bool:
         """Rollback step 1. Returns ``True`` when an order is in a state the guards exclude."""
         for entry in run.attempt.relinks:
+            await self._renew(run)
             current = await self._orders.get_current(run.tenant_id, entry.order_id)
             if current is None:
                 continue
@@ -1942,8 +1969,17 @@ class BoardPublishService:
                         not_ready[t] = ["retry_whole_group"]
                     continue
                 groups.append({"truck_ids": list(attempt.group_truck_ids), "kind": "redispatch", "added_lanes": []})
+                load_lane: Dict[str, str] = {}
+                for t in attempt.group_truck_ids:
+                    group_lane = draft.lanes.get(t)
+                    if group_lane is None:
+                        continue
+                    for load in group_lane.loads:
+                        load_lane[load.load_id] = t
+                    for load_id in group_lane.publish.plans:
+                        load_lane.setdefault(load_id, t)
                 for load_id, al in attempt.loads.items():
-                    loads_out.append({"truck_id": truck_id, "load_id": load_id, "class": al.load_class, "info": []})
+                    loads_out.append({"truck_id": load_lane.get(load_id, truck_id), "load_id": load_id, "class": al.load_class, "info": []})
                 continue
             requested.append(truck_id)
         pre = await self._preflight(draft, requested, body.warning_reasons)
@@ -1994,9 +2030,22 @@ class BoardPublishService:
     # -- real publish ------------------------------------------------------
 
     async def _publish(self, draft: BoardDraft, body: PublishBody, user_id: str, tz: str) -> Dict[str, Any]:
-        tenant_id, service_date = draft.tenant_id, draft.service_date
         if body.client_request_id in draft.publishes:
             return self._accepted_replay(draft, draft.publishes[body.client_request_id])
+        try:
+            return await self._publish_new(draft, body, user_id, tz)
+        except AppException as exc:
+            # A concurrent request with the same client_request_id claimed first:
+            # answer with its publish_id, not a conflict (K7.5).
+            if exc.status_code != 409:
+                raise
+            latest = await load_board_draft(self._es, draft.tenant_id, draft.service_date)
+            if latest is None or body.client_request_id not in latest.publishes:
+                raise
+            return self._accepted_replay(latest, latest.publishes[body.client_request_id])
+
+    async def _publish_new(self, draft: BoardDraft, body: PublishBody, user_id: str, tz: str) -> Dict[str, Any]:
+        tenant_id, service_date = draft.tenant_id, draft.service_date
         refs = {ref.truck_id: ref.expected_version for ref in body.lanes}
         missing = [t for t in refs if t not in draft.lanes]
         if missing:
@@ -2043,8 +2092,9 @@ class BoardPublishService:
         pre = await self._preflight(draft, fresh, body.warning_reasons)
         if pre.not_ready:
             raise _not_ready(pre.not_ready)
-        claimed = await self._claim(draft, pre, resume, publish_id, user_id, body)
         groups = [PublishGroup(list(a.group_truck_ids), "redispatch") for a in resume] + list(pre.groups)
+        # Nothing to run (every lane already published): no claim, no publish_id.
+        claimed = await self._claim(draft, pre, resume, publish_id, user_id, body) if groups else []
         order = {t: i for i, t in enumerate(refs)}
         groups.sort(key=lambda g: min(order.get(t, len(order)) for t in g.truck_ids))
         if groups:
@@ -2058,12 +2108,27 @@ class BoardPublishService:
         }
 
     def _accepted_replay(self, draft: BoardDraft, publish_id: str) -> Dict[str, Any]:
-        lanes = [
-            {"truck_id": t, "state": self._board._lane_state(lane)}  # noqa: SLF001
-            for t, lane in draft.lanes.items()
-            if lane.publish.attempt_id == publish_id
-        ]
-        return {"publish_id": publish_id, "lanes": lanes, "groups": [], "already_published": [], "replayed": True}
+        """The 202 body of an earlier request, rebuilt from the lanes it claimed (K7.1, K7.5)."""
+        lanes: List[Dict[str, Any]] = []
+        groups: List[Dict[str, Any]] = []
+        grouped: Set[str] = set()
+        for t, lane in draft.lanes.items():
+            result = lane.publish.last_result
+            owner = lane.publish.attempt_id == publish_id
+            if not owner and (result is None or result.publish_id != publish_id):
+                continue
+            lanes.append({"truck_id": t, "state": self._board._lane_state(lane)})  # noqa: SLF001
+            if t in grouped:
+                continue
+            if owner and lane.publish.attempt is not None:
+                group = PublishGroup(list(lane.publish.attempt.group_truck_ids), "redispatch")
+            elif result is not None and result.publish_id == publish_id and result.group_truck_ids:
+                group = PublishGroup(list(result.group_truck_ids), "redispatch")
+            else:
+                group = PublishGroup([t], "first_publish")
+            grouped.update(group.truck_ids)
+            groups.append(group.as_dict())
+        return {"publish_id": publish_id, "lanes": lanes, "groups": groups, "already_published": [], "replayed": True}
 
     async def _rollback_now(self, draft: BoardDraft, attempt: RedispatchAttempt, publish_id: str, user_id: str) -> None:
         """Retry of an interrupted or pending rollback: roll back first (K8.4 Recovery)."""
@@ -2115,6 +2180,9 @@ class BoardPublishService:
 
         def transform(doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             current = BoardDraft.model_validate(doc)
+            if body.client_request_id in current.publishes:
+                verdict["reason"] = "duplicate_request"  # _publish answers with the stored id
+                return None
             for t in fresh:
                 lane = current.lanes.get(t)
                 if lane is None or lane.version != pre.versions[t]:

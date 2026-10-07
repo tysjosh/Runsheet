@@ -239,6 +239,27 @@ cwd `.worktrees/dispatch-board/Runsheet-backend`, `PY=/Users/olukotunjosh/Downlo
 
 Free disk before/after: 7.6 GB (no Docker or frontend build was run). Scratch files under `Runsheet/tmp/` deleted.
 
+#### Phase 2 review fixes (phase2-review.json, CHANGES_REQUESTED)
+
+| Finding | Fix | Named test(s) |
+|---|---|---|
+| P2-1 (MEDIUM) redispatch lease renewed only at phase boundaries | `BoardRedispatchService._renew(run)`: one owner- and attempt-guarded `update_lanes` that moves `lease_until` on every group lane and raises `_LeaseLost` when refused. Called before each retire load, each staged load, each relink, each rollback relink-back, and before every try inside `_with_retries` (so before each apply/amend load and each in-place retry). | `test_freeze_rule_5_slow_apply_renews_the_lease_so_a_retry_is_refused` (200 s inside one apply phase; a Retry mid-phase gets 409 `publishing`), `test_freeze_rule_5_lost_lease_stops_relinks_before_the_next_one` (owner taken after the first relink; the second relink is never called; outcome `lease_lost`), `test_freeze_rule_5_worker_past_its_lease_stops_after_a_takeover` (worker stalls past its lease, a Retry takes over; old worker ends `lease_lost`, new one publishes, one execution per plan, one assignment per driver). With `_renew` disabled the first two fail; the third pins the end state. |
+| P2-2 (LOW) duplicate `client_request_id` race | The claim transform refuses when `publishes` already holds the id; `_publish` catches any 409 from the new-request path, reloads the draft and, if the id is stored, answers with `_accepted_replay` (same `publish_id`). | `test_concurrent_same_client_request_id_both_get_the_same_publish_id` |
+| P2-3 (LOW) replay and no-op bodies | No claim (and no stored id) when there are no groups to run. `_accepted_replay` rebuilds `groups` from the lanes: a live attempt gives its `group_truck_ids`; a finished redispatch lane gives the new additive `PublishResult.group_truck_ids` (written by finalize, rollback and both failure marks); otherwise a one-lane `first_publish` group. `added_lanes` is `[]` on a replay (not stored). Replay lanes use the same filter as `status`. | `test_no_op_publish_records_no_publish_id`, `test_same_client_request_id_returns_the_same_publish` (now asserts `groups`), `test_replay_of_a_redispatch_publish_rebuilds_its_groups` |
+| P2-4 (LOW) dry run mislabels recovery-group loads | `_dry_run` maps each attempt load to its lane through the group lanes' `loads` and `publish.plans`. | `test_dry_run_of_a_recovery_group_lists_each_load_under_its_own_truck` |
+| P2-5 (LOW) draft plan overwrite keeps stale header | While `draft`, `upsert_board_plan` overwrites every K7.3a key except `created_at` (executor-owned extra keys on the stored doc are kept). | `test_upsert_while_draft_overwrites_the_whole_k73a_header` |
+
+Test adjustment: `test_l_rollback_and_forward_completion_are_idempotent` re-runs rollback and forward steps directly after the attempt finished (no lease held), so it stubs `_renew` for those direct calls; the idempotency assertions are unchanged.
+
+Commands (cwd `.worktrees/dispatch-board/Runsheet-backend`, same `PY`):
+
+- `ENVIRONMENT=test JWT_SECRET=x REDIS_URL=redis://localhost:6379 $PY -m pytest --no-cov -q -p no:cacheprovider -o log_cli=false tests/unit/test_dispatch_board_redispatch.py tests/unit/test_dispatch_board_publish.py` → **67 passed**, run 3×.
+- Full suite, CI env (`REDIS_URL=redis://localhost:6379 JWT_SECRET=ci-test-jwt-secret JWT_ALGORITHM=HS256 ENVIRONMENT=test $PY -m pytest --no-cov -q -p no:cacheprovider -o log_cli=false`) → **13097 passed, 237 skipped, 0 failed** (4 m 23 s).
+- Postgres suite, CI env → **232 passed**.
+- Registry: `ENVIRONMENT=test REDIS_URL=redis://localhost:6379 JWT_SECRET=x $PY scripts/generate_endpoint_registry.py` → 353 entries; `git diff --exit-code --stat -- docs/endpoint-registry.md` → clean.
+
+Free disk: 9.5 GB. Scratch file under `Runsheet/tmp/` deleted.
+
 ### Phase 3: Realtime and suggestions
 Not started.
 

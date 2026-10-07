@@ -272,10 +272,70 @@ async def test_same_client_request_id_returns_the_same_publish(w):
     first = await w.run("T1", cid=cid)
     second = await w.start("T1", cid=cid)
     assert second["publish_id"] == first["publish_id"] and second["replayed"] is True
+    assert second["groups"] == first["groups"] == [{"truck_ids": ["T1"], "kind": "first_publish", "added_lanes": []}]
     assert len(w.driver_ws.of("assignment")) == 1
     status = await w.publish.status(tenant_id=T, service_date=TODAY, publish_id=first["publish_id"])
     assert status["done"] is True and status["lanes"][0]["state"] == "published"
     await expect(ErrorCode.RESOURCE_NOT_FOUND, w.publish.status(tenant_id=T, service_date=TODAY, publish_id="nope"))
+
+
+async def test_concurrent_same_client_request_id_both_get_the_same_publish_id(w, monkeypatch):
+    """Review P2-2: two requests with one id racing past the first check both
+    answer with the publish_id of the one that claimed (K7.5), not a 409."""
+    w.seed("o1")
+    await w.lane("T1", "o1", driver_id="d1")
+    reasons = await w.reasons_for("T1")
+    cid = str(uuid.uuid4())
+    real = w.publish._preflight
+    arrived = {"n": 0}
+    both_in = asyncio.Event()
+
+    async def gated(*a, **k):
+        arrived["n"] += 1
+        if arrived["n"] == 2:
+            both_in.set()
+        await both_in.wait()
+        return await real(*a, **k)
+
+    monkeypatch.setattr(w.publish, "_preflight", gated)
+    first, second = await asyncio.gather(w.start("T1", cid=cid, reasons=reasons), w.start("T1", cid=cid, reasons=reasons))
+    await w.publish.wait_idle()
+    assert first["publish_id"] and first["publish_id"] == second["publish_id"]
+    assert [r.get("replayed", False) for r in (first, second)].count(True) == 1
+    assert w.lane_doc("T1").publish.state == "published" and len(w.driver_ws.of("assignment")) == 1
+
+
+async def test_no_op_publish_records_no_publish_id(w):
+    """Review P2-3: every lane already published → no claim, no stored id."""
+    w.seed("o1")
+    await w.lane("T1", "o1", driver_id="d1")
+    await w.run("T1")
+    cid = str(uuid.uuid4())
+    response = await w.start("T1", cid=cid)
+    assert response["publish_id"] is None and response["already_published"] == ["T1"]
+    assert cid not in w.h.draft().publishes
+    again = await w.start("T1", cid=cid)
+    assert again["publish_id"] is None and "replayed" not in again
+
+
+async def test_upsert_while_draft_overwrites_the_whole_k73a_header(w):
+    """Review P2-5: a terminal, shift or load-order edit before a Retry lands (P10)."""
+    w.seed("o1")
+    await w.lane("T1", "o1", driver_id="d1")
+    lane = w.lane_doc("T1")
+    load = lane.loads[0]
+    first_at = w.h.now
+    doc = pub.build_plan_doc(tenant_id=T, service_date=TODAY, lane=lane, load=load, load_seq=1, revision=1, now=first_at)
+    await pub.upsert_board_plan(w.store, doc)
+    edited = load.model_copy(update={"terminal_id": "term-2", "shift_id": "night"})
+    later = first_at + timedelta(minutes=5)
+    retry = pub.build_plan_doc(tenant_id=T, service_date=TODAY, lane=lane, load=edited, load_seq=2, revision=1, now=later)
+    stored = await pub.upsert_board_plan(w.store, retry)
+    assert stored["status"] == "draft"
+    assert (stored["terminal_id"], stored["shift_id"], stored["load_seq"]) == ("term-2", "night", 2)
+    assert stored["created_at"] == first_at.isoformat()
+    stamps = ("created_at", "updated_at")
+    assert {k: v for k, v in stored.items() if k not in stamps} == {k: v for k, v in retry.items() if k not in stamps}
 
 
 async def test_version_mismatch_and_missing_lane_and_past_day(w):

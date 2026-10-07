@@ -32,7 +32,7 @@ from fuel.services.dispatch_board_models import (
     PublishedPlan,
     Stop,
 )
-from tests.unit._dispatch_board_fakes import ORDERS, T, TODAY
+from tests.unit._dispatch_board_fakes import DRAFTS, ORDERS, T, TODAY
 from tests.unit._dispatch_board_publish_world import EXECUTIONS, OPERATIONAL, PLANS, ROUTES, World
 
 NOW = datetime(2026, 10, 8, 15, 0, tzinfo=timezone.utc)
@@ -374,6 +374,34 @@ async def test_e30_retry_must_cover_the_whole_group(w):
     assert w.lane_doc("T1").publish.state == w.lane_doc("T2").publish.state == "published"
 
 
+async def test_dry_run_of_a_recovery_group_lists_each_load_under_its_own_truck(w):
+    """Review P2-4: a recovery attempt's loads map to their lanes through the draft."""
+    await publish_a(w, "o1", "o2")
+    await w.driver_start("o2")
+    await w.lane("T2", driver_id="d2")
+    await w.move(["o1"], "T2", lanes=("T1", "T2"), target={"load_id": "new"})
+    plan = w.plan_of("T1")
+    w.store.fail_on("atomic_update", EXECUTIONS, w.executions_of(plan.plan_id)[0]["execution_id"], times=4)
+    await w.run("T2", reasons=await w.reasons_for("T2"))
+    assert w.lane_doc("T2").publish.attempt.recovery == "forward"
+    preview = await w.dry("T2", "T1")
+    by_load = {entry["load_id"]: entry["truck_id"] for entry in preview["loads"]}
+    assert by_load == {w.lane_doc("T1").loads[0].load_id: "T1", w.lane_doc("T2").loads[0].load_id: "T2"}
+
+
+async def test_replay_of_a_redispatch_publish_rebuilds_its_groups(w):
+    """Review P2-3: the replayed 202 carries ``groups`` like the first answer (K7.1)."""
+    await publish_a(w, "o1", "o2")
+    await w.lane("T2", driver_id="d2")
+    await w.move(["o1"], "T2", lanes=("T1", "T2"), target={"load_id": "new"})
+    cid = "5b0c7f0e-6c55-4c1f-9d7e-6a4b8f3c2d10"
+    first = await w.run("T2", cid=cid)
+    replay = await w.start("T2", cid=cid)
+    assert replay["replayed"] is True and replay["publish_id"] == first["publish_id"]
+    assert [(sorted(g["truck_ids"]), g["kind"]) for g in replay["groups"]] == [(["T1", "T2"], "redispatch")]
+    assert [(sorted(g["truck_ids"]), g["kind"]) for g in first["groups"]] == [(["T1", "T2"], "redispatch")]
+
+
 # ---- (f), (g): moves across lanes --------------------------------------------
 
 
@@ -662,6 +690,11 @@ async def test_l_rollback_and_forward_completion_are_idempotent(w):
     await w.run("T2")
     once = operational_docs(w)
     run = captured["run"]
+
+    async def no_lease(_run):  # the steps re-run directly, outside the (released) lease
+        return None
+
+    w.redispatch._renew = no_lease  # type: ignore[assignment]
     assert await w.redispatch._relink_back(run) is False
     await w.redispatch._retire_staged(run)
     await w.redispatch._restore_retired(run)
@@ -682,6 +715,7 @@ async def test_l_rollback_and_forward_completion_are_idempotent(w):
     await w2.run("T1")
     done = operational_docs(w2)
     run2 = runs["run"]
+    w2.redispatch._renew = no_lease  # type: ignore[assignment]
     await w2.redispatch._apply(run2)
     await w2.redispatch._amend(run2)
     assert operational_docs(w2) == done
@@ -921,6 +955,103 @@ async def test_freeze_rule_5_group_processed_sequentially(w, monkeypatch):
     response = await w.run("T2")
     assert set(response["groups"][0]["truck_ids"]) == {"T1", "T2", "T3"}
     assert active["max"] == 1
+
+
+def _record_outcomes(w: World, monkeypatch) -> List[str]:
+    outcomes: List[str] = []
+    real = w.redispatch.run_group
+
+    async def spy(**kw):
+        outcome = await real(**kw)
+        outcomes.append(outcome)
+        return outcome
+
+    monkeypatch.setattr(w.redispatch, "run_group", spy)
+    return outcomes
+
+
+async def test_freeze_rule_5_slow_apply_renews_the_lease_so_a_retry_is_refused(w, monkeypatch):
+    """Review P2-1: a live worker renews before each load, so a phase longer
+    than the lease never reads as recovering and a Retry can't start a second actor."""
+    await publish_a(w, "o1", "o2")
+    await w.lane("T2", driver_id="d2")
+    await w.move(["o1"], "T2", lanes=("T1", "T2"), target={"load_id": "new"})
+    reasons = await w.reasons_for("T2")
+    real = w.executor.execute
+    seen: List[Any] = []
+
+    async def slow(**kw):
+        w.advance(100)  # two loads: 200 s inside one apply phase, past the 120 s lease
+        if len(seen) == 1:
+            lane = w.lane_doc("T2")
+            seen.append((lane.publish.state, w.h.service.lane_view(lane).state))
+            seen.append(await expect(ErrorCode.BOARD_PUBLISH_IN_PROGRESS, w.start("T2", "T1", reasons={})))
+        else:
+            seen.append(None)
+        return await real(**kw)
+
+    monkeypatch.setattr(w.executor, "execute", slow)
+    await w.run("T2", reasons=reasons)
+    assert seen[1] == ("publishing", "publishing")
+    assert seen[2].details["reason"] == "publishing"
+    assert w.lane_doc("T1").publish.state == w.lane_doc("T2").publish.state == "published"
+    assert sorted(c[1] for c in w.driver_ws.of("assignment")) == ["d1", "d1", "d2"]  # d1 once at publish_a
+
+
+async def test_freeze_rule_5_worker_past_its_lease_stops_after_a_takeover(w, monkeypatch):
+    """Review P2-1: a worker that ran past its lease and lost the group to a Retry
+    stops at its next renewal; only the new owner finishes, without duplicates."""
+    await publish_a(w, "o1", "o2")
+    await w.lane("T2", driver_id="d2")
+    await w.move(["o1"], "T2", lanes=("T1", "T2"), target={"load_id": "new"})
+    reasons = await w.reasons_for("T2")
+    outcomes = _record_outcomes(w, monkeypatch)
+    real = w.executor.execute
+    taken: List[str] = []
+
+    async def stall_then_takeover(**kw):
+        if not taken:
+            taken.append("x")
+            expire(w)
+            await w.start("T2", "T1", reasons={})  # accepted: the lease has passed
+        return await real(**kw)
+
+    monkeypatch.setattr(w.executor, "execute", stall_then_takeover)
+    w.driver_ws.calls.clear()
+    await w.run("T2", reasons=reasons)
+    await w.publish.wait_idle()
+    assert sorted(outcomes) == ["lease_lost", "published"]
+    for truck in ("T1", "T2"):
+        lane = w.lane_doc(truck)
+        assert lane.publish.state == "published" and lane.publish.attempt is None
+        assert len(w.executions_of(w.plan_of(truck).plan_id)) == 1
+    assert sorted(c[1] for c in w.driver_ws.of("assignment")) == ["d1", "d2"]
+    assert len(w.driver_ws.of("assignment_revoked")) == 1
+
+
+async def test_freeze_rule_5_lost_lease_stops_relinks_before_the_next_one(w, monkeypatch):
+    """Review P2-1: renewal before each relink, so a superseded worker can't land
+    a late relink after the new owner's relink-back."""
+    await publish_a(w, "o1", "o2", "o3")
+    await w.lane("T2", driver_id="d2")
+    await w.move(["o1", "o2"], "T2", lanes=("T1", "T2"), target={"load_id": "new"})
+    reasons = await w.reasons_for("T2")
+    outcomes = _record_outcomes(w, monkeypatch)
+    real = w.repo.relink_dispatched_assignment
+    calls: List[str] = []
+
+    async def relink_then_lose_lease(*a, **k):
+        calls.append(a[1])
+        result = await real(*a, **k)
+        doc = w.store.docs[DRAFTS][f"{T}:{TODAY.isoformat()}"]
+        for truck in ("T1", "T2"):
+            doc["lanes"][truck]["publish"]["attempt_id"] = "another-publish"
+        return result
+
+    monkeypatch.setattr(w.repo, "relink_dispatched_assignment", relink_then_lose_lease)
+    await w.run("T2", reasons=reasons)
+    assert len(calls) == 1 and outcomes == ["lease_lost"]
+    assert w.lane_doc("T2").publish.attempt.phase == "stage_relink"
 
 
 async def test_freeze_rule_6_not_started_change_is_a_new_revision_never_an_amend(w):

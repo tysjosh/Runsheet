@@ -244,6 +244,8 @@ class PublishResult(_Strict):
     kept_completed_stops: List[str] = Field(default_factory=list)
     #: Drivers with no manifest while a forward recovery is pending (banner, Q16).
     drivers_without_routes: List[str] = Field(default_factory=list)
+    #: The redispatch group this lane ran in, so a replay can rebuild ``groups`` (K7.5).
+    group_truck_ids: List[str] = Field(default_factory=list)
     publish_id: Optional[str] = None
     at: Optional[datetime] = None
 
