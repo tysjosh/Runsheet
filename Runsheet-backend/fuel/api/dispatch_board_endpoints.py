@@ -16,8 +16,8 @@ Bodies are ``Body(Any)`` and validated in the handler with ``parse_body`` so a
 actor ids come only from the verified session.
 
 Publish answers 200 for a dry run and 202 when a publish is accepted (K7.1).
-Publish and suggestion reject (Phase 3) parse and validate their bodies here;
-until their services are configured they answer 503.
+Publish and suggestion reject parse and validate their bodies here; until
+their services are configured they answer 503.
 """
 from __future__ import annotations
 
@@ -303,7 +303,12 @@ async def reject_suggestion(
             details={"reason": "service_not_configured"},
         )
     data = await _suggestion_service.reject(
-        tenant_id=tenant.tenant_id, user_id=tenant.user_id, service_date=day, plan_id=plan_id, reason=parsed.reason
+        tenant_id=tenant.tenant_id,
+        user_id=tenant.user_id,
+        service_date=day,
+        plan_id=plan_id,
+        reason=parsed.reason,
+        tz=_tz(tenant),
     )
     return _envelope(request, data)
 

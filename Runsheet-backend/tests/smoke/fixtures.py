@@ -577,6 +577,12 @@ WS_FIXTURES: Dict[str, WSFixture] = {
         params={"token": ""},
         expects_confirmation=True,
     ),
+    # Dispatch Board lane events and presence (dispatch-board K10). Admin or
+    # dispatcher only; confirmation is sent after the role and flag checks.
+    "/ws/dispatch-board": WSFixture(
+        params={"service_date": "2026-01-01"},
+        expects_confirmation=True,
+    ),
 }
 
 

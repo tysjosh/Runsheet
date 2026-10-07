@@ -7,7 +7,9 @@
 * Subscriber pin: every ``.subscribe("order.*", ...)`` registration in the
   backend (excluding tests and the venv) is for ``order.dispatched`` or
   ``order.delivered``. A new subscriber on a status the executor reaches would
-  turn plan approval into a side effect; this test makes that visible.
+  turn plan approval into a side effect; this test makes that visible. The one
+  allowed exception is the Dispatch Board order listener (board-lane staleness
+  only, dispatch-board K10.4).
 """
 
 from __future__ import annotations
@@ -154,6 +156,16 @@ def test_order_subscriber_pin():
             receiver = ast.get_source_segment(source, node.func.value) or ""
             if "order_service" in receiver:
                 non_constant.append(f"{path.relative_to(BACKEND)}:{node.lineno}")
+
+    # The Dispatch Board order listener (dispatch-board K10.4) is the one
+    # reviewed exception: it subscribes per status from a pinned tuple and only
+    # marks board lanes stale and broadcasts ``board_lane_stale`` (no dispatch,
+    # notification or order write; T-B10 write boundary).
+    from fuel.services.dispatch_board_order_listener import BOARD_ORDER_EVENTS
+
+    board_listener = "fuel/services/dispatch_board_order_listener.py"
+    non_constant = [c for c in non_constant if not c.startswith(f"{board_listener}:")]
+    assert set(BOARD_ORDER_EVENTS) == {"cancelled", "on_hold", "scheduled", "dispatched", "in_transit", "delivered", "failed"}
 
     assert non_constant == [], f"non-constant order_service.subscribe(...) calls: {non_constant}"
     assert constants == {"order.dispatched", "order.delivered"}

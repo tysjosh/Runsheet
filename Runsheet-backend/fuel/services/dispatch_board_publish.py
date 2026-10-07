@@ -2275,6 +2275,7 @@ class BoardPublishService:
             return
         views = [self._board.lane_view(draft.lanes[t]) for t in truck_ids if t in draft.lanes]
         await self._board._broadcast(tenant_id, service_date, "board_publish_progress", {  # noqa: SLF001
+            "service_date": service_date.isoformat(),
             "publish_id": publish_id,
             "lanes": [{"truck_id": v.truck_id, "state": v.state, "last_result": v.publish.last_result.model_dump(mode="json") if v.publish.last_result else None} for v in views],
         })

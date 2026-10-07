@@ -361,6 +361,7 @@
 | `/api/fleet/live` | location_update, fleet_status | session_required |
 | `/ws/agent-activity` | agent_activity, approval_event | session_required |
 | `/ws/commerce/invoices` | — | session_required |
+| `/ws/dispatch-board` | — | session_required |
 | `/ws/driver` | — | session_required |
 | `/ws/fuel-planning` | — | session_required |
 | `/ws/notifications` | — | session_required |

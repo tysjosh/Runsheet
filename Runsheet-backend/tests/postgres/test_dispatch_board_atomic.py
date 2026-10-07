@@ -170,6 +170,35 @@ async def test_cross_day_terms_lookup_on_the_real_translator(es, tenant):
     assert ctx3.other_day == {}
 
 
+async def test_order_listener_lookup_on_the_real_translator(es, tenant):
+    """K10.4: ``term order_ids`` inside the keyword array, ``service_date >= today``,
+    ``_source`` filtering; the lane is marked stale with no version bump."""
+    from fuel.services.dispatch_board_order_listener import BoardOrderListener
+
+    svc = await _service(es, tenant)
+    await es.index_document("fuel_orders_current", "o1", order("o1", tenant_id=tenant))
+    await es.index_document("fuel_orders_current", "o2", order("o2", tenant_id=tenant, day=TOMORROW))
+    for day, oid in ((TODAY, "o1"), (TOMORROW, "o2")):
+        await _send(svc, tenant, _cmd("add_lane", {"T1": 0}, truck_id="T1"), day=day)
+        await _send(svc, tenant, _cmd("assign_orders", {"T1": 1}, order_ids=[oid], truck_id="T1"), day=day)
+    events = []
+
+    async def broadcast(tenant_id, service_date, event_type, data):
+        events.append((service_date, data["truck_ids"]))
+
+    listener = BoardOrderListener(es_service=es, broadcast=broadcast, timezone_for=lambda t: TZ, clock=lambda: NOW)
+    assert await listener.on_order_event({"tenant_id": tenant, "order_id": "o2"}, "cancelled") == [f"{TOMORROW.isoformat()}:T1"]
+    assert events == [(TOMORROW, ["T1"])]
+    tomorrow = await es.get_document(DRAFTS, f"{tenant}:{TOMORROW.isoformat()}")
+    today = await es.get_document(DRAFTS, f"{tenant}:{TODAY.isoformat()}")
+    assert tomorrow["lanes"]["T1"]["checks_stale"] is True and tomorrow["lanes"]["T1"]["version"] == 2
+    assert tomorrow["draft_version"] == 2
+    assert today["lanes"]["T1"]["checks_stale"] is False
+    # Another tenant's event with the same order id finds nothing.
+    assert await listener.on_order_event({"tenant_id": "pytest-board-other", "order_id": "o1"}, "cancelled") == []
+    assert await listener.on_order_event({"tenant_id": tenant, "order_id": "o9"}, "cancelled") == []
+
+
 async def test_tray_and_history_queries_on_the_real_translator(es, tenant):
     svc = await _service(es, tenant)
     await es.index_document("fuel_orders_current", "a", order("a", tenant_id=tenant, delivery_window_start=f"{TODAY}T15:00:00+00:00"))

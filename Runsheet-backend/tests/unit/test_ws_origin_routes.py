@@ -8,7 +8,7 @@ drive the actual handlers, with a verifier that accepts every credential, so
 the only thing that can reject a handshake is the Origin check.
 
 Every route authenticates through ``_resolve_ws_claims``; the last test pins
-that by checking all ten registered routes reject a cross-origin handshake.
+that by checking all eleven registered routes reject a cross-origin handshake.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ _ALL_ROUTES = (
     "/ws/plan-execution",
     "/ws/fuel-planning",
     "/ws/commerce/invoices",
+    "/ws/dispatch-board",
 )
 
 

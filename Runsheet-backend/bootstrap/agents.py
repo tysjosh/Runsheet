@@ -262,24 +262,54 @@ def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_cli
         contract_lift_service=ContractLiftService(redis_client=redis_client),
         tenant_config=redis_client,
     )
+    from fuel.services.dispatch_board_order_listener import BoardOrderListener
+    from fuel.services.dispatch_board_suggestions import BoardSuggestionService
+    from fuel.services.dispatch_board_ws_manager import get_dispatch_board_ws_manager
+
+    feature_flags = container.ops_feature_flags if container.has("ops_feature_flags") else None
+    board_ws_manager = get_dispatch_board_ws_manager()
     board_service = DispatchBoardService(
         es_service=es_service,
         validation=validation,
         driver_repository=container.get("driver_repository") if container.has("driver_repository") else None,
+        ws_manager=board_ws_manager,
         telemetry=BoardTelemetry(
             telemetry=container.get("telemetry_service") if container.has("telemetry_service") else None,
             activity_log=container.get("activity_log_service") if container.has("activity_log_service") else None,
         ),
     )
+    # K9: agent suggestions (gated on the agents' overlay modes).
+    suggestion_service = BoardSuggestionService(
+        es_service=es_service,
+        feature_flags=feature_flags,
+        board_service=board_service,
+        approval_queue=container.get("approval_queue_service") if container.has("approval_queue_service") else None,
+    )
+    board_service.set_suggestion_reader(suggestion_service)
     container.dispatch_validation_service = validation
     container.dispatch_board_service = board_service
+    container.dispatch_board_ws_manager = board_ws_manager
+    container.dispatch_board_suggestion_service = suggestion_service
     publish_service = _build_board_publish(container, es_service, board_service, plan_execution_service, _from_container)
     if publish_service is not None:
         container.dispatch_board_publish_service = publish_service
+    # K10.4: mark lanes stale when an order on them changes status.
+    if container.has("order_service"):
+        listener = BoardOrderListener(
+            es_service=es_service,
+            broadcast=board_service._broadcast,  # noqa: SLF001 - shared board fan-out
+            timezone_for=board_service.timezone_for,
+            clock=board_service.now,
+        )
+        listener.subscribe(container.get("order_service"))
+        container.dispatch_board_order_listener = listener
+    else:
+        logger.warning("Dispatch Board order listener not subscribed: order_service missing")
     configure_dispatch_board_endpoints(
         board_service=board_service,
-        feature_flag_service=container.ops_feature_flags if container.has("ops_feature_flags") else None,
+        feature_flag_service=feature_flags,
         publish_service=publish_service,
+        suggestion_service=suggestion_service,
     )
     mount_router(app, dispatch_board_router)
     logger.info("Dispatch Board endpoints configured and router registered")
@@ -2304,6 +2334,13 @@ async def shutdown(app, container: ServiceContainer) -> None:
                     getattr(agent, "agent_id", "<unknown>"),
                     exc,
                 )
+
+    # Shut down the Dispatch Board WS manager (dispatch-board K10)
+    if container.has("dispatch_board_ws_manager"):
+        try:
+            await container.dispatch_board_ws_manager.shutdown()
+        except Exception as exc:
+            logger.exception("Dispatch board WS manager shutdown failed: %s", exc)
 
     # Shut down agent WS manager
     if container.has("agent_ws_manager"):

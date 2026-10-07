@@ -29,6 +29,7 @@ from fuel.services.dispatch_board_es_mappings import (
 )
 from fuel.services.dispatch_board_models import (
     APPLIED_COMMANDS_LIMIT,
+    AcceptSuggestionCommand,
     AcknowledgeWarningCommand,
     AppliedCommand,
     BoardDraft,
@@ -304,6 +305,7 @@ class DispatchBoardService:
         extra_terminals: Iterable[str] = (),
         fresh: bool = False,
         include_other_day: bool = True,
+        suggestions: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> ValidationContext:
         trucks = list(dict.fromkeys(t for t in truck_ids if t))
         drivers: List[str] = list(extra_drivers)
@@ -323,12 +325,6 @@ class DispatchBoardService:
                 orders.extend(engine.lane_order_ids(Lane(truck_id=truck_id, version=0, **lane.publish.published_content.model_dump())))
             plans.extend(p.plan_id for p in lane.publish.plans.values())
             terminals.extend(l.terminal_id for l in lane.loads if l.terminal_id)
-        suggestions = None
-        if self._suggestions is not None:
-            try:
-                suggestions = await self._suggestions.for_context(draft.tenant_id, draft.service_date)
-            except Exception as exc:
-                logger.warning("dispatch board suggestion read failed: %s", type(exc).__name__)
         ctx = await self.validation.build_context(
             draft.tenant_id,
             draft.service_date,
@@ -384,6 +380,14 @@ class DispatchBoardService:
         if lanes is None:
             trays, tray_degraded = await self._trays(draft, ctx, filters or SnapshotQuery(), tz, today)
             degraded |= tray_degraded
+        # K9: suggestions on full reads of today and later (hidden on past days).
+        suggestion_list: List[Dict[str, Any]] = []
+        if lanes is None and not past and self._suggestions is not None:
+            try:
+                suggestion_list = await self._suggestions.list_for_day(draft)
+            except Exception as exc:
+                degraded.add("suggestions")
+                logger.warning("dispatch board suggestion read failed: %s", type(exc).__name__)
         unpaired = [t for t in lane_ids if not draft.lanes[t].driver_id]
         suggested = await self._suggested_drivers(draft, unpaired)
         views = [self.lane_view(draft.lanes[t], ctx, suggested=suggested.get(t)) for t in lane_ids]
@@ -397,7 +401,7 @@ class DispatchBoardService:
             degraded_sources=sorted(degraded),
             lanes=views,
             trays=trays,
-            suggestions=[],
+            suggestions=suggestion_list,
             acknowledged=draft.acknowledged,
         )
         self.telemetry.metric(tm.SNAPSHOT_MS, (_time.monotonic() - started) * 1000, tenant_id=tenant_id, endpoint="snapshot", outcome="ok")
@@ -693,6 +697,9 @@ class DispatchBoardService:
             raise
         if ctype in ("revert", "reapply"):
             self.telemetry.metric(tm.UNDO_COUNT, 1, tenant_id=tenant_id, type=ctype, result="committed")
+        if isinstance(command, AcceptSuggestionCommand) and not result.get("already_applied"):
+            action = "partial" if command.load_ids is not None else "accept"
+            self.telemetry.metric(tm.SUGGESTION_COUNT, 1, tenant_id=tenant_id, action=action)
         self.telemetry.metric(tm.COMMAND_COUNT, 1, tenant_id=tenant_id, type=ctype, result="committed", input_modality=modality)
         self.telemetry.metric(tm.COMMAND_MS, (_time.monotonic() - started) * 1000, tenant_id=tenant_id, type=ctype, result="committed")
         return result
@@ -733,7 +740,15 @@ class DispatchBoardService:
         target_log: Optional[Dict[str, Any]] = None
         if isinstance(command, (RevertCommand, ReapplyCommand)):
             target_log, contents = await self._undo_plan(draft, command, user_id)
-        touched = list(contents) if contents is not None else self._touched_estimate(draft, command)
+        suggestions: Optional[Dict[str, Dict[str, Any]]] = None
+        suggestion_orders: List[str] = []
+        if isinstance(command, AcceptSuggestionCommand):
+            suggestions = await self._suggestions_for(draft)
+            touched, suggestion_orders = self._suggestion_scope(draft, command, suggestions)
+        elif contents is not None:
+            touched = list(contents)
+        else:
+            touched = self._touched_estimate(draft, command)
 
         # Step 6: publishing / recovery.
         self._publishing_check(draft, touched)
@@ -743,8 +758,9 @@ class DispatchBoardService:
             draft,
             touched,
             extra_drivers=[getattr(command, "driver_id", None) or ""],
-            extra_orders=list(getattr(command, "order_ids", None) or []) + self._content_orders(contents),
+            extra_orders=list(getattr(command, "order_ids", None) or []) + self._content_orders(contents) + suggestion_orders,
             extra_terminals=[getattr(command, "terminal_id", None) or ""],
+            suggestions=suggestions,
         )
         if "orders" in ctx.unavailable:
             raise AppException(ErrorCode.ELASTICSEARCH_UNAVAILABLE, "The board is unavailable. Retry shortly.", status_code=503)
@@ -854,10 +870,46 @@ class DispatchBoardService:
         driver_id = getattr(command, "driver_id", None)
         if driver_id:
             touched += [t for t, lane in draft.lanes.items() if lane.driver_id == driver_id and t not in touched]
-        suggestion = getattr(command, "suggestion_id", None)
-        if suggestion:
-            touched += [t for t in draft.lanes if t not in touched]
         return touched
+
+    def set_suggestion_reader(self, reader: Any) -> None:
+        """Attach the K9 suggestion service (built after this service in bootstrap)."""
+        self._suggestions = reader
+
+    async def _suggestions_for(self, draft: BoardDraft) -> Dict[str, Dict[str, Any]]:
+        """K9 suggestions for ``accept_suggestion`` (gated and minus dismissals)."""
+        if self._suggestions is None:
+            return {}
+        try:
+            return await self._suggestions.for_context(
+                draft.tenant_id, draft.service_date, tz=draft.timezone, dismissed=draft.dismissed_suggestions
+            )
+        except Exception as exc:
+            logger.warning("dispatch board suggestion read failed: %s", type(exc).__name__)
+            raise AppException(ErrorCode.ELASTICSEARCH_UNAVAILABLE, "Suggestions are unavailable. Retry shortly.", status_code=503) from None
+
+    @staticmethod
+    def _suggestion_scope(
+        draft: BoardDraft, command: AcceptSuggestionCommand, suggestions: Dict[str, Dict[str, Any]]
+    ) -> Tuple[List[str], List[str]]:
+        """Lanes and orders an ``accept_suggestion`` touches: its trucks and the lanes now holding its orders."""
+        suggestion = suggestions.get(command.suggestion_id) or {}
+        loads = list(suggestion.get("loads") or [])
+        if command.load_ids is not None:
+            wanted = set(command.load_ids)
+            loads = [l for l in loads if l.get("load_key") in wanted]
+        touched: List[str] = []
+        orders: List[str] = []
+        for spec in loads:
+            truck_id = spec.get("truck_id")
+            if truck_id and truck_id not in touched:
+                touched.append(truck_id)
+            for order_id in spec.get("order_ids") or []:
+                orders.append(order_id)
+                holder = draft.order_index.get(order_id)
+                if holder and holder not in touched:
+                    touched.append(holder)
+        return touched, orders
 
     def _version_precheck(self, draft: BoardDraft, command: Any) -> None:
         stale = [
