@@ -106,10 +106,11 @@ class FakeOrderRepository:
         self.events.append(event)
 
     async def upsert_with_last_event_timestamp(
-        self, tenant_id: str, order: dict
-    ) -> bool:
+        self, tenant_id: str, order: dict, **guard
+    ):
         self.upserts.append(dict(order))
-        return True
+        # The guarded form (OI-41) returns the stored document.
+        return dict(order) if guard else True
 
 
 class FakeQualificationService:

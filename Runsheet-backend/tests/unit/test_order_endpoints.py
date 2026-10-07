@@ -113,10 +113,31 @@ class FakeOrderRepository:
         self._orders[self._key(tenant_id, order.order_id)] = order
 
     async def upsert_with_last_event_timestamp(
-        self, tenant_id: str, order: FuelOrder | Dict[str, Any]
-    ) -> None:
+        self,
+        tenant_id: str,
+        order: FuelOrder | Dict[str, Any],
+        *,
+        expected_status: Optional[str] = None,
+        expected_last_event_timestamp: Any = None,
+    ):
         model = order if isinstance(order, FuelOrder) else FuelOrder(**order)
-        self._orders[self._key(tenant_id, model.order_id)] = model
+        key = self._key(tenant_id, model.order_id)
+        if expected_status is not None:
+            # Guarded form (OI-41): same compare-and-set as the real repo.
+            from fuel.order_repository import OrderChangedConcurrentlyError
+
+            stored = self._orders.get(key)
+            if stored is None or stored.status != expected_status or (
+                expected_last_event_timestamp is not None
+                and stored.last_event_timestamp != expected_last_event_timestamp
+            ):
+                raise OrderChangedConcurrentlyError(
+                    model.order_id, expected_status,
+                    stored.status if stored else None,
+                )
+            self._orders[key] = model
+            return model.model_dump(mode="python")
+        self._orders[key] = model
 
     async def append_event(self, tenant_id: str, event: Any) -> None:
         if isinstance(event, dict):

@@ -40,7 +40,11 @@ Residuals:
   store calls while being cancelled is unreliable.  A dispatch retry heals it
   unless an order's driver changed meanwhile: every claim then returns
   ``already_linked`` and the loop runs.  A ``reject_plan`` of that plan strands
-  the links; there is no release path in this change (OQ10).
+  the links; hold → release clears the links (OI-18).
+* Dispatch-claim double fault: a claim commits and then raises (the
+  acknowledgement is lost), and the release that follows raises too.  The
+  order stays linked to this run while the plan is still rejectable, the same
+  stranded-links state as above; hold → release clears it (OI-18).
 """
 
 from __future__ import annotations

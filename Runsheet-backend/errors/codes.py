@@ -125,6 +125,8 @@ class ErrorCode(str, Enum):
     """An approve/reject arrived after the approval's expiry_time (HTTP 409, N7)"""
     ORDERS_NOT_CONFIRMED = "ORDERS_NOT_CONFIRMED"
     """A plan being dispatched still has ``placed`` orders; confirm them first (HTTP 409, OI-16)"""
+    ORDER_CHANGED_CONCURRENTLY = "ORDER_CHANGED_CONCURRENTLY"
+    """An order changed twice while a guarded write was retrying; reload and retry (HTTP 409, OI-41)"""
 
     CHANNEL_DISABLED = "CHANNEL_DISABLED"
     """Intake channel is disabled and cannot accept orders (HTTP 403)"""
@@ -489,6 +491,7 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.LOADING_PLAN_EXECUTION_FAILED: 409,
     ErrorCode.APPROVAL_EXPIRED: 409,
     ErrorCode.ORDERS_NOT_CONFIRMED: 409,
+    ErrorCode.ORDER_CHANGED_CONCURRENTLY: 409,
     ErrorCode.CHANNEL_DISABLED: 403,
     ErrorCode.ORDER_INTAKE_DISABLED: 409,
     ErrorCode.INSUFFICIENT_ROLE: 403,

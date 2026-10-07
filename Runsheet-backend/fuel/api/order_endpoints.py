@@ -56,6 +56,7 @@ from fuel.order_state_machine import (
     is_terminal_status,
 )
 from fuel.services.order_id_generator import mint_event_id
+from fuel.services.order_service import transition_order_guarded
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from middleware.rate_limiter import limiter
 from services.csv_export import (
@@ -1072,9 +1073,22 @@ async def update_order_status(
             status_code=422,
             details={"new_status": body.new_status, "allowed": list(_ORDER_STATUSES)},
         )
-    updated = await _get_order_service().apply_status_transition(
+    async def _reread() -> Dict[str, Any]:
+        fresh = await repo.get(tenant.tenant_id, order_id)
+        if fresh is None:
+            raise resource_not_found(
+                message=f"Order '{order_id}' not found",
+                details={"order_id": order_id},
+            )
+        return fresh.model_dump(mode="python")
+
+    # Guarded with one re-read retry (OI-41): a concurrent executor or
+    # dispatch write is never overwritten by this read.
+    updated = await transition_order_guarded(
+        _get_order_service(),
+        _reread,
+        body.new_status,
         order=order.model_dump(mode="python"),
-        new_status=body.new_status,
         reason=body.reason,
         notes=body.notes,
         actor_user_id=tenant.user_id,

@@ -23,7 +23,7 @@ Validates: Requirements 1.1.9, 1.2.2, 1.2.3, 2.5.7, 3.2.1, 4.1.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from fastapi.encoders import jsonable_encoder
 
@@ -41,7 +41,7 @@ from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["OrderService"]
+__all__ = ["OrderService", "transition_order_guarded"]
 
 #: Keys a guarded transition restores on refusal (design K5a step 1).
 _GUARD_SNAPSHOT_KEYS = ("status", "last_event_timestamp", "updated_at", "hold_reason")
@@ -248,8 +248,9 @@ class OrderService:
                 canonical keys above always win, so no caller can overwrite the
                 transition's own record; and like ``client_event_timestamp`` this
                 needs no ``fuel_order_events`` mapping change.
-            guard_stored_state: Loading-plan executor and MVP dispatch only
-                (design K5a). Persists *before* the event with a guarded
+            guard_stored_state: Loading-plan executor, MVP dispatch and,
+                through :func:`transition_order_guarded`, the REST and driver
+                status writers (design K5a, OI-41). Persists *before* the event with a guarded
                 upsert that applies only if the stored status and
                 ``last_event_timestamp`` still equal the ones on ``order``.
                 On refusal the four snapshot keys are restored on ``order``
@@ -633,3 +634,61 @@ class OrderService:
                     order.get("order_id"),
                     exc,
                 )
+
+
+async def transition_order_guarded(
+    order_service: "OrderService",
+    read_order: Callable[[], Awaitable[Dict[str, Any]]],
+    new_status: str,
+    *,
+    order: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Apply a status transition that cannot overwrite a concurrent write (OI-41).
+
+    The write is ``apply_status_transition(..., guard_stored_state=True)``:
+    it lands only if the stored status and ``last_event_timestamp`` still
+    equal the ones read, so a loading-plan executor or dispatch write made
+    after the read (``scheduled`` plus run/truck links) is never overwritten.
+    On a refusal the order is re-read once and the transition retried; the
+    state machine re-validates against the fresh state, so a transition that
+    is no longer allowed gets the usual 409 ``INVALID_STATUS_TRANSITION``. A
+    second refusal is 409 ``ORDER_CHANGED_CONCURRENTLY``.
+
+    Args:
+        order_service: The service that applies the transition.
+        read_order: Returns the current order dict (raising its own 404/403
+            when the order is gone or no longer the caller's).
+        new_status: Target status.
+        order: The caller's first read, when it already has one.
+        **kwargs: Passed to :meth:`OrderService.apply_status_transition`.
+    """
+    from errors.codes import ErrorCode
+    from errors.exceptions import AppException
+
+    current = order if order is not None else await read_order()
+    order_id = current.get("order_id")
+    for attempt in (1, 2):
+        try:
+            return await order_service.apply_status_transition(
+                order=current,
+                new_status=new_status,
+                guard_stored_state=True,
+                **kwargs,
+            )
+        except (OrderChangedConcurrentlyError, OrderWriteDiscardedError) as exc:
+            if attempt == 2:
+                raise AppException(
+                    error_code=ErrorCode.ORDER_CHANGED_CONCURRENTLY,
+                    message="The order changed while it was being updated; reload and retry",
+                    status_code=409,
+                    details={"order_id": order_id},
+                ) from exc
+            logger.info(
+                "transition_order_guarded: order %s changed concurrently (%s); "
+                "re-reading once",
+                order_id,
+                type(exc).__name__,
+            )
+            current = await read_order()
+    raise AssertionError("unreachable")  # pragma: no cover

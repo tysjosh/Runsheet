@@ -83,6 +83,7 @@ from driver.services.order_transition_service import (
 from driver.services.pod_otp_service import POD_OTP_FIELD
 from errors.exceptions import internal_error, invalid_request
 from fuel.order_state_machine import VALID_STATUS_TRANSITIONS
+from fuel.services.order_service import transition_order_guarded
 from middleware.rate_limiter import driver_rate_key, limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
@@ -262,9 +263,20 @@ async def transition_order_status(
     # has not enabled gating, so nothing is written where no gate ran (R17.19).
     hos_record = evaluation.hos_audit_record()
 
-    updated = await _require_order_service().apply_status_transition(
+    async def _reread() -> Dict[str, Any]:
+        # Through the resolver again, so the ownership check (R4.2) holds on
+        # the fresh read too.
+        fresh = await _require_resolver().resolve_order(order_id, tenant)
+        return dict(fresh.order_doc or {})
+
+    # Guarded with one re-read retry (OI-41). The gates ran on the first read
+    # and are not re-evaluated on the retry; a second refusal is 409
+    # ORDER_CHANGED_CONCURRENTLY, which the offline queue retries.
+    updated = await transition_order_guarded(
+        _require_order_service(),
+        _reread,
+        target_status,
         order=order,
-        new_status=target_status,
         reason=body.reason,
         notes=body.notes,
         actor_user_id=ref.driver_id,

@@ -37,10 +37,15 @@ Residual windows (documented, not closed here):
   ``order_assigned`` for the same order because the event dedupe is
   check-then-append. The guarded transition still lets only one of them move
   the status, so the duplicate is limited to one extra ``order_assigned``.
-* **Unguarded writers (K5a).** ``assign_driver_to_order`` and other full-order
-  upserts outside ``OrderService`` do not take the lock. The executor's guarded
-  writes refuse rather than overwrite them (``order_changed_concurrently``);
-  the reverse direction is the existing behaviour of those writers.
+* **Order writers (K5a, OI-41).** ``PATCH /api/orders/{id}/status``, the
+  driver app's status transition and the AI ``assign_driver_to_order`` tool now
+  write guarded with one re-read retry (``transition_order_guarded`` /
+  guarded upsert), so neither side overwrites the other: the executor's guarded
+  writes refuse theirs (``order_changed_concurrently``) and theirs refuse the
+  executor's. The remaining unguarded full-order writer is REST
+  ``PATCH /api/orders/{id}/assign``. A stranded-links case after a dispatch
+  claim double fault is described in ``fuel.services.plan_dispatch_service``;
+  hold → release clears the links (OI-18).
 * **Crash windows (K6).** A guarded upsert can succeed and the following
   ``append_event`` fail (or the pod die): the order is correct but lacks its
   ``order_confirmed`` / ``order_scheduled`` event; the retry classifies it as

@@ -404,48 +404,75 @@ async def assign_driver_to_order(
             order_repo = _get_order_repo()
             driver_repo = _get_driver_repo()
 
-            # Validate order exists
-            order = await order_repo.get(tenant_id, order_id)
-            if order is None:
-                success = True
-                return json.dumps({
-                    "tool": "assign_driver_to_order",
-                    "error": f"Order {order_id} not found for tenant {tenant_id}",
-                })
-
-            # Validate driver exists and is available
-            driver = await driver_repo.get(tenant_id, driver_id)
-            if driver is None:
-                success = True
-                return json.dumps({
-                    "tool": "assign_driver_to_order",
-                    "error": f"Driver {driver_id} not found for tenant {tenant_id}",
-                })
-
-            if driver.status in ("off_duty", "inactive"):
-                success = True
-                return json.dumps({
-                    "tool": "assign_driver_to_order",
-                    "error": (
-                        f"Driver {driver_id} is {driver.status} and cannot "
-                        f"be assigned to orders."
-                    ),
-                    "error_code": "driver_unavailable",
-                })
-
-            # Perform the assignment via the order repository
-            order_dict = order.model_dump(mode="python")
-            order_dict["assigned_driver_id"] = driver_id
-
+            from fuel.order_repository import (
+                OrderChangedConcurrentlyError,
+                OrderWriteDiscardedError,
+            )
             from services.time_utils import utcnow
 
-            now = utcnow()
-            order_dict["updated_at"] = now
-            order_dict["last_event_timestamp"] = now
-
-            await order_repo.upsert_with_last_event_timestamp(
-                tenant_id, order_dict
-            )
+            # Guarded write (OI-41): applies only if the order's status and
+            # last_event_timestamp are still the ones read here, so a
+            # concurrent loading-plan executor write (links, ``scheduled``)
+            # is never overwritten by this stale read. One re-read retry;
+            # the order and the driver are re-validated on the fresh read.
+            for attempt in (1, 2):
+                # Validate order exists
+                order = await order_repo.get(tenant_id, order_id)
+                if order is None:
+                    success = True
+                    return json.dumps({
+                        "tool": "assign_driver_to_order",
+                        "error": f"Order {order_id} not found for tenant {tenant_id}",
+                    })
+                # Validate driver exists and is available
+                driver = await driver_repo.get(tenant_id, driver_id)
+                if driver is None:
+                    success = True
+                    return json.dumps({
+                        "tool": "assign_driver_to_order",
+                        "error": f"Driver {driver_id} not found for tenant {tenant_id}",
+                    })
+                if driver.status in ("off_duty", "inactive"):
+                    success = True
+                    return json.dumps({
+                        "tool": "assign_driver_to_order",
+                        "error": (
+                            f"Driver {driver_id} is {driver.status} and cannot "
+                            f"be assigned to orders."
+                        ),
+                        "error_code": "driver_unavailable",
+                    })
+                # Perform the assignment via the order repository
+                order_dict = order.model_dump(mode="python")
+                expected_status = order_dict.get("status")
+                expected_ts = order_dict.get("last_event_timestamp")
+                order_dict["assigned_driver_id"] = driver_id
+                now = utcnow()
+                order_dict["updated_at"] = now
+                order_dict["last_event_timestamp"] = now
+                try:
+                    await order_repo.upsert_with_last_event_timestamp(
+                        tenant_id,
+                        order_dict,
+                        expected_status=expected_status,
+                        expected_last_event_timestamp=expected_ts,
+                    )
+                    break
+                except (OrderChangedConcurrentlyError, OrderWriteDiscardedError):
+                    if attempt == 2:
+                        success = True
+                        return json.dumps({
+                            "tool": "assign_driver_to_order",
+                            "error": (
+                                f"Order {order_id} changed while it was being "
+                                "updated; reload and retry."
+                            ),
+                            "error_code": "order_changed_concurrently",
+                        })
+                    logger.info(
+                        "assign_driver_to_order: order %s changed concurrently; "
+                        "re-reading once", order_id,
+                    )
 
             # Increment driver active order count
             try:
