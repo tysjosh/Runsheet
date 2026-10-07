@@ -571,6 +571,16 @@ class Settings(BaseSettings):
             "cannot leak into real tenant queries. Default False."
         ),
     )
+    # POST /api/data/cleanup wipes every tenant's shared indices and reseeds
+    # demo data (OI-08). Off by default; set only on a local dev stack. Never
+    # set it on staging or production.
+    allow_data_cleanup: bool = Field(
+        default=False,
+        description=(
+            "When True (and not production), platform_admin may call "
+            "POST /api/data/cleanup. Local dev only. Default False."
+        ),
+    )
 
     # Circuit Breaker Configuration
     circuit_breaker_failure_threshold: int = Field(

@@ -926,7 +926,7 @@ GET  /api/analytics/delay-causes    # Delay cause breakdown
 GET  /api/analytics/regional        # Regional performance analytics
 GET  /api/analytics/time-series     # Time-series metric data
 GET  /api/search                    # Semantic search across indices
-POST /api/data/cleanup              # Deduplicate data
+POST /api/data/cleanup              # Wipe + reseed demo data (platform_admin + ALLOW_DATA_CLEANUP, local dev only)
 POST /api/data/upload/sheets        # Upload data from Google Sheets
 POST /api/data/upload/csv           # Upload CSV data
 ```

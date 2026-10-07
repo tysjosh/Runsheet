@@ -1203,9 +1203,12 @@ async def semantic_search(
 #
 #   1. Refuse outright in production — the endpoint has no legitimate
 #      production use, it exists for local-dev demo recycling only.
-#   2. Require the caller carry the ``admin`` role so regular dispatcher
-#      / driver JWTs cannot trigger a wipe even in staging.
-#   3. Keep the existing tenant dependency so requests without a valid
+#   2. Refuse unless ``ALLOW_DATA_CLEANUP=true`` (default off, OI-08). A
+#      tenant admin on staging could otherwise wipe every tenant. The flag
+#      is for local dev stacks only and is never set by staging_aws.sh.
+#   3. Require ``platform_admin`` (exact match), not a tenant ``admin``,
+#      because the wipe crosses every tenant.
+#   4. Keep the existing tenant dependency so requests without a valid
 #      JWT never reach the handler at all.
 #
 # The data_seeder helpers themselves are untouched — scoping the cleanup
@@ -1214,7 +1217,10 @@ async def semantic_search(
 @router.post("/data/cleanup")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
 async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
-    """Clean up duplicate data in Elasticsearch. Admin-only; disabled in production."""
+    """Wipe and reseed demo data across every tenant.
+
+    platform_admin only, behind ALLOW_DATA_CLEANUP, never in production.
+    """
     if settings.environment == Environment.PRODUCTION:
         # Refuse outright in production — there is no legitimate
         # production use for a platform-wide wipe + reseed endpoint.
@@ -1222,10 +1228,19 @@ async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depen
             message="Data cleanup is not available in production",
             details={"environment": settings.environment.value},
         )
-    # Admin-only — delegate to the shared, exact-match Role_Authorizer
-    # (Req 4.7) so this destructive endpoint uses the one consistent
-    # authorization mechanism rather than an ad-hoc membership check.
-    require_role(tenant, "admin")
+    if not settings.allow_data_cleanup:
+        raise forbidden(
+            message=(
+                "Data cleanup is disabled. Set ALLOW_DATA_CLEANUP=true on a "
+                "local dev stack"
+            ),
+            details={"flag": "ALLOW_DATA_CLEANUP"},
+        )
+    # platform_admin only — delegate to the shared, exact-match
+    # Role_Authorizer (Req 4.7) so this destructive endpoint uses the one
+    # consistent authorization mechanism rather than an ad-hoc membership
+    # check. A tenant ``admin`` is refused: the wipe spans every tenant.
+    require_role(tenant, "platform_admin")
     try:
         from services.data_seeder import data_seeder
 

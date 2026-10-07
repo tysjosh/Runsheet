@@ -9,8 +9,9 @@ analytics in a single POST. They now require:
 
 * A bound ``TenantContext`` (so unauthenticated callers never reach
   the handler at all).
-* ``"admin"`` in ``tenant.roles`` (so dispatcher / driver JWTs are
-  rejected with 403).
+* ``"platform_admin"`` in ``tenant.roles`` (so dispatcher, driver and
+  tenant-admin JWTs are rejected with 403, OI-08).
+* ``ALLOW_DATA_CLEANUP=true`` (default off, local dev only, OI-08).
 * Non-production ``environment`` (so a misconfigured production
   deployment cannot trigger a wipe).
 
@@ -76,71 +77,94 @@ def _build_app(router_module, *, roles: list[str], tenant_id: str = "tenant-a"):
 
 
 class TestDataCleanupGating:
-    """``POST /api/data/cleanup`` requires admin role, refuses in production."""
+    """``POST /api/data/cleanup`` requires platform_admin and ALLOW_DATA_CLEANUP,
+    and refuses in production (OI-08)."""
 
-    def _patch_settings(self, environment: Environment):
+    def _patch_settings(self, environment: Environment, *, allow_data_cleanup: bool = True):
         """Patch the module-level ``settings`` used by the cleanup handler
-        so its environment check sees the requested value."""
+        so its environment and flag checks see the requested values."""
         import data_endpoints
 
         stub_settings = MagicMock(
             environment=environment,
+            allow_data_cleanup=allow_data_cleanup,
             rate_limit_requests_per_minute=1000,
         )
         return patch.object(data_endpoints, "settings", stub_settings)
 
-    def test_non_admin_returns_403(self):
-        import data_endpoints
-
-        app = _build_app(data_endpoints, roles=["dispatcher"])
-        with self._patch_settings(Environment.DEVELOPMENT):
-            with TestClient(app) as client:
-                resp = client.post("/api/data/cleanup")
-
-        assert resp.status_code == 403, resp.text
-        body = resp.json()
-        # The error envelope surfaces the admin-role requirement. The shared
-        # Role_Authorizer reports the requirement under ``details.required_roles``
-        # (a list) via the canonical ``INSUFFICIENT_ROLE`` error.
-        details = body.get("details") or {}
-        assert "admin" in (body.get("message") or "").lower() \
-            or "admin" in details.get("required_role", "").lower() \
-            or "admin" in details.get("required_roles", [])
-
-    def test_admin_in_production_returns_403(self):
-        import data_endpoints
-
-        app = _build_app(data_endpoints, roles=["admin"])
-        with self._patch_settings(Environment.PRODUCTION):
-            with TestClient(app) as client:
-                resp = client.post("/api/data/cleanup")
-
-        assert resp.status_code == 403, resp.text
-
-    def test_admin_in_development_succeeds(self):
-        import data_endpoints
-
-        # Wipe + seed are both stubbed so the test never touches ES.
+    def _fake_seeder(self):
         fake_seeder = MagicMock()
         fake_seeder.clear_all_data = AsyncMock()
         fake_seeder.seed_all_data = AsyncMock()
+        return fake_seeder
 
+    def _post(self, roles, environment, *, allow_data_cleanup=True, seeder=None):
+        import data_endpoints
+
+        seeder = seeder or self._fake_seeder()
         with patch.dict(
             sys.modules,
-            {
-                "services.data_seeder": MagicMock(data_seeder=fake_seeder),
-            },
+            {"services.data_seeder": MagicMock(data_seeder=seeder)},
             clear=False,
-        ), self._patch_settings(Environment.DEVELOPMENT):
-            app = _build_app(data_endpoints, roles=["admin"])
+        ), self._patch_settings(environment, allow_data_cleanup=allow_data_cleanup):
+            app = _build_app(data_endpoints, roles=roles)
             with TestClient(app) as client:
-                resp = client.post("/api/data/cleanup")
+                return client.post("/api/data/cleanup")
+
+    def test_non_admin_returns_403(self):
+        resp = self._post(["dispatcher"], Environment.DEVELOPMENT)
+
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        # The shared Role_Authorizer reports the requirement under
+        # ``details.required_roles`` via the canonical ``INSUFFICIENT_ROLE``.
+        details = body.get("details") or {}
+        assert "platform_admin" in details.get("required_roles", [])
+
+    def test_tenant_admin_returns_403_even_with_flag(self):
+        seeder = self._fake_seeder()
+        resp = self._post(["admin"], Environment.DEVELOPMENT, seeder=seeder)
+
+        assert resp.status_code == 403, resp.text
+        assert "platform_admin" in (resp.json().get("details") or {}).get(
+            "required_roles", []
+        )
+        seeder.clear_all_data.assert_not_awaited()
+
+    def test_platform_admin_without_flag_returns_403(self):
+        seeder = self._fake_seeder()
+        resp = self._post(
+            ["platform_admin"], Environment.DEVELOPMENT,
+            allow_data_cleanup=False, seeder=seeder,
+        )
+
+        assert resp.status_code == 403, resp.text
+        body = resp.json()
+        assert "ALLOW_DATA_CLEANUP" in body.get("message", "")
+        assert (body.get("details") or {}).get("flag") == "ALLOW_DATA_CLEANUP"
+        seeder.clear_all_data.assert_not_awaited()
+
+    def test_production_returns_403_even_with_flag(self):
+        seeder = self._fake_seeder()
+        resp = self._post(["platform_admin"], Environment.PRODUCTION, seeder=seeder)
+
+        assert resp.status_code == 403, resp.text
+        assert "production" in resp.json().get("message", "").lower()
+        seeder.clear_all_data.assert_not_awaited()
+
+    def test_platform_admin_with_flag_in_development_succeeds(self):
+        seeder = self._fake_seeder()
+        resp = self._post(["platform_admin"], Environment.DEVELOPMENT, seeder=seeder)
 
         assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["success"] is True
-        fake_seeder.clear_all_data.assert_awaited_once()
-        fake_seeder.seed_all_data.assert_awaited_once_with(force=True)
+        assert resp.json()["success"] is True
+        seeder.clear_all_data.assert_awaited_once()
+        seeder.seed_all_data.assert_awaited_once_with(force=True)
+
+    def test_flag_defaults_off(self):
+        from config.settings import Settings
+
+        assert Settings.model_fields["allow_data_cleanup"].default is False
 
 
 # ---------------------------------------------------------------------------
