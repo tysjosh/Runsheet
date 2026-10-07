@@ -109,6 +109,7 @@ async def chat_endpoint(
                 session_id=request.session_id,
                 tenant_id=tenant.tenant_id,
                 request_id=request_id,
+                user_id=tenant.user_id,
             ):
                 if isinstance(event, ChatEvent):
                     # Already normalized (orchestrator path and legacy
@@ -181,6 +182,7 @@ async def chat_fallback_endpoint(
             request.mode,
             session_id=request.session_id,
             tenant_id=tenant.tenant_id,
+            user_id=tenant.user_id,
         )
     except AgentServiceError as err:
         # An AI failure is an error response, not a 200 whose text is the
@@ -200,7 +202,7 @@ async def clear_chat_endpoint(
     request: ClearChatRequest,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
-    # The clear is scoped to (caller's verified tenant, session_id) and
+    # The clear is scoped to (caller's verified tenant, user, session_id) and
     # awaited, so it removes exactly the history the caller's next turn would
     # load and never another tenant's entry under the same session id (F1).
     # Specialists keep no history between requests, so the session store
@@ -214,7 +216,9 @@ async def clear_chat_endpoint(
     from errors.exceptions import session_store_unavailable
 
     cleared = await LogisticsAgent().clear_memory(
-        session_id=request.session_id, tenant_id=tenant.tenant_id
+        session_id=request.session_id,
+        tenant_id=tenant.tenant_id,
+        user_id=tenant.user_id,
     )
     if not cleared:
         raise session_store_unavailable(

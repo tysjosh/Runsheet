@@ -202,7 +202,9 @@ class _PartialOrchestrator:
     """Yields a partial error event in the wire shape (built by hand so this
     test exercises ``chat_streaming`` alone)."""
 
-    async def route_stream(self, user_message, tenant_id, session_id=None, request_id=None):
+    async def route_stream(
+        self, user_message, tenant_id, session_id=None, request_id=None, user_id=None
+    ):
         yield status_event("routing", targets=["fleet", "fuel"])
         yield text_event("12 trucks")
         yield ChatEvent(

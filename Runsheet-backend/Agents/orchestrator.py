@@ -244,6 +244,7 @@ class AgentOrchestrator:
         tenant_id: str,
         session_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> str:
         """Collect :meth:`route_stream` into one string.
 
@@ -256,7 +257,11 @@ class AgentOrchestrator:
         parts: List[str] = []
         error: Optional[ChatEvent] = None
         async for event in self.route_stream(
-            user_message, tenant_id, session_id=session_id, request_id=request_id
+            user_message,
+            tenant_id,
+            session_id=session_id,
+            request_id=request_id,
+            user_id=user_id,
         ):
             if event["type"] == "text":
                 parts.append(event["content"])
@@ -279,6 +284,7 @@ class AgentOrchestrator:
         tenant_id: str,
         session_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Classify intent, delegate, and yield normalized chat events.
 
@@ -298,6 +304,9 @@ class AgentOrchestrator:
         an event (F3). ``routing_completed`` records ``outcome``
         ``success`` / ``partial`` / ``failure`` (F4); partial events do not
         make it a failure.
+
+        ``user_id`` is the verified caller and is recorded on both activity
+        entries (OI-60).
         """
         start_time = time.monotonic()
 
@@ -319,7 +328,7 @@ class AgentOrchestrator:
             "outcome": "success",
             "duration_ms": 0,
             "tenant_id": tenant_id,
-            "user_id": None,
+            "user_id": user_id,
             "session_id": session_id,
             "details": {
                 "event": "intent_classified",
@@ -371,7 +380,7 @@ class AgentOrchestrator:
             "outcome": outcome,
             "duration_ms": duration_ms,
             "tenant_id": tenant_id,
-            "user_id": None,
+            "user_id": user_id,
             "session_id": session_id,
             "details": {
                 "event": "routing_completed",

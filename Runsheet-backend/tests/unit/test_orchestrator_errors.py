@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import importlib
 import json
-from typing import Any, List
+from typing import Any, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import litellm
@@ -216,6 +216,22 @@ async def test_outcome_success_when_every_target_answers():
     # Several answers are labelled by specialist (N3).
     text = "".join(e["content"] for e in events if e["type"] == "text")
     assert text == "**Fleet**\n\na\n\n**Fuel**\n\nb"
+
+
+async def test_activity_entries_carry_the_callers_user_id():
+    """OI-60: both routing entries record who asked, not ``None``."""
+    log = _activity_log()
+    orch = _orchestrator({"fleet": FakeSpecialist(answer="a")}, activity_log=log)
+
+    [e async for e in orch.route_stream("Show trucks", "tenant-1", user_id="user-7")]
+    await orch.route("Show trucks", "tenant-1", user_id="user-8")
+
+    entries = [c.args[0] for c in log.log.call_args_list]
+    assert [e["details"]["event"] for e in entries] == [
+        "intent_classified", "routing_completed",
+        "intent_classified", "routing_completed",
+    ]
+    assert [e["user_id"] for e in entries] == ["user-7", "user-7", "user-8", "user-8"]
 
 
 async def test_outcome_partial_keeps_the_answer_and_adds_a_safe_note():
@@ -427,14 +443,21 @@ def _sse_payloads(body: str) -> List[dict]:
 
 
 class _ErrorOrchestrator:
-    async def route_stream(self, user_message, tenant_id, session_id=None, request_id=None):
+    def __init__(self) -> None:
+        self.user_ids: List[Optional[str]] = []
+
+    async def route_stream(
+        self, user_message, tenant_id, session_id=None, request_id=None, user_id=None
+    ):
+        self.user_ids.append(user_id)
         yield status_event("routing", targets=["fleet"])
         yield error_event("AI_RATE_LIMITED", "safe text", request_id, 64400)
         yield done_event()
 
 
 def test_chat_endpoint_sends_the_error_event(mainagent, monkeypatch):
-    client = _client(mainagent, monkeypatch, _ErrorOrchestrator())
+    orchestrator = _ErrorOrchestrator()
+    client = _client(mainagent, monkeypatch, orchestrator)
 
     resp = client.post(
         "/api/chat", json={"message": "Show trucks"}, headers={"X-Request-ID": "req-abc"}
@@ -450,6 +473,8 @@ def test_chat_endpoint_sends_the_error_event(mainagent, monkeypatch):
         "retry_after_seconds": 64400,
     }]
     assert [p for p in payloads if p.get("type") == "done"] == [{"type": "done"}]
+    # /api/chat passes the verified caller to the orchestrator (OI-60).
+    assert orchestrator.user_ids == ["user-1"]
 
 
 def test_chat_endpoint_unexpected_failure_is_a_safe_error(mainagent, monkeypatch):

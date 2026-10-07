@@ -361,22 +361,31 @@ class LogisticsAgent:
             return False
     
     @staticmethod
-    def _session_key(tenant_id: Optional[str], session_id: Optional[str]) -> Optional[str]:
-        """Session-store key for one conversation, scoped to its tenant.
+    def _session_key(
+        tenant_id: Optional[str],
+        user_id: Optional[str],
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        """Session-store key for one conversation, scoped to its tenant and user.
 
         The store used to be keyed on the client-supplied ``session_id``
         alone, so tenant B sending tenant A's session id loaded A's history
         (staging finding F1). ``tenant_id`` comes from the verified
         ``TenantContext`` and leads the key, so a client-chosen session id
-        cannot reach another tenant's entry. Returns ``None`` when either
-        part is missing; callers then skip the store entirely.
+        cannot reach another tenant's entry. ``user_id`` (also verified)
+        follows it, so two users of one tenant who send the same session id
+        don't share history (OI-38). Returns ``None`` when any part is
+        missing; callers then skip the store entirely (fail closed).
         """
-        if not tenant_id or not session_id:
+        if not tenant_id or not user_id or not session_id:
             return None
-        return f"{tenant_id}:{session_id}"
+        return f"{tenant_id}:{user_id}:{session_id}"
 
     async def _load_conversation_history(
-        self, session_id: str, tenant_id: Optional[str] = None
+        self,
+        session_id: str,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> Optional[list]:
         """
         Load conversation history from the session store.
@@ -390,11 +399,12 @@ class LogisticsAgent:
         Args:
             session_id: Unique identifier for the conversation session.
             tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
             
         Returns:
             List of conversation messages if found, None otherwise.
         """
-        key = self._session_key(tenant_id, session_id)
+        key = self._session_key(tenant_id, user_id, session_id)
         if key is None:
             return None
 
@@ -415,7 +425,11 @@ class LogisticsAgent:
             return None
     
     async def _save_conversation_history(
-        self, session_id: str, messages: list, tenant_id: Optional[str] = None
+        self,
+        session_id: str,
+        messages: list,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         Save conversation history to the session store.
@@ -430,11 +444,12 @@ class LogisticsAgent:
             session_id: Unique identifier for the conversation session.
             messages: List of conversation messages to persist.
             tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
             
         Returns:
             True if saved successfully, False otherwise.
         """
-        key = self._session_key(tenant_id, session_id)
+        key = self._session_key(tenant_id, user_id, session_id)
         if key is None:
             return False
 
@@ -446,6 +461,7 @@ class LogisticsAgent:
             session_data = {
                 "session_id": session_id,
                 "tenant_id": tenant_id,
+                "user_id": user_id,
                 "messages": messages,
                 "updated_at": datetime.utcnow().isoformat() + "Z",
                 "message_count": len(messages)
@@ -458,18 +474,24 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to save conversation history for session {session_id}: {e}")
             return False
     
-    async def _clear_session(self, session_id: str, tenant_id: Optional[str] = None) -> bool:
+    async def _clear_session(
+        self,
+        session_id: str,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
         """
         Clear conversation history from the session store.
         
         Args:
             session_id: Unique identifier for the conversation session.
             tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
             
         Returns:
             True if cleared successfully, False otherwise.
         """
-        key = self._session_key(tenant_id, session_id)
+        key = self._session_key(tenant_id, user_id, session_id)
         if key is None:
             return False
 
@@ -568,13 +590,17 @@ class LogisticsAgent:
             os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
 
     async def clear_memory(
-        self, session_id: Optional[str] = None, tenant_id: Optional[str] = None
+        self,
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> bool:
         """
         Clear the agent's conversation memory.
         
         If a session_id is provided and session store is available,
-        also clears the persisted session data for (tenant_id, session_id).
+        also clears the persisted session data for
+        (tenant_id, user_id, session_id).
         The store delete is awaited: it used to be fire-and-forget via
         ``create_task``, so ``/api/chat/clear`` returned before anything was
         cleared and the next turn could still load the old history (F1).
@@ -582,6 +608,7 @@ class LogisticsAgent:
         Args:
             session_id: Optional session identifier to clear from store.
             tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
 
         Returns:
             True if cleared (or nothing persisted to clear), False otherwise.
@@ -593,7 +620,7 @@ class LogisticsAgent:
             
             # If session_id provided, also clear from session store
             if session_id:
-                return await self._clear_session(session_id, tenant_id)
+                return await self._clear_session(session_id, tenant_id, user_id)
             return True
         except Exception:
             logger.exception("Failed to clear agent memory")
@@ -606,6 +633,7 @@ class LogisticsAgent:
         session_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Asynchronous streaming chat method with circuit breaker protection,
@@ -650,6 +678,8 @@ class LogisticsAgent:
                 passes tenant_id through its own API.
             request_id: The HTTP request id, echoed in error events so a user
                 can quote it and operators can find the server-side log.
+            user_id: Verified user of the caller. Scopes the session-store
+                key (OI-38) and is recorded on orchestrator activity (OI-60).
         """
         start_time = time.time()
         
@@ -657,7 +687,9 @@ class LogisticsAgent:
         # Requirement 8.2: Load conversation history using session identifier
         if session_id:
             try:
-                stored_messages = await self._load_conversation_history(session_id, tenant_id)
+                stored_messages = await self._load_conversation_history(
+                    session_id, tenant_id, user_id
+                )
                 if stored_messages:
                     # Restore conversation history to agent
                     self.agent.messages = stored_messages
@@ -686,6 +718,7 @@ class LogisticsAgent:
                     tenant_id=effective_tenant_id,
                     session_id=session_id,
                     request_id=request_id,
+                    user_id=user_id,
                 ):
                     yielded_any = True
                     # A partial error (one specialist failed, the rest of
@@ -790,7 +823,9 @@ class LogisticsAgent:
                     # Requirement 8.3: Persist updated conversation history
                     if session_id:
                         try:
-                            await self._save_conversation_history(session_id, self.agent.messages, tenant_id)
+                            await self._save_conversation_history(
+                                session_id, self.agent.messages, tenant_id, user_id
+                            )
                         except Exception as e:
                             # Graceful degradation: log but don't fail the response
                             logger.warning(f"⚠️ Could not persist session {session_id}: {e}")
@@ -865,6 +900,7 @@ class LogisticsAgent:
         mode: str = "chat",
         session_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> str:
         """
         Non-streaming fallback method with circuit breaker protection, session
@@ -890,6 +926,8 @@ class LogisticsAgent:
             session_id: Optional session identifier for conversation persistence.
             tenant_id: Optional tenant identifier for data scoping. Bound to the
                 tool ContextVar for the duration of the run.
+            user_id: Verified user of the caller; scopes the session-store
+                key (OI-38).
 
         Raises:
             AgentServiceError: the AI service failed after retries, or its
@@ -901,7 +939,9 @@ class LogisticsAgent:
         # Requirement 8.2: Load conversation history using session identifier
         if session_id:
             try:
-                stored_messages = await self._load_conversation_history(session_id, tenant_id)
+                stored_messages = await self._load_conversation_history(
+                    session_id, tenant_id, user_id
+                )
                 if stored_messages:
                     # Restore conversation history to agent
                     self.agent.messages = stored_messages
@@ -948,7 +988,9 @@ class LogisticsAgent:
             # Requirement 8.3: Persist updated conversation history
             if session_id:
                 try:
-                    await self._save_conversation_history(session_id, self.agent.messages, tenant_id)
+                    await self._save_conversation_history(
+                        session_id, self.agent.messages, tenant_id, user_id
+                    )
                 except Exception as e:
                     # Graceful degradation: log but don't fail the response
                     logger.warning(f"⚠️ Could not persist session {session_id}: {e}")

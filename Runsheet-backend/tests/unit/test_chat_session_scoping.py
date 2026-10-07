@@ -1,5 +1,5 @@
 """
-Legacy chat session memory is scoped to (tenant, session) and clear works.
+Legacy chat session memory is scoped to (tenant, user, session) and clear works.
 
 Staging finding F1, second vector: ``LogisticsAgent`` persisted conversation
 history in the session store keyed on the client-supplied ``session_id`` alone,
@@ -13,7 +13,11 @@ handlers and the real ``LogisticsAgent`` on a real Strands loop. Only the LLM
 Redis and accepts any key format) are replaced, so the key the code chooses is
 exactly what decides whether history crosses tenants.
 
-Validates: Requirements 8.2, 8.3; staging finding F1.
+Two users of one tenant who send the same session id don't share history
+either (OI-38): the verified ``user_id`` is part of the key, and a missing user
+means the store isn't touched at all.
+
+Validates: Requirements 8.2, 8.3; staging finding F1; OI-38.
 """
 from __future__ import annotations
 
@@ -67,26 +71,35 @@ class FakeSessionStore:
 
     def __init__(self) -> None:
         self.data: Dict[str, dict] = {}
+        self.accessed: List[str] = []
 
     async def connect(self) -> None:
         pass
 
     async def get(self, key: str):
+        self.accessed.append(key)
         value = self.data.get(key)
         return copy.deepcopy(value) if value is not None else None
 
     async def set(self, key: str, value: dict, ttl=None) -> None:
+        self.accessed.append(key)
         self.data[key] = copy.deepcopy(value)
 
     async def delete(self, key: str) -> None:
+        self.accessed.append(key)
         self.data.pop(key, None)
 
 
 @pytest.fixture
-def harness(monkeypatch):
+def session_store():
+    return FakeSessionStore()
+
+
+@pytest.fixture
+def harness(monkeypatch, session_store):
     model = RecordingModel()
-    store = FakeSessionStore()
-    current = {"tenant": "tenant-A"}
+    store = session_store
+    current = {"tenant": "tenant-A", "user": "user-1"}
 
     # Patch the module objects in ``sys.modules``: that is what the handlers'
     # call-time ``from Agents.mainagent import LogisticsAgent`` resolves to.
@@ -106,7 +119,7 @@ def harness(monkeypatch):
     async def _tenant() -> TenantContext:
         return TenantContext(
             tenant_id=current["tenant"],
-            user_id="user-1",
+            user_id=current["user"],
             has_pii_access=False,
             roles=["dispatcher"],
         )
@@ -117,8 +130,9 @@ def harness(monkeypatch):
     app.dependency_overrides[get_tenant_context] = _tenant
     client = TestClient(app)
 
-    def turn(tenant: str, session_id: str, message: str) -> list:
+    def turn(tenant: str, session_id: str, message: str, user: str = "user-1") -> list:
         current["tenant"] = tenant
+        current["user"] = user
         before = len(model.calls)
         resp = client.post(
             "/api/chat/fallback", json={"message": message, "session_id": session_id}
@@ -127,8 +141,9 @@ def harness(monkeypatch):
         assert len(model.calls) == before + 1
         return model.calls[-1]
 
-    def clear(tenant: str, session_id: str):
+    def clear(tenant: str, session_id: str, user: str = "user-1"):
         current["tenant"] = tenant
+        current["user"] = user
         return client.post("/api/chat/clear", json={"session_id": session_id})
 
     return turn, clear
@@ -198,3 +213,37 @@ def test_clear_reports_failure_when_store_delete_fails(harness, monkeypatch):
 
     assert resp.status_code == 503, resp.text
     assert resp.json()["error_code"] == "SESSION_STORE_UNAVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# OI-38: history is per user within a tenant
+# ---------------------------------------------------------------------------
+
+
+def test_two_users_in_one_tenant_with_same_session_id_do_not_share(harness, session_store):
+    turn, _ = harness
+    turn("tenant-A", "s1", "user one secret", user="user-1")
+    call = turn("tenant-A", "s1", "hello", user="user-2")
+
+    assert len(call) == 1, f"user-2's turn carried {len(call)} messages"
+    assert not any("user one secret" in t for t in _texts(call))
+    assert set(session_store.data) == {"tenant-A:user-1:s1", "tenant-A:user-2:s1"}
+
+
+def test_missing_user_never_touches_the_store(harness, session_store):
+    turn, _ = harness
+    turn("tenant-A", "s1", "anonymous secret", user="")
+
+    assert session_store.accessed == []
+    assert session_store.data == {}
+
+
+def test_clear_deletes_only_the_callers_key(harness, session_store):
+    turn, clear = harness
+    turn("tenant-A", "s1", "one", user="user-1")
+    turn("tenant-A", "s1", "two", user="user-2")
+
+    resp = clear("tenant-A", "s1", user="user-1")
+
+    assert resp.status_code == 200, resp.text
+    assert set(session_store.data) == {"tenant-A:user-2:s1"}
