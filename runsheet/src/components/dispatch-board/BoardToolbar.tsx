@@ -2,6 +2,10 @@
  * Board toolbar (design K14.1): date navigation (today − 7 … today + 14),
  * shift, zoom, density, search, filters, presence, undo/redo and help.
  * Generate plan and Publish all ready join in Phase 6.
+ *
+ * It is a labelled `role="group"`, not an APG `toolbar`: it holds a date
+ * input and a search box, whose arrow keys must keep editing text, so each
+ * control stays in the Tab order (Phase 4 review P4-7).
  */
 import {
   ChevronLeft,
@@ -15,7 +19,6 @@ import {
 import { useState } from "react";
 import type { BoardPresenceUser } from "../../hooks/useDispatchBoardSocket";
 import type { BoardShift } from "../../services/dispatchBoardApi";
-import { Modal } from "../ui";
 import { FilterChips } from "./FilterChips";
 import { PresenceBar } from "./PresenceBar";
 import { ShiftPicker } from "./ShiftPicker";
@@ -26,20 +29,6 @@ import {
   DAYS_AHEAD,
   DAYS_BACK,
 } from "./viewState";
-
-/** R18.5 shortcut list; the keys are wired in plan task 31. */
-export const SHORTCUTS: [string, string][] = [
-  ["/", "Search"],
-  ["A", "Assign selected"],
-  ["M", "Move selected"],
-  ["P", "Pair driver"],
-  ["U", "Unassign"],
-  ["[ / ]", "Previous / next day"],
-  ["T", "Timeline / sequence"],
-  ["Cmd/Ctrl + Z", "Undo"],
-  ["Shift + Cmd/Ctrl + Z", "Redo"],
-  ["Esc", "Cancel"],
-];
 
 export interface BoardToolbarProps {
   view: BoardView;
@@ -56,6 +45,7 @@ export interface BoardToolbarProps {
   onDateChange: (date: string) => void;
   onUndo: () => void;
   onRedo: () => void;
+  onHelp: () => void;
 }
 
 const segment = (active: boolean) =>
@@ -81,16 +71,16 @@ export function BoardToolbar({
   onDateChange,
   onUndo,
   onRedo,
+  onHelp,
 }: BoardToolbarProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const [helpOpen, setHelpOpen] = useState(false);
   const min = addDays(today, -DAYS_BACK);
   const max = addDays(today, DAYS_AHEAD);
   const filterCount = activeFilterCount(view.filters);
 
   return (
     <div
-      role="toolbar"
+      role="group"
       aria-label="Board"
       className="border-b border-gray-200 bg-white px-4 py-2"
     >
@@ -195,6 +185,7 @@ export function BoardToolbar({
             aria-hidden="true"
           />
           <input
+            id="board-search"
             type="search"
             aria-label="Search orders, customers, trucks and drivers"
             placeholder="Search"
@@ -240,7 +231,7 @@ export function BoardToolbar({
             type="button"
             className={iconButton}
             aria-label="Keyboard shortcuts"
-            onClick={() => setHelpOpen(true)}
+            onClick={onHelp}
           >
             <CircleHelp className="h-4 w-4" aria-hidden="true" />
           </button>
@@ -257,26 +248,6 @@ export function BoardToolbar({
           />
         </div>
       )}
-
-      <Modal
-        isOpen={helpOpen}
-        onClose={() => setHelpOpen(false)}
-        title="Keyboard shortcuts"
-        size="sm"
-      >
-        <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-          {SHORTCUTS.map(([key, label]) => (
-            <div key={key} className="contents">
-              <dt>
-                <kbd className="rounded border border-gray-300 bg-gray-50 px-1.5 py-0.5 font-mono text-xs">
-                  {key}
-                </kbd>
-              </dt>
-              <dd className="text-gray-700">{label}</dd>
-            </div>
-          ))}
-        </dl>
-      </Modal>
     </div>
   );
 }

@@ -94,7 +94,8 @@ describe("load states", () => {
     expect(screen.getByText("Loading the board")).toBeInTheDocument();
     expect(screen.getByTestId("lane-skeleton").children).toHaveLength(6);
     expect(screen.getByTestId("tray-skeleton")).toBeInTheDocument();
-    expect(screen.getByRole("toolbar", { name: "Board" })).toBeInTheDocument();
+    // A labelled group, not an APG toolbar (date and search inputs; P4-7).
+    expect(screen.getByRole("group", { name: "Board" })).toBeInTheDocument();
   });
 
   it("no trucks with compartments links to setup (R21.2)", async () => {

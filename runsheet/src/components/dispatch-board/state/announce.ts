@@ -180,27 +180,49 @@ export function announceCommitted(
         lane(command.truck_id),
         command.truck_id,
       );
-    case "move_stops":
+    case "move_stops": {
+      // A cross-lane move answers with the source lane too (R19.1 "from where").
+      const from = lanes.find(
+        (l) =>
+          l.truck_id !== command.truck_id &&
+          !command.order_ids.some((id) => findStop(l, id)),
+      );
       return placementText(
-        "moved to",
+        from ? `moved from ${truckLabel(from.truck_id)} to` : "moved to",
         command.order_ids,
         lane(command.truck_id),
         command.truck_id,
       );
-    case "unassign_orders":
-      return sentence(
-        `${command.order_ids.length === 1 ? orderLabel(command.order_ids[0]) : `${command.order_ids.length} orders`} returned to the order tray`,
+    }
+    case "unassign_orders": {
+      const what =
+        command.order_ids.length === 1
+          ? orderLabel(command.order_ids[0])
+          : `${command.order_ids.length} orders`;
+      // Dispatched orders wait on the lane's shelf instead (R13.5).
+      const shelved = lanes.find((l) =>
+        command.order_ids.some((id) => l.shelf.includes(id)),
       );
+      return shelved
+        ? sentence(
+            `${what} moved to the To reassign shelf on ${truckLabel(shelved.truck_id)}`,
+          )
+        : sentence(`${what} returned to the order tray`);
+    }
     case "pair_driver": {
       if (command.driver_id === null)
         return sentence(`${truckLabel(command.truck_id)} has no driver`);
       const name =
         lane(command.truck_id)?.driver?.name || `Driver ${command.driver_id}`;
       const l = lane(command.truck_id);
-      return [
-        sentence(`${name} paired with ${truckLabel(command.truck_id)}`),
-        l ? checkSentence(worstCheck(l.checks)) : "",
-      ]
+      // The pairing moved off another truck (R6.2): name both.
+      const from = lanes.find(
+        (x) => x.truck_id !== command.truck_id && x.driver_id === null,
+      );
+      const head = from
+        ? `${name} paired with ${truckLabel(command.truck_id)}, moved from ${truckLabel(from.truck_id)}`
+        : `${name} paired with ${truckLabel(command.truck_id)}`;
+      return [sentence(head), l ? checkSentence(worstCheck(l.checks)) : ""]
         .filter(Boolean)
         .join(" ");
     }
@@ -268,6 +290,28 @@ export function announceUndoRefused(
 ): string {
   const verb = redo ? "redo" : "undo";
   return `Can't ${verb}. ${UNDO_REASONS[reason ?? ""] ?? "The board changed since."}`;
+}
+
+/** Publish result per lane (R12.8): failures go to the assertive region. */
+export function announcePublishResult(
+  truckId: string,
+  state: string,
+  writesMade?: boolean | "unknown" | null,
+): { text: string; assertive: boolean } | null {
+  if (state === "published") {
+    return { text: `${truckLabel(truckId)} published.`, assertive: false };
+  }
+  if (state === "failed" || state === "recovering") {
+    const tail =
+      writesMade === false
+        ? " Nothing was changed. Retry from the lane."
+        : " Retry from the lane.";
+    return {
+      text: `Publish failed on ${truckLabel(truckId)}.${tail}`,
+      assertive: true,
+    };
+  }
+  return null;
 }
 
 export function announceNotSaved(): string {

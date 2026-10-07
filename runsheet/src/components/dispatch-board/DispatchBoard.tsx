@@ -4,12 +4,13 @@
  *
  * Owns the view state (URL first, local storage for defaults), loads the
  * snapshot for the service day, keeps it live through
- * `useDispatchBoardSocket`, and holds the reducer and command senders that
- * the trays and lanes (plan Phase 5) plug into. This shell renders the
- * toolbar, banners and every load state; the lane and tray bodies are
- * summaries until Phase 5 replaces them with the grid and trays.
+ * `useDispatchBoardSocket`, and holds the reducer, command senders and the
+ * interaction controller that trays, lanes, menus and dialogs share
+ * (`BoardContext`). Renders the toolbar, banners, every load state, the
+ * trays, the lanes grid, Place mode, the shortcut help and the two live
+ * regions (mounted at page load, R19.1).
  */
-import { CalendarClock, Truck } from "lucide-react";
+import { Truck } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   useCallback,
@@ -29,23 +30,30 @@ import {
   type BoardSnapshot,
   getBoard,
   isAbortError,
-  type LaneState,
   type LaneView,
 } from "../../services/dispatchBoardApi";
 import { getCurrentUserId } from "../../utils/auth";
-import {
-  Badge,
-  EmptyState,
-  LoadErrorState,
-  ToastContainer,
-  useToasts,
-} from "../ui";
+import { EmptyState, LoadErrorState, ToastContainer, useToasts } from "../ui";
 import { BoardBanners } from "./BoardBanners";
+import { BoardContext } from "./BoardContext";
+import { BoardLiveRegion, useAnnouncer } from "./BoardLiveRegion";
 import { BoardToolbar } from "./BoardToolbar";
+import { AssignToMenu } from "./dialogs/AssignToMenu";
+import { CardMenu } from "./dialogs/CardMenu";
+import {
+  readSingleKeyEnabled,
+  ShortcutHelpDialog,
+  writeSingleKeyEnabled,
+} from "./dialogs/ShortcutHelpDialog";
+import { BoardGrid } from "./grid/BoardGrid";
+import { handleShortcut } from "./keyboard/useBoardShortcuts";
+import { PlaceModeBanner } from "./PlaceModeBanner";
 import {
   announceBlocked,
+  announceCommitted,
   announceConflict,
   announceNotSaved,
+  announcePublishResult,
   announceUndoRefused,
 } from "./state/announce";
 import {
@@ -57,7 +65,10 @@ import {
   type CommandOutcome,
   useBoardCommands,
 } from "./state/useBoardCommands";
+import { TrayPanel } from "./trays/TrayPanel";
+import { useBoardController } from "./useBoardController";
 import {
+  addDays,
   type BoardView,
   clampDate,
   parseView,
@@ -77,21 +88,6 @@ export interface DispatchBoardProps {
   /** Leave the board (LoadErrorState "back"). */
   onExit?: () => void;
 }
-
-const LANE_STATE_LABEL: Record<
-  LaneState,
-  {
-    label: string;
-    variant: "neutral" | "success" | "warning" | "info" | "error";
-  }
-> = {
-  draft: { label: "Draft", variant: "neutral" },
-  published: { label: "Published", variant: "success" },
-  modified: { label: "Modified", variant: "warning" },
-  publishing: { label: "Publishing", variant: "info" },
-  failed: { label: "Publish failed", variant: "error" },
-  recovering: { label: "Recovering", variant: "error" },
-};
 
 function storage(): Storage | null {
   try {
@@ -139,6 +135,11 @@ function stopCount(lanes: LaneView[]): number {
   );
 }
 
+const READ_ONLY_TEXT: Record<string, string> = {
+  shadow: "Preview mode, changes are not saved.",
+  past_service_day: "This day is in the past. The board is read-only.",
+};
+
 export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -152,6 +153,16 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   const [failure, setFailure] = useState<LoadFailure | null>(null);
   const [presence, setPresence] = useState<BoardPresenceUser[]>([]);
   const { toasts, addToast, dismissToast } = useToasts();
+  const announcer = useAnnouncer();
+  const { announce: announceTo } = announcer;
+  const announce = useCallback(
+    (text: string, assertive = false) =>
+      announceTo(text, assertive ? "assertive" : "polite"),
+    [announceTo],
+  );
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [singleKey, setSingleKey] = useState(() => readSingleKeyEnabled());
+  const rootRef = useRef<HTMLDivElement>(null);
 
   const snapshot = state.snapshot;
   const [storedZone] = useState(() => readStoredZone(storage()));
@@ -191,6 +202,22 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
 
+  // The first snapshot waits for the session user id, and the socket waits
+  // for the snapshot, so this user's own early echoes are never shown as
+  // another dispatcher's (Phase 4 review).
+  const selfUserId = useRef<string | null>(null);
+  const selfIdPromise = useRef<Promise<void> | null>(null);
+  const selfReady = () => {
+    selfIdPromise.current ??= getCurrentUserId()
+      .then((id) => {
+        selfUserId.current = id;
+      })
+      .catch(() => undefined);
+    return selfIdPromise.current;
+  };
+  const selfReadyRef = useRef(selfReady);
+  selfReadyRef.current = selfReady;
+
   const load = useCallback(
     async ({ background = false }: { background?: boolean } = {}) => {
       loadAbort.current?.abort();
@@ -200,12 +227,15 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       // A foreground load shows the skeleton, not a previous failure.
       if (!background) setFailure(null);
       try {
-        const snap: BoardSnapshot = await getBoard(date, {
-          filters: serverFiltering.current
-            ? serverTrayFilters(filtersRef.current)
-            : undefined,
-          signal: controller.signal,
-        });
+        const [snap]: [BoardSnapshot, void] = await Promise.all([
+          getBoard(date, {
+            filters: serverFiltering.current
+              ? serverTrayFilters(filtersRef.current)
+              : undefined,
+            signal: controller.signal,
+          }),
+          selfReadyRef.current(),
+        ]);
         if (controller.signal.aborted || date !== dateRef.current) return;
         if (snap.trays.orders_truncated) serverFiltering.current = true;
         dispatch({ type: "snapshotLoaded", snapshot: snap });
@@ -268,17 +298,10 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   // ── Live updates ──────────────────────────────────────────────────────────
   const lanesRef = useRef(state.lanesById);
   lanesRef.current = state.lanesById;
+  const laneActorsRef = useRef(state.laneActors);
+  laneActorsRef.current = state.laneActors;
   // Own echoed events must not name the current user as "the other dispatcher".
-  const selfUserId = useRef<string | null>(null);
-  useEffect(() => {
-    let active = true;
-    void getCurrentUserId().then((id) => {
-      if (active) selfUserId.current = id;
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+  const announced = useRef<Set<string>>(new Set());
   const socket = useDispatchBoardSocket(
     snapshot ? serviceDate : null,
     {
@@ -298,7 +321,23 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       },
       onLaneStale: (e) => void loadLanes(e.truck_ids),
       onPresence: setPresence,
-      onPublishProgress: (e) => void loadLanes(e.lanes.map((l) => l.truck_id)),
+      onPublishProgress: (e) => {
+        // Publish result per lane, once (R12.8): failures are assertive.
+        for (const l of e.lanes) {
+          const key = `${e.publish_id}:${l.truck_id}:${l.state}`;
+          if (announced.current.has(key)) continue;
+          const writes = l.last_result?.writes_made as
+            | boolean
+            | "unknown"
+            | null
+            | undefined;
+          const msg = announcePublishResult(l.truck_id, l.state, writes);
+          if (!msg) continue;
+          announced.current.add(key);
+          announce(msg.text, msg.assertive);
+        }
+        void loadLanes(e.lanes.map((l) => l.truck_id));
+      },
       onSuggestionsChanged: () => void loadRef.current({ background: true }),
       onRefetch: () => void loadRef.current({ background: true }),
       onOrdersChanged: () => void loadRef.current({ background: true }),
@@ -312,10 +351,13 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     { enabled: Boolean(snapshot), focusTruckId: view.truck },
   );
 
-  // ── Commands (undo/redo here; every other sender is wired in Phase 5) ─────
+  // ── Commands: results go to the live regions and toasts (R19, R14.2) ─────
   const onOutcome = useCallback(
     (o: CommandOutcome) => {
       switch (o.kind) {
+        case "committed":
+          announce(announceCommitted(o.command, o.response.lanes));
+          break;
         case "conflict": {
           // Name the lane whose version moved, not just the first returned.
           const expected = o.command.expected_lane_versions;
@@ -326,33 +368,45 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
                 l.version !== expected[l.truck_id],
             ) ?? o.lanes[0];
           const truck = changed?.truck_id ?? "";
-          const actor = state.laneActors[truck]?.name;
-          addToast(announceConflict(truck, actor), "error");
+          const actor = laneActorsRef.current[truck]?.name;
+          const text = announceConflict(truck, actor);
+          addToast(text, "error");
+          announce(text, true);
           break;
         }
-        case "blocked":
-          addToast(announceBlocked(o.checks), "error");
+        case "blocked": {
+          const text = announceBlocked(o.checks);
+          addToast(text, "error");
+          announce(text);
           break;
-        case "undo_stale":
-          addToast(
-            announceUndoRefused(o.reason, o.command.type === "reapply"),
-            "error",
+        }
+        case "undo_stale": {
+          const text = announceUndoRefused(
+            o.reason,
+            o.command.type === "reapply",
           );
+          addToast(text, "error");
+          announce(text);
           break;
-        case "network":
-          addToast(announceNotSaved(), "error");
+        }
+        case "network": {
+          const text = announceNotSaved();
+          addToast(text, "error");
+          announce(text);
           break;
-        case "error":
-          addToast(
-            o.error instanceof Error ? o.error.message : "Not saved.",
-            "error",
-          );
+        }
+        case "error": {
+          const text =
+            o.error instanceof Error ? o.error.message : "Not saved.";
+          addToast(text, "error");
+          announce(text);
           break;
+        }
         default:
           break;
       }
     },
-    [addToast, state.laneActors],
+    [addToast, announce],
   );
   const commands = useBoardCommands({
     serviceDate,
@@ -389,6 +443,61 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     [snapshot],
   );
 
+  // ── Interactions (trays, lanes, menus, Place mode, drag) ──────────────────
+  const ensureVisibleRef = useRef<(truckId: string) => void>(() => {});
+  const registerEnsureVisible = useCallback((fn: (truckId: string) => void) => {
+    ensureVisibleRef.current = fn;
+  }, []);
+  const visibleRef = useRef<string[]>([]);
+  const onVisibleChange = useCallback((ids: string[]) => {
+    visibleRef.current = ids;
+  }, []);
+  const readOnlyText =
+    READ_ONLY_TEXT[readOnlyReason ?? ""] ?? "The board is read-only.";
+  const controller = useBoardController({
+    state,
+    dispatch,
+    snapshot:
+      snapshot && snapshot.service_date === serviceDate ? snapshot : null,
+    commands,
+    view,
+    serviceDate,
+    timezone: timezone ?? "UTC",
+    today,
+    readOnly,
+    readOnlyText,
+    announce,
+    toast: (text, kind) => addToast(text, kind),
+    refresh: () => void loadRef.current({ background: true }),
+    rootRef,
+    ensureLaneVisible: (truckId) => ensureVisibleRef.current(truckId),
+    visibleLanes: () => visibleRef.current,
+  });
+  const { api } = controller;
+
+  const canUndo = !readOnly && state.undoStack.length > 0;
+  const canRedo = !readOnly && state.redoStack.length > 0;
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    handleShortcut(e, {
+      api,
+      singleKey,
+      focusSearch: () => document.getElementById("board-search")?.focus(),
+      prevDay: () =>
+        updateView({ date: clampDate(addDays(serviceDate, -1), today) }),
+      nextDay: () =>
+        updateView({ date: clampDate(addDays(serviceDate, 1), today) }),
+      toggleZoom: () =>
+        updateView({
+          zoom: view.zoom === "timeline" ? "sequence" : "timeline",
+        }),
+      openHelp: () => setHelpOpen(true),
+      undo: () => void commands.undo(),
+      redo: () => void commands.redo(),
+      canUndo,
+      canRedo,
+    });
+  };
+
   const toolbar = (
     <BoardToolbar
       view={view}
@@ -399,12 +508,13 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       products={products}
       priorities={priorities}
       presence={presence}
-      canUndo={!readOnly && state.undoStack.length > 0}
-      canRedo={!readOnly && state.redoStack.length > 0}
+      canUndo={canUndo}
+      canRedo={canRedo}
       onViewChange={updateView}
       onDateChange={(date) => updateView({ date: clampDate(date, today) })}
       onUndo={() => void commands.undo()}
       onRedo={() => void commands.redo()}
+      onHelp={() => setHelpOpen(true)}
     />
   );
 
@@ -421,7 +531,7 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
         onRetry={() => void load()}
       />
     );
-  } else if (!snapshot || !currentDay) {
+  } else if (!snapshot || !currentDay || !api) {
     body = <BoardSkeleton />;
   } else if (
     snapshot.lanes.length === 0 &&
@@ -439,88 +549,30 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       />
     );
   } else {
-    const trayOrders = snapshot.trays.orders;
-    const planned = stopCount(lanes);
     body = (
       <div className="flex min-h-0 flex-1">
-        <section
-          aria-label="Trays"
-          className="w-80 shrink-0 overflow-auto border-r border-gray-200 bg-white p-4"
-        >
-          <h2 className="text-sm font-semibold text-gray-900">Orders</h2>
-          {trayOrders.length === 0 && planned === 0 && (
-            <div className="mt-2 text-sm text-gray-600">
-              <p>No orders for this day.</p>
-              <button
-                type="button"
-                className="mt-1 font-medium text-primary underline hover:no-underline"
-                onClick={() => router.push("/dashboard/orders")}
-              >
-                Go to Orders
-              </button>
-            </div>
-          )}
-          {trayOrders.length === 0 && planned > 0 && (
-            <p className="mt-2 text-sm text-gray-600">
-              All orders are planned ({planned}).
-            </p>
-          )}
-          {trayOrders.length > 0 && (
-            <p className="mt-2 text-sm text-gray-600">
-              {trayOrders.length} {trayOrders.length === 1 ? "order" : "orders"}{" "}
-              to plan
-            </p>
-          )}
-          <h2 className="mt-4 text-sm font-semibold text-gray-900">Drivers</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            {snapshot.trays.drivers.length} drivers
-          </p>
-          <h2 className="mt-4 text-sm font-semibold text-gray-900">Trucks</h2>
-          <p className="mt-1 text-sm text-gray-600">
-            {snapshot.trays.trucks.length} trucks without a lane
-          </p>
-        </section>
-        <section
-          aria-label="Lanes"
-          className="min-w-0 flex-1 overflow-auto p-4"
-        >
-          {lanes.length === 0 ? (
-            <EmptyState
-              icon={<CalendarClock />}
-              title="No trucks on the board yet"
-              description="Add a truck from the truck tray to start planning."
-            />
-          ) : (
-            <ul className="space-y-2">
-              {lanes.map((lane) => {
-                const badge = LANE_STATE_LABEL[lane.state];
-                return (
-                  <li
-                    key={lane.truck_id}
-                    className={`flex items-center gap-3 rounded-md border border-gray-200 bg-white px-4 ${view.density === "compact" ? "h-[72px]" : "h-[104px]"}`}
-                  >
-                    <span className="font-medium text-gray-900">
-                      Truck {lane.truck_id}
-                    </span>
-                    <span className="text-sm text-gray-600">
-                      {lane.driver?.name ?? "No driver"}
-                    </span>
-                    <Badge variant={badge.variant}>{badge.label}</Badge>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </section>
+        <TrayPanel
+          plannedCount={stopCount(lanes)}
+          onGoToOrders={() => router.push("/dashboard/orders")}
+        />
+        <BoardGrid
+          lanes={lanes}
+          zone={timezone ? zoneAbbreviation(timezone) : ""}
+          focusTruckId={view.truck}
+          registerEnsureVisible={registerEnsureVisible}
+          onVisibleChange={onVisibleChange}
+        />
       </div>
     );
   }
 
-  return (
+  const content = (
     <div
+      ref={rootRef}
       className="flex h-full min-h-0 flex-col"
       data-density={view.density}
       data-zoom={view.zoom}
+      onKeyDown={onKeyDown}
     >
       {toolbar}
       {snapshot && currentDay && (
@@ -528,11 +580,37 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
           readOnlyReason={readOnly ? readOnlyReason : null}
           paused={socket.paused}
           degradedSources={snapshot.degraded_sources}
-          truncated={snapshot.trays.orders_truncated}
+          truncated={false}
         />
       )}
+      {api && currentDay && <PlaceModeBanner />}
       {body}
+      <CardMenu request={controller.menu} onClose={controller.closeMenu} />
+      {api && controller.assign && (
+        <AssignToMenu
+          mode={controller.assign.mode}
+          item={controller.assign.item}
+          originKey={controller.assign.originKey}
+          onClose={controller.closeAssign}
+        />
+      )}
+      <ShortcutHelpDialog
+        isOpen={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        singleKey={singleKey}
+        onSingleKeyChange={(on) => {
+          setSingleKey(on);
+          writeSingleKeyEnabled(on);
+        }}
+      />
+      <BoardLiveRegion
+        polite={announcer.polite}
+        assertive={announcer.assertive}
+      />
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
+
+  // Always the same tree, so the live regions stay mounted from page load.
+  return <BoardContext.Provider value={api}>{content}</BoardContext.Provider>;
 }
