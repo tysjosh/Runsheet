@@ -1053,7 +1053,7 @@ class PostgresAppAccessUnitOfWork:
             await self._session.execute(
                 text(
                     "SELECT email, tenant_id, roles, has_pii_access, driver_id, "
-                    "st_user_id FROM auth_users WHERE email = :email"
+                    "st_user_id, customer_id FROM auth_users WHERE email = :email"
                 ),
                 {"email": email},
             )
@@ -1067,6 +1067,7 @@ class PostgresAppAccessUnitOfWork:
             "has_pii_access": bool(row[3]),
             "driver_id": row[4],
             "st_user_id": row[5],
+            "customer_id": row[6],
         }
 
     async def upsert_app_access(
@@ -1414,6 +1415,29 @@ class AppAccessService:
                 existing_roles = [
                     r for r in (existing.get("roles") or []) if isinstance(r, str)
                 ]
+
+                # A customer-portal identity is exclusive (OI-06, design §1.6):
+                # appending ``driver`` would violate the auth_users CHECK and
+                # turn this into a 500. Same indistinguishable 409 as above;
+                # the reason stays in the log and the audit outcome.
+                if "customer" in existing_roles or existing.get("customer_id"):
+                    logger.warning(
+                        "App-access grant refused: target_email=%s is a "
+                        "customer-portal identity (user=%s tenant=%s "
+                        "driver_id=%s)",
+                        email,
+                        tenant.user_id,
+                        tenant.tenant_id,
+                        driver_id,
+                    )
+                    audit_outcome = "rejected:customer_identity"
+                    raise app_access_already_linked(
+                        message=(
+                            "That email cannot be granted app access in this "
+                            "tenant."
+                        ),
+                        details={"driver_id": driver_id},
+                    )
 
                 await uow.upsert_app_access(
                     email=email,

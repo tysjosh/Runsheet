@@ -105,6 +105,10 @@ class TenantContext:
         default_factory=lambda: default_measurement_units_for_region("US").to_dict()
     )
     driver_id: Optional[str] = None
+    #: The commerce ``customer_id`` a portal (``customer``) session is bound
+    #: to; ``None`` for every staff caller. Appended last with a default for
+    #: the same reason as ``driver_id`` (OI-06, design §1.2).
+    customer_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +283,7 @@ def _build_context(
     roles: list[str],
     settings: TenantSettings,
     driver_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
 ) -> TenantContext:
     return TenantContext(
         tenant_id=tenant_id,
@@ -288,6 +293,7 @@ def _build_context(
         region=settings.region,
         measurement_units=settings.measurement_units.to_dict(),
         driver_id=driver_id,
+        customer_id=customer_id,
     )
 
 
@@ -310,7 +316,23 @@ async def get_tenant_context(request: Request) -> TenantContext:
     Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4
     """
     user_id, claims = await _verify_supertokens_session(request, required=True)
-    return await _context_from_session_claims(user_id, claims, request=request)
+    context = await _context_from_session_claims(user_id, claims, request=request)
+    # E1b (OI-06, design §2.2): the central customer-portal deny, repeated
+    # here as defense in depth in case AuthEnforcementMiddleware is bypassed.
+    from portal.scope import customer_session_verdict
+
+    verdict = customer_session_verdict(
+        {"roles": context.roles, "customer_id": context.customer_id},
+        request.url.path,
+    )
+    if verdict is not None:
+        from errors.codes import ErrorCode
+        from errors.exceptions import AppException
+
+        raise AppException(
+            ErrorCode(verdict), "This account can't use this part of Runsheet"
+        )
+    return context
 
 
 async def _verify_supertokens_session(
@@ -367,15 +389,24 @@ async def _context_from_session_claims(
     driver_id = (
         raw_driver_id if isinstance(raw_driver_id, str) and raw_driver_id else None
     )
+    # customer_id: coerced exactly like driver_id (OI-06, design §1.2).
+    raw_customer_id = claims.get("customer_id")
+    customer_id = (
+        raw_customer_id
+        if isinstance(raw_customer_id, str) and raw_customer_id
+        else None
+    )
+    resolved_user_id = user_id if user_id else "unknown"
 
     request_tenant_id_var.set(tenant_id)
     if request is not None:
         # Stamped for middleware that cannot depend on get_tenant_context:
         # tenant_id unblocks idempotency replay, driver_id unblocks per-driver
-        # rate limiting.
+        # rate limiting, auth_user_id gives the portal audit line an actor
+        # even when a request is refused before the portal guard runs.
         request.state.tenant_id = tenant_id
         request.state.driver_id = driver_id
-    resolved_user_id = user_id if user_id else "unknown"
+        request.state.auth_user_id = resolved_user_id
     has_pii_access = bool(claims.get("has_pii_access", False))
     roles = [r for r in (claims.get("roles") or []) if isinstance(r, str)]
 
@@ -395,6 +426,7 @@ async def _context_from_session_claims(
         roles=roles,
         settings=tenant_settings,
         driver_id=driver_id,
+        customer_id=customer_id,
     )
 
 

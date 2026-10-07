@@ -262,11 +262,13 @@ def test_canonical_user_roles_are_declared(initialized_supertokens):
         # feature-flag endpoints had no way to distinguish a customer
         # administrator from support staff.
         "platform_admin",
+        # Exclusive customer-portal identity (OI-06).
+        "customer",
     }
     # No duplicates / no extras in the declared tuple. ``ops_manager`` was
     # removed: it was declared but gated nothing, so it advertised a permission
     # tier that did not exist.
-    assert len(CANONICAL_ROLES) == 4
+    assert len(CANONICAL_ROLES) == 5
     # The UserRoles recipe is registered so the roles can exist in the core.
     assert UserRolesRecipe.get_instance().get_recipe_id() == "userroles"
 

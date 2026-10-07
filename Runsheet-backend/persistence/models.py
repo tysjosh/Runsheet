@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -32,7 +33,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
+from sqlalchemy.dialects.postgresql import CITEXT as _PG_CITEXT
 from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
@@ -1049,4 +1052,112 @@ class EsDocumentORM(Base):
         # Supports the ``sort: created_at desc`` default that ``get_all_documents``
         # and most list endpoints use.
         Index("ix_es_documents_index_updated", "index_name", "updated_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Customer portal (OI-06, migration 0011_customer_portal)
+# ---------------------------------------------------------------------------
+#
+# Mirrors of the two portal tables. ``auth_users`` itself has no ORM model (it
+# is read and written with SQL by the auth provisioner), so its new
+# ``customer_id`` column and CHECK live only in the migration.
+
+# CITEXT on PostgreSQL, a plain string on SQLite (test ``create_all``).
+_EMAIL = String(320).with_variant(_PG_CITEXT(), "postgresql")
+
+
+class PortalUserGrantORM(Base):
+    """One portal-user grant: invite/revoke history for a customer's users.
+
+    ``auth_users`` holds only the current binding (the claims source); this
+    table keeps every grant so the admin list can show revoked users and the
+    per-customer cap can count active ones. "invited" is ``status='active'``
+    with ``first_seen_at`` still null.
+    """
+
+    __tablename__ = "portal_user_grants"
+
+    grant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    email: Mapped[str] = mapped_column(_EMAIL, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    revoked_by: Mapped[Optional[str]] = mapped_column(Text)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_portal_grant_status"),
+        Index(
+            "uq_portal_grant_active_email",
+            "tenant_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index("ix_portal_grant_customer", "tenant_id", "customer_id", "status"),
+    )
+
+
+class PortalPaymentAttemptORM(Base):
+    """One customer-initiated ACH payment attempt (Stripe PaymentIntent).
+
+    No bank details are stored. ``uq_ppa_inflight`` is the database backstop
+    for "at most one attempt in flight per invoice".
+    """
+
+    __tablename__ = "portal_payment_attempts"
+
+    payment_attempt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    invoice_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    stripe_payment_intent_id: Mapped[Optional[str]] = mapped_column(String(128))
+    payment_id: Mapped[Optional[str]] = mapped_column(String(64))
+    failure_code: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+    terminal_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="ck_ppa_amount_positive"),
+        CheckConstraint(
+            "status IN ('creating', 'created', 'pending', 'succeeded', "
+            "'failed', 'canceled')",
+            name="ck_ppa_status",
+        ),
+        UniqueConstraint("stripe_payment_intent_id", name="uq_ppa_stripe_payment_intent"),
+        UniqueConstraint(
+            "tenant_id", "actor_user_id", "idempotency_key", name="uq_ppa_idem"
+        ),
+        Index(
+            "uq_ppa_inflight",
+            "tenant_id",
+            "invoice_id",
+            unique=True,
+            postgresql_where=text("status IN ('creating', 'created', 'pending')"),
+            sqlite_where=text("status IN ('creating', 'created', 'pending')"),
+        ),
+        Index(
+            "ix_ppa_customer",
+            "tenant_id",
+            "customer_id",
+            "invoice_id",
+            text("created_at DESC"),
+        ),
     )

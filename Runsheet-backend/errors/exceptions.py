@@ -1145,3 +1145,132 @@ def driver_not_dispatch_eligible(
         message=message,
         details=details
     )
+
+
+# ── Customer portal (OI-06, design §11) ─────────────────────────────────
+
+
+def _portal_error(
+    code: ErrorCode, message: str, details: Optional[dict[str, Any]]
+) -> AppException:
+    return AppException(error_code=code, message=message, details=details)
+
+
+def portal_disabled(
+    message: str = "The customer portal is not available.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Portal flag (or the commerce backbone) is off (HTTP 404)."""
+    return _portal_error(ErrorCode.PORTAL_DISABLED, message, details)
+
+
+def portal_route_forbidden(
+    message: str = "This account can't use this part of Runsheet",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """A customer session called a non-portal route (HTTP 403)."""
+    return _portal_error(ErrorCode.PORTAL_ROUTE_FORBIDDEN, message, details)
+
+
+def portal_identity_invalid(
+    message: str = "This account can't use this part of Runsheet",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """A malformed customer identity (extra role or no customer_id) (HTTP 403)."""
+    return _portal_error(ErrorCode.PORTAL_IDENTITY_INVALID, message, details)
+
+
+def portal_access_suspended(
+    message: str = "Portal access for this account is suspended.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Grant revoked or customer archived (HTTP 403)."""
+    return _portal_error(ErrorCode.PORTAL_ACCESS_SUSPENDED, message, details)
+
+
+def portal_unavailable(
+    message: str = "The customer portal is temporarily unavailable.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Principal-check store failure (HTTP 503)."""
+    return _portal_error(ErrorCode.PORTAL_UNAVAILABLE, message, details)
+
+
+def portal_email_in_use(
+    message: str = "This email can't be invited to the portal.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Invite email belongs to an ineligible identity (HTTP 409)."""
+    return _portal_error(ErrorCode.PORTAL_EMAIL_IN_USE, message, details)
+
+
+def portal_user_limit_reached(
+    message: str = "This customer already has the maximum number of portal users.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Active portal-user cap reached (HTTP 409)."""
+    return _portal_error(ErrorCode.PORTAL_USER_LIMIT_REACHED, message, details)
+
+
+def portal_customer_archived(
+    message: str = "Portal users can't be invited for an archived customer.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Invite for an archived customer (HTTP 409)."""
+    return _portal_error(ErrorCode.PORTAL_CUSTOMER_ARCHIVED, message, details)
+
+
+def order_not_cancellable(
+    message: str = "This request can no longer be cancelled.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Portal cancel on an order not awaiting confirmation (HTTP 409)."""
+    return _portal_error(ErrorCode.ORDER_NOT_CANCELLABLE, message, details)
+
+
+def order_request_rejected(
+    message: str = "This delivery request couldn't be accepted.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Portal order rejected by intake validation or a hook (HTTP 422)."""
+    return _portal_error(ErrorCode.ORDER_REQUEST_REJECTED, message, details)
+
+
+def invoice_not_payable(
+    message: str = "This invoice can't be paid.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Payment create on a non-payable invoice (HTTP 409)."""
+    return _portal_error(ErrorCode.INVOICE_NOT_PAYABLE, message, details)
+
+
+def payment_amount_invalid(
+    message: str = "The payment amount is not valid for this invoice.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Payment amount out of range (HTTP 422)."""
+    return _portal_error(ErrorCode.PAYMENT_AMOUNT_INVALID, message, details)
+
+
+def payment_in_progress(
+    message: str = "A payment for this invoice is already in progress.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Another attempt for the invoice is in flight (HTTP 409)."""
+    return _portal_error(ErrorCode.PAYMENT_IN_PROGRESS, message, details)
+
+
+def portal_payments_unavailable(
+    message: str = "Online payments are not available.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """No enabled payment provider for portal payments (HTTP 409)."""
+    return _portal_error(ErrorCode.PORTAL_PAYMENTS_UNAVAILABLE, message, details)
+
+
+def payment_provider_error(
+    message: str = "The payment provider couldn't process this request.",
+    details: Optional[dict[str, Any]] = None,
+) -> AppException:
+    """Payment provider call failed (HTTP 502)."""
+    return _portal_error(ErrorCode.PAYMENT_PROVIDER_ERROR, message, details)

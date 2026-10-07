@@ -89,6 +89,8 @@ from commerce.api.pricing_endpoints import (
     router as commerce_pricing_rules_router,
 )
 from Agents.support.mvp_endpoints import router as mvp_fuel_router
+from portal.api import routers as portal_routers
+from portal.audit import PortalAuditMiddleware
 from fuel.api.fuel_ops_endpoints import (
     router as fuel_ops_router,
     mvp_router as fuel_ops_mvp_router,
@@ -153,6 +155,9 @@ if _provider_enforces(getattr(_auth_settings, "auth_provider", "legacy")):
 
     _init_supertokens(_auth_settings)
 
+# Customer-portal audit (OI-06, §8.1): innermost, inside the auth gate and RequestID.
+app.add_middleware(PortalAuditMiddleware)
+
 # Always register the gate; it is a no-op under "legacy" and activates when the
 # Migration_Controller flag flips, without re-wiring (Req 9.1).
 _register_auth_enforcement(app, _auth_settings)
@@ -176,6 +181,7 @@ app.add_middleware(
     allow_headers=[
         "Accept", "Accept-Language", "Content-Language", "Content-Type",
         "Authorization", "X-Request-ID", "X-Requested-With", "X-Idempotency-Key",
+        "Idempotency-Key",  # portal payments (OI-06)
         # SuperTokens SDK headers so the frontend session/anti-CSRF flow passes
         # CORS preflight (Req 2.5, 8.4): anti-csrf token + recipe/FDI routing +
         # the cookie-vs-header session transport mode selector.
@@ -225,6 +231,7 @@ for _router in (
     auth_public_config_router,
     voice_submission_router,  # Dinee voice Surface A (gated by self-check above)
     voice_read_driver_router,  # Dinee voice Surface B read/driver endpoints
+    *portal_routers,  # customer portal (OI-06): always mounted, flag 404s per request
 ):
     app.include_router(_router)
 

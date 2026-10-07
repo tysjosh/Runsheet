@@ -15,6 +15,7 @@ Requirements:
 - 21.1-21.3: Ops-specific rate limiting for webhooks, API, and metrics
 """
 
+import logging
 import os
 from enum import Enum
 from functools import lru_cache
@@ -826,6 +827,49 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Customer portal (OI-06) ──────────────────────────────────────
+    #
+    # The portal is effective only when commerce_backbone_enabled is also
+    # on (it needs CustomerService); see portal.scope.portal_enabled. The
+    # validator below logs a WARN for the inert combination, never raises.
+    customer_portal_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master flag for the customer portal (/api/portal/* and the "
+            "portal-user admin routes). Effective only together with "
+            "commerce_backbone_enabled. When off those routes return 404 "
+            "PORTAL_DISABLED. Default: False."
+        ),
+    )
+    portal_read_rate_limit: int = Field(
+        default=120, ge=1,
+        description="Portal read requests per minute per portal user (shared bucket)",
+    )
+    portal_order_rate_limit: int = Field(
+        default=10, ge=1,
+        description="Portal order submissions per minute per portal user",
+    )
+    portal_order_cancel_rate_limit: int = Field(
+        default=10, ge=1,
+        description="Portal order cancellations per minute per portal user",
+    )
+    portal_payment_rate_limit: int = Field(
+        default=5, ge=1,
+        description="Portal payment creations per minute per portal user",
+    )
+    portal_max_users_per_customer: int = Field(
+        default=10, ge=1,
+        description="Maximum active portal users per commerce customer",
+    )
+    portal_principal_cache_seconds: int = Field(
+        default=60, ge=1,
+        description="TTL of the in-process portal principal (grant/customer) check cache",
+    )
+    portal_stale_reading_days: int = Field(
+        default=7, ge=1,
+        description="Days after which a tank reading is shown as stale in the portal",
+    )
+
     commerce_customers_enabled: bool = Field(
         default=False,
         description=(
@@ -1219,6 +1263,21 @@ class Settings(BaseSettings):
                             "Configure your production frontend domain(s)."
                         )
         
+        return self
+
+    @model_validator(mode="after")
+    def warn_portal_without_backbone(self) -> "Settings":
+        """WARN (never raise) when the portal flag is on but the backbone is off.
+
+        The portal needs CustomerService, which exists only with the commerce
+        backbone, so ``portal.scope.portal_enabled`` keeps it off. Logging
+        instead of raising lets a misconfigured environment still boot.
+        """
+        if self.customer_portal_enabled and not self.commerce_backbone_enabled:
+            logging.getLogger(__name__).warning(
+                "customer_portal_enabled without commerce_backbone_enabled; "
+                "portal stays off"
+            )
         return self
 
 

@@ -82,7 +82,8 @@ class AuthUserRow:
     Mirrors the columns the provisioner cares about. ``email`` is the
     idempotency key (Req 9.4); ``roles`` carries only canonical role names —
     see :data:`auth.supertokens_init.CANONICAL_ROLES`, currently ``admin`` /
-    ``dispatcher`` / ``driver`` / ``platform_admin``;
+    ``dispatcher`` / ``driver`` / ``platform_admin`` / ``customer`` (the
+    exclusive portal role, which requires ``customer_id``);
     ``st_user_id`` is the SuperTokens user id once backfilled.
     """
 
@@ -93,6 +94,32 @@ class AuthUserRow:
     driver_id: Optional[str] = None
     st_user_id: Optional[str] = None
     id: Optional[str] = None
+    #: Commerce customer a portal (``customer``) user is bound to (OI-06).
+    customer_id: Optional[str] = None
+
+
+#: The ``customer`` role is exclusive (mirrors the ``auth_users`` CHECK
+#: ``ck_auth_users_customer_binding``, design §1.3).
+_CUSTOMER_ROLE = "customer"
+
+
+def _violates_customer_binding(row: AuthUserRow, roles: Sequence[str]) -> bool:
+    """True when ``row`` breaks the ``ck_auth_users_customer_binding`` invariant.
+
+    Valid rows either hold no ``customer`` role and no ``customer_id``, or hold
+    exactly ``["customer"]`` with a ``customer_id``, no ``driver_id`` and no
+    PII flag.
+    """
+    has_binding = isinstance(row.customer_id, str) and bool(row.customer_id.strip())
+    if row.customer_id is not None and not has_binding:
+        return True
+    if not has_binding:
+        return _CUSTOMER_ROLE in roles
+    return not (
+        list(roles) == [_CUSTOMER_ROLE]
+        and row.driver_id is None
+        and not row.has_pii_access
+    )
 
 
 class ProvisioningConflictError(RuntimeError):
@@ -231,11 +258,17 @@ def _build_metadata(row: AuthUserRow) -> dict[str, Any]:
     rather than leaving it behind — keeping the metadata an exact image of the
     source row.
     """
-    return {
+    metadata: dict[str, Any] = {
         "tenant_id": row.tenant_id,
         "has_pii_access": bool(row.has_pii_access),
         "driver_id": row.driver_id,
     }
+    # customer_id only for portal users. Unlike driver_id there is no stale
+    # value to clear: a customer row is deleted on revoke, never converted
+    # back to a staff row (design §1.7, D10).
+    if row.customer_id:
+        metadata["customer_id"] = row.customer_id
+    return metadata
 
 
 async def provision_user(
@@ -293,6 +326,12 @@ async def provision_user(
 
     email = row.email.strip()
     roles = _normalize_roles(row.roles)
+
+    # 0. Role exclusivity for the portal identity (design §1.5): refuse before
+    #    any SuperTokens write, a second layer under the DB CHECK for rows
+    #    that never touch Postgres (tests, the CLI).
+    if _violates_customer_binding(row, roles):
+        raise ValueError("invalid_customer_binding")
 
     # 1. Idempotent create-or-find keyed by email (Req 9.4), bound by the
     #    backfilled st_user_id (F1).

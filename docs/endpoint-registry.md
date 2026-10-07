@@ -293,6 +293,7 @@
 | POST | `/api/orders/{order_id}/hold` | /api/orders | session_required | — | — | OrderResponse |
 | POST | `/api/orders/{order_id}/release-hold` | /api/orders | session_required | — | — | OrderResponse |
 | PATCH | `/api/orders/{order_id}/status` | /api/orders | session_required | — | — | OrderResponse |
+| GET | `/api/portal/me` | — | session_required | — | — | PortalMeEnvelope |
 | GET | `/api/scheduling/cargo/search` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs` | /api/scheduling | session_required | — | CreateJob | dict |

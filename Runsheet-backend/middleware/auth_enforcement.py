@@ -283,6 +283,67 @@ async def _has_verifiable_session(request: Request) -> bool:
     return verified is not None
 
 
+async def _verified_claims(request: Request) -> dict:
+    """Return the verified session's claims for a request that has one.
+
+    Reads the ``VerifiedSession`` memoized on ``request.state`` by the default
+    verifier. Fake verifiers in tests don't memoize, so fall back to asking
+    the verifier again. Returns ``{}`` when neither yields a session.
+    """
+    from ops.middleware import tenant_guard
+
+    verified = getattr(
+        request.state, tenant_guard._VERIFIED_SESSION_STATE_ATTR, None
+    )
+    if not isinstance(verified, tenant_guard.VerifiedSession):
+        verified = await tenant_guard._get_session_verifier().verify(request)
+    if verified is None:
+        return {}
+    claims = dict(verified.claims or {})
+    claims.setdefault("_user_id", verified.user_id)
+    return claims
+
+
+def _forbidden_response(request: Request, code: str) -> JSONResponse:
+    """Build a 403 for the customer-portal central deny.
+
+    Same JSON shape as :func:`_unauthorized_response`; ``code`` is
+    ``PORTAL_ROUTE_FORBIDDEN`` or ``PORTAL_IDENTITY_INVALID``.
+    """
+    return JSONResponse(
+        status_code=403,
+        content={
+            "error_code": code,
+            "message": "This account can't use this part of Runsheet",
+            "details": {},
+            "request_id": _request_id(request),
+        },
+    )
+
+
+def _audit_forbidden_route(request: Request, claims: dict, code: str) -> None:
+    """WARN ``portal_audit`` line for a central-deny refusal (R8.3)."""
+    from portal.audit import emit_portal_audit
+    from portal.scope import collapse_path
+
+    tenant_id = claims.get("tenant_id")
+    customer_id = claims.get("customer_id")
+    emit_portal_audit(
+        level=logging.WARNING,
+        tenant_id=tenant_id if isinstance(tenant_id, str) else None,
+        actor_user_id=claims.get("_user_id"),
+        customer_id=customer_id if isinstance(customer_id, str) else None,
+        action="central_deny",
+        target_ids={},
+        outcome="forbidden_route",
+        request_id=getattr(request.state, "request_id", None),
+        channel="http",
+        error_code=code,
+        method=request.method,
+        path_template=collapse_path(request.url.path),
+    )
+
+
 def _has_legacy_bearer(request: Request) -> bool:
     """Deprecated no-op retained for backward import compatibility.
 
@@ -349,6 +410,15 @@ class AuthEnforcementMiddleware(BaseHTTPMiddleware):
             )
 
         if has_session:
+            # E1/E2 (OI-06, design §2.2): central default-deny for customer
+            # portal sessions, before routing and before any handler.
+            claims = await _verified_claims(request)
+            from portal.scope import customer_session_verdict
+
+            verdict = customer_session_verdict(claims, path)
+            if verdict is not None:
+                _audit_forbidden_route(request, claims, verdict)
+                return _forbidden_response(request, verdict)
             return await call_next(request)
 
         logger.debug(

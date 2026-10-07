@@ -393,6 +393,30 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Commerce customer API wiring failed: %s", exc)
 
+        # ── Customer portal principal check (OI-06, design §2.3) ──────
+        # Only when CustomerService exists; without it the portal guard
+        # fails closed (503 PORTAL_UNAVAILABLE).
+        if container.has("commerce_customer_service"):
+            try:
+                from portal.api.me_endpoints import configure_portal_me
+                from portal.services.principal import (
+                    PortalPrincipalChecker,
+                    configure_portal_principal,
+                )
+
+                configure_portal_principal(
+                    PortalPrincipalChecker(
+                        customer_service=container.commerce_customer_service,
+                        cache_seconds=settings.portal_principal_cache_seconds,
+                    )
+                )
+                configure_portal_me(
+                    customer_service=container.commerce_customer_service
+                )
+                logger.info("Customer portal principal checker configured")
+            except Exception as exc:
+                logger.warning("Customer portal principal wiring failed: %s", exc)
+
         # ── Commerce Account API wiring (Task 4.3) ─────────────────────
         # Wire the AccountService and CreditService into the
         # account_endpoints module so the router handlers can access them.
@@ -597,6 +621,10 @@ async def initialize(app, container: ServiceContainer) -> None:
 
             configure_invoice_api(invoice_service=_inv_svc_for_api)
             logger.info("Commerce invoice API configured")
+
+            from portal.api.me_endpoints import configure_portal_me
+
+            configure_portal_me(invoice_service=_inv_svc_for_api)
         except Exception as exc:
             logger.warning("Commerce invoice API wiring failed: %s", exc)
 

@@ -210,6 +210,10 @@ async def initialize(app, container: ServiceContainer) -> None:
         )
         container.order_intake_pipeline = order_intake_pipeline
         logger.info("OrderIntakePipeline registered")
+        # Customer portal /me reads ordering_available from it (OI-06).
+        from portal.api.me_endpoints import configure_portal_me
+
+        configure_portal_me(order_intake_pipeline=order_intake_pipeline)
 
         # Register the VoiceReviewHoldHook so voice orders flagged for human
         # review (hold_reason set by the VoiceIntakeAdapter) are promoted from

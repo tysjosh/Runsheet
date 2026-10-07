@@ -1590,6 +1590,8 @@ containers = [
             # Commerce needs dual-write whenever the backbone is on; staging
             # validation refuses the combination otherwise.
             {"name": "COMMERCE_BACKBONE_ENABLED", "value": "true"},
+            # Customer portal (OI-06); effective only with the backbone on.
+            {"name": "CUSTOMER_PORTAL_ENABLED", "value": "true"},
             {"name": "COMMERCE_DUAL_WRITE_POSTGRES", "value": "true"},
             {"name": "COMMERCE_READ_FROM_POSTGRES", "value": "true"},
             # Sub-flags (config/settings.py commerce_*_enabled). Without them the

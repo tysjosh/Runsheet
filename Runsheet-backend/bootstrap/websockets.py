@@ -249,6 +249,34 @@ def _handshake_origin_allowed(websocket: WebSocket) -> bool:
     )
 
 
+def _audit_ws_customer_refusal(websocket: WebSocket, claims: Dict[str, Any]) -> None:
+    """WARN ``portal_audit`` line for a refused customer WS handshake."""
+    import logging as _logging
+
+    from portal.audit import emit_portal_audit
+    from portal.scope import collapse_path
+
+    try:
+        path = websocket.url.path
+    except Exception:  # noqa: BLE001 — log context only
+        path = ""
+    tenant_id = claims.get("tenant_id")
+    customer_id = claims.get("customer_id")
+    user_id = claims.get("sub")
+    emit_portal_audit(
+        level=_logging.WARNING,
+        tenant_id=tenant_id if isinstance(tenant_id, str) else None,
+        actor_user_id=user_id if isinstance(user_id, str) else None,
+        customer_id=customer_id if isinstance(customer_id, str) else None,
+        action="central_deny",
+        target_ids={},
+        outcome="forbidden_route",
+        request_id=None,
+        channel="websocket",
+        path_template=collapse_path(path),
+    )
+
+
 async def _resolve_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
     """Resolve verified SuperTokens session claims for a WS handshake.
 
@@ -278,6 +306,13 @@ async def _resolve_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
     access_token, anti_csrf = _extract_session_credential(websocket)
     claims = await verifier(access_token, anti_csrf)
     if claims:
+        # E3 (OI-06, design §2.2): a customer-portal session may not open any
+        # WebSocket. Every caller closes with 4001 on None.
+        from portal.scope import is_customer_claims
+
+        if is_customer_claims(claims):
+            _audit_ws_customer_refusal(websocket, claims)
+            return None
         # Remember the session handle so _ws_loop can re-check that the
         # session is still alive after sign-out or revoke (OI-11).
         handle = claims.get("sessionHandle")

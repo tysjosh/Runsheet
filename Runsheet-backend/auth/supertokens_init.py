@@ -22,7 +22,8 @@ FastAPI app is created, wiring the three recipes the migration uses:
   the client (Req 3.3).
 * **UserRoles** — represents the canonical roles listed in
   :data:`CANONICAL_ROLES`: ``admin`` / ``dispatcher`` / ``driver`` /
-  ``platform_admin`` (Req 4.4). That constant is the single source of truth;
+  ``platform_admin`` / ``customer`` (Req 4.4; ``customer`` is the exclusive
+  portal identity, OI-06). That constant is the single source of truth;
   enumerate from it rather than restating the list.
 
 Deployment is the SuperTokens **managed SaaS core**: the SDK reaches a remote
@@ -107,12 +108,27 @@ logger = logging.getLogger(__name__)
 #: provisioning a user, so an operator could hand it out believing it conferred
 #: access it did not. ``tests/unit/test_tenant_scope_authz.py::
 #: test_ops_manager_is_retired`` fails if it comes back.
+#:
+#: ``customer`` is the customer-portal identity (OI-06). It is **exclusive**: a
+#: customer row holds no other role, no ``driver_id`` and no PII flag, and is
+#: bound to exactly one commerce ``customer_id`` (the ``auth_users`` CHECK
+#: ``ck_auth_users_customer_binding`` owns that invariant). A customer session
+#: is refused on every route outside the portal allowlist (``portal.scope``).
+#: :data:`CUSTOMER_ASSIGNABLE_ROLES` excludes it: only the portal grant flow
+#: writes it.
 CANONICAL_ROLES: tuple[str, ...] = (
     "admin",
     "dispatcher",
     "driver",
     "platform_admin",
+    "customer",
 )
+
+#: The customer-portal role (see :data:`CANONICAL_ROLES`).
+CUSTOMER_PORTAL_ROLE: str = "customer"
+
+#: Every staff (non-portal) role. The portal staff-deny tests iterate it.
+STAFF_ROLES: tuple[str, ...] = ("admin", "dispatcher", "driver", "platform_admin")
 
 #: The Runsheet-staff role. Callers holding it may target a tenant other than
 #: their own on endpoints that take a ``tenant_id`` parameter.
@@ -120,8 +136,10 @@ PLATFORM_ADMIN_ROLE: str = "platform_admin"
 
 #: Roles a tenant's own administrator may assign. Deliberately excludes
 #: ``platform_admin`` so tenant-scoped admin cannot escalate to cross-tenant.
-#: Every other canonical role is assignable, so this is :data:`CANONICAL_ROLES`
-#: minus the staff role — but it stays an explicit tuple rather than a derived
+#: Also excludes ``customer``: portal users are created only by the portal grant
+#: flow, never by assigning a role. Every other canonical role is assignable,
+#: so this is :data:`CANONICAL_ROLES` minus those two — but it stays an explicit
+#: tuple rather than a derived
 #: one, so adding a future privileged role does not silently make it
 #: customer-assignable by omission.
 CUSTOMER_ASSIGNABLE_ROLES: tuple[str, ...] = (
@@ -307,7 +325,7 @@ async def _lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
     from sqlalchemy import text
 
     query = text(
-        "SELECT tenant_id, roles, has_pii_access, driver_id "
+        "SELECT tenant_id, roles, has_pii_access, driver_id, customer_id "
         "FROM auth_users WHERE st_user_id = :user_id"
     )
     try:
@@ -335,7 +353,9 @@ async def _lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
         )
         return {}
 
-    tenant_id, roles, has_pii_access, driver_id = rows[0]
+    row = tuple(rows[0])
+    tenant_id, roles, has_pii_access, driver_id = row[:4]
+    customer_id = row[4] if len(row) > 4 else None
     claims: Dict[str, Any] = {
         "tenant_id": tenant_id,
         # Only the canonical role names are stored; surface them verbatim for
@@ -347,6 +367,10 @@ async def _lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
     # reads it from the verified session (Req 7.3).
     if driver_id:
         claims["driver_id"] = driver_id
+    # customer_id is present only for portal (``customer``) users; the
+    # central deny and the portal guard read it from the verified session.
+    if customer_id:
+        claims["customer_id"] = customer_id
     return claims
 
 
@@ -598,8 +622,10 @@ def init_supertokens(settings: Settings) -> None:
 __all__ = [
     "CANONICAL_ROLES",
     "CUSTOMER_ASSIGNABLE_ROLES",
+    "CUSTOMER_PORTAL_ROLE",
     "PLATFORM_ADMIN_ROLE",
     "PLATFORM_STAFF_ROLES",
+    "STAFF_ROLES",
     "SuperTokensConfigError",
     "init_supertokens",
     "is_supertokens_initialized",

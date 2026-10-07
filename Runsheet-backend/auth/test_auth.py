@@ -123,6 +123,7 @@ def issue_test_context(
     *,
     user_id: Optional[str] = None,
     driver_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
 ) -> TenantContext:
     """Build a valid ``TenantContext`` for tests (Req 11.1).
 
@@ -149,6 +150,8 @@ def issue_test_context(
             else (omitted, ``None``, or blank) yields ``None`` so the driver
             surface's fail-closed path (403 ``DRIVER_IDENTITY_MISSING``,
             Req 1.6) stays exercised.
+        customer_id: Optional commerce ``customer_id`` for customer-portal
+            handler tests, coerced the same way as ``driver_id``.
 
     Returns:
         A populated :class:`TenantContext`.
@@ -172,6 +175,11 @@ def issue_test_context(
         if isinstance(driver_id, str) and driver_id.strip()
         else None
     )
+    resolved_customer_id = (
+        customer_id.strip()
+        if isinstance(customer_id, str) and customer_id.strip()
+        else None
+    )
 
     settings = default_tenant_settings()
     return TenantContext(
@@ -182,6 +190,7 @@ def issue_test_context(
         region=settings.region,
         measurement_units=settings.measurement_units.to_dict(),
         driver_id=resolved_driver_id,
+        customer_id=resolved_customer_id,
     )
 
 

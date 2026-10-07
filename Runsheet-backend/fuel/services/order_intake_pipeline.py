@@ -961,6 +961,15 @@ class OrderIntakePipeline:
     #: The overlay flag key used for the order intake pipeline rollout.
     OVERLAY_FLAG_KEY = "order_intake_pipeline"
 
+    async def get_ordering_state(self, tenant_id: str) -> str:
+        """Public read of the intake overlay state for ``tenant_id``.
+
+        Wraps :meth:`_get_overlay_state`, so it fails closed to
+        ``"disabled"``. The customer portal uses it to tell a customer
+        whether delivery requests can be submitted (``/api/portal/me``).
+        """
+        return await self._get_overlay_state(tenant_id)
+
     async def _get_overlay_state(self, tenant_id: str) -> str:
         """Return the overlay state for the order intake pipeline.
 

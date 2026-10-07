@@ -26,7 +26,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from auth.provisioner import AuthUserRow, provision_user
-from auth.supertokens_init import CANONICAL_ROLES
+from auth.supertokens_init import CANONICAL_ROLES, CUSTOMER_PORTAL_ROLE
 from tests.unit.test_provisioner import FakeAuthUserStore, FakeSuperTokensAdmin
 
 
@@ -55,12 +55,18 @@ _emails = st.builds(
 # ``CANONICAL_ROLES`` rather than restated, so a role added there (such as
 # ``platform_admin``) is covered here without a second edit — provisioning must
 # round-trip every canonical role, staff roles included.
-_canonical_roles = st.sampled_from(CANONICAL_ROLES)
+#
+# ``customer`` (OI-06) is the one exception: it is exclusive and needs a
+# ``customer_id``, so a mixed role set holding it is refused by the provisioner
+# guard by design. Its own round trip is pinned in tests/portal.
+_canonical_roles = st.sampled_from(
+    tuple(r for r in CANONICAL_ROLES if r != CUSTOMER_PORTAL_ROLE)
+)
 _arbitrary_roles = st.text(
     alphabet=st.characters(blacklist_categories=("Cs", "Cc", "Zs")),
     min_size=1,
     max_size=16,
-).filter(lambda s: s.strip() != "")
+).filter(lambda s: s.strip() not in ("", CUSTOMER_PORTAL_ROLE))
 _roles = st.lists(st.one_of(_canonical_roles, _arbitrary_roles), max_size=6).map(tuple)
 
 _driver_ids = st.one_of(st.none(), _non_blank_text)

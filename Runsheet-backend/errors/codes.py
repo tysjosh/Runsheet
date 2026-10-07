@@ -430,6 +430,52 @@ class ErrorCode(str, Enum):
     INVOICING_DISABLED = "INVOICING_DISABLED"
     """Commerce invoicing module is not enabled for the tenant (HTTP 404)"""
 
+    # Customer portal (OI-06, design §11)
+    PORTAL_DISABLED = "PORTAL_DISABLED"
+    """Customer portal (or the commerce backbone it needs) is off (HTTP 404)"""
+
+    PORTAL_ROUTE_FORBIDDEN = "PORTAL_ROUTE_FORBIDDEN"
+    """A customer session called a route outside the portal allowlist (HTTP 403)"""
+
+    PORTAL_IDENTITY_INVALID = "PORTAL_IDENTITY_INVALID"
+    """A customer session holds another role or no customer_id (HTTP 403)"""
+
+    PORTAL_ACCESS_SUSPENDED = "PORTAL_ACCESS_SUSPENDED"
+    """Portal grant revoked or the customer is archived (HTTP 403)"""
+
+    PORTAL_UNAVAILABLE = "PORTAL_UNAVAILABLE"
+    """The portal principal check could not reach its store (HTTP 503)"""
+
+    PORTAL_EMAIL_IN_USE = "PORTAL_EMAIL_IN_USE"
+    """The invited email belongs to an identity that can't become this portal user (HTTP 409)"""
+
+    PORTAL_USER_LIMIT_REACHED = "PORTAL_USER_LIMIT_REACHED"
+    """The customer already has the maximum number of active portal users (HTTP 409)"""
+
+    PORTAL_CUSTOMER_ARCHIVED = "PORTAL_CUSTOMER_ARCHIVED"
+    """Portal users can't be invited for an archived customer (HTTP 409)"""
+
+    ORDER_NOT_CANCELLABLE = "ORDER_NOT_CANCELLABLE"
+    """The portal order is no longer awaiting confirmation (HTTP 409)"""
+
+    ORDER_REQUEST_REJECTED = "ORDER_REQUEST_REJECTED"
+    """A portal order request was rejected by intake validation or a hook (HTTP 422)"""
+
+    INVOICE_NOT_PAYABLE = "INVOICE_NOT_PAYABLE"
+    """The invoice is paid, void or otherwise not payable (HTTP 409)"""
+
+    PAYMENT_AMOUNT_INVALID = "PAYMENT_AMOUNT_INVALID"
+    """The requested payment amount is outside the allowed range (HTTP 422)"""
+
+    PAYMENT_IN_PROGRESS = "PAYMENT_IN_PROGRESS"
+    """Another payment attempt for the invoice is in flight (HTTP 409)"""
+
+    PORTAL_PAYMENTS_UNAVAILABLE = "PORTAL_PAYMENTS_UNAVAILABLE"
+    """No enabled payment provider is configured for portal payments (HTTP 409)"""
+
+    PAYMENT_PROVIDER_ERROR = "PAYMENT_PROVIDER_ERROR"
+    """The payment provider call failed (HTTP 502)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -576,6 +622,22 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.CUSTOMERS_DISABLED: 404,
     ErrorCode.PRICING_DISABLED: 404,
     ErrorCode.INVOICING_DISABLED: 404,
+    # Customer portal (OI-06)
+    ErrorCode.PORTAL_DISABLED: 404,
+    ErrorCode.PORTAL_ROUTE_FORBIDDEN: 403,
+    ErrorCode.PORTAL_IDENTITY_INVALID: 403,
+    ErrorCode.PORTAL_ACCESS_SUSPENDED: 403,
+    ErrorCode.PORTAL_UNAVAILABLE: 503,
+    ErrorCode.PORTAL_EMAIL_IN_USE: 409,
+    ErrorCode.PORTAL_USER_LIMIT_REACHED: 409,
+    ErrorCode.PORTAL_CUSTOMER_ARCHIVED: 409,
+    ErrorCode.ORDER_NOT_CANCELLABLE: 409,
+    ErrorCode.ORDER_REQUEST_REJECTED: 422,
+    ErrorCode.INVOICE_NOT_PAYABLE: 409,
+    ErrorCode.PAYMENT_AMOUNT_INVALID: 422,
+    ErrorCode.PAYMENT_IN_PROGRESS: 409,
+    ErrorCode.PORTAL_PAYMENTS_UNAVAILABLE: 409,
+    ErrorCode.PAYMENT_PROVIDER_ERROR: 502,
 }
 
 
