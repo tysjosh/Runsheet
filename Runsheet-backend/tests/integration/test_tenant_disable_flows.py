@@ -405,11 +405,11 @@ class TestAgentActivityWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_agent_ws_broadcast_generic_event(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="t1")
 
         count = await self.manager.broadcast_event(
             "delay_alert",
-            {"job_id": "JOB-001", "delay_minutes": 45},
+            {"job_id": "JOB-001", "delay_minutes": 45, "tenant_id": "t1"},
         )
         assert count == 1
 

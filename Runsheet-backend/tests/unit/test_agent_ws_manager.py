@@ -351,16 +351,16 @@ class TestTenantScopedBroadcasts:
 
 
 class TestBroadcastEvent:
-    """Tests for the generic broadcast_event method."""
+    """Tests for the generic broadcast_event method (tenant-scoped, OI-01)."""
 
     @pytest.mark.asyncio
     async def test_broadcast_event_delay_alert(self):
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
 
-        data = {"job_id": "JOB-1", "reason": "no_alternative_available"}
+        data = {"job_id": "JOB-1", "reason": "no_alternative_available", "tenant_id": "t1"}
         await manager.broadcast_event("delay_alert", data)
 
         msg = ws.send_json.call_args_list[1][0][0]
@@ -372,9 +372,9 @@ class TestBroadcastEvent:
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
 
-        data = {"station_id": "S-12", "urgency": "critical"}
+        data = {"station_id": "S-12", "urgency": "critical", "tenant_id": "t1"}
         await manager.broadcast_event("fuel_alert", data)
 
         msg = ws.send_json.call_args_list[1][0][0]
@@ -386,9 +386,9 @@ class TestBroadcastEvent:
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
 
-        data = {"shipment_id": "SH-99", "rider_id": "R-5"}
+        data = {"shipment_id": "SH-99", "rider_id": "R-5", "tenant_id": "t1"}
         await manager.broadcast_event("sla_breach", data)
 
         msg = ws.send_json.call_args_list[1][0][0]
@@ -396,20 +396,34 @@ class TestBroadcastEvent:
         assert msg["data"] == data
 
     @pytest.mark.asyncio
+    async def test_broadcast_event_without_tenant_reaches_nobody(self):
+        manager = AgentActivityWSManager()
+        ws = _make_websocket()
+
+        await manager.connect(ws, tenant_id="t1")
+
+        count = await manager.broadcast_event("sla_breach", {"shipment_id": "SH-1"})
+
+        assert count == 0
+        assert ws.send_json.await_count == 1  # only the connection handshake
+
+    @pytest.mark.asyncio
     async def test_broadcast_event_removes_dead_clients(self):
         manager = AgentActivityWSManager()
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="t1")
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "t1",
             "pending_count": 0,
         }
 
-        count = await manager.broadcast_event("sla_breach", {"shipment_id": "SH-1"})
+        count = await manager.broadcast_event(
+            "sla_breach", {"shipment_id": "SH-1", "tenant_id": "t1"}
+        )
 
         assert count == 1
         assert ws_dead not in manager._clients
@@ -418,7 +432,9 @@ class TestBroadcastEvent:
     async def test_broadcast_event_no_clients_returns_zero(self):
         manager = AgentActivityWSManager()
 
-        count = await manager.broadcast_event("fuel_alert", {"station_id": "S-1"})
+        count = await manager.broadcast_event(
+            "fuel_alert", {"station_id": "S-1", "tenant_id": "t1"}
+        )
         assert count == 0
 
 

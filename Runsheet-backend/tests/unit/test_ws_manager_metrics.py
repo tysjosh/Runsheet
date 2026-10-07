@@ -367,15 +367,17 @@ class TestAgentActivityManagerMetrics:
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="t1")
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "t1",
             "pending_count": 0,
         }
 
-        count = await manager.broadcast_event("fuel_alert", {"station_id": "S-1"})
+        count = await manager.broadcast_event(
+            "fuel_alert", {"station_id": "S-1", "tenant_id": "t1"}
+        )
 
         assert count == 1
         assert ws_dead not in manager._clients

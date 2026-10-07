@@ -482,6 +482,8 @@ class TestMonitorCycleEscalation:
         assert payload["job_id"] == "JOB-001"
         assert payload["reason"] == "no_alternative_available"
         assert "job_details" in payload
+        # Tenant-scoped delivery needs the job's tenant on the payload (OI-01).
+        assert payload["tenant_id"] == job["tenant_id"]
 
     @pytest.mark.asyncio
     async def test_sets_cooldown_after_escalation(self):

@@ -114,19 +114,25 @@ class AgentActivityWSManager(BaseWSManager):
 
     async def broadcast_event(self, event_type: str, data: dict) -> int:
         """
-        Broadcast a generic event to all connected clients.
+        Broadcast a generic event to the payload's tenant only.
 
         Used by autonomous agents for ``delay_alert``, ``fuel_alert``,
-        ``sla_breach``, and other event types.
+        ``sla_breach``, and other event types. Alerts are tenant-scoped like
+        approval events (K9 extended to alerts, OI-01): data without a
+        ``tenant_id`` is dropped with a WARNING (fail closed).
 
         Returns the number of clients that successfully received the message.
         """
+        tenant_id = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if not tenant_id:
+            logger.warning("%s without tenant_id dropped", event_type)
+            return 0
         message = {
             "type": event_type,
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        return await self.broadcast(message)
+        return await self.broadcast_to_tenant(tenant_id, message)
 
 
 # Module-level singleton

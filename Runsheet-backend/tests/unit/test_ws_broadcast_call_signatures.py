@@ -124,6 +124,77 @@ def test_every_broadcast_call_binds_to_its_managers_signature():
     assert mismatched == [], "\n".join(mismatched)
 
 
+#: ``broadcast_event`` call sites whose payload is a variable rather than a
+#: dict literal, reviewed to always carry ``tenant_id`` (OI-01).
+#: (path relative to Runsheet-backend, payload variable name).
+BROADCAST_EVENT_PAYLOAD_VARS = {
+    ("Agents/support/fuel_distribution_pipeline.py", "event_data"),
+    ("fuel/services/fuel_planning_ws_manager.py", "payload"),
+}
+
+
+def _broadcast_event_calls() -> List[Tuple[str, int, ast.Call]]:
+    """``(relpath, line, call)`` for every ``X.broadcast_event(...)`` call.
+
+    Matches the attribute ``broadcast_event`` exactly, so the private
+    ``_broadcast_event`` helpers in orders_ws.py/ops_ws.py aren't included.
+    """
+    found = []
+    for path in sorted(BACKEND.rglob("*.py")):
+        rel = path.relative_to(BACKEND)
+        if _SKIP_DIRS.intersection(rel.parts):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(rel))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "broadcast_event"
+            ):
+                found.append((rel.as_posix(), node.lineno, node))
+    return found
+
+
+def _payload_arg(call: ast.Call):
+    if len(call.args) >= 2:
+        return call.args[1]
+    for kw in call.keywords:
+        if kw.arg == "data":
+            return kw.value
+    return None
+
+
+def test_the_broadcast_event_walk_finds_call_sites():
+    rels = {rel for rel, _line, _call in _broadcast_event_calls()}
+    assert "Agents/autonomous/delay_response_agent.py" in rels
+    assert "Agents/support/fuel_distribution_pipeline.py" in rels
+
+
+def test_every_broadcast_event_payload_carries_tenant_id():
+    """broadcast_event drops a payload without tenant_id (OI-01), so every
+    call must pass a dict literal with a ``"tenant_id"`` key, or a reviewed
+    variable listed in BROADCAST_EVENT_PAYLOAD_VARS."""
+    bad = []
+    for rel, line, call in _broadcast_event_calls():
+        payload = _payload_arg(call)
+        if isinstance(payload, ast.Dict):
+            keys = {
+                k.value for k in payload.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)
+            }
+            if "tenant_id" not in keys:
+                bad.append(f"{rel}:{line} payload dict has no 'tenant_id' key")
+        elif isinstance(payload, ast.Name):
+            if (rel, payload.id) not in BROADCAST_EVENT_PAYLOAD_VARS:
+                bad.append(
+                    f"{rel}:{line} payload variable {payload.id!r} isn't in "
+                    "BROADCAST_EVENT_PAYLOAD_VARS"
+                )
+        else:
+            bad.append(f"{rel}:{line} payload must be a dict literal or a reviewed name")
+    assert bad == [], "\n".join(bad)
+
+
 def test_every_scheduling_broadcast_passes_tenant_id():
     tenantless = []
     for rel, line, receiver, call in _broadcast_calls():
