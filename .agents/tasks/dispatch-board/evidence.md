@@ -8,7 +8,7 @@ Record per phase: tasks done, commits, test commands and results, decisions and 
 
 ### Phase 0: Spike and prerequisites
 
-Status: tasks 1, 2, 3, 4, 4b, 5, 5b, 5c and 6 done. Commits on `feature/dispatch-board`: `83729c6` (DnD spike, throwaway) and the Phase 0 commit that follows it (backend prerequisites, spike removed, this record). No staging, AWS or CodeBuild action was taken.
+Status: tasks 1, 2, 3, 4, 4b, 5, 5b, 5c and 6 done. Commits on `feature/dispatch-board`: `83729c6` (DnD spike, throwaway) and `064434f` (backend prerequisites, spike removed, this record). No staging, AWS or CodeBuild action was taken.
 
 #### Task 1: DnD spike — library chosen: **Pragmatic drag and drop**
 
