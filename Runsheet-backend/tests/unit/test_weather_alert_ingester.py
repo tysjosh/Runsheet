@@ -721,6 +721,36 @@ class TestMonitorCycle:
         assert published.alert_id == "alert-new-1"
 
     @pytest.mark.asyncio
+    async def test_cycle_is_logged_once_per_tenant(self):
+        """Staging 2026-10-07: every cycle that fetched an alert was logged
+        with tenant_id None (detections are bare alert ids), so the live feed
+        dropped it with a WARNING every 5 minutes."""
+        transport = _mock_transport([_nws_feature(alert_id="alert-shared-1")])
+
+        async def loader():
+            return {"tenant-A": ["14202"], "tenant-B": ["75247"]}
+
+        async with httpx.AsyncClient(transport=transport) as client:
+            deps = _make_deps()
+            agent = WeatherAlertIngester(
+                es_service=deps["es_service"],
+                activity_log_service=deps["activity_log_service"],
+                ws_manager=deps["ws_manager"],
+                confirmation_protocol=deps["confirmation_protocol"],
+                signal_bus=deps["signal_bus"],
+                http_client=client,
+                tenant_footprint_loader=loader,
+            )
+            detections, actions = await agent.monitor_cycle()
+            await agent._log_cycle(detections, actions, 1.0)
+
+        logged = sorted(
+            (c.kwargs["tenant_id"], c.args[1], c.args[2])
+            for c in deps["activity_log_service"].log_monitoring_cycle.await_args_list
+        )
+        assert logged == [("tenant-A", 1, 1), ("tenant-B", 1, 1)]
+
+    @pytest.mark.asyncio
     async def test_empty_footprint_returns_no_detections_or_actions(self):
         async def loader():
             return {}
