@@ -324,9 +324,16 @@ async def handle_request_validation_error(
             "error_count": len(errors),
         },
     )
+    # The UI shows ``message``; it used to join FastAPI's ``detail`` list into
+    # "field: msg" text, so keep that wording here. ``msg`` is pydantic's
+    # description of the rule and never contains the submitted value.
+    summary = "; ".join(
+        f"{err['loc'][-1]}: {err['msg']}" if err["loc"] else err["msg"]
+        for err in errors[:5]
+    )
     error_response = ErrorResponse(
         error_code=ErrorCode.VALIDATION_ERROR.value,
-        message="Request validation failed",
+        message=f"Request validation failed: {summary}" if summary else "Request validation failed",
         details={"errors": errors},
         request_id=request_id,
     )

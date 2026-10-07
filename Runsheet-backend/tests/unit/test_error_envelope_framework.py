@@ -115,7 +115,8 @@ def test_bad_body_is_422_envelope_without_input() -> None:
     body = resp.json()
     _assert_envelope(body)
     assert body["error_code"] == "VALIDATION_ERROR"
-    assert body["message"] == "Request validation failed"
+    assert body["message"].startswith("Request validation failed: ")
+    assert "count: Field required" in body["message"]
     errors = body["details"]["errors"]
     assert errors and all(set(e) == {"loc", "msg", "type"} for e in errors)
     assert {"input", "ctx", "url"}.isdisjoint(_keys_anywhere(body))
