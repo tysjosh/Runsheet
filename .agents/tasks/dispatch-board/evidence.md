@@ -295,7 +295,7 @@ cwd `.worktrees/dispatch-board/Runsheet-backend`, `PY=/Users/olukotunjosh/Downlo
 Free disk: 6.9 GB (no Docker or frontend build was run). Scratch output under `Runsheet/tmp/` deleted.
 
 ### Phase 4: Frontend foundation
-Status: tasks 21–25 done (no review file existed, so implemented from scratch). One commit on `feature/dispatch-board` (`feat(dispatch-board): Phase 4 frontend foundation ...`). No staging, AWS, deploy or CodeBuild action was taken. The board stays behind the flag: the tab shows only when `GET /api/fuel/board/status` answers a mode, and the backend default is `disabled` (404).
+Status: tasks 21–25 done (no review file existed, so implemented from scratch). Commit `f4a802f` on `feature/dispatch-board`. No staging, AWS, deploy or CodeBuild action was taken. The board stays behind the flag: the tab shows only when `GET /api/fuel/board/status` answers a mode, and the backend default is `disabled` (404).
 
 #### What landed
 | Task | Change | Tests |
