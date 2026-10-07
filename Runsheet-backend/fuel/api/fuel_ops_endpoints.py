@@ -4102,6 +4102,9 @@ async def list_reconciliation_records(
 
     Validates: Requirements 4.4.4, 4.4.5.
     """
+    # Invoiced amounts and variances: admin + dispatcher only, the same
+    # roles as the CSV export below (OI-19).
+    require_role(tenant, "admin", "dispatcher")
 
     date_range = parse_date_range(start_date, end_date)
     es = _get_es()

@@ -341,10 +341,11 @@ def test_invoice_flag_off_is_404(world, client, monkeypatch, roles):
     assert client.get(EXPORTS["invoices"]).status_code == 404
 
 
-def test_reconciliation_driver_gets_403_though_list_allows(world, client):
+def test_reconciliation_driver_gets_403_on_list_and_export(world, client):
+    # OI-19: the list now has the export's admin + dispatcher gate.
     seed_all(world)
     world.as_("driver")
-    assert client.get("/api/fuel/mvp/reconciliation").status_code == 200
+    assert client.get("/api/fuel/mvp/reconciliation").status_code == 403
     assert client.get(EXPORTS["reconciliation"]).status_code == 403
 
 

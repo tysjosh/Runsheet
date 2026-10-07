@@ -256,7 +256,12 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["platform_admin"],
     note: "Customer master lives in the ERP.",
   },
-  { id: "invoices", tier: 1, note: "Capability 6." },
+  {
+    id: "invoices",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Capability 6. Hidden from drivers (OI-19); the API refuses them too.",
+  },
   {
     id: "price-books",
     tier: 4,
@@ -287,7 +292,12 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["platform_admin"],
     note: "ERP receivables.",
   },
-  { id: "reconciliation", tier: 1, note: "Capability 7 — gallon variance." },
+  {
+    id: "reconciliation",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Capability 7 — gallon variance. Admin + dispatcher only (OI-19).",
+  },
 
   // ── ComplianceHub tabs — all legally required ─────────────────────────────
   { id: "certifications", tier: 3, note: "DOT asset certifications." },

@@ -72,6 +72,15 @@ describe("canSee — MVP mode hides only Tier 4", () => {
     expect(canSee("reconciliation", RESOLVED(["dispatcher"], true))).toBe(true);
   });
 
+  it.each(["invoices", "reconciliation"])(
+    "hides %s from drivers and shows it to dispatchers and admins (OI-19)",
+    (id) => {
+      expect(canSee(id, RESOLVED(["driver"]))).toBe(false);
+      expect(canSee(id, RESOLVED(["dispatcher"]))).toBe(true);
+      expect(canSee(id, RESOLVED(["admin"]))).toBe(true);
+    },
+  );
+
   it("leaves Tier 1-3 alone in mvpMode", () => {
     for (const id of ["depots", "weather-alerts", "tax", "ifta"]) {
       expect(canSee(id, RESOLVED(["dispatcher"], true))).toBe(true);
