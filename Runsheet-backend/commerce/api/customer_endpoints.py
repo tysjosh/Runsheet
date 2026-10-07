@@ -136,6 +136,29 @@ def _get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unknown")
 
 
+async def _revoke_portal_sessions(tenant_id: str, customer_id: str) -> None:
+    """Customer-portal archive hook (OI-06, design §1.7).
+
+    Revokes the sessions of the customer's portal users and leaves their
+    grants active, so un-archiving restores access. Best effort: the service
+    logs its own failures, and the per-request principal check denies an
+    archived customer's users regardless.
+    """
+    from portal.services.portal_access_service import get_portal_access_service
+
+    portal_access = get_portal_access_service()
+    if portal_access is None:
+        return
+    try:
+        await portal_access.revoke_sessions_for_customer(tenant_id, customer_id)
+    except Exception as exc:  # noqa: BLE001 — the archive already succeeded
+        logger.error(
+            "Portal session revoke on archive failed for customer %s: %s",
+            customer_id,
+            type(exc).__name__,
+        )
+
+
 # ---------------------------------------------------------------------------
 # POST /api/commerce/customers
 # ---------------------------------------------------------------------------
@@ -274,6 +297,7 @@ async def update_customer(
     # If archiving, use the dedicated archive method that checks open invoices
     if body.status == "archived":
         customer = await service.archive(tenant.tenant_id, customer_id)
+        await _revoke_portal_sessions(tenant.tenant_id, customer_id)
     else:
         # Build kwargs for partial update, only including provided fields
         update_kwargs: Dict[str, Any] = {}

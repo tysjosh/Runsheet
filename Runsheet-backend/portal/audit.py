@@ -145,6 +145,12 @@ def _audit_request(request: Request, status: int) -> None:
     target_ids = {
         k: str(v) for k, v in path_params.items() if k.endswith("_id")
     }
+    # Ids a handler created (e.g. the invite's grant_id), not in the path.
+    extra_targets = getattr(request.state, "portal_audit_target_ids", None)
+    if isinstance(extra_targets, dict):
+        target_ids.update(
+            {str(k): str(v) for k, v in extra_targets.items() if str(k).endswith("_id")}
+        )
     emit_portal_audit(
         level=_level_for_status(status),
         tenant_id=_state(request, "portal_tenant_id", "tenant_id"),

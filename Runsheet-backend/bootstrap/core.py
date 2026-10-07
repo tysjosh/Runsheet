@@ -414,6 +414,27 @@ async def initialize(app, container: ServiceContainer) -> None:
                     customer_service=container.commerce_customer_service
                 )
                 logger.info("Customer portal principal checker configured")
+
+                # Portal-user provisioning (design §1.7). The unit of work,
+                # the SuperTokens seams and the link minter default to their
+                # production implementations; only the audit sink comes from
+                # the container.
+                from portal.services.portal_access_service import (
+                    PortalAccessService,
+                    configure_portal_access,
+                )
+
+                configure_portal_access(
+                    PortalAccessService(
+                        customer_service=container.commerce_customer_service,
+                        telemetry_service=(
+                            container.telemetry_service
+                            if container.has("telemetry_service")
+                            else None
+                        ),
+                    )
+                )
+                logger.info("Customer portal access service configured")
             except Exception as exc:
                 logger.warning("Customer portal principal wiring failed: %s", exc)
 

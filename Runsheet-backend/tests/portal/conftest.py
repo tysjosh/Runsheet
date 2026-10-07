@@ -197,6 +197,320 @@ class FakePipeline:
         return self.state
 
 
+class FakePortalDB:
+    """In-memory ``auth_users`` + ``portal_user_grants`` (FEAT-002).
+
+    ``uow()`` is a :class:`PortalAccessUnitOfWork` factory with transaction
+    semantics: work happens on a copy that replaces the state only on a clean
+    exit. ``fail_commits = n`` makes the next ``n`` commits raise. The DB is
+    also a ``PortalGrantStore`` (joined through ``st_user_id`` like the
+    Postgres store), so a principal checker can run over it, and
+    :meth:`claims_for` mimics ``_lookup_auth_user_claims``.
+    """
+
+    def __init__(self) -> None:
+        self.auth_users: Dict[str, Dict[str, Any]] = {}
+        self.grants: List[Dict[str, Any]] = []
+        self.fail_commits = 0
+        self.locks: List[Tuple[str, str]] = []
+        self._seq = 0
+
+    # -- seeding / inspection ----------------------------------------------
+
+    def add_user(self, email: str, tenant_id: str, roles=(), **fields: Any) -> Dict[str, Any]:
+        row = {
+            "email": email,
+            "tenant_id": tenant_id,
+            "roles": list(roles),
+            "has_pii_access": False,
+            "driver_id": None,
+            "st_user_id": None,
+            "customer_id": None,
+            **fields,
+        }
+        self.auth_users[email.casefold()] = row
+        return row
+
+    def user(self, email: str) -> Optional[Dict[str, Any]]:
+        return self.auth_users.get(email.casefold())
+
+    def active(self, tenant_id: str, customer_id: str) -> List[Dict[str, Any]]:
+        return [
+            g for g in self.grants
+            if g["tenant_id"] == tenant_id and g["customer_id"] == customer_id
+            and g["status"] == "active"
+        ]
+
+    def claims_for(self, st_user_id: str) -> Dict[str, Any]:
+        rows = [r for r in self.auth_users.values() if r.get("st_user_id") == st_user_id]
+        if len(rows) != 1:
+            return {}
+        r = rows[0]
+        claims: Dict[str, Any] = {
+            "tenant_id": r["tenant_id"],
+            "roles": list(r["roles"]),
+            "has_pii_access": bool(r["has_pii_access"]),
+        }
+        if r.get("customer_id"):
+            claims["customer_id"] = r["customer_id"]
+        return claims
+
+    # -- unit of work --------------------------------------------------------
+
+    def uow(self):
+        import copy
+        from contextlib import asynccontextmanager
+
+        db = self
+
+        @asynccontextmanager
+        async def _scope():
+            work = _FakeAccessUoW(db, copy.deepcopy(db.auth_users), copy.deepcopy(db.grants))
+            yield work
+            if db.fail_commits > 0:
+                db.fail_commits -= 1
+                raise RuntimeError("simulated commit failure")
+            db.auth_users, db.grants = work.auth_users, work.grants
+
+        return _scope()
+
+    # -- PortalGrantStore ------------------------------------------------------
+
+    async def find_active_grant(self, *, tenant_id, user_id, customer_id):
+        for row in self.auth_users.values():
+            if (row.get("st_user_id") == user_id and row["tenant_id"] == tenant_id
+                    and row.get("customer_id") == customer_id):
+                for g in self.active(tenant_id, customer_id):
+                    if g["email"].casefold() == row["email"].casefold():
+                        return {"grant_id": g["grant_id"], "first_seen_at": g["first_seen_at"]}
+        return None
+
+    async def mark_first_seen(self, *, grant_id):
+        for g in self.grants:
+            if g["grant_id"] == grant_id and g["first_seen_at"] is None:
+                g["first_seen_at"] = "now"
+
+    def _next_ts(self) -> str:
+        self._seq += 1
+        return f"2026-10-08T00:00:{self._seq:02d}+00:00"
+
+
+class _FakeAccessUoW:
+    def __init__(self, db: FakePortalDB, auth_users, grants) -> None:
+        self._db = db
+        self.auth_users = auth_users
+        self.grants = grants
+
+    async def lock_customer(self, *, tenant_id, customer_id):
+        self._db.locks.append((tenant_id, customer_id))
+
+    async def read_auth_user(self, email):
+        row = self.auth_users.get(email.casefold())
+        return dict(row) if row is not None else None
+
+    def _match(self, g, tenant_id, customer_id):
+        return g["tenant_id"] == tenant_id and g["customer_id"] == customer_id
+
+    async def find_active_grant(self, *, tenant_id, customer_id, email):
+        for g in self.grants:
+            if (self._match(g, tenant_id, customer_id) and g["status"] == "active"
+                    and g["email"].casefold() == email.casefold()):
+                return dict(g)
+        return None
+
+    async def count_active_grants(self, *, tenant_id, customer_id):
+        return sum(1 for g in self.grants if self._match(g, tenant_id, customer_id) and g["status"] == "active")
+
+    async def upsert_customer_user(self, *, email, tenant_id, customer_id):
+        row = self.auth_users.setdefault(email.casefold(), {"email": email, "st_user_id": None})
+        row.update(tenant_id=tenant_id, roles=["customer"], has_pii_access=False,
+                   driver_id=None, customer_id=customer_id)
+
+    async def insert_grant(self, *, grant_id, tenant_id, customer_id, email, created_by):
+        from errors.exceptions import portal_email_in_use
+
+        if any(g["tenant_id"] == tenant_id and g["status"] == "active"
+               and g["email"].casefold() == email.casefold() for g in self.grants):
+            raise portal_email_in_use()
+        g = {"grant_id": grant_id, "tenant_id": tenant_id, "customer_id": customer_id,
+             "email": email, "status": "active", "first_seen_at": None,
+             "created_by": created_by, "created_at": self._db._next_ts(),
+             "revoked_by": None, "revoked_at": None}
+        self.grants.append(g)
+        return dict(g)
+
+    async def list_grants(self, *, tenant_id, customer_id):
+        rows = [dict(g) for g in self.grants if self._match(g, tenant_id, customer_id)]
+        return sorted(rows, key=lambda g: (g["created_at"], g["grant_id"]), reverse=True)
+
+    async def get_grant(self, *, tenant_id, customer_id, grant_id):
+        for g in self.grants:
+            if self._match(g, tenant_id, customer_id) and g["grant_id"] == grant_id:
+                return dict(g)
+        return None
+
+    async def read_customer_user(self, *, email, tenant_id, customer_id):
+        row = self.auth_users.get(email.casefold())
+        if row and row["tenant_id"] == tenant_id and row.get("customer_id") == customer_id:
+            return {"email": row["email"], "st_user_id": row.get("st_user_id")}
+        return None
+
+    async def delete_customer_user(self, *, email, tenant_id, customer_id):
+        row = self.auth_users.get(email.casefold())
+        if (row and row["tenant_id"] == tenant_id and row.get("customer_id") == customer_id
+                and row["roles"] == ["customer"]):
+            del self.auth_users[email.casefold()]
+            return 1
+        return 0
+
+    async def mark_grant_revoked(self, *, grant_id, revoked_by):
+        for g in self.grants:
+            if g["grant_id"] == grant_id:
+                g.update(status="revoked", revoked_by=revoked_by, revoked_at="2026-10-09T00:00:00+00:00")
+
+    async def active_grant_user_ids(self, *, tenant_id, customer_id):
+        ids = []
+        for g in self.grants:
+            if self._match(g, tenant_id, customer_id) and g["status"] == "active":
+                row = self.auth_users.get(g["email"].casefold())
+                if row and row.get("customer_id") == customer_id and row.get("st_user_id"):
+                    ids.append(row["st_user_id"])
+        return ids
+
+    async def mark_provisioned(self, *, email, st_user_id):
+        self.auth_users[email.casefold()]["st_user_id"] = st_user_id
+
+    async def mark_failed(self, *, email, error):
+        row = self.auth_users.get(email.casefold())
+        if row is not None:
+            row["provision_error"] = error
+
+
+class FakeSuperTokens:
+    """In-memory SuperTokens core: the provisioner admin plus the SDK seams.
+
+    ``fail[op] = exc`` makes ``op`` raise (once per assignment if
+    ``fail_once``). ``writes()`` lists every mutating call.
+    """
+
+    UNKNOWN = "UNKNOWN_USER_ID_ERROR"
+    _WRITE_OPS = {"create_user", "set_user_roles", "set_user_metadata",
+                  "revoke_sessions", "delete_user", "send_reset_email"}
+
+    def __init__(self, db: FakePortalDB) -> None:
+        self._db = db
+        self.users: Dict[str, str] = {}  # email (casefold) -> st user id
+        self.roles: Dict[str, List[str]] = {}
+        self.metadata: Dict[str, Dict[str, Any]] = {}
+        self.calls: List[Tuple[str, Any]] = []
+        self.fail: Dict[str, Exception] = {}
+        self.unknown_raises = True
+
+    def _call(self, op: str, arg: Any) -> None:
+        self.calls.append((op, arg))
+        exc = self.fail.pop(op, None)
+        if exc is not None:
+            raise exc
+
+    def writes(self) -> List[Tuple[str, Any]]:
+        return [c for c in self.calls if c[0] in self._WRITE_OPS]
+
+    def known(self, uid: str) -> bool:
+        return uid in self.users.values()
+
+    # SuperTokensAdmin
+    async def get_user_id_by_email(self, email):
+        self._call("get_user_id_by_email", email)
+        return self.users.get(email.casefold())
+
+    async def create_user(self, email):
+        self._call("create_user", email)
+        uid = f"st-{uuid.uuid4().hex[:12]}"
+        self.users[email.casefold()] = uid
+        return uid
+
+    async def set_user_roles(self, uid, roles):
+        self._call("set_user_roles", (uid, list(roles)))
+        if not self.known(uid) and self.unknown_raises:
+            raise RuntimeError(f"{self.UNKNOWN}: {uid}")
+        self.roles[uid] = list(roles)
+
+    async def set_user_metadata(self, uid, metadata):
+        self._call("set_user_metadata", (uid, dict(metadata)))
+        self.metadata[uid] = dict(metadata)
+
+    # SDK seams
+    async def revoke_sessions(self, uid):
+        self._call("revoke_sessions", uid)
+        if not self.known(uid) and self.unknown_raises:
+            raise RuntimeError(f"{self.UNKNOWN}: {uid}")
+        return []
+
+    async def delete_user(self, uid):
+        self._call("delete_user", uid)
+        if not self.known(uid):
+            raise RuntimeError(f"{self.UNKNOWN}: {uid}")
+        for email, value in list(self.users.items()):
+            if value == uid:
+                del self.users[email]
+        self.roles.pop(uid, None)
+
+    async def create_role(self, role, permissions):
+        self._call("create_role", role)
+
+    async def mint_link(self, email, *, tenant_id):
+        from auth.password_admin import PasswordAdminError, PasswordSetLink
+
+        self._call("mint_link", email)
+        row = self._db.user(email)
+        if row is None or row["tenant_id"] != tenant_id:
+            raise PasswordAdminError("not_provisioned", "not provisioned")
+        uid = self.users.get(email.casefold())
+        if uid is None:
+            raise PasswordAdminError("no_supertokens_user", "no user")
+        return PasswordSetLink(email=email, st_user_id=uid, link=f"https://reset.test/{uid}")
+
+    async def send_reset_email(self, st_tenant_id, uid, email):
+        self._call("send_reset_email", uid)
+        return "OK" if self.known(uid) else self.UNKNOWN
+
+
+class FakeTelemetry:
+    def __init__(self) -> None:
+        self.events: List[Dict[str, Any]] = []
+
+    def log_audit_event(self, **kwargs):
+        self.events.append(kwargs)
+
+
+@dataclass
+class AccessFakes:
+    db: FakePortalDB
+    st: FakeSuperTokens
+    telemetry: FakeTelemetry
+    service: Any
+
+    def outcomes(self, action: str) -> List[str]:
+        return [e["details"]["outcome"] for e in self.telemetry.events
+                if e["event_type"] == f"portal_user_{action}"]
+
+
+def make_access_service(customers, db: FakePortalDB, st: FakeSuperTokens, telemetry=None):
+    from portal.services.portal_access_service import PortalAccessService
+
+    return PortalAccessService(
+        customer_service=customers,
+        uow_factory=db.uow,
+        supertokens_admin=st,
+        session_revoker=st.revoke_sessions,
+        user_deleter=st.delete_user,
+        role_creator=st.create_role,
+        link_minter=st.mint_link,
+        reset_emailer=st.send_reset_email,
+        telemetry_service=telemetry,
+    )
+
+
 @dataclass
 class PortalFakes:
     grants: FakeGrantStore
@@ -317,6 +631,24 @@ def portal_fakes(monkeypatch) -> Iterator[PortalFakes]:
         me._services.clear()
         me._services.update(saved_me)
         pay.configure_portal_payments(*saved_pay)
+
+
+@pytest.fixture
+def access(portal_fakes) -> Iterator[AccessFakes]:
+    """A ``PortalAccessService`` over :class:`FakePortalDB` / :class:`FakeSuperTokens`
+    (customers from ``portal_fakes``), installed for the admin routes."""
+    from portal.services import portal_access_service as pas
+
+    db = FakePortalDB()
+    st = FakeSuperTokens(db)
+    telemetry = FakeTelemetry()
+    service = make_access_service(portal_fakes.customers, db, st, telemetry)
+    saved = pas.get_portal_access_service()
+    pas.configure_portal_access(service)
+    try:
+        yield AccessFakes(db, st, telemetry, service)
+    finally:
+        pas.configure_portal_access(saved)
 
 
 @pytest.fixture

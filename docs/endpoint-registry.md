@@ -47,6 +47,10 @@
 | POST | `/api/commerce/customers` | — | session_required | — | — | dict |
 | GET | `/api/commerce/customers/{customer_id}` | — | session_required | — | — | dict |
 | PATCH | `/api/commerce/customers/{customer_id}` | — | session_required | — | — | dict |
+| GET | `/api/commerce/customers/{customer_id}/portal-users` | — | session_required | — | — | PortalUserListResponse |
+| POST | `/api/commerce/customers/{customer_id}/portal-users` | — | session_required | — | — | PortalUserInviteResponse |
+| DELETE | `/api/commerce/customers/{customer_id}/portal-users/{grant_id}` | — | session_required | — | — | PortalUserRevokeResponse |
+| POST | `/api/commerce/customers/{customer_id}/portal-users/{grant_id}/resend` | — | session_required | — | — | PortalUserLinkResponse |
 | GET | `/api/commerce/invoices` | — | session_required | — | — | dict |
 | GET | `/api/commerce/invoices/export` | — | session_required | — | — | — |
 | GET | `/api/commerce/invoices/{invoice_id}` | — | session_required | — | — | dict |
