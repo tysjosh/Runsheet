@@ -326,6 +326,7 @@ Status: tasks 21–25 done (no review file existed, so implemented from scratch)
 - **Disk:** started at 6.1 GB free; cleared the uv cache (3.4 GB) and npm cache; 6.2 GB free at the end. No Docker build, no volume prune.
 
 #### Review fix iteration (phase4-review.json CHANGES_REQUESTED)
+Commit `d72144a` on `feature/dispatch-board`.
 Dependencies unchanged: `@atlaskit/pragmatic-drag-and-drop@4.0.0`, `-hitbox@3.0.0`, `-auto-scroll@3.2.1`, `-live-region@2.1.0` (exact pins, no lockfile change in this iteration). No user-visible behaviour beyond the spec was changed.
 
 | Finding | Fix | Tests |
