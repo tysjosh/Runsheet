@@ -1,0 +1,27 @@
+{
+  "id": "FEAT-002",
+  "type": "feat",
+  "description": "Portal-user provisioning for tenant admins (R1): PortalAccessService (invite / list / resend / revoke under the F1 per-customer advisory lock), the staff admin routes under /api/commerce/customers/{customer_id}/portal-users, the customer-archive session-revoke hook, and their tests. Design §1.4, §1.7, F1, D2, D3, D10. Depends on FEAT-001 (migration, codes, guard, audit middleware, principal checker invalidation).",
+  "status": "pending",
+  "steps": [
+    "1. Runsheet-backend/portal/services/portal_access_service.py: mirror fuel/api/driver_endpoints.py AppAccessService method for method. default_portal_access_uow() over session_scope; invite steps 1-7 of design §1.7 in one transaction (archived -> 409 PORTAL_CUSTOMER_ARCHIVED; pg_advisory_xact_lock(hashtext('portal-grants:'||tenant||':'||customer)); unscoped auth_users read by email with the four acceptance conditions else 409 PORTAL_EMAIL_IN_USE with one fixed message and the real reason only in WARN log + audit outcome; already_invited short-circuit; cap count vs settings.portal_max_users_per_customer -> 409 PORTAL_USER_LIMIT_REACHED; upsert auth_users {customer} + insert grant pug_<uuid4>; provision_user inside the transaction, ProvisioningConflictError -> 409 PORTAL_EMAIL_IN_USE; compensation on post-provisioner failure). After commit: create_password_set_link (PasswordAdminError -> link_error true, grant kept) and send_reset_password_email best-effort (email_sent). Memoized create_new_role_or_add_permissions('customer', []) once per process. Revoke per design §1.7 (set_user_roles([]), revoke_all_sessions_for_user, supertokens_python.asyncio.delete_user, unknown-user = success for each; DELETE predicate roles = ARRAY['customer']; grant -> revoked; principal_checker.invalidate_user). Resend requires active grant. revoke_sessions_for_customer(tenant, customer_id) best-effort, ERROR log on failure. telemetry.log_audit_event like the driver flow; no email in portal_audit.",
+    "2. Runsheet-backend/portal/api/admin_endpoints.py: router prefix /api/commerce/customers/{customer_id}/portal-users with GET '', POST '' ({email} extra='forbid', 3-320 chars, same shape check as AppAccessGrantRequest), POST '/{grant_id}/resend', DELETE '/{grant_id}'. require_portal_admin: portal_enabled (404 PORTAL_DISABLED) -> get_tenant_context -> require_role admin (403) -> CustomerService.get (404, nothing written). Response shapes exactly as the §1.7 table. Mount in main.py (or the portal router tuple from FEAT-001).",
+    "3. commerce/api/customer_endpoints.py archive handler: after CustomerService.archive succeeds call portal_access_service.revoke_sessions_for_customer when configured. Wire PortalAccessService in bootstrap/core.py next to CustomerService (only when commerce backbone is on).",
+    "4. Tests: Runsheet-backend/tests/portal/test_portal_access_service.py (PRV-1 complete list from design §13.2 incl. unknown-user retry, rollback on SuperTokens error, link-mint failure keeps grant, compensation; ISO-T-5 cross-tenant customer 404 and other-tenant email 409 with no SuperTokens write), test_portal_admin_routes.py (XR-7: dispatcher/driver/platform_admin 403, customer 403 PORTAL_ROUTE_FORBIDDEN, admin 200, via the FEAT-001 real-auth harness), test_portal_isolation.py::test_revoked_customer_has_no_session (XR-9), an archive-hook test (sessions revoked, grants stay active), and tests/postgres/test_portal_schema.py::test_concurrent_invites_cap (F1: 11 concurrent invites leave exactly 10 active) plus the grants-list part of ISO-T-4. Confirm the FEAT-001 generic suites (AUD-1 covers the admin routes, XR-8 admin part) still pass.",
+    "5. Regenerate and commit docs/endpoint-registry.md."
+  ],
+  "acceptance_criteria": [
+    "Admin invite creates auth_users roles={customer} with the customer_id, a grant row, provisions SuperTokens and returns password_set_link; the 11th active invite for a customer returns 409 PORTAL_USER_LIMIT_REACHED (unit and [pg] concurrent)",
+    "Staff, driver, other-customer and other-tenant emails all return 409 PORTAL_EMAIL_IN_USE with an identical body and no SuperTokens write",
+    "Non-admin callers get 403 on all four admin routes; a customer gets 403 PORTAL_ROUTE_FORBIDDEN; flag off gives 404",
+    "Revoke deletes the SuperTokens user and the portal-only auth_users row, marks the grant revoked, and an old session gets 403 PORTAL_ACCESS_SUSPENDED (XR-9 passes); re-invite of the same email succeeds",
+    "Archiving a customer revokes its portal users' sessions and leaves grants active"
+  ],
+  "verification": [
+    "cd <wt>/Runsheet-backend && ENVIRONMENT=test JWT_SECRET=ci-test-jwt-secret JWT_ALGORITHM=HS256 REDIS_URL=redis://localhost:6379 <venv>/bin/python -m pytest tests/portal tests/unit/test_driver_app_access_endpoints.py tests/commerce -q --no-cov",
+    "Scratch-DB [pg] run: POSTGRES_TEST_URL=postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet_portal_ci <venv>/bin/python -m pytest tests/postgres -q --no-cov (after alembic upgrade head on that DB; 0 skipped)",
+    "python scripts/generate_endpoint_registry.py, commit, git diff --exit-code docs/endpoint-registry.md"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

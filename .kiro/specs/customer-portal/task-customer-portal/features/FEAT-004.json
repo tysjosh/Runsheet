@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-004",
+  "type": "feat",
+  "description": "Read-only invoices (R5): a `statuses` filter through InvoiceService and both read paths, PortalInvoiceReader, the PortalInvoice allowlist projection (with account display names), the reportlab invoice PDF, the scoped CSV export through services/csv_export.py, the invoice routes, and their tests. The payment_attempt field on the invoice detail is wired to PortalPaymentAttemptStore in FEAT-005; here it is always null. Design §2.4 (invoice row), §3.2, §5, D8, DV9. Depends on FEAT-001; independent of FEAT-002 and FEAT-003.",
+  "status": "pending",
+  "steps": [
+    "1. Add statuses: Optional[Sequence[str]] = None (ES terms / SQL IN, applied together with status) to InvoiceService.list/count and _invoice_must_clauses in commerce/services/invoice_service.py, InvoiceReadRepository.list/count in persistence/read_repositories.py, and read_invoice_list/read_invoice_count in commerce/services/commerce_persistence_bridge.py. Re-read the post-rebase invoice_service.py first (OI-14 changed it).",
+    "2. portal/services/scoped_readers.py PortalInvoiceReader.list/count (tenant_id + customer_id + statuses=PORTAL_INVOICE_STATUSES or [status]) and get (tenant get, then customer_id mismatch or draft -> the same resource_not_found(f\"Invoice '{id}' not found\", details={'invoice_id': id}) as a miss). portal/services/projection.py PortalInvoice projection (fields exactly as design §5; unit_price_cents via services.money.legacy_unit_price_cents; delivery only delivered_at/actual_gallons/ticket_number; payable rule; account_display_name map from AccountService.list following next_cursor up to 500, WARN + 'Account' on error). portal/models.py PortalInvoice + line item models (extra='forbid').",
+    "3. portal/services/invoice_pdf.py render_invoice_pdf(invoice: PortalInvoice, *, supplier_name, customer_display_name) -> bytes with the reportlab canvas API like the BOL renderer (letter, 30 line items per page). portal/services/portal_invoice_service.py orchestrates list/detail/pdf/csv. services/csv_export.py ExportType gains 'portal_invoices'; PORTAL_INVOICE_EXPORT_COLUMNS as in §5; source adapted from _invoice_export_source to call PortalInvoiceReader.",
+    "4. portal/api/invoice_endpoints.py: require_portal_invoicing (404 INVOICING_DISABLED when backbone/invoicing off or service missing); GET /api/portal/invoices (read limit; status enum without draft; start_date/end_date through services.date_range.parse_date_range on created_at), GET /invoices/export declared BEFORE /invoices/{invoice_id} (download limit = EXPORT_RATE_LIMIT, key portal_rate_key), GET /invoices/{invoice_id}, GET /invoices/{invoice_id}/pdf (application/pdf, Content-Disposition attachment with the sanitized filename; render error -> ERROR log + 500 'Invoice PDF could not be generated'). Mount; wire the service in bootstrap/core.py when invoicing is configured.",
+    "5. Tests in Runsheet-backend/tests/portal/: test_portal_invoices.py (INV-1 incl. the draft-exclusion case against both the ES fake and the commerce_persistence_bridge path, void labelled 'Void', PDF text via pypdf contains only projected values, CSV BOM + '=' escaping + scope rows + 413 cap), add invoice/PDF/CSV cases to test_portal_isolation.py (ISO-C-1, ISO-C-2 parsed CSV, ISO-T-1), test_scoped_readers.py (ISO-C-3 spy on InvoiceService.list/count), test_portal_projection.py (ISO-C-6: full delivery_result with driver id, recipient, photos, geotag, signature never appears in list, detail, PDF text or CSV), and extend tests/commerce/test_invoice_status_filter.py for statuses. Existing commerce invoice tests pass unchanged.",
+    "6. Regenerate and commit docs/endpoint-registry.md."
+  ],
+  "acceptance_criteria": [
+    "Draft invoices never appear in the portal list or CSV and are 404 by id, PDF and payment paths; void invoices are listed with label 'Void' (INV-1 passes on both read paths)",
+    "The PDF response is application/pdf with filename invoice_<sanitized>.pdf and its extracted text contains no restricted values (ISO-C-6 passes)",
+    "Customer A gets 404 with the unknown-id body for B's and T2's invoices and PDFs; A's list and parsed CSV contain only A's invoices",
+    "With invoicing disabled all invoice routes return 404 INVOICING_DISABLED and /me shows invoices_available=false"
+  ],
+  "verification": [
+    "cd <wt>/Runsheet-backend && ENVIRONMENT=test JWT_SECRET=ci-test-jwt-secret JWT_ALGORITHM=HS256 REDIS_URL=redis://localhost:6379 <venv>/bin/python -m pytest tests/portal tests/commerce tests/unit/test_csv_export_helper.py -q --no-cov",
+    "python scripts/generate_endpoint_registry.py, commit, git diff --exit-code docs/endpoint-registry.md"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
