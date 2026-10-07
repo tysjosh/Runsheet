@@ -69,6 +69,11 @@ DISPATCH_BOARD_COMMANDS_MAPPING = {
                     "hash_after":     {"type": "keyword"},
                 },
             },
+            # Flat copy of ``lanes[].truck_id``: a ``term`` on a keyword array
+            # matches in the Postgres translator, a path into an array of
+            # objects does not (History filter, R22.3).
+            "truck_ids":         {"type": "keyword"},
+            "target_command_id": {"type": "keyword"},
             "content_before": {"type": "object", "enabled": False},
             "content_after":  {"type": "object", "enabled": False},
             "checks_summary": {"type": "object", "dynamic": True},

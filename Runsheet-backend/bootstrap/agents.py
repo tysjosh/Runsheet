@@ -225,6 +225,62 @@ async def _seed_fuel_ops_feature_flag_defaults(
         )
 
 
+def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_client) -> None:
+    """Build the Dispatch Board services and configure ``/api/fuel/board`` (K11).
+
+    The router is also included by ``main.py`` at import time (so the endpoint
+    registry lists it); mounting through the idempotent helper keeps one copy.
+    The board flag defaults to ``disabled`` (K13), so wiring changes nothing
+    until a tenant is switched on.
+    """
+    from fuel.api.dispatch_board_endpoints import (
+        configure_dispatch_board_endpoints,
+        router as dispatch_board_router,
+    )
+    from fuel.services.contract_lift_service import ContractLiftService
+    from fuel.services.dispatch_board_service import DispatchBoardService
+    from fuel.services.dispatch_board_telemetry import BoardTelemetry
+    from fuel.services.dispatch_validation import DispatchValidationService, Lazy
+    from fuel.services.terminal_wait_resolver import build_wait_time_resolver
+    from fuel.terminal_models import TerminalWaitReportRepository
+
+    def _from_container(name: str):
+        return Lazy(lambda: container.get(name) if container.has(name) else None)
+
+    validation = DispatchValidationService(
+        es_service=es_service,
+        order_repository=_from_container("order_repository"),
+        driver_repository=_from_container("driver_repository"),
+        qualification_service=_from_container("driver_qualification_service"),
+        hos_advisory_service=_from_container("hos_advisory_service"),
+        asset_certification_service=_from_container("asset_certification_service"),
+        dyed_diesel_enforcer=_from_container("dyed_diesel_enforcer"),
+        terminal_wait_resolver=build_wait_time_resolver(
+            redis_client=redis_client,
+            wait_report_repository=TerminalWaitReportRepository(es_service=es_service),
+        ),
+        contract_lift_service=ContractLiftService(redis_client=redis_client),
+        tenant_config=redis_client,
+    )
+    board_service = DispatchBoardService(
+        es_service=es_service,
+        validation=validation,
+        driver_repository=container.get("driver_repository") if container.has("driver_repository") else None,
+        telemetry=BoardTelemetry(
+            telemetry=container.get("telemetry_service") if container.has("telemetry_service") else None,
+            activity_log=container.get("activity_log_service") if container.has("activity_log_service") else None,
+        ),
+    )
+    container.dispatch_validation_service = validation
+    container.dispatch_board_service = board_service
+    configure_dispatch_board_endpoints(
+        board_service=board_service,
+        feature_flag_service=container.ops_feature_flags if container.has("ops_feature_flags") else None,
+    )
+    mount_router(app, dispatch_board_router)
+    logger.info("Dispatch Board endpoints configured and router registered")
+
+
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
@@ -1097,6 +1153,16 @@ async def initialize(app, container: ServiceContainer) -> None:
     # the idempotent helper: including it again would duplicate every MVP route.
     mount_router(app, mvp_router)
     logger.info("MVP endpoints configured and router registered")
+
+    # Dispatch Board (dispatch-board K11, plan task 13). Built after the
+    # dispatch service and executor above (Phase 2 publish needs both). The
+    # validators come from earlier bootstrap modules, except HOS, which
+    # ``bootstrap/driver.py`` builds after this module: every collaborator is
+    # resolved at call time through ``Lazy`` so a later registration is seen.
+    try:
+        _wire_dispatch_board(app, container, es_service, _agent_redis_client)
+    except Exception as exc:
+        logger.error("Dispatch Board not wired: %s", type(exc).__name__, exc_info=True)
 
     # ---- Fuel Ops Hardening endpoints (Phase 3 Task 3.6 et al.) ----
     # Register the fuel-domain router that owns the customer-tanks CRUD

@@ -93,6 +93,7 @@ from fuel.api.fuel_ops_endpoints import (
     router as fuel_ops_router,
     mvp_router as fuel_ops_mvp_router,
 )
+from fuel.api.dispatch_board_endpoints import router as dispatch_board_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -216,6 +217,9 @@ for _router in (
     mvp_fuel_router,
     fuel_ops_router,
     fuel_ops_mvp_router,
+    # /api/fuel/board — flag-gated (404 until a tenant's dispatch_board flag
+    # is on); services wired by bootstrap/agents.py.
+    dispatch_board_router,
     auth_admin_router,
     auth_account_router,
     # GET /api/auth/public-config — unauthenticated by an explicit
