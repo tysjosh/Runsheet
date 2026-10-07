@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 import unicodedata
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import (
@@ -317,8 +317,76 @@ class PortalTankDeliveryListEnvelope(_PortalModel):
     request_id: str
 
 
+# ---------------------------------------------------------------------------
+# Invoices (design §5, PD12)
+# ---------------------------------------------------------------------------
+
+
+class PortalInvoiceLineItem(_PortalModel):
+    product_code: Optional[str] = None
+    quantity_gallons: Optional[float] = None
+    unit_price_cents: Optional[int] = None
+    subtotal_cents: Optional[int] = None
+
+
+class PortalInvoiceDelivery(_PortalModel):
+    """Only these three ``delivery_result`` facts ever reach the portal."""
+
+    delivered_at: Optional[datetime] = None
+    actual_gallons: Optional[float] = None
+    ticket_number: Optional[str] = None
+
+
+class PortalInvoicePaymentAttempt(_PortalModel):
+    """The newest portal payment attempt (detail only; wired in FEAT-005)."""
+
+    payment_attempt_id: str
+    status_code: str
+    status_label: str
+    amount_cents: int
+    created_at: Optional[datetime] = None
+
+
+class PortalInvoice(_PortalModel):
+    invoice_id: str
+    invoice_number: Optional[str] = None
+    status_code: str
+    status_label: str
+    issued_at: Optional[datetime] = None
+    due_date: Optional[date] = None
+    created_at: Optional[datetime] = None
+    account_display_name: str
+    subtotal_cents: int
+    tax_cents: int
+    total_cents: int
+    amount_paid_cents: int
+    remaining_cents: int
+    line_items: List[PortalInvoiceLineItem]
+    delivery: Optional[PortalInvoiceDelivery] = None
+    payment_attempt: Optional[PortalInvoicePaymentAttempt] = None
+    payable: bool
+
+
+class PortalInvoiceEnvelope(_PortalModel):
+    data: PortalInvoice
+    request_id: str
+
+
+class PortalInvoiceListEnvelope(_PortalModel):
+    data: List[PortalInvoice]
+    next_cursor: Optional[str] = None
+    limit: int
+    request_id: str
+
+
 __all__ = [
     "PATH_ID_PATTERN",
+    "PortalInvoice",
+    "PortalInvoiceDelivery",
+    "PortalInvoiceEnvelope",
+    "PortalInvoiceLineItem",
+    "PortalInvoiceListEnvelope",
+    "PortalInvoicePaymentAttempt",
     "PortalCancelRequest",
     "PortalNextDelivery",
     "PortalOrder",

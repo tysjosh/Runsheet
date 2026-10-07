@@ -646,6 +646,23 @@ async def initialize(app, container: ServiceContainer) -> None:
             from portal.api.me_endpoints import configure_portal_me
 
             configure_portal_me(invoice_service=_inv_svc_for_api)
+
+            # Customer portal invoices (OI-06, design §5).
+            from portal.services.portal_invoice_service import wire_portal_invoices
+
+            wire_portal_invoices(
+                invoice_service=_inv_svc_for_api,
+                account_service=(
+                    container.commerce_account_service
+                    if container.has("commerce_account_service")
+                    else None
+                ),
+                customer_service=(
+                    container.commerce_customer_service
+                    if container.has("commerce_customer_service")
+                    else None
+                ),
+            )
         except Exception as exc:
             logger.warning("Commerce invoice API wiring failed: %s", exc)
 

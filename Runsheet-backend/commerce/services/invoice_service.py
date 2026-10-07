@@ -18,7 +18,7 @@ import asyncio
 import logging
 import math
 from datetime import date, datetime, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from commerce.models.events import InvoiceEvent, InvoiceEventType
@@ -75,17 +75,22 @@ def _invoice_must_clauses(
     created_from: Optional[datetime] = None,
     created_before: Optional[datetime] = None,
     created_until: Optional[datetime] = None,
+    statuses: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Document-store must-clauses shared by ``InvoiceService.list`` and ``count``.
 
     Invoice ``created_at`` is written as ``utcnow().isoformat()`` (``+00:00``
     suffix) and compared as text, so date bounds use the same form.
+    ``statuses`` becomes a ``terms`` clause applied together with ``status``;
+    an empty sequence matches nothing.
     """
     from services.date_range import to_doc_bound
 
     must_clauses: List[Dict[str, Any]] = []
     if status:
         must_clauses.append({"term": {"status": status}})
+    if statuses is not None:
+        must_clauses.append({"terms": {"status": list(statuses)}})
     if customer_id:
         must_clauses.append({"term": {"customer_id": customer_id}})
     if account_id:
@@ -1880,23 +1885,26 @@ class InvoiceService:
         created_from: Optional[datetime] = None,
         created_before: Optional[datetime] = None,
         created_until: Optional[datetime] = None,
+        statuses: Optional[Sequence[str]] = None,
     ) -> int:
         """Count Invoices matching the :meth:`list` filters (data export)."""
         from commerce.services.commerce_persistence_bridge import (
             _NOT_CUT_OVER,
             read_invoice_count,
         )
+        status_kwargs = {"statuses": statuses} if statuses is not None else {}
         pg = await read_invoice_count(
             tenant_id, status=status, customer_id=customer_id,
             account_id=account_id, order_id=order_id,
             qbo_push_state=qbo_push_state, created_from=created_from,
             created_before=created_before, created_until=created_until,
+            **status_kwargs,
         )
         if pg is not _NOT_CUT_OVER:
             return int(pg)
         clauses = _invoice_must_clauses(
             status, customer_id, account_id, order_id, qbo_push_state,
-            created_from, created_before, created_until,
+            created_from, created_before, created_until, statuses=statuses,
         )
         base_query: Dict[str, Any] = {
             "query": {"bool": {"must": clauses if clauses else [{"match_all": {}}]}},
@@ -1923,11 +1931,12 @@ class InvoiceService:
         created_until: Optional[datetime] = None,
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
+        statuses: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """List Invoices for a tenant with cursor/limit pagination.
 
         Default limit is 50, max 200. Supports filtering by status,
-        customer_id, account_id, and order_id.
+        statuses (any of), customer_id, account_id, and order_id.
 
         Validates: Constraint C3
         """
@@ -1942,19 +1951,20 @@ class InvoiceService:
             _NOT_CUT_OVER,
             read_invoice_list,
         )
+        status_kwargs = {"statuses": statuses} if statuses is not None else {}
         pg = await read_invoice_list(
             tenant_id, status=status, customer_id=customer_id,
             account_id=account_id, order_id=order_id,
             qbo_push_state=qbo_push_state, created_from=created_from,
             created_before=created_before, created_until=created_until,
-            cursor=cursor, limit=limit,
+            cursor=cursor, limit=limit, **status_kwargs,
         )
         if pg is not _NOT_CUT_OVER:
             return pg
 
         must_clauses = _invoice_must_clauses(
             status, customer_id, account_id, order_id, qbo_push_state,
-            created_from, created_before, created_until,
+            created_from, created_before, created_until, statuses=statuses,
         )
 
         base_query: Dict[str, Any] = {

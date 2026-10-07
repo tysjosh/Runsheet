@@ -154,6 +154,82 @@ async def test_repository_search_filters_on_both_paths(monkeypatch):
     assert seen["in_filters"] is None
 
 
+class _InvoiceServiceSpy:
+    """Records every ``InvoiceService.list/count/get`` call."""
+
+    def __init__(self, doc=None):
+        self.calls = []
+        self.doc = doc
+
+    async def list(self, **kwargs):
+        self.calls.append(("list", kwargs))
+        return {"items": [], "next_cursor": None, "limit": kwargs.get("limit")}
+
+    async def count(self, **kwargs):
+        self.calls.append(("count", kwargs))
+        return 0
+
+    async def get(self, **kwargs):
+        self.calls.append(("get", kwargs))
+        return dict(self.doc or {})
+
+
+async def test_invoice_store_calls_carry_customer_id():
+    """ISO-C-3 (invoice part): every list/count carries both ids and a
+    statuses set without ``draft``."""
+    from portal.services.scoped_readers import PORTAL_INVOICE_STATUSES, PortalInvoiceReader
+
+    spy = _InvoiceServiceSpy()
+    reader = PortalInvoiceReader(spy)
+    await reader.list(SCOPE, limit=10)
+    await reader.list(SCOPE, limit=10, status="void")
+    await reader.list(SCOPE, limit=10, status="draft")
+    await reader.count(SCOPE)
+    await reader.count(SCOPE, status="paid")
+
+    assert [op for op, _ in spy.calls] == ["list", "list", "list", "count", "count"]
+    for _op, kwargs in spy.calls:
+        assert kwargs["tenant_id"] == SCOPE.tenant_id
+        assert kwargs["customer_id"] == SCOPE.customer_id
+        assert "draft" not in kwargs["statuses"]
+    assert spy.calls[0][1]["statuses"] == list(PORTAL_INVOICE_STATUSES)
+    assert spy.calls[1][1]["statuses"] == ["void"]
+    assert spy.calls[2][1]["statuses"] == []  # draft matches nothing
+    assert spy.calls[4][1]["statuses"] == ["paid"]
+
+
+@pytest.mark.parametrize("doc", [
+    {"invoice_id": "inv-1", "customer_id": "OTHER", "status": "open"},
+    {"invoice_id": "inv-1", "customer_id": CUSTOMER_A, "status": "draft"},
+])
+async def test_invoice_get_out_of_scope_is_the_miss_404(doc):
+    from errors.exceptions import AppException
+    from portal.services.scoped_readers import PortalInvoiceReader
+
+    spy = _InvoiceServiceSpy(doc)
+    with pytest.raises(AppException) as err:
+        await PortalInvoiceReader(spy).get(SCOPE, "inv-1")
+    assert err.value.status_code == 404
+    assert err.value.message == "Invoice 'inv-1' not found"
+    assert err.value.details == {"invoice_id": "inv-1"}
+    assert spy.calls == [("get", {"tenant_id": T1, "invoice_id": "inv-1"})]
+
+
+async def test_invoice_reader_refuses_scope_without_ids():
+    from portal.services.scoped_readers import PortalInvoiceReader
+
+    spy = _InvoiceServiceSpy()
+    bad = SimpleNamespace(tenant_id=T1, customer_id="")
+    for fn in (
+        lambda: PortalInvoiceReader(spy).list(bad, limit=5),
+        lambda: PortalInvoiceReader(spy).count(bad),
+        lambda: PortalInvoiceReader(spy).get(bad, "x"),
+    ):
+        with pytest.raises(ValueError):
+            await fn()
+    assert spy.calls == []
+
+
 async def test_transition_if_compares_status_and_hold_reason():
     from fuel.order_repository import FuelOrderRepository
     from tests.unit._loading_plan_fakes import ORDERS, InMemoryDocumentStore, fuel_order_doc

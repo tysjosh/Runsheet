@@ -306,6 +306,135 @@ class PortalForecastReader:
 
 
 # ---------------------------------------------------------------------------
+# Invoices (design §2.4, §5)
+# ---------------------------------------------------------------------------
+
+#: Every invoice status a customer may see; ``draft`` is excluded in the query.
+PORTAL_INVOICE_STATUSES: Tuple[str, ...] = ("open", "partial", "paid", "overdue", "void")
+
+
+def invoice_not_found(invoice_id: str) -> AppException:
+    """The same constructor and message ``InvoiceService.get`` uses for a miss."""
+    return resource_not_found(
+        f"Invoice '{invoice_id}' not found", details={"invoice_id": invoice_id}
+    )
+
+
+class PortalInvoiceReader:
+    """Customer-scoped reads over :class:`commerce.services.invoice_service.InvoiceService`.
+
+    The portal cursor is opaque (``encode_cursor([created_at, invoice_id])``).
+    Its invoice is re-checked against the scope before it is handed to the
+    service, so a cursor naming another customer's invoice answers exactly
+    like a malformed one (422) and can't be used to probe for ids.
+    """
+
+    def __init__(self, invoice_service: Any) -> None:
+        self._service = invoice_service
+
+    @staticmethod
+    def _statuses(status: Optional[str]) -> List[str]:
+        if status is None:
+            return list(PORTAL_INVOICE_STATUSES)
+        # An unknown or draft status matches nothing rather than widening.
+        return [status] if status in PORTAL_INVOICE_STATUSES else []
+
+    @staticmethod
+    def _visible(doc: Any, customer_id: str) -> bool:
+        return (
+            isinstance(doc, dict)
+            and doc.get("customer_id") == customer_id
+            and doc.get("status") in PORTAL_INVOICE_STATUSES
+        )
+
+    async def get_or_none(self, scope: Any, invoice_id: str) -> Optional[Dict[str, Any]]:
+        tenant_id, customer_id = _require_scope(scope)
+        try:
+            doc = await self._service.get(tenant_id=tenant_id, invoice_id=invoice_id)
+        except AppException as exc:
+            if exc.error_code == ErrorCode.RESOURCE_NOT_FOUND:
+                return None
+            raise
+        return doc if self._visible(doc, customer_id) else None
+
+    async def get(self, scope: Any, invoice_id: str) -> Dict[str, Any]:
+        """One non-draft invoice of the customer, else the not-found 404 (E9)."""
+        doc = await self.get_or_none(scope, invoice_id)
+        if doc is None:
+            raise invoice_not_found(invoice_id)
+        return doc
+
+    async def _service_cursor(self, scope: Any, cursor: Optional[str]) -> Optional[str]:
+        after = decode_cursor(cursor)
+        if after is None:
+            return None
+        invoice_id = str(after[1])
+        if await self.get_or_none(scope, invoice_id) is None:
+            raise AppException(
+                ErrorCode.VALIDATION_ERROR,
+                "cursor is not valid",
+                status_code=422,
+                details={"fields": ["cursor"]},
+            )
+        return invoice_id
+
+    async def list(
+        self,
+        scope: Any,
+        *,
+        limit: int,
+        cursor: Optional[str] = None,
+        status: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        created_until: Optional[datetime] = None,
+    ) -> Page:
+        """Newest first (the service's ``created_at desc, invoice_id`` order)."""
+        tenant_id, customer_id = _require_scope(scope)
+        service_cursor = await self._service_cursor(scope, cursor)
+        result = await self._service.list(
+            tenant_id=tenant_id,
+            customer_id=customer_id,
+            statuses=self._statuses(status),
+            created_from=created_from,
+            created_before=created_before,
+            created_until=created_until,
+            cursor=service_cursor,
+            limit=limit,
+        )
+        raw = list(result.get("items") or [])
+        items = [doc for doc in raw if self._visible(doc, customer_id)]
+        next_cursor = None
+        if result.get("next_cursor") and raw:
+            last = raw[-1]
+            next_cursor = encode_cursor(
+                [str(last.get("created_at") or ""), str(result["next_cursor"])]
+            )
+        return Page(items, next_cursor)
+
+    async def count(
+        self,
+        scope: Any,
+        *,
+        status: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        created_until: Optional[datetime] = None,
+    ) -> int:
+        tenant_id, customer_id = _require_scope(scope)
+        return int(
+            await self._service.count(
+                tenant_id=tenant_id,
+                customer_id=customer_id,
+                statuses=self._statuses(status),
+                created_from=created_from,
+                created_before=created_before,
+                created_until=created_until,
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -337,7 +466,9 @@ def get_portal_readers() -> PortalReaders:
 
 
 __all__ = [
+    "PORTAL_INVOICE_STATUSES",
     "PortalForecastReader",
+    "PortalInvoiceReader",
     "PortalOrderReader",
     "PortalReaders",
     "PortalTankReader",
@@ -346,6 +477,7 @@ __all__ = [
     "encode_cursor",
     "get_configured_readers",
     "get_portal_readers",
+    "invoice_not_found",
     "order_not_found",
     "tank_not_found",
 ]

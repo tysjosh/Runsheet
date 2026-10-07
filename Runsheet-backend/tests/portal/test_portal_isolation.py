@@ -192,3 +192,63 @@ def test_tenant_boundary(client, portal_on, portal_orders, cA, cC):
     assert next_ids == {ids.order_c}
     # And the reverse: cC can't reach A's rows.
     _assert_like_unknown(client, cC, ids.order_a_portal, ids.tank_a)
+
+
+# ---------------------------------------------------------------------------
+# Invoices, PDF and CSV (FEAT-004): ISO-C-1, ISO-C-2, ISO-T-1
+# ---------------------------------------------------------------------------
+
+import csv  # noqa: E402
+import io  # noqa: E402
+
+from tests.portal.conftest import seed_invoice_isolation  # noqa: E402
+
+_VISIBLE = ("open", "partial", "paid", "overdue", "void")
+
+
+def _assert_invoice_like_unknown(client, session, foreign_id, *, pdf=False):
+    """Detail (and, with ``pdf``, the PDF route: 5/min per user, so callers
+    check it for two ids only)."""
+    unknown = "QA-INV-UNKNOWN-1"
+    for suffix in ("", "/pdf") if pdf else ("",):
+        miss = call(client, "GET", f"/api/portal/invoices/{unknown}{suffix}", session)
+        hit = call(client, "GET", f"/api/portal/invoices/{foreign_id}{suffix}", session)
+        assert miss.status_code == 404 and hit.status_code == 404, (foreign_id, suffix)
+        assert miss.json()["error_code"] == "RESOURCE_NOT_FOUND"
+        assert _normalized(hit, foreign_id) == _normalized(miss, unknown), (foreign_id, suffix)
+
+
+def _invoice_list_and_csv(client, session):
+    listed = call(client, "GET", "/api/portal/invoices", session)
+    exported = call(client, "GET", "/api/portal/invoices/export", session)
+    assert listed.status_code == 200 and exported.status_code == 200
+    rows = list(csv.reader(io.StringIO(exported.content.decode("utf-8").lstrip("\ufeff"))))
+    return {i["invoice_id"] for i in listed.json()["data"]}, {r[0] for r in rows[1:]}
+
+
+def test_customer_a_cannot_read_b_invoices(client, portal_on, portal_fakes, cA):
+    """ISO-C-1 (invoice part): B's invoices and PDFs answer like unknown ids."""
+    inv = seed_invoice_isolation(portal_fakes.invoices)
+    for status in ("draft",) + _VISIBLE:
+        _assert_invoice_like_unknown(client, cA, inv["B"][status],
+                                     pdf=status in ("draft", "open"))
+
+
+def test_invoice_lists_and_csv_contain_only_own_rows(client, portal_on, portal_fakes, cA):
+    """ISO-C-2 (invoice part): list and parsed CSV contain only A's invoices."""
+    inv = seed_invoice_isolation(portal_fakes.invoices)
+    listed, csv_numbers = _invoice_list_and_csv(client, cA)
+    assert listed == {inv["A"][s] for s in _VISIBLE}
+    assert csv_numbers == {f"INV-{inv['A'][s]}" for s in _VISIBLE}
+
+
+def test_invoice_tenant_boundary(client, portal_on, portal_fakes, cA, cC):
+    """ISO-T-1 (invoice part): T2 invoices are unknown to cA; cC sees only T2."""
+    inv = seed_invoice_isolation(portal_fakes.invoices)
+    for status in ("draft",) + _VISIBLE:
+        _assert_invoice_like_unknown(client, cA, inv["C"][status],
+                                     pdf=status in ("draft", "open"))
+    listed, csv_numbers = _invoice_list_and_csv(client, cC)
+    assert listed == {inv["C"][s] for s in _VISIBLE}
+    assert csv_numbers == {f"INV-{inv['C'][s]}" for s in _VISIBLE}
+    _assert_invoice_like_unknown(client, cC, inv["A"]["open"], pdf=True)

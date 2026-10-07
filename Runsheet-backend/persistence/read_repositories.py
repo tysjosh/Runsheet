@@ -22,7 +22,7 @@ All queries are tenant-scoped; no method exposes a cross-tenant read.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -265,11 +265,18 @@ class InvoiceReadRepository:
     @staticmethod
     def _list_filters(*, status=None, customer_id=None, account_id=None,
                       order_id=None, qbo_push_state=None, created_from=None,
-                      created_before=None, created_until=None) -> list:
-        """Filter list shared by :meth:`list` and :meth:`count`."""
+                      created_before=None, created_until=None,
+                      statuses=None) -> list:
+        """Filter list shared by :meth:`list` and :meth:`count`.
+
+        ``statuses`` (SQL ``IN``) is applied together with ``status``; an
+        empty sequence matches nothing.
+        """
         filters = []
         if status:
             filters.append(InvoiceORM.status == status)
+        if statuses is not None:
+            filters.append(InvoiceORM.status.in_(list(statuses)))
         if customer_id:
             filters.append(InvoiceORM.customer_id == customer_id)
         if account_id:
@@ -301,13 +308,14 @@ class InvoiceReadRepository:
                    qbo_push_state: Optional[str] = None,
                    created_from=None, created_before=None, created_until=None,
                    cursor: Optional[str] = None,
-                   limit: int = _DEFAULT_PAGE_LIMIT) -> Dict[str, Any]:
+                   limit: int = _DEFAULT_PAGE_LIMIT,
+                   statuses: Optional[Sequence[str]] = None) -> Dict[str, Any]:
         limit = _clamp(limit)
         filters = self._list_filters(
             status=status, customer_id=customer_id, account_id=account_id,
             order_id=order_id, qbo_push_state=qbo_push_state,
             created_from=created_from, created_before=created_before,
-            created_until=created_until,
+            created_until=created_until, statuses=statuses,
         )
         rows = await _keyset_page(
             session, InvoiceORM, tenant_id=tenant_id, filters=filters,

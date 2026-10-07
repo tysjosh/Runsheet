@@ -27,6 +27,10 @@ Fixtures later FEATs reuse:
   over one ``InMemoryDocumentStore``, wired as the portal readers and
   ``PortalOrderService`` (and as the /me pipeline). Without it the order and
   tank routes answer 503 ``PORTAL_UNAVAILABLE``.
+* ``portal_fakes.invoices`` (FEAT-004): :class:`InvoiceHarness` — a real
+  ``InvoiceService`` over an ``InMemoryDocumentStore`` plus
+  :class:`FakeAccountService`, wired as the portal invoice service. Seed with
+  ``add_invoice(...)``; ``seed_invoice_isolation()`` seeds A/B/C invoices.
 """
 from __future__ import annotations
 
@@ -517,6 +521,129 @@ def make_access_service(customers, db: FakePortalDB, st: FakeSuperTokens, teleme
     )
 
 
+class FakeAccountService:
+    """``AccountService.list`` fake: offset cursors, records every call."""
+
+    def __init__(self) -> None:
+        self.accounts: List[Dict[str, Any]] = []
+        self.calls: List[Dict[str, Any]] = []
+        self.fail: Optional[Exception] = None
+
+    def add(self, tenant_id: str, customer_id: str, account_id: str, display_name: str) -> None:
+        self.accounts.append({
+            "tenant_id": tenant_id, "customer_id": customer_id,
+            "account_id": account_id, "display_name": display_name,
+        })
+
+    async def list(self, tenant_id, *, customer_id=None, status=None, cursor=None, limit=50):
+        self.calls.append({"tenant_id": tenant_id, "customer_id": customer_id,
+                           "cursor": cursor, "limit": limit})
+        if self.fail is not None:
+            raise self.fail
+        rows = [a for a in self.accounts
+                if a["tenant_id"] == tenant_id and (not customer_id or a["customer_id"] == customer_id)]
+        start = int(cursor or 0)
+        page = rows[start:start + limit]
+        nxt = str(start + limit) if start + limit < len(rows) else None
+        return {"items": [dict(a) for a in page], "next_cursor": nxt, "limit": limit}
+
+
+#: A full POD snapshot whose restricted values must never reach the portal.
+RESTRICTED_DELIVERY_RESULT: Dict[str, Any] = {
+    "pod_id": "QA-POD-SECRET-1",
+    "actual_gallons": 123.5,
+    "actual_gallons_source": "meter_ticket",
+    "delivered_at": "2026-10-01T15:30:00+00:00",
+    "recipient_name": "Rosalind Recipientname",
+    "driver_id": "QA-DRV-SECRET-77",
+    "signature_ref": "s3://sig/QA-SIG-SECRET",
+    "photo_refs": ["s3://photo/QA-PHOTO-SECRET-1", "s3://photo/QA-PHOTO-SECRET-2"],
+    "meter_ticket_ref": "s3://ticket/QA-METER-SECRET",
+    "meter_number": "QA-METERNO-SECRET",
+    "ticket_number": "TKT-4471",
+    "bol_id": "QA-BOL-SECRET",
+    "geotag": {"lat": 41.987654, "lon": -88.123456},
+    "otp_verified": True,
+    "location_mismatch": False,
+}
+
+#: Values from :data:`RESTRICTED_DELIVERY_RESULT` (and invoice internals) that
+#: must not appear in any portal invoice response, PDF or CSV.
+RESTRICTED_INVOICE_VALUES = (
+    "QA-POD-SECRET-1", "Rosalind", "QA-DRV-SECRET-77", "QA-SIG-SECRET",
+    "QA-PHOTO-SECRET", "QA-METER-SECRET", "QA-METERNO-SECRET", "QA-BOL-SECRET",
+    "41.987654", "-88.123456", "meter_ticket", "QA-ORDER-SECRET", "QA-ACCT-ID-SECRET",
+)
+
+
+@dataclass
+class InvoiceHarness:
+    """A real ``InvoiceService`` over an ``InMemoryDocumentStore`` (the ES
+    path), a :class:`FakeAccountService`, and the ``PortalInvoiceService``
+    built over them with :func:`wire_portal_invoices`."""
+
+    store: Any
+    service: Any
+    accounts: FakeAccountService
+    portal: Any
+    now: datetime
+
+    def add_invoice(
+        self,
+        tenant_id: str,
+        customer_id: str,
+        invoice_id: str,
+        *,
+        status: str = "open",
+        account_id: str = "QA-ACCT-1",
+        created_at: Optional[datetime] = None,
+        invoice_number: Optional[str] = None,
+        lines: int = 1,
+        **overrides: Any,
+    ) -> Dict[str, Any]:
+        from commerce.models.invoice import Invoice
+
+        created = created_at or self.now - timedelta(days=1)
+        line_items = [
+            {"line_id": f"line-{invoice_id}-{i}", "product_code": "PROPANE",
+             "quantity_gallons": 100.0, "unit_price_cents": 297,
+             "unit_price_micros": 2_966_000, "subtotal_cents": 29660}
+            for i in range(lines)
+        ]
+        subtotal = 29660 * lines
+        doc = Invoice(
+            invoice_id=invoice_id, tenant_id=tenant_id, customer_id=customer_id,
+            account_id=account_id, order_id="QA-ORDER-SECRET",
+            invoice_number=invoice_number or f"INV-{invoice_id}",
+            status=status, line_items=line_items, subtotal_cents=subtotal,
+            tax_cents=1000, total_cents=subtotal + 1000, amount_paid_cents=0,
+            remaining_cents=subtotal + 1000,
+            issued_at=created if status != "draft" else None,
+            due_date=(created + timedelta(days=30)).date(),
+        ).model_dump(mode="json")
+        doc["created_at"] = iso(created)
+        doc.update(overrides)
+        from commerce.services.invoice_service import INVOICES_CURRENT_INDEX
+
+        self.store.seed(INVOICES_CURRENT_INDEX, invoice_id, doc)
+        return doc
+
+
+def build_invoice_harness(customer_service: Any) -> InvoiceHarness:
+    from commerce.services.invoice_service import InvoiceService
+    from portal.services.portal_invoice_service import wire_portal_invoices
+    from tests.unit._loading_plan_fakes import InMemoryDocumentStore
+
+    store = InMemoryDocumentStore()
+    service = InvoiceService(es_service=store)
+    accounts = FakeAccountService()
+    portal = wire_portal_invoices(
+        invoice_service=service, account_service=accounts, customer_service=customer_service,
+    )
+    return InvoiceHarness(store=store, service=service, accounts=accounts, portal=portal,
+                          now=datetime.now(timezone.utc))
+
+
 @dataclass
 class PortalFakes:
     grants: FakeGrantStore
@@ -525,6 +652,8 @@ class PortalFakes:
     invoice_service: Any
     checker: Any
     clock: List[float] = field(default_factory=lambda: [1000.0])
+    #: FEAT-004: the invoice routes' backing (empty unless a test seeds it).
+    invoices: Optional[InvoiceHarness] = None
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +731,15 @@ def portal_fakes(monkeypatch) -> Iterator[PortalFakes]:
     for tenant_id, customer_id in ((T1, CUSTOMER_A), (T1, CUSTOMER_B), (T2, CUSTOMER_C)):
         customers.add(tenant_id, customer_id)
     pipeline = FakePipeline()
-    invoice_service = object()
+    from config.settings import clear_settings_cache
+    from portal.services import portal_invoice_service as pis
+
+    # The invoice harness reads the document-store path.
+    monkeypatch.setenv("COMMERCE_READ_FROM_POSTGRES", "false")
+    clear_settings_cache()
+    saved_invoices = pis.get_configured_invoice_service()
+    invoices = build_invoice_harness(customers)
+    invoice_service = invoices.service
     clock = [1000.0]
     checker = principal.PortalPrincipalChecker(
         customer_service=customers,
@@ -631,8 +768,10 @@ def portal_fakes(monkeypatch) -> Iterator[PortalFakes]:
     monkeypatch.setattr(password_admin, "_email_for_st_user_id", _email)
     monkeypatch.setattr(account_endpoints, "_email_for_st_user_id", _email)
     try:
-        yield PortalFakes(grants, customers, pipeline, invoice_service, checker, clock)
+        yield PortalFakes(grants, customers, pipeline, invoice_service, checker, clock,
+                          invoices=invoices)
     finally:
+        pis.configure_portal_invoices(saved_invoices)
         principal.configure_portal_principal(saved_checker)
         me._services.clear()
         me._services.update(saved_me)
@@ -1051,3 +1190,27 @@ def seed_isolation(h: OrderHarness) -> IsolationIds:
                     hold_reason=PORTAL_REVIEW_HOLD_REASON, channel="web_portal",
                     created_at=h.now - timedelta(hours=2 + i))
     return ids
+
+
+# ---------------------------------------------------------------------------
+# Invoices (FEAT-004)
+# ---------------------------------------------------------------------------
+
+INVOICE_STATUSES_ALL = ("draft", "open", "partial", "paid", "overdue", "void")
+
+
+def seed_invoice_isolation(h: InvoiceHarness) -> Dict[str, Dict[str, str]]:
+    """One invoice per status (incl. draft) for A, B (T1) and C (T2), plus an
+    account each. Returns ``{customer_letter: {status: invoice_id}}``."""
+    out: Dict[str, Dict[str, str]] = {}
+    for n, (tenant, customer) in enumerate(((T1, CUSTOMER_A), (T1, CUSTOMER_B), (T2, CUSTOMER_C))):
+        letter = customer[-1]
+        account = f"QA-ACCT-{letter}"
+        h.accounts.add(tenant, customer, account, f"Account {letter} Main")
+        out[letter] = {}
+        for i, status in enumerate(INVOICE_STATUSES_ALL):
+            invoice_id = f"QA-INV-{letter}-{status}"
+            h.add_invoice(tenant, customer, invoice_id, status=status, account_id=account,
+                          created_at=h.now - timedelta(days=1 + i, minutes=n))
+            out[letter][status] = invoice_id
+    return out

@@ -1,5 +1,5 @@
-"""Portal projections: the only code that turns stored orders and tanks into
-portal response models (design §2.1 E10, §4.5, §7).
+"""Portal projections: the only code that turns stored orders, tanks and
+invoices into portal response models (design §2.1 E10, §4.5, §5, §7).
 
 Every field a customer can see is named here. Driver, truck, run, claim,
 photos, recipient, geotag, signature, OTP, customer phone and email, special
@@ -7,12 +7,17 @@ instructions, ``hold_reason``, ``intake_metadata`` and prices are never read.
 """
 from __future__ import annotations
 
+import logging
 import math
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from fuel.order_models import PORTAL_REVIEW_HOLD_REASON
 from portal.models import (
+    PortalInvoice,
+    PortalInvoiceDelivery,
+    PortalInvoiceLineItem,
+    PortalInvoicePaymentAttempt,
     PortalNextDelivery,
     PortalOrder,
     PortalOrderTank,
@@ -20,6 +25,9 @@ from portal.models import (
     PortalTankDelivery,
     PortalTankForecast,
 )
+from services.money import legacy_unit_price_cents, unit_price_micros_from_record
+
+logger = logging.getLogger(__name__)
 
 #: Shown for a portal request waiting for a dispatcher (``on_hold`` with
 #: :data:`PORTAL_REVIEW_HOLD_REASON`).
@@ -190,7 +198,171 @@ def project_tank(
     )
 
 
+# ---------------------------------------------------------------------------
+# Invoices (design §5, PD12)
+# ---------------------------------------------------------------------------
+
+#: Internal invoice status → portal label. ``draft`` never reaches here.
+INVOICE_STATUS_LABELS: Dict[str, str] = {
+    "open": "Open",
+    "partial": "Partially paid",
+    "paid": "Paid",
+    "overdue": "Overdue",
+    "void": "Void",
+}
+
+#: Statuses a customer may pay (with ``remaining_cents >= 100``).
+PAYABLE_INVOICE_STATUSES: Tuple[str, ...] = ("open", "partial", "overdue")
+MIN_PAYMENT_CENTS = 100
+
+#: Shown for an account id that is unknown, beyond the cap, or unreadable.
+DEFAULT_ACCOUNT_NAME = "Account"
+ACCOUNT_PAGE_SIZE = 200
+ACCOUNT_NAME_CAP = 500
+
+
+async def account_display_names(account_service: Any, scope: Any) -> Dict[str, str]:
+    """``{account_id: display_name}`` for the customer's accounts.
+
+    One per request: follows ``next_cursor`` until exhausted, at most
+    :data:`ACCOUNT_NAME_CAP` accounts. Any error is logged at WARN and every
+    name shows :data:`DEFAULT_ACCOUNT_NAME`; the invoice response still answers.
+    """
+    if account_service is None:
+        return {}
+    tenant_id, customer_id = scope.tenant_id, scope.customer_id
+    if not customer_id:
+        raise ValueError("account names need a customer_id")
+    names: Dict[str, str] = {}
+    cursor: Optional[str] = None
+    seen = 0
+    try:
+        while seen < ACCOUNT_NAME_CAP:
+            page = await account_service.list(
+                tenant_id, customer_id=customer_id, cursor=cursor, limit=ACCOUNT_PAGE_SIZE
+            )
+            for account in (page or {}).get("items") or []:
+                if seen >= ACCOUNT_NAME_CAP:
+                    break
+                seen += 1
+                if _get(account, "customer_id") != customer_id:
+                    continue
+                account_id = _get(account, "account_id")
+                if account_id:
+                    names[str(account_id)] = str(_get(account, "display_name") or DEFAULT_ACCOUNT_NAME)
+            cursor = (page or {}).get("next_cursor")
+            if not cursor:
+                break
+    except Exception as exc:  # noqa: BLE001 — names are cosmetic
+        logger.warning(
+            "portal invoices: account list failed for tenant=%s: %s",
+            tenant_id,
+            type(exc).__name__,
+        )
+        return {}
+    return names
+
+
+def _int(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _date(value: Any) -> Optional[date]:
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _line_item(line: Mapping[str, Any]) -> PortalInvoiceLineItem:
+    unit_price_cents: Optional[int] = None
+    try:
+        micros = unit_price_micros_from_record(line)
+        if micros is not None:
+            unit_price_cents = legacy_unit_price_cents(micros)
+    except ValueError:
+        unit_price_cents = None
+    quantity = line.get("quantity_gallons")
+    return PortalInvoiceLineItem(
+        product_code=line.get("product_code"),
+        quantity_gallons=float(quantity) if isinstance(quantity, (int, float)) and not isinstance(quantity, bool) else None,
+        unit_price_cents=unit_price_cents,
+        subtotal_cents=_int(line.get("subtotal_cents")) if line.get("subtotal_cents") is not None else None,
+    )
+
+
+def _delivery(result: Any) -> Optional[PortalInvoiceDelivery]:
+    """Only ``delivered_at``, ``actual_gallons`` and ``ticket_number`` (PD12)."""
+    if not isinstance(result, Mapping):
+        return None
+    gallons = result.get("actual_gallons")
+    return PortalInvoiceDelivery(
+        delivered_at=_parse_ts(result.get("delivered_at")),
+        actual_gallons=float(gallons) if isinstance(gallons, (int, float)) and not isinstance(gallons, bool) else None,
+        ticket_number=str(result["ticket_number"]) if result.get("ticket_number") else None,
+    )
+
+
+def project_invoice(
+    invoice: Mapping[str, Any],
+    *,
+    account_names: Mapping[str, str],
+    payments_available: bool,
+    payment_attempt: Optional[PortalInvoicePaymentAttempt] = None,
+) -> PortalInvoice:
+    """Build the :class:`PortalInvoice` for a stored invoice (allowlist only)."""
+    status = str(invoice.get("status") or "")
+    remaining = _int(invoice.get("remaining_cents"))
+    lines = [line for line in invoice.get("line_items") or [] if isinstance(line, Mapping)]
+    return PortalInvoice(
+        invoice_id=str(invoice.get("invoice_id")),
+        invoice_number=invoice.get("invoice_number") or None,
+        status_code=status,
+        status_label=INVOICE_STATUS_LABELS.get(status, status.title()),
+        issued_at=_parse_ts(invoice.get("issued_at")),
+        due_date=_date(invoice.get("due_date")),
+        created_at=_parse_ts(invoice.get("created_at")),
+        account_display_name=account_names.get(str(invoice.get("account_id") or ""), DEFAULT_ACCOUNT_NAME),
+        subtotal_cents=_int(invoice.get("subtotal_cents")),
+        tax_cents=_int(invoice.get("tax_cents")),
+        total_cents=_int(invoice.get("total_cents")),
+        amount_paid_cents=_int(invoice.get("amount_paid_cents")),
+        remaining_cents=remaining,
+        line_items=[_line_item(line) for line in lines],
+        delivery=_delivery(invoice.get("delivery_result")),
+        payment_attempt=payment_attempt,
+        payable=bool(
+            payments_available
+            and status in PAYABLE_INVOICE_STATUSES
+            and remaining >= MIN_PAYMENT_CENTS
+        ),
+    )
+
+
+def invoice_total_gallons(invoice: PortalInvoice) -> Optional[float]:
+    quantities = [li.quantity_gallons for li in invoice.line_items if li.quantity_gallons is not None]
+    return sum(quantities) if quantities else None
+
+
 __all__ = [
+    "ACCOUNT_NAME_CAP",
+    "DEFAULT_ACCOUNT_NAME",
+    "INVOICE_STATUS_LABELS",
+    "PAYABLE_INVOICE_STATUSES",
+    "account_display_names",
+    "invoice_total_gallons",
+    "project_invoice",
     "AWAITING_CONFIRMATION",
     "OPEN_DELIVERY_STATUSES",
     "ORDER_STATUS_MAP",

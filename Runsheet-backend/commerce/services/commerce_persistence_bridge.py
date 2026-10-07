@@ -651,22 +651,27 @@ async def read_invoice_find_by_order(tenant_id: str, order_id: str):
         return await InvoiceReadRepository().find_by_order(session, tenant_id, order_id)
 
 
-async def read_invoice_list(tenant_id: str, **kwargs):
+async def read_invoice_list(tenant_id: str, *, statuses=None, **kwargs):
+    """Invoice page from PG; ``statuses`` is an SQL ``IN`` applied with ``status``."""
     if not read_from_postgres():
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import InvoiceReadRepository
 
+    if statuses is not None:
+        kwargs["statuses"] = list(statuses)
     async with session_scope() as session:
         return await InvoiceReadRepository().list(session, tenant_id, **kwargs)
 
 
-async def read_invoice_count(tenant_id: str, **kwargs):
+async def read_invoice_count(tenant_id: str, *, statuses=None, **kwargs):
     """Count invoices matching the ``read_invoice_list`` filters (data export)."""
     if not read_from_postgres():
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import InvoiceReadRepository
+    if statuses is not None:
+        kwargs["statuses"] = list(statuses)
     async with session_scope() as session:
         return await InvoiceReadRepository().count(session, tenant_id, **kwargs)
 async def read_payment_get(tenant_id: str, payment_id: str):

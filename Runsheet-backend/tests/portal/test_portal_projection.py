@@ -92,3 +92,65 @@ def test_order_and_tank_responses_hide_restricted_fields(client, portal_on, port
     assert full["delivered_gallons"] == 98.5
     assert full["ticket_number"] == "TCK-9"
     assert full["status_code"] == "delivered"
+
+
+# ---------------------------------------------------------------------------
+# Invoices (FEAT-004): list, detail, PDF text and CSV
+# ---------------------------------------------------------------------------
+
+#: Keys that must never appear in a portal invoice response.
+RESTRICTED_INVOICE_KEYS = {
+    "driver_id", "recipient_name", "photo_refs", "signature_ref", "geotag", "pod_id",
+    "meter_ticket_ref", "meter_number", "bol_id", "bol_ref", "pod_hash", "otp_verified",
+    "actual_gallons_source", "delivery_result", "customer_id", "account_id", "order_id",
+    "tenant_id", "line_id", "unit_price_micros", "external_refs", "qbo_push_state",
+    "qbo_push_last_error", "void_reason", "location_mismatch",
+}
+
+
+def test_invoice_responses_hide_restricted_fields(client, portal_on, portal_fakes, cA):
+    import csv
+    import io
+
+    from pypdf import PdfReader
+
+    from tests.portal.conftest import RESTRICTED_DELIVERY_RESULT, RESTRICTED_INVOICE_VALUES
+
+    h = portal_fakes.invoices
+    h.accounts.add(T1, CUSTOMER_A, "QA-ACCT-ID-SECRET", "Main account")
+    h.add_invoice(
+        T1, CUSTOMER_A, "QA-INV-FULL", status="paid", account_id="QA-ACCT-ID-SECRET",
+        delivery_result=dict(RESTRICTED_DELIVERY_RESULT), void_reason="QA-VOID-SECRET",
+        qbo_push_last_error="QA-QBO-SECRET", external_refs={"qbo": "QA-EXT-SECRET"},
+    )
+    values = RESTRICTED_INVOICE_VALUES + ("QA-VOID-SECRET", "QA-QBO-SECRET", "QA-EXT-SECRET")
+
+    for path in ("/api/portal/invoices", "/api/portal/invoices/QA-INV-FULL"):
+        resp = call(client, "GET", path, cA)
+        assert resp.status_code == 200, resp.text
+        leaked = _keys(resp.json(), set()) & RESTRICTED_INVOICE_KEYS
+        assert leaked == set(), (path, leaked)
+        for value in values:
+            assert value not in resp.text, (path, value)
+
+    detail = call(client, "GET", "/api/portal/invoices/QA-INV-FULL", cA).json()["data"]
+    assert detail["delivery"] == {
+        "delivered_at": "2026-10-01T15:30:00Z", "actual_gallons": 123.5,
+        "ticket_number": "TKT-4471",
+    }
+    assert detail["account_display_name"] == "Main account"
+
+    pdf = call(client, "GET", "/api/portal/invoices/QA-INV-FULL/pdf", cA)
+    assert pdf.status_code == 200
+    text = "\n".join(p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf.content)).pages)
+    assert "TKT-4471" in text and "123.50" in text
+    for value in values:
+        assert value not in text, ("pdf", value)
+
+    exported = call(client, "GET", "/api/portal/invoices/export", cA)
+    assert exported.status_code == 200
+    body = exported.content.decode("utf-8")
+    rows = list(csv.reader(io.StringIO(body.lstrip("\ufeff"))))
+    assert [r[0] for r in rows[1:]] == ["INV-QA-INV-FULL"]
+    for value in values:
+        assert value not in body, ("csv", value)

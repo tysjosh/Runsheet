@@ -297,6 +297,10 @@
 | POST | `/api/orders/{order_id}/hold` | /api/orders | session_required | — | — | OrderResponse |
 | POST | `/api/orders/{order_id}/release-hold` | /api/orders | session_required | — | — | OrderResponse |
 | PATCH | `/api/orders/{order_id}/status` | /api/orders | session_required | — | — | OrderResponse |
+| GET | `/api/portal/invoices` | — | session_required | — | — | PortalInvoiceListEnvelope |
+| GET | `/api/portal/invoices/export` | — | session_required | — | — | — |
+| GET | `/api/portal/invoices/{invoice_id}` | — | session_required | — | — | PortalInvoiceEnvelope |
+| GET | `/api/portal/invoices/{invoice_id}/pdf` | — | session_required | — | — | — |
 | GET | `/api/portal/me` | — | session_required | — | — | PortalMeEnvelope |
 | GET | `/api/portal/orders` | — | session_required | — | — | PortalOrderListEnvelope |
 | POST | `/api/portal/orders` | — | session_required | — | — | PortalOrderEnvelope |
