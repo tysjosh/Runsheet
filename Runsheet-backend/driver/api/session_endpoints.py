@@ -54,6 +54,7 @@ from supertokens_python.recipe.session.exceptions import (
     TryRefreshTokenError,
 )
 
+from auth import signin_timing
 from auth.signin_throttle import get_signin_throttle
 from auth.supertokens_init import (
     _lookup_auth_user_claims,
@@ -321,13 +322,16 @@ async def create_driver_session(
         raise too_many_attempts(retry)
 
     # 1. Verify the credential through the EmailPassword recipe.
+    started = signin_timing.now()
     result = await emailpassword_sign_in(
         _SUPERTOKENS_TENANT_ID, body.email, body.password
     )
     if not isinstance(result, SignInOkResult):
         await throttle.record_sign_in_failure(body.email)
         # Uniform rejection: never distinguish "unknown email" from "wrong
-        # password", and never echo the submitted credential.
+        # password" (in the body, or in the response time via the timing
+        # floor, OI-12), and never echo the submitted credential.
+        await signin_timing.pad_to_floor(started)
         raise unauthorized(
             message="Invalid credentials",
             details={"reason": "credential_verification_failed"},

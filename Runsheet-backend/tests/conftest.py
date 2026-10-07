@@ -97,6 +97,22 @@ def _reset_settings_cache() -> Generator[None, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def _skip_signin_failure_floor_sleep(monkeypatch) -> None:
+    """Failed sign-ins are padded to ``SIGNIN_FAILURE_FLOOR_MS`` (OI-12).
+
+    The padding code still runs in every test, but the sleep is a no-op, so
+    suites that make many failed sign-ins don't wait a second each.
+    ``tests/unit/test_signin_timing_floor.py`` injects a recording sleep.
+    """
+    import auth.signin_timing as signin_timing
+
+    async def _no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(signin_timing, "_sleep", _no_sleep)
+
+
+@pytest.fixture(autouse=True)
 def _reset_ref_resolver() -> Generator[None, None, None]:
     """Reset the process-wide ``RefResolver`` around every test.
 

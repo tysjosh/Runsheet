@@ -459,6 +459,17 @@ class Settings(BaseSettings):
         ge=60,
         description="Access-token / session lifetime in seconds (Req 2.7).",
     )
+    signin_failure_floor_ms: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "Env SIGNIN_FAILURE_FLOOR_MS. Every failed sign-in (web "
+            "/auth/signin and driver POST /auth/driver/session) takes at "
+            "least this long, so response time doesn't reveal whether an "
+            "email has an account (OI-12). Throttled 429s and successes are "
+            "not padded. 0 disables."
+        ),
+    )
     ws_session_recheck_seconds: float = Field(
         default=60,
         ge=0,

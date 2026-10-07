@@ -64,6 +64,7 @@ from supertokens_python.recipe.session.interfaces import (
 )
 from supertokens_python.types.response import GeneralErrorResponse
 
+from auth import signin_timing
 from auth.signin_throttle import (
     configure_signin_throttle,
     get_signin_throttle,
@@ -412,8 +413,10 @@ def _override_emailpassword_apis(
             get_client_ip(api_options.request.request), email
         )
         if retry is not None:
+            # Not padded: a 429 doesn't depend on whether the account exists.
             return _send_throttled(api_options, retry)
 
+        started = signin_timing.now()
         result = await original_sign_in_post(
             form_fields,
             tenant_id,
@@ -426,6 +429,10 @@ def _override_emailpassword_apis(
             await throttle.record_sign_in_failure(email)
         elif isinstance(result, SignInPostOkResult):
             await throttle.clear_sign_in_failures(email)
+        if not isinstance(result, SignInPostOkResult):
+            # Fixed minimum time for every failure, so "unknown email" and
+            # "wrong password" take the same time (OI-12).
+            await signin_timing.pad_to_floor(started)
         return result
 
     async def generate_password_reset_token_post(  # type: ignore[override]
