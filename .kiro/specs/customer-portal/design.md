@@ -18,13 +18,13 @@ The design adds two tables and one column in a single Alembic revision on top of
 
 **Technology stack (locked):**
 
-- Backend: Python / FastAPI, SQLAlchemy async + Alembic (Postgres), the existing document store (`ElasticsearchService` facade, served from `es_documents` / ES), SuperTokens Python SDK 0.31.3, slowapi, reportlab 4.5.0, and the `stripe` SDK already pinned.
+- Backend: Python / FastAPI, SQLAlchemy async + Alembic (Postgres), the existing document store (`ElasticsearchService` facade, served from `es_documents` / ES), SuperTokens Python SDK 0.31.3, slowapi, reportlab 4.5.0, and the `stripe` SDK already in `requirements.txt` (range `>=10.0.0,<13.0.0`, unchanged).
 - Frontend: Next.js 15.5 App Router, React 19, and `supertokens-auth-react` 0.51.2. Stripe.js is loaded from `https://js.stripe.com/v3` with `next/script`, with no npm package. Tests use Jest + Testing Library, plus Playwright with `@axe-core/playwright@4.13.0` (exact pin, dev only).
 - No new backend dependencies. No new runtime frontend dependencies.
 
 ## Codebase facts this design relies on
 
-All of these were checked in worktree `.worktrees/customer-portal` at `9e95e56`:
+All of these were checked in worktree `.worktrees/customer-portal` at `9e95e56`, and re-checked at `77449ed` for the revision (the last nine bullets were added by the revision):
 
 - `ops/middleware/tenant_guard.py`: `TenantContext` is a dataclass. Its last field, `driver_id`, has a default. `_context_from_session_claims` builds it from signed claims. `_SuperTokensSessionVerifier` memoizes `VerifiedSession` on `request.state`, so the middleware and the dependency share one verification.
 - `middleware/auth_enforcement.py`: `AuthEnforcementMiddleware` (a `BaseHTTPMiddleware`) verifies a session on every non-public path and builds its own JSON 401, because it runs outside FastAPI's exception handlers. Public paths and the test-auth bypass return early.
@@ -44,6 +44,14 @@ All of these were checked in worktree `.worktrees/customer-portal` at `9e95e56`:
 - `TenantSettings` has `region`, `measurement_units` and `default_depot_id`. There is **no tenant display name and no time zone**. BOL rendering falls back to `tenant_name = tenant_id` (`driver/services/pod_bol_finalizer.py`).
 - The Alembic head is `0010_acct_override_audit`. CI fails when there is more than one head (`.github/workflows/ci.yml` "alembic heads" step). Playwright does not run in CI today.
 - main.py registers middleware in this order at import time: auth enforcement, then RequestID / rate limiter / security headers, then CORS. Each later registration wraps the earlier ones, so it sits outside them.
+- `before_accept` hooks are registered from three bootstrap modules (`bootstrap/core.py:498-499` Pricing and Credit, `bootstrap/compliance.py:724+` DyedDiesel, `bootstrap/fuel.py:219` VoiceReviewHold), so their relative order is a bootstrap-ordering detail. `register_release_hold_hook` has no production caller: `release-hold` does **not** re-run credit.
+- `PricingError` (`commerce/services/pricing_engine.py:51`) and `DyedDieselOrderRejected` (`compliance/hooks/dyed_diesel_intake_hook.py:27`) are plain `Exception` subclasses. The pipeline re-raises hook exceptions unchanged.
+- `StripeConnector` assigns the process-global `stripe_sdk.api_key` before each `asyncio.to_thread` SDK call (`integrations/stripe_connector.py:447,617,741`).
+- `_stripe_connector_factory` is a closure in `bootstrap/agents.py:1900`. It lists instances with `enabled=None` and falls back to a disabled instance so webhooks keep verifying.
+- `CustomerService` is built only when `commerce_backbone_enabled` is on (`bootstrap/core.py:380-391`).
+- `PaymentService.ingest` opens and commits its own sessions. `PaymentService.find_by_external_id(*, tenant_id, source, external_id)` is already public (`commerce/services/payment_service.py:805`).
+- `supertokens_python.asyncio.delete_user` exists in the pinned SDK.
+- `.env.staging` is gitignored. The staging task env is set in `scripts/staging_aws.sh` (`COMMERCE_BACKBONE_ENABLED` at line 1592).
 
 ## 1. Identity: the `customer` role and account linkage
 
@@ -125,7 +133,7 @@ This follows `AppAccessService` method for method. Routes are in `portal/api/adm
 
 The gate dependency `require_portal_admin`, in order:
 
-1. `settings.customer_portal_enabled`, else 404 `PORTAL_DISABLED`.
+1. `portal_enabled(settings)` (§2.3 step 1: portal flag AND commerce backbone), else 404 `PORTAL_DISABLED`.
 2. `get_tenant_context`.
 3. `require_role(tenant, "admin")`, else 403 `INSUFFICIENT_ROLE`. This covers dispatcher, driver and platform_admin-only callers. A `customer` session never reaches it, because the central deny refuses it first.
 4. `CustomerService.get(tenant_id, customer_id)`. Not found means 404 `RESOURCE_NOT_FOUND`, and nothing is written (R1.3).
@@ -155,14 +163,19 @@ After the commit:
 
 **Role existence.** `SDKSuperTokensAdmin.set_user_roles` needs the role to exist in the core. Startup (`init_supertokens`) does not call the core. So `PortalAccessService.invite` calls `userroles.asyncio.create_new_role_or_add_permissions("customer", [])` once per process, before the first provisioning. The call is idempotent and memoized in a module flag.
 
-**Revoke** (one transaction, with the same advisory lock):
+**Revoke removes the identity; it never leaves an empty one** (review H1). An emptied row (`roles = '{}'`, still bound to `st_user_id`, password still valid) would sign in again as a role-less tenant session, which the central deny treats as staff and which reaches tenant-wide routes such as `GET /api/fuel/mvp/forecasts`. Because the §1.3 CHECK guarantees a bound customer row holds nothing but the portal binding, deleting it loses nothing. Revoke runs in one transaction, under the same advisory lock:
 
 1. Load the grant by `(tenant, customer, grant_id)`. If it is missing or already revoked, return 404.
-2. `set_user_roles(st_user_id, [])` and `revoke_all_sessions_for_user(st_user_id)`.
-3. Update `auth_users` to `roles = '{}'` and `customer_id = NULL`, and the grant to `revoked` with `revoked_by` / `revoked_at`.
-4. Invalidate the local principal cache entry (§2.3).
+2. Load `st_user_id` from `auth_users` by `(email, tenant, customer_id)`. When a row exists:
+   1. `set_user_roles(st_user_id, [])`
+   2. `revoke_all_sessions_for_user(st_user_id)`
+   3. `supertokens_python.asyncio.delete_user(st_user_id)`. An unknown user is treated as success, so a retry is idempotent.
+3. `DELETE FROM auth_users WHERE email = :email AND tenant_id = :tenant AND customer_id = :customer AND roles = ARRAY['customer']::text[]`. The predicate can only match a portal-only row, so a staff or driver row can never be deleted here. Then set the grant to `revoked` with `revoked_by` / `revoked_at`. The grant row keeps the history (D2).
+4. Invalidate the local principal cache entries for that user (§2.3).
 
-If a SuperTokens call fails, the error propagates as a 500. The transaction rolls back and the admin retries, which is idempotent. Even when session revocation partly fails, the per-request principal check denies within 60 s (R1.7, R2.11).
+Failure handling: any SuperTokens error propagates as 500 `INTERNAL_ERROR`, logged at ERROR with `grant_id`. The DB transaction rolls back and the admin retries. If SuperTokens succeeded but the DB commit failed, the SuperTokens user is already gone, so the person can't sign in; the retry finds no SuperTokens user, treats that as success, and finishes the DB part. Even when session revocation partly fails, the per-request principal check (§2.3) denies within 60 s, because the grant is no longer `active` (R1.7, R2.11).
+
+A re-invite of the same email after revoke finds no `auth_users` row and provisions a fresh SuperTokens user, so no orphaned SuperTokens user causes a `ProvisioningConflictError`.
 
 **Resend:** the grant must be `active`. Then run the same link mint and email as invite.
 
@@ -180,7 +193,7 @@ If a SuperTokens call fails, the error propagates as a 500. The transaction roll
 | E1b | The same decision, again | `get_tenant_context`, after building the context | Defense in depth, in case the middleware is mis-registered or bypassed by a non-HTTP mount. It costs one set lookup. |
 | E2 | A malformed customer session (customer plus another role, or no `customer_id`) gets 403 `PORTAL_IDENTITY_INVALID` on every authenticated route | The same two places as E1 | R2.2. The DB constraint makes it unreachable from real data. This catches forged or legacy claims. |
 | E3 | A `customer` WebSocket handshake is refused (close 4001) | `bootstrap/websockets._resolve_ws_claims` returns `None` | It is the one choke point all 10 sockets use (R2.4). |
-| E4 | `customer_portal_enabled` is off: 404 `PORTAL_DISABLED` | `require_portal_customer` / `require_portal_admin`, first step | Flag before role, the commerce precedent (R2.6). |
+| E4 | `portal_enabled(settings)` is false (portal flag off, **or** commerce backbone off): 404 `PORTAL_DISABLED` | `require_portal_customer` / `require_portal_admin`, first step | Flag before role, the commerce precedent (R2.6). The portal needs `CustomerService`, which exists only with the backbone (review M3). |
 | E5 | A non-customer session on a portal route gets 403 `INSUFFICIENT_ROLE` | `require_portal_customer`, using `require_role(tenant, "customer")` | PD5. It reuses the shared exact-match mechanism. |
 | E6 | Binding revoked or customer archived: 403 `PORTAL_ACCESS_SUSPENDED` | `require_portal_customer`, using `PortalPrincipalChecker` (cache of at most 60 s) | R2.11. |
 | E7 | `tenant_id` / `customer_id` in query or body: 422 | Router dependency `reject_scope_params` (query) and `extra="forbid"` models (body) | R2.7. |
@@ -222,6 +235,8 @@ In `get_tenant_context`, the same verdict comes from the built context. Raise `A
 
 In `_resolve_ws_claims`, when the claims carry `customer`, log WARN `portal_audit` (`outcome="forbidden_route"`, `channel="websocket"`) and return `None`. Every caller already closes with 4001 on `None`.
 
+**Actor stamp for refusals (review M5).** `_context_from_session_claims` in `ops/middleware/tenant_guard.py` also sets `request.state.auth_user_id = resolved_user_id`, next to the existing `tenant_id` / `driver_id` stamps. It is additive and changes nothing for staff. `PortalAuditMiddleware` (§8.1) reads `portal_user_id or auth_user_id`, so a staff 403 or a 404 `PORTAL_DISABLED` on a portal route, which fail before the guard's step 5, still carries `actor_user_id`.
+
 The test-auth bypass (`override_auth`) skips the middleware and replaces `get_tenant_context`. The isolation suites therefore must **not** use `override_auth` for customer sessions. They install a fake verifier with `configure_session_verifier` and run with `auth_provider="supertokens"` (§11). Portal handler unit tests may use `override_auth` with a customer context.
 
 ### 2.3 Portal guard (`portal/api/_authz.py`)
@@ -242,13 +257,13 @@ class PortalScope:
 
 `async def require_portal_customer(request, tenant=Depends(get_tenant_context)) -> PortalScope`:
 
-1. If `customer_portal_enabled` is off, return 404 `PORTAL_DISABLED`. Note on ordering: a dependency's sub-dependencies resolve before its own body, so `get_tenant_context` runs first and an unauthenticated caller gets 401. That matches the commerce gates. The flag check comes before the *role* check, which is what R2.6 requires.
+1. If `portal_enabled(settings)` is false, return 404 `PORTAL_DISABLED`. `portal_enabled(s) = s.customer_portal_enabled and s.commerce_backbone_enabled`, defined once in `portal/scope.py` and used by both guards and by `/me`. A `model_validator` on `Settings` logs WARN `customer_portal_enabled without commerce_backbone_enabled; portal stays off` when the first is on and the second is off (it does not raise, so a misconfigured env still boots). Note on ordering: a dependency's sub-dependencies resolve before its own body, so `get_tenant_context` runs first and an unauthenticated caller gets 401. That matches the commerce gates. The flag check comes before the *role* check, which is what R2.6 requires.
 2. `require_role(tenant, "customer")`, else 403 `INSUFFICIENT_ROLE` (E5).
 3. If `tenant.roles != ["customer"]` or `tenant.customer_id` is empty, return 403 `PORTAL_IDENTITY_INVALID`. This is normally unreachable after E2.
 4. `await principal_checker.check(tenant.tenant_id, tenant.user_id, tenant.customer_id)` returns `ok`, `revoked` or `customer_archived`. Anything but `ok` gives 403 `PORTAL_ACCESS_SUSPENDED`. The checker:
    - reads the `active` grant through `auth_users.st_user_id = :user_id` joined to `portal_user_grants`, requiring the same tenant, the same customer and `status = 'active'`
    - reads the customer through `CustomerService.get`
-   - caches `(tenant, user) → (verdict, expires_at)` in-process for `portal_principal_cache_seconds` (60)
+   - caches `(tenant, user, customer_id) → (verdict, expires_at)` in-process (the customer id is in the key so a re-bind within the TTL can't reuse a stale `ok`; revoke invalidates every key for the user) for `portal_principal_cache_seconds` (60)
    - sets `first_seen_at` on the grant once, when it is null
    - fails closed: a store error gives 503 `PORTAL_UNAVAILABLE`, logged at ERROR and never cached
 5. Stamp `request.state.portal_tenant_id`, `portal_user_id` and `portal_customer_id`. These feed the rate-limit key and the audit middleware. Also stamp `export_tenant_id` / `export_user_id`, so `stream_csv_export`'s existing audit line works.
@@ -272,13 +287,13 @@ Each reader also asserts at runtime that the kwargs it sends include a non-empty
 
 Additions to existing services, all backward compatible:
 
-- `InvoiceService.list/count`, `_invoice_must_clauses` and `InvoiceReadRepository.list/count` gain `statuses: Optional[Sequence[str]] = None`, which becomes ES `terms` or SQL `IN`. It is applied together with `status`.
+- `InvoiceService.list/count`, `_invoice_must_clauses`, `InvoiceReadRepository.list/count`, and the Postgres bridge reads `read_invoice_list` / `read_invoice_count` in `commerce/services/commerce_persistence_bridge.py` (which `list/count` call first on the read-cutover path) gain `statuses: Optional[Sequence[str]] = None`, which becomes ES `terms` or SQL `IN`. It is applied together with `status`. INV-1 runs the draft-exclusion case against both the ES fake and the bridge path.
 - `FuelOrderRepository.search` gains `customer_tank_id`, `statuses` (a terms / `in_filters` list) and `hold_reason` term filters on both the ES and Postgres (`read_hybrid_search` `term_filters` / `in_filters`) paths.
 - `FuelOrderRepository.transition_if(tenant_id, order_id, *, expected_status, expected_hold_reason=_ANY, update_fields) -> Optional[dict]` runs `atomic_update`, applies `update_fields` only when the current status and hold reason match, and returns the new doc or `None`. The caller then mirrors to Postgres with `mirror_current_state_upsert`, as `_apply_order_update` does. See FREEZE F3.
 
 ## 3. Portal API
 
-Every route below sits under a router created with `dependencies=[Depends(reject_scope_params)]`, and every handler takes `scope: PortalScope = Depends(require_portal_customer)`. The routers are mounted unconditionally in the `main.py` router tuple. The flag answers 404 per request, so route inventories are stable whatever the flag says.
+Every route below sits under a router created with `dependencies=[Depends(reject_scope_params)]`, and every handler takes `request: Request` (slowapi's decorators require it) and `scope: PortalScope = Depends(require_portal_customer)`. The routers are mounted unconditionally in the `main.py` router tuple. The flag answers 404 per request, so route inventories are stable whatever the flag says.
 
 Responses use the existing envelope conventions:
 
@@ -322,7 +337,9 @@ The response is `PortalMe`:
 - `supplier_name` falls back to `tenant_id`, the BOL precedent. A tenant display name doesn't exist yet: see Backlog B1 and Deviation DV1.
 - `ordering_available` is `pipeline.get_ordering_state(tenant_id) != "disabled"`. That is a new public wrapper over `_get_overlay_state`, which already fails closed to `disabled`.
 - `invoices_available` is `commerce_backbone_enabled and commerce_invoicing_enabled`, and also requires the invoice service to be configured.
-- `payments_available` is `invoices_available and await stripe_connector_factory(tenant_id) is not None`. A factory exception counts as `False` and is logged at WARN.
+- `payments_available` is `invoices_available and await portal_connector_factory(tenant_id) is not None`. A factory exception counts as `False` and is logged at WARN.
+
+**Portal Stripe factory (review M2).** The existing `_stripe_connector_factory` is a closure in `bootstrap/agents.py` that falls back to a *disabled* instance so webhooks keep verifying, so it can't answer "may the portal take payments". `bootstrap/agents.py` builds a second closure, `_portal_stripe_connector_factory`, right after it, using the same repository and vault. It lists instances with `enabled=None`, picks the first one with `enabled` true, and returns `None` when there is none (or when the repository or vault is missing, or the lookup raises, logged WARN). It constructs the connector with the same arguments. It is registered with `portal.services.portal_payment_service.configure_portal_payments(connector_factory=..., payment_service=...)`, called next to `configure_stripe_endpoints`. `/me`, payment create, replay `retrieve`, and `GET /payment-attempts/{id}` use only this factory. The webhook keeps the existing factory, so events for a since-disabled instance still verify and reconcile. When `configure_portal_payments` was never called, the factory is `None` and payments are unavailable.
 
 ### 3.2 Common validation
 
@@ -332,7 +349,7 @@ The response is `PortalMe`:
 | `cursor` | Optional opaque string, ≤ 256 chars | 422 |
 | `limit` | Optional int, 1–50, default 25 | 422 |
 | `status` (invoice list) | Optional; one of `open`, `partial`, `paid`, `overdue`, `void` (enum, `draft` excluded) | 422 |
-| `start_date` / `end_date` | Optional; parsed by `services.date_range.parse_date_range` on invoice `created_at` | 422 `VALIDATION_ERROR` (the existing parser error) |
+| `start_date` / `end_date` | Optional; parsed by `services.date_range.parse_date_range` on invoice `created_at` (D8, DV9) | 422 `VALIDATION_ERROR` (the existing parser error) |
 | Unknown query params | Ignored, except `tenant_id` / `customer_id`, which give 422 (E7) | |
 | Body | Pydantic model with `extra="forbid"` | 422 naming the fields |
 
@@ -365,34 +382,45 @@ The UI always sends a window. When the customer picks only a date, the browser s
    - `ship_to_address` is the `ship_to_address` of the tank's most recent order (`repo.search(tenant, customer_id, customer_tank_id, size=1, sort created_at:desc)`) when there is one.
    - Otherwise it is `f"{customer.display_name} — tank {tank.external_tank_id or tank.customer_tank_id[-8:]}, ZIP {tank.zip_code}"`.
 6. Build the adapter payload with `customer_id = scope.customer_id`, `customer_tank_id`, `product_code = tank.fuel_product_code`, `gallons_requested` / `fill_to_full`, `call_type = "will_call"`, `delivery_window_start/end`, `po_number`, and `special_instructions = notes`.
-7. `result = await pipeline.ingest_portal(scope=scope, payload=..., request_id=..., client_event_id=body.client_event_id)`. Map the results:
+6a. **Replay pre-check (review H3).** `oid = portal_order_id(scope.tenant_id, scope.user_id, body.client_event_id)`. If `await PortalOrderReader.get_or_none(scope, oid)` returns an order, return 200 with its projection and do not call the pipeline (R4.2). This does not depend on the Redis idempotency marker, which can be missing (72 h TTL, a flush, or a crash between the upsert and `mark_processed`). Step 6a runs after steps 2–5 on purpose, so a replay still gets the same 404 / 422 answers for an invalid body. `get_or_none` is the reader's `get` without the 404: it returns `None` for missing or out-of-scope.
+7. `result = await pipeline.ingest_portal(scope=scope, payload=..., request_id=..., client_event_id=body.client_event_id)`. Exceptions from the pipeline are caught as `except (AppException, PricingError, DyedDieselOrderRejected)`, because the pricing and dyed-diesel hooks raise plain exceptions that the pipeline re-raises unchanged (review M1). Map the results:
 
 | Pipeline result | Portal response |
 |---|---|
 | `legacy_passthrough` (the flag flipped between step 1 and here) | 409 `ORDER_INTAKE_DISABLED` |
 | `processed` | 201, `{order_id, status_code: "awaiting_confirmation", status_label: "Awaiting confirmation"}` plus `Location` |
-| `duplicate` | Load `portal_order_id(...)` through `PortalOrderReader.get`. Return 200 with the original projection (R4.2). If it isn't found (the first attempt crashed after marking the key), return 409 `IDEMPOTENCY_CONFLICT` with the message "Please submit the request again with a new reference." |
+| `duplicate` (the Redis marker hit, or the §4.2 existing-id guard fired for a concurrent first submit) | Load `portal_order_id(...)` through `PortalOrderReader.get`. Return 200 with the original projection (R4.2). If it isn't found (the first attempt crashed after marking the key), return 409 `IDEMPOTENCY_CONFLICT` with the message "Please submit the request again with a new reference." |
 | `queued_for_review` (an adapter error, not expected) | 422 `ORDER_REQUEST_REJECTED`, logged at ERROR |
 | `AppException` `ORDER_PAYLOAD_INVALID` | 422, passing `invalid_fields` through. Field names are ours, not internal. |
 | `AppException` `INVALID_CUSTOMER_TANK_REF` | 404 `RESOURCE_NOT_FOUND` |
-| Any other `AppException` from a `before_accept` hook (pricing, credit) | 422 `ORDER_REQUEST_REJECTED` with the message "We couldn't accept this request online. Please contact your supplier." The hook's code is logged at WARN and never returned. |
+| Any other `AppException`, or `PricingError` (no price rule), or `DyedDieselOrderRejected` (no exemption certificate; OI-02 makes this check blocking) | 422 `ORDER_REQUEST_REJECTED` with the message "We couldn't accept this request online. Please contact your supplier." Logged at WARN with `type(exc).__name__` and `getattr(exc, "error_code", None)`; neither is returned. Nothing is written, because hooks run before the upsert. |
 | Anything else | Propagates as a 500 |
 
 ### 4.2 Pipeline changes (`fuel/services/order_intake_pipeline.py`, `fuel/intake/web_portal_adapter.py`)
 
 - **`WebPortalIntakeAdapter`** (`channel_type = "web_portal"`, `schema_version = "1.0"`) is registered in `bootstrap/fuel.py` next to the dispatcher adapter. It is shaped like `DispatcherIntakeAdapter`: it requires `customer_id`, `customer_name`, `ship_to_address`, `ship_to_lat`, `ship_to_lon`, `customer_tank_id`, `product_code` and `call_type`.
   - It stamps `intake_channel = "web_portal"`, `intake_channel_id = channel.channel_id`, and `intake_metadata = {"portal_session_id": None}`. It does not carry PII.
-  - It emits one `order_placed` event whose payload is `{intake_channel, intake_channel_id, actor_user_id, hold_reason: PORTAL_REVIEW_HOLD_REASON}` (R8.4).
+  - It emits one `order_placed` event whose payload is `{intake_channel, intake_channel_id, actor_user_id}` (R8.4). It carries no `hold_reason`, because the adapter runs before the hooks and can't know which hold the order ends with; the order document is the source of truth for that.
 - **`_PortalChannel`** is an ephemeral dataclass like `_CsvImportChannel`: `channel_id = "web-portal"`, `channel_type = "web_portal"`, `supported_schema_versions = ["1.0"]`.
 - **`async def ingest_portal(self, *, scope, payload, request_id, client_event_id) -> IntakeResponse`** calls `_ingest_common(channel=_PortalChannel(tenant_id=scope.tenant_id), payload, request_id, actor_user_id=scope.user_id, client_event_id=portal_event_id(scope.user_id, client_event_id))`.
   - `portal_event_id(user, cid) = f"portal:{user}:{cid}"` namespaces the tenant-scoped idempotency key per user, so two users can't collide.
   - `portal_order_id(tenant, user, cid) = "ord_portal_" + sha256(f"{tenant}|{user}|{cid}").hexdigest()[:32]`.
   - Both helpers live in `fuel/services/order_intake_pipeline.py` and are imported by the portal service.
 - **`_complete_order_doc`**: when `channel_type == "web_portal"`, set `order_id = portal_order_id(context.tenant_id, context.actor_user_id, <cid>)`. The client id is recovered from the namespaced event id. Otherwise the code is unchanged.
-- **Hold stamp:** a new step (i3) runs right after the `before_accept` hooks loop and before `FuelOrder.model_validate`. When `channel_type == "web_portal"`, it sets `order_doc["status"] = "on_hold"` and `order_doc["hold_reason"] = PORTAL_REVIEW_HOLD_REASON`.
+- **Existing-id guard (review H3).** In `_ingest_common`, right after `_complete_order_doc` and before the hooks, when `channel_type == "web_portal"`: if `await FuelOrderRepository(self._es).get(tenant_id, order_doc["order_id"])` returns a document (the same lookup the CSV path uses at `order_intake_pipeline.py:890`), call `mark_processed` for the event id and return `IntakeResponse(status="duplicate", order_id=...)` without running hooks or writing. This mirrors the CSV `stale` branch and covers two concurrent first submits that both pass step 6a. A repository error here propagates (500); it is not treated as "missing", because that would reopen the overwrite.
+- **Hold stamp (review H2):** a new step (i3) runs right after the `before_accept` hooks loop and before `FuelOrder.model_validate`. It lives in the pipeline, not in a hook, so it doesn't depend on hook registration order across three bootstrap modules:
+
+  ```python
+  if channel_type == "web_portal" and order_doc.get("status") == "placed":
+      order_doc["status"] = "on_hold"
+      order_doc["hold_reason"] = PORTAL_REVIEW_HOLD_REASON
+  # A hold set by a hook (credit_limit_exceeded) is left untouched.
+  ```
+
   - `PORTAL_REVIEW_HOLD_REASON = "awaiting_dispatcher_confirmation"` lives in `fuel/order_models.py` next to `LOADABLE_ORDER_STATUSES`.
-  - The stamp runs after the hooks on purpose. A credit hold set by the hook is overwritten here, but `release-hold` re-runs the credit hook, which re-applies `credit_limit_exceeded` when it still holds. So the dispatcher reviews first, and credit still gates loading.
-  - `release-hold` never re-applies the portal reason, because none of its hooks know it (R4.8, PD8).
+  - It never overwrites another hold. `release-hold` does not re-run the credit hook (no production code calls `register_release_hold_hook`), so overwriting `credit_limit_exceeded` would let a dispatcher confirm an over-limit order straight to `placed`.
+  - A credit-held portal order shows the customer "On hold" (PD11), has `cancellable = false`, and is released by a dispatcher through the existing `release-hold`, which is already a human review. Other hooks (credit, pricing, dyed diesel) still run as usual (PD8).
+  - `release-hold` never re-applies the portal reason, because none of its hooks know it (R4.8).
 
 ### 4.3 Planner exclusion
 
@@ -513,24 +541,39 @@ The response is 201 `{payment_attempt_id, status_code, amount_cents, client_secr
 
 `PortalPaymentService.create(scope, invoice_id, key, amount)`:
 
-1. Gates: invoicing (404), then the connector, `connector = await factory(tenant)`. If it is `None`, return 409 `PORTAL_PAYMENTS_UNAVAILABLE` (R6.5).
-2. **Replay check.** In its own short transaction, select by (tenant, user, key).
+1. Gates: invoicing (404), then the connector, `connector = await portal_connector_factory(tenant)` (§3.1, enabled instances only). If it is `None`, return 409 `PORTAL_PAYMENTS_UNAVAILABLE` (R6.5).
+2. **Replay check.** In its own short transaction, select by (tenant, user, key) and apply the replay rules:
    - Not found: continue.
    - Found with a different `invoice_id` or `amount_cents`: 409 `IDEMPOTENCY_CONFLICT`.
-   - Found in `creating`: 409 `PAYMENT_IN_PROGRESS`.
-   - Found in `created`: `PaymentIntent.retrieve(pi_id)`, then 200 with its `client_secret`.
+   - Found in `creating`: 200 with the attempt, no `client_secret`, and `Retry-After: 2`. The client polls `GET /payment-attempts/{id}` until it is `created` (review M6; R6.2 says the same key returns the existing attempt).
+   - Found in `created`: `retrieve_intent(pi_id)`, then 200 with its `client_secret`.
    - Found in any other status: 200 without `client_secret` (R6.2).
 3. **Transaction A** (FREEZE F2, serialized per invoice):
    1. `pg_advisory_xact_lock(hashtext('portal-pay:'||tenant||':'||invoice_id))`.
+   1b. Repeat the step 2 lookup by (tenant, user, key) and apply the same replay rules. Two requests with the same key (double-click, two tabs) both miss step 2; the second waits on the lock and then finds the first's row here, so it returns that attempt instead of a 409. One extra rule applies here only, under the lock: a same-key row still `creating` after 120 s is re-driven with its own Stripe idempotency key (the F4 mechanism), then moved to `created` (200 with `client_secret`) or `failed` (502). Without this, a crashed first request would leave the client polling a row that never moves.
    2. `invoice = PortalInvoiceReader.get(scope, invoice_id)`, read fresh and never from the client.
    3. If the status is not in (`open`, `partial`, `overdue`), return 409 `INVOICE_NOT_PAYABLE`.
    4. If `amount < 100` or `amount > remaining_cents`, return 422 `PAYMENT_AMOUNT_INVALID` with `details.max_cents` (R6.4).
    5. `SELECT … FROM portal_payment_attempts WHERE tenant_id = :t AND invoice_id = :i AND status IN ('creating','created','pending') FOR UPDATE`:
       - `pending` gives 409 `PAYMENT_IN_PROGRESS` (R6.3).
       - `creating` younger than 120 s gives 409 `PAYMENT_IN_PROGRESS`.
-      - `created`, or `creating` at least 120 s old, is **superseded** (FREEZE F4): call `stripe.PaymentIntent.cancel(pi_id)`. For a stale `creating` with no PI id, first re-drive `PaymentIntent.create` with the old Stripe idempotency key to obtain it. If Stripe refuses because the PI is `processing` or `succeeded`, set the old attempt to `pending`, commit, and return 409 `PAYMENT_IN_PROGRESS`. Otherwise set it to `canceled`.
+      - `created`, or `creating` at least 120 s old, is **superseded** (FREEZE F4): call `connector.cancel_intent(pi_id)` (per-request key, F7). For a stale `creating` with no PI id, first re-drive `PaymentIntent.create` with the old Stripe idempotency key to obtain it. If Stripe refuses because the PI is `processing` or `succeeded`, set the old attempt to `pending`, commit, and return 409 `PAYMENT_IN_PROGRESS`. Otherwise set it to `canceled`.
    6. `INSERT` the new attempt with status `creating`, then commit.
-4. Call Stripe with a 10 s timeout, wrapped with `asyncio.to_thread`: `connector.create_portal_ach_intent(amount_cents, idempotency_key=f"portal_pa_{attempt_id}", metadata={source: "runsheet_portal", tenant_id, customer_id, invoice_id, payment_attempt_id}, description=f"Invoice {invoice_number}")`. This is a new connector method that bypasses autocharge and the ceiling, because the payment is customer-initiated. It sets `payment_method_types=["us_bank_account"]` and `payment_method_options={"us_bank_account": {"verification_method": "automatic"}}`, then returns `{id, client_secret, status}`.
+4. Call Stripe, bounded by `asyncio.wait_for(..., 10)`: `connector.create_portal_ach_intent(amount_cents, idempotency_key=f"portal_pa_{attempt_id}", metadata={source: "runsheet_portal", tenant_id, customer_id, invoice_id, payment_attempt_id}, description=f"Invoice {invoice_number}")`. This is a new connector method that bypasses autocharge and the ceiling, because the payment is customer-initiated. It sets `payment_method_types=["us_bank_account"]` and `payment_method_options={"us_bank_account": {"verification_method": "automatic"}}`, then returns `{id, client_secret, status}`.
+
+   **Per-request Stripe key (review H4, FREEZE F7).** The three new connector methods (`create_portal_ach_intent`, `cancel_intent`, `retrieve_intent`) never assign `stripe_sdk.api_key`. Each decrypts the tenant envelope, then passes the key as a per-request option inside the thread:
+
+   ```python
+   key = envelope["secret_key"]
+   await asyncio.to_thread(lambda: stripe_sdk.PaymentIntent.create(
+       **body, api_key=key, idempotency_key=f"portal_pa_{attempt_id}"))
+   await asyncio.to_thread(lambda: stripe_sdk.PaymentIntent.cancel(pi_id, api_key=key))
+   await asyncio.to_thread(lambda: stripe_sdk.PaymentIntent.retrieve(pi_id, api_key=key))
+   ```
+
+   The `api_key=` request option exists on every SDK version in the `>=10,<13` range, which is why this is chosen over `StripeClient` (whose service accessors changed within that range, and the SDK isn't installed locally to confirm). The existing connector methods keep their global assignment; changing them is out of scope (Backlog B6). A key is never logged.
+
+   **Timeout (review N12).** `wait_for` stops waiting at 10 s but doesn't stop the thread. The orphaned SDK call is bounded by the SDK's own HTTP timeout (80 s default) with `max_network_retries` left at its default of 0. Changing `stripe.default_http_client` would also change the timeouts of the existing connector calls, so it isn't done. The orphan is harmless: its attempt is already `failed`, no client secret was issued, and an intent it creates is never confirmed and is superseded or expires at Stripe.
    - On success: update the attempt to `created` with `stripe_payment_intent_id`, and return 201 with `client_secret` and `connector.get_publishable_key()`.
    - On any Stripe error or timeout: set the attempt to `failed` with `failure_code = "provider_error"`, log ERROR `portal_payment_provider_error` with `payment_attempt_id` (no Stripe message), and return 502 `PAYMENT_PROVIDER_ERROR` (R6.6).
 
@@ -544,9 +587,11 @@ The response is 201 `{payment_attempt_id, status_code, amount_cents, client_secr
 - `event.type in {"charge.refunded", "charge.dispute.created"}`: call the portal handler, which looks up `obj.payment_intent` and does nothing when it isn't a portal attempt.
 - Anything else: the existing `connector.handle_webhook_event(event)`, unchanged (R6.12).
 
+**Placement (review N3).** The portal branch sits after signature verification and **before**, not inside, the existing `try/except` around `handle_webhook_event` (`stripe_endpoints.py:562-583`) that turns any error into 200 `handler_error`. A DB error in the portal handler therefore propagates to a real 500 and Stripe retries. The two `charge.*` events reach the portal handler first; when it reports "not a portal attempt", the endpoint continues into the existing block unchanged.
+
 `configure_stripe_endpoints` gains `portal_payment_handler: Optional[...] = None`. When it is `None`, portal events fall through to the existing path, which ignores them as `missing_reconciliation_id`.
 
-`PortalPaymentReconciler.handle(path_tenant_id, event)` runs in one transaction (FREEZE F2):
+`PortalPaymentReconciler.handle(path_tenant_id, event)` holds the attempt row lock for the whole handling (FREEZE F2). The attempt-row reads and writes share one transaction. `payment_service.ingest` does **not** join it: it opens and commits its own sessions (Payment write, ES index, `invoice_service.apply_payment`, then the Redis marker last). The row lock only serializes deliveries; it doesn't make `ingest` atomic with the attempt update (review M4).
 
 1. `SELECT … WHERE payment_attempt_id = :meta_attempt FOR UPDATE`.
 2. Verify all of these: the row exists, `row.tenant_id == path_tenant_id == metadata.tenant_id`, metadata `customer_id` and `invoice_id` equal the row's, and `row.stripe_payment_intent_id` is null or equals `obj.id`. Any mismatch: log WARN `portal_audit outcome=webhook_mismatch` (ids only), write nothing, and return `{handled: false}`. The endpoint answers 200 (R6.11).
@@ -555,7 +600,7 @@ The response is 201 `{payment_attempt_id, status_code, amount_cents, client_secr
    | Event | From | To / action |
    |---|---|---|
    | `processing` | `creating`, `created` | `pending` (R6.7) |
-   | `succeeded` | any except `succeeded` | Call `payment_service.ingest(tenant_id, invoice_id, account_id, amount_cents=obj.amount_received or obj.amount, source="stripe", method="ach", external_id=obj.id, received_at=now, actor=f"portal:{actor_user_id}")`, then `succeeded` with `payment_id` (R6.8, R6.9) |
+   | `succeeded` | any except `succeeded` | First `existing = await payment_service.find_by_external_id(tenant_id=..., source="stripe", external_id=obj.id)`. If found, set `succeeded` with `payment_id = existing["payment_id"]` and skip `ingest` (an earlier delivery recorded the Payment but its attempt update rolled back). Otherwise call `payment_service.ingest(tenant_id, invoice_id, account_id, amount_cents=obj.amount_received or obj.amount, source="stripe", method="ach", external_id=obj.id, received_at=now, actor=f"portal:{actor_user_id}")`, then `succeeded` with `payment_id` (R6.8, R6.9) |
    | `payment_failed` | not `succeeded` | `failed`, with `failure_code = obj.last_payment_error.code` (R6.10) |
    | `canceled` | not `succeeded` | `canceled` (R6.10) |
    | any | `succeeded` | No-op. A duplicate delivery means at most one Payment, because `ingest` is also idempotent on `external_id`. |
@@ -564,7 +609,7 @@ The response is 201 `{payment_attempt_id, status_code, amount_cents, client_secr
 4. If `ingest` raises an `AppException` (for example, the invoice was voided meanwhile), set `succeeded`, keep `payment_id` NULL and set `failure_code = f"apply_rejected:{code}"`. Log ERROR `portal_payment_unapplied`, and return handled. A Stripe retry wouldn't help, and staff resolve it manually (refund in Stripe or apply by hand). Any other exception rolls back and propagates, so the endpoint returns 500 and Stripe retries.
 5. `charge.refunded` / `charge.dispute.created`: when the attempt is found by `stripe_payment_intent_id`, log WARN `portal_audit action=payment_refund_or_dispute`. No state changes (R6.15, PD14).
 
-The ingest runs while the row lock is held. A second concurrent delivery waits, then sees `succeeded` and does nothing. Whatever the ordering, the Postgres unique constraint `(tenant, source, external_id)` and the idempotency check in `ingest` stop a second Payment.
+A second concurrent delivery waits on the row lock, then sees `succeeded` and does nothing. If the attempt update fails after `ingest` committed, the transaction rolls back to the pre-event state and Stripe retries; the retry finds the Payment through `find_by_external_id` and only links it. So a duplicate Payment needs both the lookup and `ingest`'s own dedupe (Redis marker, plus the Postgres unique when payments are write-authoritative) to miss, which the lookup rules out once the first Payment is readable. A `find_by_external_id` error propagates (500, Stripe retries); it is never read as "not found".
 
 **Runbook note.** The tenant's Stripe webhook endpoint must subscribe to `payment_intent.processing`, `succeeded`, `payment_failed`, `canceled`, `charge.refunded` and `charge.dispute.created`. This goes in `docs/runbooks/` as part of implementation (O1).
 
@@ -613,7 +658,7 @@ The ingest runs while the row lock is held. A second concurrent delivery waits, 
 - `action` is `request.scope["route"].name` (the endpoint function name) when it resolves, else `"unmatched"`.
 - `target_ids` comes from `request.path_params`, keeping only `*_id` keys.
 - `outcome` maps from status: 2xx `ok`, 401 `unauthenticated`, 403 `forbidden`, 404 `not_found`, 409 `conflict`, 422 `invalid`, 429 `rate_limited`, 5xx `error`.
-- The identity fields come from the `request.state.portal_*` / `tenant_id` stamps.
+- The identity fields come from the request-state stamps: `tenant_id` from `portal_tenant_id or tenant_id`, `actor_user_id` from `portal_user_id or auth_user_id` (§2.2, M5), and `customer_id` from `portal_customer_id`, else `null`.
 - Level is INFO for 2xx, else WARN, and ERROR for 5xx.
 - It sets `Cache-Control: no-store` on every matched response.
 
@@ -639,7 +684,7 @@ Settings, added to `config/settings.py`:
 
 | Setting | Default |
 |---|---|
-| `customer_portal_enabled` | `False`; staging env `CUSTOMER_PORTAL_ENABLED=true` via `.env.staging` and the deploy script's task env |
+| `customer_portal_enabled` | `False`. Staging sets `{"name": "CUSTOMER_PORTAL_ENABLED", "value": "true"}` in the task env of `scripts/staging_aws.sh`, next to `COMMERCE_BACKBONE_ENABLED` (about line 1592). `.env.staging` is gitignored and isn't touched. Effective only with `commerce_backbone_enabled` (§2.3). |
 | `portal_read_rate_limit` | `120` |
 | `portal_order_rate_limit` | `10` |
 | `portal_order_cancel_rate_limit` | `10` |
@@ -650,7 +695,7 @@ Settings, added to `config/settings.py`:
 
 All ints are `ge=1`.
 
-Test T-RL-COVERAGE asserts that every `/api/portal/*` route function appears in `limiter._route_limits` or in a shared-limit scope, so a new route can't ship unlimited.
+Test T-RL-COVERAGE asserts that every `/api/portal/*` route function appears in `limiter._route_limits` or in a shared-limit scope, and that its signature has a `request: Request` parameter (slowapi needs it), so a new route can't ship unlimited.
 
 ## 9. Migration (single head)
 
@@ -666,7 +711,7 @@ The new file is `alembic/versions/20261008_0001_customer_portal.py`, with `revis
 
 ORM mirrors `PortalUserGrantORM` and `PortalPaymentAttemptORM` go in `persistence/models.py`, so the existing ORM-vs-migration parity tests see them.
 
-**Single-head rule.** `production-readiness/margin-feed` is being specced in parallel and may add a revision on `0010` too. Before merging, the implementer runs `alembic heads` on the rebased branch. If another `0011_*` already landed, change this file's `down_revision` to that head and bump the id to the next number. Never create a merge revision. CI's head-count step enforces this.
+**Single-head rule.** `production-readiness/margin-feed` is being specced in parallel and may add a revision on `0010` too. Before merging, the implementer runs `alembic heads` on the rebased branch. If another `0011_*` already landed, change this file's `down_revision` to that head and bump the id to the next number. Never create a merge revision. CI's head-count step enforces this. `margin-feed`'s design also claims `0011_margin_feed` on `0010` with a `20261008_0001_*` filename (review N10). Whichever branch merges second re-parents, renames its file to the next free `2026MMDD_000N` slot, and names the new `down_revision` in its PR description.
 
 ## 10. Frontend
 
@@ -677,7 +722,7 @@ ORM mirrors `PortalUserGrantORM` and `PortalPaymentAttemptORM` go in `persistenc
   - On pathname change, when a session exists, it reads `getCurrentUserRoles()`.
   - If the roles include `customer` and the path starts with `/dashboard`, `/admin`, `/commerce`, `/compliance`, `/ops` or `/orders`, it calls `router.replace("/portal")`.
   - If the roles don't include `customer` and the path starts with `/portal`, it calls `router.replace("/dashboard")`.
-  - It renders `children` immediately. The guard only routes; the backend enforces.
+  - While a session exists, the path has one of the staff prefixes above or `/portal`, and roles haven't resolved yet, it renders `null` (review N9). That stops a customer from briefly mounting the staff shell and opening refused WebSockets. `getCurrentUserRoles` reads the local access-token payload, so the delay is a microtask. Other paths, signed-out visitors, and resolved roles render `children` as before. The guard only routes; the backend enforces.
 - `app/signin/page.tsx`: after `OK`, it routes with `router.replace((await getCurrentUserRoles()).includes("customer") ? "/portal" : "/dashboard")`.
 
 ### 10.2 Portal route group (`runsheet/src/app/portal/`)
@@ -713,8 +758,8 @@ It imports nothing from `Sidebar`, `Header`, `AIChat`, `GlobalSearch`, `Notifica
   - Every input has a `<label>`. Errors use `aria-describedby` and are summarized in an `role="alert"` region on submit, with focus moved to the summary.
   - Tank is a select of the customer's tanks, showing the label, product and capacity.
   - Quantity is a radio group (Fill to full / Gallons) with a number input.
-  - The date is a native `type="date"`. The optional window uses two `type="time"` inputs.
-  - When `ordering_available` is false, or a submit returns 409 `ORDER_INTAKE_DISABLED`, it shows the PD10 message in a `role="status"` live region, sets `aria-disabled="true"` on submit, and keeps all values. It doesn't retry, and `client_event_id` is kept, so a later manual retry is idempotent.
+  - The date is a native `type="date"` with `min` = today and `max` = today + 60 days, both in local time (PD9, F6). The server stays authoritative. The optional window uses two `type="time"` inputs.
+  - When `ordering_available` is false, or a submit returns 409 `ORDER_INTAKE_DISABLED`, it shows the PD10 message in a `role="status"` live region, sets `aria-disabled="true"` on submit, and keeps all values. `aria-disabled` doesn't block activation, so the submit handler returns early while disabled (OID-4 asserts no second `fetch`). It doesn't retry, and `client_event_id` is kept, so a later manual retry is idempotent.
 - **429 (R9.2):** "Too many requests. Try again in N seconds.", with N taken from `Retry-After`, shown in the same live region.
 - **Pay page:**
   - It loads `https://js.stripe.com/v3` with `<Script strategy="afterInteractive">`. A minimal `types/stripe-js.d.ts` declares the subset used: `Stripe(pk)`, `elements({clientSecret})`, `create("payment")`, `mount`, `confirmPayment`.
@@ -789,8 +834,12 @@ Stripe messages, client secrets, emails and bank data are never logged.
 | A customer session reaches only the allowlist | `AuthEnforcementMiddleware` (E1), plus `get_tenant_context` (E1b) and `_resolve_ws_claims` (E3) | Default-deny before routing |
 | Portal data is scoped to (tenant, customer) | `scoped_readers` (E8). `PortalScope` refuses empty ids. | One module, testable by spying |
 | At most one in-flight payment attempt per invoice | Advisory lock (F2) plus partial unique index `uq_ppa_inflight` | Serialize, with a DB backstop |
-| At most one commerce Payment per PaymentIntent | `payment_service.ingest` idempotency plus the unique `(tenant, source, external_id)`, under the attempt row lock | The existing mechanism, reused |
-| A Portal_Request isn't loadable before confirmation | Pipeline step (i3) sets `on_hold`, and `LOADABLE_ORDER_STATUSES` excludes it | Reuses the existing state machine |
+| At most one commerce Payment per PaymentIntent | The reconciler's `find_by_external_id` pre-check, then `payment_service.ingest`'s own dedupe (Redis marker, plus the unique `(tenant, source, external_id)` when authoritative). The attempt row lock serializes deliveries; `ingest` commits independently of it. | Reuses the existing mechanism; the pre-check closes the gap left by `ingest` committing on its own |
+| A Portal_Request isn't loadable before confirmation | Pipeline step (i3) sets `on_hold` when nothing else held it; a hook-set hold also keeps it `on_hold`. `LOADABLE_ORDER_STATUSES` excludes `on_hold`. | Reuses the existing state machine |
+| A hook-set hold (credit) is never replaced by the portal hold | Pipeline step (i3) only stamps when `status == "placed"` | In the pipeline, so it doesn't depend on hook registration order |
+| A replayed `client_event_id` never rewrites an existing order | `PortalOrderService` step 6a pre-check, plus the pipeline's existing-id guard for `web_portal` | Two layers: the service answers replays; the pipeline guard covers concurrent first submits and any other caller |
+| A revoked customer has no identity left | `PortalAccessService.revoke` deletes the SuperTokens user and the portal-only `auth_users` row | No role-less session can exist for an outsider |
+| A portal Stripe call uses its own tenant's key | The three new connector methods pass `api_key=` per request and never write module state (F7) | The global key is shared across concurrent requests |
 | Confirm and customer-cancel can't both win | `FuelOrderRepository.transition_if` (F3) | CAS at the store |
 | The 10-user cap | Advisory lock per customer (F1) | Serialize |
 
@@ -830,18 +879,21 @@ Stripe messages, client secrets, emails and bank data are never logged.
 | XR-5 | Cross-role deny, customer to staff | `…::test_mixed_role_session_refused` | Claims `roles=["customer","admin"]` give 403 `PORTAL_IDENTITY_INVALID` on a staff route and on a portal route (R2.2) |
 | XR-6 | Cross-role deny, staff to portal | `test_portal_staff_deny.py::test_staff_roles_forbidden_on_portal` [real-auth] | For every route under `/api/portal/` × each role in `STAFF_ROLES` (single-role sessions plus the `PLATFORM_STAFF_ROLES` bundle): 403 `INSUFFICIENT_ROLE` with the flag on (AC3) |
 | XR-7 | Cross-role deny, staff to portal | `…::test_portal_admin_routes_admin_only` | Portal-user admin routes: `dispatcher`, `driver` and `platform_admin` alone get 403. A `customer` gets 403 `PORTAL_ROUTE_FORBIDDEN` (E1). `admin` gets 200. |
-| XR-8 | Cross-role deny, both directions | `test_portal_flag_off.py` [real-auth] | With `customer_portal_enabled=False`, every `/api/portal/*` route returns 404 `PORTAL_DISABLED` for `cA` and for every staff role. Every portal-admin route returns 404 for every staff role, and 403 `PORTAL_ROUTE_FORBIDDEN` for `cA`, because the central deny comes before the flag (DV7). (AC8) |
-| PAY-1 | Payment idempotency | `test_portal_payments.py::test_same_key_one_attempt_one_intent` | Two sequential creates with the same key give one row and one `create_portal_ach_intent` call. The second response is 200 with the same id. The Stripe idempotency key is `portal_pa_<attempt_id>`. |
+| XR-8 | Cross-role deny, both directions | `test_portal_flag_off.py` [real-auth], parametrized over (portal off, backbone on) and (portal on, backbone off) | In both cases every `/api/portal/*` route returns 404 `PORTAL_DISABLED` for `cA` and for every staff role. Every portal-admin route returns 404 for every staff role, and 403 `PORTAL_ROUTE_FORBIDDEN` for `cA`, because the central deny comes before the flag (DV7). The backbone-off case also asserts the settings WARN was logged. (AC8) |
+| XR-9 | Cross-role deny, revoked customer | `test_portal_isolation.py::test_revoked_customer_has_no_session` [real-auth] | After revoke: the admin fake records `delete_user(st_user_id)`, the `auth_users` row is gone, and a session whose claims come from `_lookup_auth_user_claims` for that user has no `tenant_id`, so it gets 401 on `/api/fuel/mvp/forecasts` and on `/api/portal/me` (both resolve `get_tenant_context`). A pre-revoke session (claims still cached) gets 403 `PORTAL_ACCESS_SUSPENDED` on `/api/portal/me`. Re-invite of the same email provisions a new SuperTokens user without `ProvisioningConflictError`. |
+| PAY-1 | Payment idempotency | `test_portal_payments.py::test_same_key_one_attempt_one_intent`, plus a [pg] concurrent variant in `tests/postgres/test_portal_schema.py::test_concurrent_same_key` | Sequential: two creates with the same key give one row and one `create_portal_ach_intent` call; the second response is 200 with the same id; the Stripe idempotency key is `portal_pa_<attempt_id>`. Concurrent [pg]: two same-key creates in parallel (fake Stripe sleeps inside create) give one row, one Stripe call, and both responses carry the same `payment_attempt_id` (one 201, one 200; the 200 may be the `creating` replay with `Retry-After: 2` and no `client_secret`). A same-key replay of a `creating` row older than 120 s re-drives with the same Stripe key and returns `created`. |
 | PAY-2 | Payment idempotency | `…::test_same_key_different_amount_conflict` | 409 `IDEMPOTENCY_CONFLICT`, and no new Stripe call |
 | PAY-3 | Payment idempotency | `…::test_second_key_while_pending_409` | An existing `pending` attempt makes a new key return 409 `PAYMENT_IN_PROGRESS` |
 | PAY-4 | Payment idempotency | `…::test_second_key_supersedes_created` | An existing `created` attempt is canceled at Stripe (fake records `cancel`), the old row goes to `canceled` and the new attempt is created. When the fake's cancel raises "processing", the old row goes to `pending` and the response is 409. |
 | PAY-5 | Payment idempotency | `tests/postgres/test_portal_schema.py::test_concurrent_creates_serialized` [pg] | 10 concurrent creates with distinct keys on one invoice: exactly one `creating`/`created` row. The others get 409. The partial unique index holds. |
 | PAY-6 | Payment idempotency | `test_portal_stripe_webhook.py::test_duplicate_succeeded_one_payment` | The same `payment_intent.succeeded` event delivered twice (sequentially, and concurrently in the [pg] variant) gives exactly one `payment_service.ingest` side effect (one Payment row in the fake store). The attempt is `succeeded`. (AC11) |
-| PAY-7 | Payment idempotency | `…::test_amount_validation` | `amount_cents` of 99, `remaining+1`, or a `paid`/`void`/`draft` invoice gives 422 / 409 / 409 / 404, and nothing is created |
+| PAY-6c | Payment idempotency | `…::test_attempt_update_fails_after_ingest` | `ingest` succeeds (fake store has the Payment), then the attempt update raises: the endpoint returns 500. Redeliver with the Redis-marker fake cleared and payments non-authoritative: `ingest` is not called again, exactly one Payment exists, and the attempt ends `succeeded` with that `payment_id`. |
+| PAY-7 | Payment idempotency | `…::test_amount_validation` | `amount_cents` of 99 or `remaining+1` gives 422; a `paid` or `void` invoice gives 409; a `draft` invoice gives 404 (DV8); nothing is created |
 | PAY-8 | Payment idempotency | `…::test_webhook_transitions` | `processing` gives `pending`. `succeeded` gives a recorded Payment and the invoice moves to `partial`/`paid` in the fake. `payment_failed`/`canceled` give no Payment. `succeeded` after `canceled` records the payment (late success). An `AppException` from ingest gives `succeeded` with `apply_rejected`. A DB error gives 500. (AC12) |
 | PAY-9 | Payment idempotency | `…::test_reconciliation_path_unchanged` | An event with `reconciliation_id` and no portal source still reaches `connector.handle_webhook_event`. The existing `test_stripe_endpoints.py` and `test_stripe_connector.py` pass unmodified. |
-| PAY-10 | Payment idempotency | `…::test_no_stripe_409` | Factory returns `None`: create returns 409 `PORTAL_PAYMENTS_UNAVAILABLE`, and `/me` returns `payments_available=false` (AC13) |
+| PAY-10 | Payment idempotency | `…::test_no_stripe_409`, plus `test_portal_stripe_factory.py` | Portal factory returns `None`: create returns 409 `PORTAL_PAYMENTS_UNAVAILABLE`, and `/me` returns `payments_available=false` (AC13). Factory unit cases: only a disabled instance gives `None` (while the webhook factory still returns a connector for it); a disabled plus an enabled instance gives the enabled one; a repository error gives `None` and a WARN. |
 | PAY-11 | Payment idempotency | `…::test_provider_error_502` | The fake raises or times out: attempt `failed` and 502 `PAYMENT_PROVIDER_ERROR`. The body has no Stripe text. |
+| PAY-12 | Payment idempotency (tenant key) | `test_stripe_connector_portal.py::test_concurrent_tenants_use_own_key` | A fake `stripe` module whose `PaymentIntent.create/cancel/retrieve` record the `api_key` kwarg and sleep 50 ms. Concurrent T1 and T2 calls of all three methods each receive their own tenant's key, and a sentinel on the module-level `api_key` is never overwritten. |
 | OID-1 | Order intake disabled | `test_portal_orders.py::test_intake_disabled_409` | Overlay state `disabled`: `POST /api/portal/orders` gives 409 `ORDER_INTAKE_DISABLED`, the pipeline repo spy records no write, and `GET /me` gives `ordering_available=false` (AC10) |
 | OID-2 | Order intake disabled | `…::test_flag_flips_mid_request` | State is `shadow` at step 1 and `disabled` inside the pipeline (`legacy_passthrough`): 409 `ORDER_INTAKE_DISABLED` |
 | OID-3 | Order intake disabled | `…::test_shadow_and_active_write` | `shadow`, `active_gated` and `active_auto` each create an order with `status=on_hold`, `hold_reason=awaiting_dispatcher_confirmation`, `intake_channel=web_portal`, product from the tank, and lat/lon from the tank |
@@ -852,20 +904,21 @@ Stripe messages, client secrets, emails and bank data are never logged.
 | ID | Test | Covers |
 |---|---|---|
 | ORD-1 | `test_portal_orders.py::test_duplicate_client_event_id` | Same `client_event_id` gives 200 with the same `order_id` and one order. Another user with the same UUID gets a different `order_id` (R4.2). |
+| ORD-1b | `…::test_replay_after_marker_loss_does_not_rewrite` | Create, then a dispatcher releases the order to `placed`. Clear the idempotency fake and resubmit the same `client_event_id`: 200 with the same `order_id`, no pipeline call (spy), and the stored status is still `placed`. Pipeline unit case: `ingest_portal` for an id that already exists returns `duplicate`, runs no hooks and makes no upsert. |
 | ORD-2 | `…::test_tank_out_of_scope_404`, `::test_pd9_validation_422` (parametrized over every PD9 rule) | AC9 |
 | ORD-3 | `test_portal_loadable_exclusion.py` (T-ORD-LOADABLE) | R4.9, AC9 |
-| ORD-4 | `test_order_release_hold_portal.py` | `release-hold` moves the order to `placed` with no re-hold. With the credit hook failing it stays `on_hold` with `credit_limit_exceeded`. CAS: when the order was cancelled between read and write, the response is 409 `INVALID_STATUS_TRANSITION` and the order stays `cancelled` (F3). |
+| ORD-4 | `test_order_release_hold_portal.py` | (a) A credit-passing portal order lands as `on_hold` / `awaiting_dispatcher_confirmation`, and `release-hold` moves it to `placed` with no re-hold. (b) A credit-failing portal order lands as `on_hold` / `credit_limit_exceeded`, not the portal reason; the portal shows "On hold" with `cancellable=false`. (c) Hook registration order doesn't matter: (a) and (b) pass with the credit hook registered first and last among the pipeline's hooks. (d) CAS: when the order was cancelled between read and write, the response is 409 `INVALID_STATUS_TRANSITION` and the order stays `cancelled` (F3). |
 | ORD-5 | `test_portal_orders.py::test_cancel_rules` | Awaiting gives `cancelled`, with the actor on the event. Any other state gives 409 `ORDER_NOT_CANCELLABLE`. |
-| ORD-6 | `…::test_hook_rejection_generic_422` | A pricing hook `AppException` gives 422 `ORDER_REQUEST_REJECTED` and the hook code is not in the body |
+| ORD-6 | `…::test_hook_rejection_generic_422`, parametrized over `AppException`, `PricingError` and `DyedDieselOrderRejected` raised from a `before_accept` hook | 422 `ORDER_REQUEST_REJECTED` with the fixed message, no order written, a WARN with the exception class name, and neither the class name nor the hook code in the body |
 | ORD-7 | `test_projection.py::test_order_status_map_total` (T-ORD-MAP) | PD11 |
 | INV-1 | `test_portal_invoices.py` | Drafts never listed and 404 by id. Void listed as "Void". PDF is `application/pdf`, filename sanitized, pypdf text contains only projected values. CSV has BOM, `=` escaped, scope rows only, cap enforced. (AC14) |
 | TNK-1 | `test_portal_tanks.py` | Active tanks only, null forecast, stale at 7 d + 1 s and fresh at 7 d − 1 s, next delivery picks the earliest window, history is 24 months and paginated, foreign tank 404 (AC15) |
-| PRV-1 | `test_portal_access_service.py` | Admin only; email-in-use for staff, driver and other-customer rows with one identical message; 10-user cap (11th gets 409); revoke clears both columns, calls `set_user_roles([])` and `revoke_all_sessions`, and the next request gets 403 `PORTAL_ACCESS_SUSPENDED` after cache invalidation; resend; link-mint failure keeps the grant; compensation on provisioner failure (AC7) |
+| PRV-1 | `test_portal_access_service.py` | Admin only; email-in-use for staff, driver and other-customer rows with one identical message; 10-user cap (11th gets 409); revoke deletes the portal-only `auth_users` row (a staff row with the same email in another tenant is untouched), calls `set_user_roles([])`, `revoke_all_sessions` and `delete_user`, treats an already-deleted SuperTokens user as success, rolls back on a SuperTokens error, and the next request on an old session gets 403 `PORTAL_ACCESS_SUSPENDED` after cache invalidation; resend; link-mint failure keeps the grant; compensation on provisioner failure (AC7) |
 | PRV-2 | `tests/postgres/test_portal_schema.py::test_customer_binding_check` [pg] | Inserting `roles={customer,admin}`, or `customer` with `driver_id`, or `customer_id` with `roles={dispatcher}`, raises `CheckViolation` |
 | PRV-3 | `test_app_access_refuses_customer.py` | The driver grant on a customer email gives 409 `APP_ACCESS_ALREADY_LINKED` and no SuperTokens write |
 | PRV-4 | `test_supertokens_claims.py::test_customer_id_claim` | `_lookup_auth_user_claims` emits `customer_id` only when it is set |
-| PRV-5 | `test_portal_principal.py` | Archived customer gives 403 `PORTAL_ACCESS_SUSPENDED`. Cache TTL is respected (frozen clock). Store error gives 503 and is not cached. `first_seen_at` is set once. |
-| AUD-1 | `test_portal_audit.py` | Every portal route and admin action gives exactly one line with the PD18 fields, the field-name allowlist, and no `@` or spaces in values (AC16). Central-deny HTTP and WS refusals give WARN lines. |
+| PRV-5 | `test_portal_principal.py` | Archived customer gives 403 `PORTAL_ACCESS_SUSPENDED`. Cache TTL is respected (frozen clock). A cached `ok` for (tenant, user, A) is not reused for (tenant, user, B). Store error gives 503 and is not cached. `first_seen_at` is set once. |
+| AUD-1 | `test_portal_audit.py` | Every portal route and admin action gives exactly one line with the PD18 fields, the field-name allowlist, and no `@` or spaces in values (AC16). Central-deny HTTP and WS refusals give WARN lines. A staff 403 `INSUFFICIENT_ROLE` and a 404 `PORTAL_DISABLED` on a portal route both log a non-null `actor_user_id` and `customer_id = null`. |
 | RL-1 | `test_portal_rate_limits.py` | Each limit's 429 has `Retry-After`. User 1 exhausting the limit doesn't affect user 2. T-RL-COVERAGE (AC17). |
 | MIG-1 | `tests/postgres/test_migrations.py` (existing) plus CI head-count | Upgrade, downgrade, upgrade. Single head. |
 | UI-1 | Jest: `AudienceGuard.test.tsx`, `signin/page.test.tsx` (extended), `modules.test.ts` (extended) | Redirects both ways. Customer sign-in lands on `/portal`. `canSee` is false for customers. |
@@ -900,11 +953,13 @@ Existing suites must pass unchanged (AC19). `test_tenant_scope_authz.py` and any
 - `fuel/order_models.py` (constant), `fuel/order_repository.py` (filters, `transition_if`), `fuel/services/order_intake_pipeline.py`, `fuel/api/order_endpoints.py` (cancel via `order_actions`, release-hold CAS, `hold_reason` list filter)
 - `bootstrap/fuel.py` (adapter), `bootstrap/core.py` and `bootstrap/agents.py` (configure the portal services and pass `portal_payment_handler`)
 - `commerce/services/invoice_service.py` and `persistence/read_repositories.py` (`statuses`), `commerce/api/customer_endpoints.py` (archive hook)
-- `integrations/stripe_connector.py` (`create_portal_ach_intent`, `cancel_intent`, `retrieve_intent`), `integrations/api/stripe_endpoints.py` (routing)
+- `integrations/stripe_connector.py` (`create_portal_ach_intent`, `cancel_intent`, `retrieve_intent`, all with per-request `api_key`, F7), `integrations/api/stripe_endpoints.py` (routing, placed before the existing try/except)
+- `bootstrap/agents.py` also gains `_portal_stripe_connector_factory` and the `configure_portal_payments(...)` call (M2)
+- `commerce/services/commerce_persistence_bridge.py` (`statuses` on `read_invoice_list` / `read_invoice_count`)
 - `services/csv_export.py` (`ExportType`)
 - `errors/codes.py`, `errors/exceptions.py`, `config/settings.py`, `persistence/models.py`
 - `main.py` (routers and audit middleware)
-- `.env.example` and `.env.staging` (`CUSTOMER_PORTAL_ENABLED`)
+- `.env.example` (`CUSTOMER_PORTAL_ENABLED=false`) and `scripts/staging_aws.sh` (task env `CUSTOMER_PORTAL_ENABLED=true`). `.env.staging` is gitignored and not changed.
 
 **New, frontend:**
 
@@ -933,7 +988,9 @@ Existing suites must pass unchanged (AC19). `test_tenant_scope_authz.py` and any
 - **D5. Deterministic portal `order_id` plus a namespaced idempotency key** answer R4.2 ("return the original result") with no new table. CSV import already uses the same deterministic-id technique.
 - **D6. Stripe.js comes from the CDN, not npm.** Stripe requires loading Stripe.js from `js.stripe.com` anyway, and this keeps N3 (no new runtime frontend dependency).
 - **D7. Audit is one middleware, not per-handler calls.** That guarantees exactly one line per request, including rate-limit and validation refusals that never reach the handler.
-- **D8. The invoice date filter uses `created_at`,** the existing indexed range in both stores, while `issued_at` is displayed. Adding an `issued_at` range to both stores is backlog B2.
+- **D8. The invoice date filter uses `created_at`,** the existing indexed range in both stores, while `issued_at` is displayed. Adding an `issued_at` range to both stores is backlog B2. This is also recorded as DV9.
+- **D9. The portal hold stamp stays in the pipeline (step i3), not in a hook.** The review offered a `PortalReviewHoldHook` registered last. Hooks are registered from three bootstrap modules, so "last" would be an ordering convention nothing enforces. An inline guarded step is order-independent and has the same behavior.
+- **D10. Revoke deletes the customer's SuperTokens user and `auth_users` row** instead of emptying them. History lives in `portal_user_grants`. Alternatives considered: teaching the central deny to refuse role-less sessions (would change behavior for existing role-less staff and driver rows, out of scope), or disabling the password (no SDK primitive for it in the pinned version).
 
 ### FREEZE decisions (review-loop convergence rule)
 
@@ -944,6 +1001,7 @@ Each one removes a class of race or edge case instead of answering each case sep
 - **F3. Portal_Request state changes are compare-and-set** through `FuelOrderRepository.transition_if` (portal cancel, staff release-hold final write, staff cancel through `order_actions`). This removes confirm-vs-cancel resurrection. Tests: ORD-4 (CAS 409), ORD-5.
 - **F4. No background sweeper for abandoned payment attempts.** A `created` attempt is superseded by the next create, which cancels the old intent at Stripe first. A stale `creating` row (≥ 120 s) is re-driven with its own Stripe idempotency key and then superseded. If Stripe reports that money is moving, the result is 409. Tests: PAY-3, PAY-4.
 - **F5. Playwright axe and keyboard tests run against a deployed environment** (staging, with `PLAYWRIGHT_BASE_URL` and the QA portal account from env), as part of the staging verification step (AC20), not in CI. Playwright doesn't run in CI today, and a real SuperTokens session can't be faked in the browser without a test-only auth bypass in the UI, which would be worse. CI covers the same behaviors at component level (UI-2, UI-3, OID-4). Tests: E2E-1, run and recorded in the task evidence file.
+- **F7. Portal Stripe calls are tenant-keyed per request** (added in revision 1). The three new connector methods pass `api_key=` on every SDK call and never write `stripe_sdk.api_key`. No connector refactor, no new client abstraction, and the existing methods stay as they are (B6). This removes the cross-tenant Stripe class for every customer-triggered call. Tests: PAY-12.
 - **F6. No tenant time zone exists.** The server validates instants with offsets: start ≥ now − 24 h, start ≤ now + 60 days, window ≤ 25 h. The browser turns local dates into instants. This removes a whole class of "today in which zone" bugs, and A3 resolves to this rule. Tests: ORD-2 boundary cases at −24 h ± 1 s and +60 d ± 1 s.
 
 ### Deviations from requirements (for design review)
@@ -956,6 +1014,8 @@ Each one removes a class of race or edge case instead of answering each case sep
 - **DV6. R8.1 audit for unauthenticated (401) portal requests** isn't written, because the auth gate answers before the portal layer and there is no actor. The existing auth logging covers these.
 
 - **DV7. AC8, customer sessions on portal-admin routes.** These get 403 `PORTAL_ROUTE_FORBIDDEN` instead of 404 when the flag is off. The central deny runs in the middleware before any route-level flag check, and making it flag-aware would put a feature flag inside the isolation boundary. A customer learns nothing from this: they get the same 403 on every staff route.
+- **DV8. R6.4, payment create on a `draft` invoice** returns 404 `RESOURCE_NOT_FOUND`, not 409. Drafts are invisible to the portal (R5.5, PD6), so a 409 would confirm the draft exists. Test: PAY-7.
+- **DV9. R5.1 "issue-date range"** filters on invoice `created_at` (D8). `issued_at` is displayed. Backlog B2 adds a real `issued_at` range.
 
 ### Backlog
 
@@ -964,8 +1024,38 @@ Each one removes a class of race or edge case instead of answering each case sep
 - **B3.** Showing the bank name and last-4 on attempts (expand `payment_method` on the webhook).
 - **B4.** Pushing portal payments to QBO (PD16, out of scope).
 - **B5.** A service address on `CustomerTank`, which would replace D4's fallback label.
+- **B6.** Move the existing `StripeConnector` methods (`sync_push`, list calls at `stripe_connector.py:447,617,741`) off the process-global `stripe_sdk.api_key` to per-request keys, as F7 does for the portal methods. Those calls are admin- or agent-triggered today; the same race applies under concurrency.
 
 ## Review responses
 
-None yet. This is the first design pass; no `design-review.json` existed when it was written.
+### Revision 1 (responds to design review pass 1, verdict CHANGES_REQUESTED: 4 HIGH, 6 MEDIUM, 12 NIT)
+
+All 22 findings are addressed. None is backlogged in place of a fix, and none is ignored. No FREEZE decision was reopened. One freeze was added (F7). The changes fix wrong assumptions about existing code. The design's scope is unchanged.
+
+| ID | Response | Where |
+|---|---|---|
+| H1 | **Addressed.** Revoke deletes the SuperTokens user (`delete_user`, where an unknown user counts as success) and the portal-only `auth_users` row. The `DELETE` predicate `roles = ARRAY['customer']` keeps it from touching staff or driver rows. Grant history stays in `portal_user_grants`. A re-invite provisions a fresh user. Rationale is in D10. Tests: XR-9 (new) and PRV-1 (updated). | §1.7 Revoke, §12, D10 |
+| H2 | **Addressed.** Step i3 stamps the portal hold only when `status == "placed"` after the hooks run, so a credit hold is never overwritten. The false "release-hold re-runs credit" sentence is removed. I kept the stamp inline instead of adding a `PortalReviewHoldHook`, because hooks are registered from three bootstrap modules and nothing enforces which runs last (D9). The `order_placed` event no longer claims a hold reason. ORD-4 is rewritten as cases (a)–(d), including hook-order independence. | §4.2, §12, ORD-4, D9 |
+| H3 | **Addressed** with both guards: the service pre-check (step 6a, `get_or_none`, 200 replay with no pipeline call) and the pipeline existing-id guard for `web_portal` (returns `duplicate`, writes nothing, and propagates repo errors as 500). Test: ORD-1b. | §4.1 step 6a, §4.2, §12 |
+| H4 | **Addressed** as FREEZE F7. The new methods pass `api_key=` per request inside the thread and never write module state. I chose `api_key=` over `StripeClient` because it works across the whole `>=10,<13` range. The existing methods are B6. Test: PAY-12. | §6.2 step 4, F7, B6, §14 |
+| M1 | **Addressed.** The service catches `(AppException, PricingError, DyedDieselOrderRejected)` and maps them to 422 `ORDER_REQUEST_REJECTED`, with a WARN that names the class and code. ORD-6 is parametrized over all three. | §4.1 step 7 + table, ORD-6 |
+| M2 | **Addressed.** `_portal_stripe_connector_factory` in `bootstrap/agents.py` returns enabled instances only. It is wired through `configure_portal_payments` and used by `/me`, create, replay and attempt polling. The webhook keeps the existing factory. PAY-10 is extended. | §3.1, §6.2 step 1, §14 |
+| M3 | **Addressed.** `portal_enabled = customer_portal_enabled AND commerce_backbone_enabled` gates both guards. A settings validator logs WARN and does not raise. XR-8 is parametrized with the backbone off. | §1.7 gate, §2.1 E4, §2.3 step 1, §8.2, XR-8 |
+| M4 | **Addressed within F2.** The reconciler calls `find_by_external_id` before `ingest`, and on a hit it only links the Payment. §6.3 and §12 now say `ingest` commits on its own and the row lock only serializes. Test: PAY-6c. | §6.3, §12 |
+| M5 | **Addressed.** `_context_from_session_claims` stamps `request.state.auth_user_id`. The audit middleware falls back to it. AUD-1 is extended. | §2.2, §8.1, AUD-1 |
+| M6 | **Addressed.** Step 3.1b repeats the same-key lookup under the advisory lock. A same-key `creating` row returns 200 with `Retry-After: 2` and no `client_secret`. One added rule: a same-key `creating` row older than 120 s is re-driven under the lock using the existing F4 mechanism, so the client never polls a dead row. PAY-1 gains a [pg] concurrent case. | §6.2 steps 2 and 3.1b, PAY-1 |
+| N1 | **Addressed.** The staging value is set in `scripts/staging_aws.sh`. `.env.staging` is dropped from §14. | §8.2, §14 |
+| N2 | **Addressed.** The wording now says the version is a range. | Tech stack |
+| N3 | **Addressed.** The portal branch is placed explicitly before the existing try/except. | §6.3 Placement |
+| N4 | **Addressed.** `statuses` is added to `read_invoice_list` / `read_invoice_count`. INV-1 covers both paths. | §2.4, §14 |
+| N5 | **Addressed** as DV8. | §15, PAY-7 |
+| N6 | **Addressed** as DV9 (cross-referenced from D8 and §3.2). | §15 |
+| N7 | **Addressed.** Every handler declares `request: Request`, and T-RL-COVERAGE asserts it. | §3, §8.2 |
+| N8 | **Addressed.** The cache is keyed on `(tenant, user, customer_id)`. Revoke invalidates every key for the user. PRV-5 is extended. | §2.3 step 4, PRV-5 |
+| N9 | **Addressed.** `AudienceGuard` renders `null` on staff and portal prefixes until roles resolve. | §10.1 |
+| N10 | **Addressed.** The branch that merges second re-parents, renames its file, and names the new `down_revision` in its PR. | §9 |
+| N11 | **Addressed.** The handler no-ops while disabled. The date `min`/`max` are set per PD9/F6. | §10.2 |
+| N12 | **Addressed, with a different mechanism.** I kept the SDK's default HTTP timeout, which is bounded, rather than setting `stripe.default_http_client`, because that global would also change the existing connector calls. The orphaned call is documented as harmless. | §6.2 step 4 |
+
+**Convergence note.** This pass has no new design areas. Every change either corrects a wrong assumption about existing code or tightens an existing mechanism (F2, F4, the CSV stale-branch precedent). If a next pass keeps raising new MEDIUM findings in the payment create and replay flow, the planned simplification is to serialize same-key and same-invoice work completely under the F2 lock, including the Stripe call, and accept the added latency.
 
