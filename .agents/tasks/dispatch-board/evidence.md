@@ -167,6 +167,7 @@ Commands (cwd `.worktrees/dispatch-board/Runsheet-backend`, same `$PY`):
 - Postgres suite, CI env → **232 passed**.
 - Registry regenerated (353 entries); `git diff --exit-code -- docs/endpoint-registry.md` → clean.
 - Free disk 7.8 GB (no Docker build run).
+- Commit: `5090b0e` on `feature/dispatch-board` (not pushed). Next: Phase 1 re-review of `3e9ada8` + `5090b0e`.
 
 ### Phase 2: Publish and changes after publish
 Not started.
