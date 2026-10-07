@@ -126,7 +126,8 @@ const UNPLACED_ORDERS_SHOWN = 5;
 const UNPLACED_REASON_LABELS: Record<string, string> = {
   no_truck_capacity: "no truck capacity",
   no_compatible_compartment: "no compatible compartment",
-  dyed_diesel_compartment_incompatible: "compartment not dyed-diesel compatible",
+  dyed_diesel_compartment_incompatible:
+    "compartment not dyed-diesel compatible",
   dyed_diesel_check_unavailable: "dyed-diesel check unavailable",
 };
 
