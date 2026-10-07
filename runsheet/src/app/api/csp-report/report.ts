@@ -14,6 +14,7 @@
  *   or origin + path (document / source), and samples, referrers, headers,
  *   cookies and the client address are never logged.
  */
+import { isIP } from "node:net";
 
 /** Content types browsers use for CSP reports (legacy and Reporting API). */
 export const ACCEPTED_CONTENT_TYPES: ReadonlySet<string> = new Set([
@@ -34,12 +35,41 @@ export function mediaType(header: string | null): string {
 }
 
 /**
- * Rate-limit key: the first `x-forwarded-for` hop (the ALB appends the real
- * client), else "unknown". Used only as a map key; never logged.
+ * Trusted proxies that append to `x-forwarded-for`: env `TRUSTED_PROXY_HOPS`,
+ * else 1 in production (behind the ALB) and 0 locally. Same rule as the
+ * backend's `settings.effective_trusted_proxy_hops`.
  */
-export function clientKey(headers: Headers): string {
-  const first = (headers.get("x-forwarded-for") ?? "").split(",")[0].trim();
-  return first || "unknown";
+export function trustedProxyHops(): number {
+  const raw = process.env.TRUSTED_PROXY_HOPS?.trim();
+  if (raw) {
+    const hops = Number(raw);
+    if (Number.isInteger(hops) && hops >= 0) return hops;
+  }
+  return process.env.NODE_ENV === "production" ? 1 : 0;
+}
+
+/**
+ * Rate-limit key: the client address the trusted proxies saw, else "unknown".
+ * Used only as a map key; never logged.
+ *
+ * The ALB keeps whatever `x-forwarded-for` the client sent and appends the
+ * address it saw, so with N trusted proxies the client is the Nth entry from
+ * the right; the leftmost entries are client-controlled and never read. This
+ * is the backend's `get_client_ip` rule (F5). Keying on the first entry let a
+ * sender rotate it per request and get a fresh bucket every time.
+ */
+export function clientKey(
+  headers: Headers,
+  hops: number = trustedProxyHops(),
+): string {
+  if (hops <= 0) return "unknown";
+  const entries = (headers.get("x-forwarded-for") ?? "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (entries.length < hops) return "unknown";
+  const candidate = entries[entries.length - hops];
+  return isIP(candidate) ? candidate : "unknown";
 }
 
 /** In-memory fixed-window limiter. Per task, which is fine for a log sink. */

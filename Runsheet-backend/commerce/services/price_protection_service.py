@@ -236,6 +236,18 @@ class PriceResolution(BaseModel):
             "inputs it needs without a separate lookup."
         ),
     )
+    excess_price_cents: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Price for the gallons the contract does not cover, set by "
+            "``SalesPricingEngine`` on a split: the customer's normal "
+            "price-book price (the same rule resolution as a delivery "
+            "with no contract), or ``market_price_cents`` when no rule "
+            "matches. ``None`` from the bare resolver, which knows no "
+            "rules, and on the single-price path."
+        ),
+    )
 
     @field_validator("contract_type")
     @classmethod
@@ -817,6 +829,88 @@ class PriceProtectionService:
             "decrement_gallons: optimistic concurrency retry exhausted "
             f"for contract {contract_id} "
             f"(last_observed_version={last_observed_version})"
+        )
+
+    # ------------------------------------------------------------------
+    # Invoice consumption (D14c)
+    # ------------------------------------------------------------------
+
+    async def consume_gallons(self, contract_id: str, gallons: float) -> float:
+        """Take up to ``gallons`` from the contract; return what was granted.
+
+        Invoicing calls this so a contract's volume is honoured once across
+        all invoices, not once per invoice (D14c). The grant is
+        ``min(gallons, remaining_gallons)`` and goes through
+        :meth:`decrement_gallons`'s compare-and-swap, so two invoices racing
+        for the last gallons can't both get them: the loser re-reads and is
+        granted what is left (possibly nothing).
+        """
+        gallons = float(gallons)
+        if not math.isfinite(gallons) or gallons <= _REMAINING_GALLONS_EPSILON:
+            return 0.0
+        for _ in range(_MAX_DECREMENT_RETRIES):
+            contract = await self._fetch_contract(contract_id)
+            remaining = float(contract.remaining_gallons or 0.0)
+            granted = min(gallons, remaining)
+            if granted <= _REMAINING_GALLONS_EPSILON:
+                return 0.0
+            try:
+                await self.decrement_gallons(contract_id, granted)
+            except ValueError as exc:
+                if str(exc).startswith("insufficient_remaining_gallons"):
+                    continue  # another invoice took some; re-read
+                raise
+            return granted
+        raise ValueError(
+            "consume_gallons: optimistic concurrency retry exhausted "
+            f"for contract {contract_id}"
+        )
+
+    async def restore_gallons(self, contract_id: str, gallons: float) -> None:
+        """Give back gallons an invoice consumed (void, or a failed write).
+
+        Capped at ``contracted_gallons``. A contract the lifecycle cron
+        marked ``exhausted`` goes back to ``active``: it has gallons again,
+        and the cron still expires it on ``end_date``.
+        """
+        gallons = float(gallons)
+        if not math.isfinite(gallons) or gallons <= 0:
+            return
+        for attempt in range(_MAX_DECREMENT_RETRIES):
+            contract = await self._fetch_contract(contract_id)
+            remaining = float(contract.remaining_gallons or 0.0)
+            new_remaining = min(
+                float(contract.contracted_gallons), remaining + gallons
+            )
+            new_version = contract.version + 1
+            patch: Dict[str, Any] = {
+                "remaining_gallons": new_remaining,
+                "version": new_version,
+                "updated_at": utcnow().isoformat(),
+            }
+            if contract.status == "exhausted" and new_remaining > 0:
+                patch["status"] = "active"
+            await self._es.update_document(
+                PRICE_PROTECTION_CONTRACTS_INDEX, contract_id, patch
+            )
+            refreshed = await self._fetch_contract(contract_id)
+            if (
+                refreshed.version == new_version
+                and abs(float(refreshed.remaining_gallons or 0.0) - new_remaining)
+                < _REMAINING_GALLONS_EPSILON
+            ):
+                from commerce.services.commerce_persistence_bridge import (
+                    mirror_compliance_config_upsert,
+                )
+                await mirror_compliance_config_upsert(
+                    "price_protection_contract", refreshed.model_dump(mode="json")
+                )
+                return
+            if attempt + 1 < _MAX_DECREMENT_RETRIES:
+                await asyncio.sleep(self._decrement_backoff_seconds(attempt))
+        raise ValueError(
+            "restore_gallons: optimistic concurrency retry exhausted "
+            f"for contract {contract_id}"
         )
 
     # ------------------------------------------------------------------

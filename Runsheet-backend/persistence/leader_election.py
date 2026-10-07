@@ -64,6 +64,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Awaitable, Callable, Optional
 
 from sqlalchemy import text
@@ -469,6 +470,62 @@ async def wait_for_leadership(timeout: float) -> bool:
     return True
 
 
+#: Longest a follower waits before re-checking leadership, and the longest a
+#: leader sleeps before re-reading a long-interval job's persisted schedule.
+LEADERSHIP_RETRY_SECONDS = 60.0
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+async def wait_until_due(
+    job: str,
+    interval_seconds: float,
+    last_local: Optional[datetime],
+    *,
+    seed_if_missing: bool,
+) -> datetime:
+    """Wait until this process is sweep leader and ``job`` is due, then claim it.
+
+    For long-interval jobs (see :mod:`persistence.periodic_runs`). The schedule
+    is the later of the persisted last run (written by whichever process was
+    leader) and ``last_local`` (this process's own last run, which covers a
+    single-process stack with no ledger). The claimed start is persisted
+    before the caller runs the cycle, so a leader that takes over mid-interval
+    waits for the rest of it instead of running again.
+
+    With no known last run, ``seed_if_missing=False`` runs now and ``True``
+    records now as the baseline and waits a whole interval (``run_periodic``
+    without ``run_immediately``, which never ran a job at boot).
+
+    Returns the claimed start time.
+    """
+    from persistence.periodic_runs import read_last_run, write_last_run
+
+    while True:
+        if not is_sweep_leader():
+            await wait_for_leadership(min(interval_seconds, LEADERSHIP_RETRY_SECONDS))
+            continue
+        persisted = await read_last_run(job)
+        known = [t for t in (persisted, last_local) if t is not None]
+        now = _utcnow()
+        if not known:
+            if not seed_if_missing:
+                break
+            await write_last_run(job, now, seeded=True)
+            last_local = now
+            known = [now]
+        remaining = (max(known) - now).total_seconds() + interval_seconds
+        if remaining <= 0:
+            break
+        await asyncio.sleep(min(remaining, LEADERSHIP_RETRY_SECONDS))
+
+    started = _utcnow()
+    await write_last_run(job, started)
+    return started
+
+
 async def run_periodic(
     name: str,
     interval_seconds: float,
@@ -490,7 +547,16 @@ async def run_periodic(
     * An exception inside ``cycle`` is logged and the loop continues. A sweep
       that dies on one bad row must not stay dead until the next deploy.
     * ``asyncio.CancelledError`` propagates, so shutdown is not swallowed.
+
+    A job with an interval of at least
+    :data:`~persistence.periodic_runs.PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS`
+    schedules from its persisted last run (:func:`wait_until_due`), so a
+    deploy neither restarts its clock (a daily job would never run on an
+    environment redeployed more than daily) nor runs it twice in one interval.
     """
+    from persistence.periodic_runs import PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS
+
+    persisted = interval_seconds >= PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS
     logger.info(
         "Periodic job %r scheduled every %.0fs%s",
         name,
@@ -498,15 +564,22 @@ async def run_periodic(
         " (first run immediate)" if run_immediately else "",
     )
     first = True
+    last_run: Optional[datetime] = None
     try:
         while True:
-            if not (first and run_immediately):
-                await asyncio.sleep(interval_seconds)
+            if persisted:
+                last_run = await wait_until_due(
+                    name, interval_seconds, last_run, seed_if_missing=not run_immediately
+                )
+            else:
+                if not (first and run_immediately):
+                    await asyncio.sleep(interval_seconds)
+                while not is_sweep_leader():
+                    logger.debug("Periodic job %r skipped — not the sweep leader", name)
+                    await wait_for_leadership(
+                        min(interval_seconds, LEADERSHIP_RETRY_SECONDS)
+                    )
             first = False
-
-            while not is_sweep_leader():
-                logger.debug("Periodic job %r skipped — not the sweep leader", name)
-                await wait_for_leadership(interval_seconds)
 
             try:
                 await cycle()
@@ -529,8 +602,10 @@ __all__ = [
     "get_sweep_leader",
     "is_sweep_leader",
     "role_object_id",
+    "LEADERSHIP_RETRY_SECONDS",
     "run_periodic",
     "wait_for_leadership",
+    "wait_until_due",
     "set_sweep_leader",
     "try_advisory_lock",
     "try_advisory_lock_pair",

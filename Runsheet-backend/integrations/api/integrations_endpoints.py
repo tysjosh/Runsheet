@@ -610,11 +610,27 @@ async def create_integration_instance(
         payload["credentials_ref"] = credentials_ref
 
     try:
-        instance = await repo.create(tenant.tenant_id, payload)
-    except CrossTenantAccessError as exc:
-        raise _translate_cross_tenant_error(exc)
-    except (ValidationError, ValueError, TypeError) as exc:
-        raise _translate_validation_error(exc)
+        try:
+            instance = await repo.create(tenant.tenant_id, payload)
+        except CrossTenantAccessError as exc:
+            raise _translate_cross_tenant_error(exc)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise _translate_validation_error(exc)
+    except Exception:
+        # No instance points at the credential just stored (a taken id's
+        # 409, or any other refusal); each put mints a new ref, so delete it
+        # rather than leave an orphaned secret, as intake channels do.
+        if credentials_ref is not None:
+            try:
+                await vault.delete(tenant.tenant_id, credentials_ref)
+            except Exception:  # noqa: BLE001 — best effort; the error stands
+                logger.warning(
+                    "integrations.create: could not delete the credential "
+                    "stored for a refused create (tenant=%s provider=%s)",
+                    tenant.tenant_id,
+                    body.provider_name,
+                )
+        raise
 
     logger.info(
         "integrations.create: tenant=%s instance=%s provider=%s",

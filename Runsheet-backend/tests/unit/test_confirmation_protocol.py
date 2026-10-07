@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from Agents.confirmation_protocol import (
     ConfirmationProtocol,
+    MutationExecutionError,
     MutationRequest,
     MutationResult,
 )
@@ -70,6 +71,7 @@ def _make_protocol(
     approval_id: str = "approval-123",
     notification_service=None,
     job_service=None,
+    es_service=None,
 ) -> ConfirmationProtocol:
     """Create a ConfirmationProtocol with mocked dependencies."""
     risk_registry = MagicMock()
@@ -97,7 +99,14 @@ def _make_protocol(
         business_validator=business_validator,
         notification_service=notification_service,
         job_service=job_service,
+        es_service=es_service,
     )
+
+
+def _refill_request(**overrides) -> MutationRequest:
+    """A tool that writes one document when an ES service is wired."""
+    overrides.setdefault("parameters", {"station_id": "ST-1", "quantity_liters": 100})
+    return _make_request(tool_name="request_fuel_refill", **overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -275,9 +284,10 @@ class TestProcessMutationImmediate:
 
     async def test_low_risk_full_auto_executes_immediately(self):
         protocol = _make_protocol(
-            risk_level=RiskLevel.LOW, autonomy_level="full-auto"
+            risk_level=RiskLevel.LOW, autonomy_level="full-auto",
+            es_service=AsyncMock(),
         )
-        request = _make_request(tool_name="update_fuel_threshold")
+        request = _refill_request()
         result = await protocol.process_mutation(request)
 
         assert result.executed is True
@@ -316,9 +326,10 @@ class TestProcessMutationImmediate:
 
     async def test_immediate_execution_logs_to_activity_log(self):
         protocol = _make_protocol(
-            risk_level=RiskLevel.LOW, autonomy_level="full-auto"
+            risk_level=RiskLevel.LOW, autonomy_level="full-auto",
+            es_service=AsyncMock(),
         )
-        request = _make_request()
+        request = _refill_request()
         await protocol.process_mutation(request)
 
         protocol._activity_log.log_mutation.assert_called_once()
@@ -541,14 +552,12 @@ class TestExecuteMutation:
     """Tests for the placeholder _execute_mutation method."""
 
     async def test_returns_success_string(self):
-        protocol = _make_protocol()
-        request = _make_request(
-            tool_name="update_fuel_threshold", tenant_id="t1"
-        )
+        protocol = _make_protocol(es_service=AsyncMock())
+        request = _refill_request(tenant_id="t1")
         result = await protocol._execute_mutation(request)
 
         assert isinstance(result, str)
-        assert "update_fuel_threshold" in result
+        assert "request_fuel_refill" in result
         assert "t1" in result
 
     async def test_includes_tool_name_in_result(self):
@@ -559,8 +568,8 @@ class TestExecuteMutation:
         assert "cancel_job" in result
 
     async def test_includes_tenant_id_in_result(self):
-        protocol = _make_protocol()
-        request = _make_request(tenant_id="tenant-xyz")
+        protocol = _make_protocol(es_service=AsyncMock())
+        request = _refill_request(tenant_id="tenant-xyz")
         result = await protocol._execute_mutation(request)
 
         assert "tenant-xyz" in result
@@ -649,7 +658,9 @@ class TestExecuteMutationSendCustomerNotification:
         protocol = _make_protocol(notification_service=mock_ns)
         request = self._make_notification_request()
 
-        result = await protocol._execute_mutation(request)
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "failed" in result.lower()
         assert "no notifications created" in result.lower()
@@ -661,9 +672,10 @@ class TestExecuteMutationSendCustomerNotification:
         protocol = _make_protocol(notification_service=mock_ns)
         request = self._make_notification_request()
 
-        result = await protocol._execute_mutation(request)
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
 
-        assert "failed" in result.lower()
+        assert "failed" in str(exc.value).lower()
 
     async def test_notify_event_exception_returns_failure(self):
         """Req 1.3: Exception from NotificationService returns failure details."""
@@ -674,7 +686,9 @@ class TestExecuteMutationSendCustomerNotification:
         protocol = _make_protocol(notification_service=mock_ns)
         request = self._make_notification_request()
 
-        result = await protocol._execute_mutation(request)
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "Failed to execute" in result
         assert "ES connection timeout" in result
@@ -684,7 +698,9 @@ class TestExecuteMutationSendCustomerNotification:
         protocol = _make_protocol(notification_service=None)
         request = self._make_notification_request()
 
-        result = await protocol._execute_mutation(request)
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "failed" in result.lower()
         assert "not configured" in result.lower()
@@ -1039,7 +1055,9 @@ class TestExecuteMutationRefusesLoadingPlans:
         h.svc.create = AsyncMock()
         mark = h.mark()
         with caplog.at_level(_logging.ERROR, logger="Agents.confirmation_protocol"):
-            text = await h.protocol._execute_mutation(request)
+            with pytest.raises(MutationExecutionError) as exc:
+                await h.protocol._execute_mutation(request)
+        text = str(exc.value)
         assert text == "apply_loading_plan runs only through the approval queue; no mutation executed"
         assert "Unknown tool" not in text and "Successfully" not in text
         h.svc.create.assert_not_called()
@@ -1050,8 +1068,10 @@ class TestExecuteMutationRefusesLoadingPlans:
 
     async def test_refusal_holds_without_an_es_service(self):
         protocol = _make_protocol()
-        text = await protocol._execute_mutation(_make_request(tool_name="apply_loading_plan"))
-        assert "approval queue" in text and "ES not wired" not in text
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(_make_request(tool_name="apply_loading_plan"))
+        text = str(exc.value)
+        assert "approval queue" in text and "not wired" not in text
 
 
 class TestLoadingPlanExecutorRegistry:

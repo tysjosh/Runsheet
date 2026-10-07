@@ -263,15 +263,29 @@ async def upload_csv_temporal(
             message="No valid data found in CSV",
             details={"data_type": data_type},
         )
-    await data_seeder.upsert_batch_data(
+    outcome = await data_seeder.upsert_batch_data(
         data_type=data_type,
         documents=documents,
         batch_id=batch_id,
         operational_time=operational_time,
         tenant_id=tenant.tenant_id,
     )
-    return {"data": {"recordCount": len(documents), "batch_id": batch_id, "operational_time": operational_time},
-            "success": True, "message": f"Successfully uploaded {len(documents)} {data_type} records",
+    # Rows the store refused (an id another tenant owns) are reported, not
+    # counted as uploaded.
+    failed = outcome.get("failed", 0) if isinstance(outcome, dict) else 0
+    if not isinstance(failed, int):
+        failed = 0
+    uploaded = len(documents) - failed
+    message = f"Successfully uploaded {uploaded} {data_type} records"
+    if failed:
+        message = (
+            f"Uploaded {uploaded} of {len(documents)} {data_type} records; "
+            f"{failed} refused"
+        )
+    return {"data": {"recordCount": uploaded, "failed": failed,
+                     "errors": outcome.get("errors", []) if failed else [],
+                     "batch_id": batch_id, "operational_time": operational_time},
+            "success": not failed, "message": message,
             "timestamp": utcnow().isoformat()}
 
 @router.post("/api/upload/batch")

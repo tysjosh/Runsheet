@@ -95,8 +95,11 @@ class CrossTenantWriteError(AppException):
         super().__init__(
             error_code=ErrorCode.RESOURCE_ALREADY_EXISTS,
             message="A record with this id already exists",
-            details={"index": index, "doc_id": str(doc_id)},
+            # The internal index name stays out of the client response; the
+            # refusal is logged with it (``_refuse_rehome``).
+            details={"doc_id": str(doc_id)},
         )
+        self.index = index
 
 
 def _refuse_rehome(

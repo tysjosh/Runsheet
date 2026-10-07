@@ -538,3 +538,156 @@ class TestRunPeriodic:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+
+
+# ---------------------------------------------------------------------------
+# Persisted schedule for long-interval jobs (CRON-1)
+# ---------------------------------------------------------------------------
+
+
+class TestPersistedSchedule:
+    """A daily ``run_periodic`` job schedules from the shared ledger, so a
+    deploy neither restarts its 24 h clock nor runs it twice in a day."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger_and_clock(self):
+        from datetime import datetime, timezone
+
+        from persistence.periodic_runs import InMemoryRunLedger, set_run_ledger
+
+        self.ledger = InMemoryRunLedger()
+        set_run_ledger(self.ledger)
+        self.clock = [datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)]
+        with patch("persistence.leader_election.LEADERSHIP_RETRY_SECONDS", 0.01), \
+             patch("persistence.leader_election.FOLLOWER_RECHECK_SECONDS", 0.005), \
+             patch("persistence.leader_election._utcnow", lambda: self.clock[0]):
+            yield
+        set_run_ledger(None)
+
+    @staticmethod
+    async def _stop(task):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_a_deploy_does_not_restart_the_daily_clock(self):
+        """Last run 23 h ago on the old task: the new leader runs in 1 h, not 24 h."""
+        from datetime import timedelta
+
+        self.ledger.runs["daily"] = self.clock[0] - timedelta(hours=23)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(self.clock[0])
+
+        task = asyncio.create_task(run_periodic("daily", 86_400.0, cycle))
+        await asyncio.sleep(0.04)
+        assert calls == []
+        self.clock[0] += timedelta(hours=1)
+        await asyncio.sleep(0.04)
+        assert len(calls) == 1
+        assert self.ledger.runs["daily"] == self.clock[0]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_run_immediately_does_not_rerun_inside_the_interval(self):
+        from datetime import timedelta
+
+        self.ledger.runs["daily"] = self.clock[0] - timedelta(hours=2)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(
+            run_periodic("daily", 86_400.0, cycle, run_immediately=True)
+        )
+        await asyncio.sleep(0.04)
+        assert calls == [], "a new leader re-ran a daily job 2 h after the last run"
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_no_record_and_not_immediate_seeds_a_baseline(self):
+        """Keeps the old "never at boot" behaviour for the first-ever start."""
+        from datetime import timedelta
+
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(run_periodic("daily", 86_400.0, cycle))
+        await asyncio.sleep(0.04)
+        assert calls == []
+        assert self.ledger.runs["daily"] == self.clock[0]
+        self.clock[0] += timedelta(hours=24)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_follower_takes_over_and_runs_when_due(self):
+        follower = _FakeLeader(False)
+        set_sweep_leader(follower)
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(
+            run_periodic("daily", 86_400.0, cycle, run_immediately=True)
+        )
+        await asyncio.sleep(0.03)
+        assert calls == []
+        follower._is_leader = True
+        await asyncio.sleep(0.03)
+        assert calls == [1]
+        await self._stop(task)
+
+
+class TestDocumentStoreRunLedger:
+    @pytest.mark.asyncio
+    async def test_round_trip_through_the_document_store(self):
+        from datetime import datetime, timezone
+
+        from persistence.periodic_runs import PERIODIC_RUNS_INDEX, DocumentStoreRunLedger
+
+        docs = {}
+
+        class _Store:
+            async def get_document(self, index, doc_id):
+                return docs.get((index, doc_id))
+
+            async def index_document(self, index, doc_id, document):
+                docs[(index, doc_id)] = dict(document)
+
+        ledger = DocumentStoreRunLedger(_Store())
+        assert await ledger.last_run("agent:x") is None
+        at = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        await ledger.record_run("agent:x", at)
+        assert await ledger.last_run("agent:x") == at
+        assert docs[(PERIODIC_RUNS_INDEX, "agent:x")]["job"] == "agent:x"
+
+    @pytest.mark.asyncio
+    async def test_unreadable_ledger_fails_open(self):
+        from persistence.periodic_runs import read_last_run, set_run_ledger, write_last_run
+
+        class _Broken:
+            async def last_run(self, job):
+                raise RuntimeError("db down")
+
+            async def record_run(self, job, at, *, seeded=False):
+                raise RuntimeError("db down")
+
+        set_run_ledger(_Broken())
+        try:
+            assert await read_last_run("x") is None
+            from datetime import datetime, timezone
+
+            await write_last_run("x", datetime.now(timezone.utc))  # no raise
+        finally:
+            set_run_ledger(None)

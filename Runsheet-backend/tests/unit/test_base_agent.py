@@ -8,6 +8,7 @@ property.
 Requirements: 3.1, 3.6, 3.7, 4.1, 4.4, 4.6, 5.1, 5.7
 """
 import asyncio
+import contextlib
 import pytest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -559,7 +560,190 @@ class TestFollowerWaitsForLeadership:
                 leader.is_leader = True  # election moved leadership here
                 await asyncio.wait_for(ran.wait(), timeout=1.0)
             task.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            # The scripted agent stops itself after its last cycle, so the
+            # loop may already have returned.
+            with contextlib.suppress(asyncio.CancelledError):
                 await task
         finally:
             leader_election.set_sweep_leader(original)
+
+
+class _CountingAgent(AutonomousAgentBase):
+    """Counts cycles and keeps running until stopped."""
+
+    def __init__(self, agent_id="daily_cron", poll_interval_seconds=86_400):
+        super().__init__(
+            agent_id=agent_id,
+            poll_interval_seconds=poll_interval_seconds,
+            cooldown_minutes=0,
+            activity_log_service=_spy_log(),
+            ws_manager=None,
+            confirmation_protocol=None,
+        )
+        self.runs = 0
+
+    async def monitor_cycle(self):
+        self.runs += 1
+        return ([], [])
+
+
+class _SwitchLeader:
+    def __init__(self, is_leader=False):
+        self.is_leader = is_leader
+
+
+class TestDailyAgentSchedule:
+    """CRON-1: a daily agent runs promptly after it becomes leader, but never
+    twice in one interval across leader changes, and keeps its interval."""
+
+    @pytest.fixture(autouse=True)
+    def _shared_ledger(self):
+        from persistence import leader_election
+        from persistence.periodic_runs import InMemoryRunLedger, set_run_ledger
+
+        self.ledger = InMemoryRunLedger()  # stands in for the shared PG store
+        set_run_ledger(self.ledger)
+        self.clock = [datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)]
+        original = leader_election.get_sweep_leader()
+        with patch.object(leader_election, "LEADERSHIP_RETRY_SECONDS", 0.01), \
+             patch.object(leader_election, "FOLLOWER_RECHECK_SECONDS", 0.005), \
+             patch.object(leader_election, "_utcnow", lambda: self.clock[0]):
+            yield
+        leader_election.set_sweep_leader(original)
+        set_run_ledger(None)
+
+    @staticmethod
+    async def _stop(*tasks):
+        for task in tasks:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_non_leader_runs_within_the_retry_window_after_takeover(self):
+        from persistence import leader_election
+
+        leader = _SwitchLeader(False)
+        leader_election.set_sweep_leader(leader)
+        agent = _CountingAgent()
+        agent._running = True
+        task = asyncio.create_task(agent._run_loop())
+        await asyncio.sleep(0.05)
+        assert agent.runs == 0, "a follower ran the cycle"
+        leader.is_leader = True
+        await asyncio.sleep(0.05)
+        assert agent.runs == 1
+        assert "agent:daily_cron" in self.ledger.runs
+        await self._stop(task)
+
+    async def test_follower_rechecks_leadership_on_the_short_retry(self):
+        """The follower's wait is capped at the retry interval, not 24 h."""
+        from persistence import leader_election
+
+        leader_election.set_sweep_leader(_SwitchLeader(False))
+        timeouts = []
+
+        async def _wait(timeout):
+            timeouts.append(timeout)
+            await asyncio.sleep(0.001)
+            return False
+
+        agent = _CountingAgent()
+        agent._running = True
+        with patch.object(leader_election, "wait_for_leadership", _wait):
+            task = asyncio.create_task(agent._run_loop())
+            await asyncio.sleep(0.02)
+            await self._stop(task)
+        assert timeouts and max(timeouts) <= leader_election.LEADERSHIP_RETRY_SECONDS
+
+    async def test_new_leader_does_not_rerun_inside_the_interval(self):
+        """Old task ran at 12:00 and was replaced at 14:00 (a deploy). The new
+        leader waits until 12:00 the next day, then runs once."""
+        from persistence import leader_election
+
+        leader_election.set_sweep_leader(_SwitchLeader(True))
+        old = _CountingAgent()
+        old._running = True
+        old_task = asyncio.create_task(old._run_loop())
+        await asyncio.sleep(0.03)
+        assert old.runs == 1
+        await self._stop(old_task)  # old task drains, lock moves
+
+        self.clock[0] += timedelta(hours=2)
+        new = _CountingAgent()
+        new._running = True
+        new_task = asyncio.create_task(new._run_loop())
+        await asyncio.sleep(0.05)
+        assert new.runs == 0, "the new leader re-ran a daily job after 2 h"
+
+        self.clock[0] += timedelta(hours=22)
+        await asyncio.sleep(0.05)
+        assert new.runs == 1
+        await self._stop(new_task)
+
+    async def test_two_tasks_with_moving_leadership_run_once_per_interval(self):
+        from persistence import leader_election
+
+        leader = _SwitchLeader(True)
+        leader_election.set_sweep_leader(leader)
+        a, b = _CountingAgent(), _CountingAgent()
+        a._running = b._running = True
+        task_a = asyncio.create_task(a._run_loop())
+        await asyncio.sleep(0.03)
+        assert a.runs == 1
+        # Both tasks now see leadership flip back and forth (a.k.a. two ECS
+        # tasks across a failover); neither may run again inside the interval.
+        task_b = asyncio.create_task(b._run_loop())
+        for _ in range(4):
+            leader.is_leader = not leader.is_leader
+            await asyncio.sleep(0.02)
+        leader.is_leader = True
+        await asyncio.sleep(0.03)
+        assert a.runs + b.runs == 1
+        await self._stop(task_a, task_b)
+
+    async def test_poll_interval_is_respected_after_the_first_run(self):
+        from persistence import leader_election
+
+        leader_election.set_sweep_leader(_SwitchLeader(True))
+        agent = _CountingAgent(poll_interval_seconds=3600)
+        agent._running = True
+        task = asyncio.create_task(agent._run_loop())
+        await asyncio.sleep(0.03)
+        assert agent.runs == 1
+        self.clock[0] += timedelta(seconds=3599)
+        await asyncio.sleep(0.05)
+        assert agent.runs == 1
+        self.clock[0] += timedelta(seconds=1)
+        await asyncio.sleep(0.05)
+        assert agent.runs == 2
+        await self._stop(task)
+
+    async def test_without_a_ledger_the_process_keeps_its_own_interval(self):
+        """Single-process dev stack: no Postgres, so no ledger."""
+        from persistence import leader_election
+        from persistence.periodic_runs import set_run_ledger
+
+        set_run_ledger(None)
+        leader_election.set_sweep_leader(_SwitchLeader(True))
+        agent = _CountingAgent(poll_interval_seconds=3600)
+        agent._running = True
+        with patch("persistence.database.is_persistence_enabled", return_value=False):
+            task = asyncio.create_task(agent._run_loop())
+            await asyncio.sleep(0.05)
+            assert agent.runs == 1
+            self.clock[0] += timedelta(seconds=3600)
+            await asyncio.sleep(0.05)
+            assert agent.runs == 2
+            await self._stop(task)
+
+    async def test_short_interval_agents_do_not_use_the_ledger(self):
+        from persistence import leader_election
+
+        leader_election.set_sweep_leader(_SwitchLeader(True))
+        agent = _CountingAgent(poll_interval_seconds=0)
+        agent._running = True
+        task = asyncio.create_task(agent._run_loop())
+        await asyncio.sleep(0.02)
+        await self._stop(task)
+        assert agent.runs > 1
+        assert self.ledger.runs == {}

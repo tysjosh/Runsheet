@@ -267,3 +267,95 @@ class TestChatFormatting:
         )
         assert text.startswith("⏳ Action queued for approval (risk: high)")
         assert "Approval ID: action-9" in text
+
+
+# ---------------------------------------------------------------------------
+# D15d: the non-job tools never report success without an effect
+# ---------------------------------------------------------------------------
+
+
+def _req(tool_name, parameters):
+    return MutationRequest(
+        tool_name=tool_name, parameters=parameters, tenant_id="t1", agent_id="ai"
+    )
+
+
+class TestNonJobToolsNeverFakeSuccess:
+    @pytest.mark.parametrize(
+        "tool_name,params",
+        [
+            ("reassign_rider", {"shipment_id": "S-1", "new_rider_id": "R-2"}),
+            ("escalate_shipment", {"shipment_id": "S-1", "priority": "high"}),
+        ],
+    )
+    async def test_retired_shipment_tools_refuse_and_write_nothing(self, tool_name, params):
+        es = _fake_es()
+        protocol = _protocol(None, es=es)
+        result = await protocol.process_mutation(_req(tool_name, params))
+        assert result.executed is False
+        assert "not available" in result.result
+        es.update_document.assert_not_called()
+        es.index_document.assert_not_called()
+        # Logged with no result, so the activity log can't read as a success.
+        assert protocol._activity_log.log_mutation.call_args[0][3] is None
+
+    async def test_unwired_store_is_not_executed(self):
+        protocol = _protocol(None)
+        protocol._es = None
+        result = await protocol.process_mutation(
+            _req("request_fuel_refill", {"station_id": "ST-1"})
+        )
+        assert result.executed is False
+        assert "not executed" in result.result
+
+    async def test_write_failure_is_not_executed(self):
+        es = _fake_es()
+        es.index_document = AsyncMock(side_effect=RuntimeError("db down"))
+        protocol = _protocol(None, es=es)
+        result = await protocol.process_mutation(
+            _req("request_fuel_refill", {"station_id": "ST-1"})
+        )
+        assert result.executed is False
+        assert "db down" in result.result
+
+    async def test_unknown_tool_is_not_executed(self):
+        result = await _protocol(None).process_mutation(_req("no_such_tool", {}))
+        assert result.executed is False
+        assert "no mutation executed" in result.result
+
+    async def test_fuel_threshold_goes_through_fuel_service(self):
+        """The raw write used the bare station id (docs are keyed
+        ``<station>::<fuel type>``) and a field nothing reads."""
+        from unittest.mock import patch
+
+        update = AsyncMock()
+        with patch("fuel.services.fuel_service.FuelService.update_threshold", update):
+            es = _fake_es()
+            result = await _protocol(None, es=es).process_mutation(
+                _req("update_fuel_threshold", {"station_id": "ST-1", "threshold_pct": 25})
+            )
+        assert result.executed is True
+        update.assert_awaited_once_with("ST-1", 25.0, "t1")
+        es.update_document.assert_not_called()
+
+    async def test_fuel_threshold_refusal_is_not_executed(self):
+        from unittest.mock import patch
+
+        from errors.exceptions import resource_not_found
+
+        update = AsyncMock(side_effect=resource_not_found("Fuel station 'ST-9' not found"))
+        with patch("fuel.services.fuel_service.FuelService.update_threshold", update):
+            result = await _protocol(None).process_mutation(
+                _req("update_fuel_threshold", {"station_id": "ST-9", "threshold_pct": 25})
+            )
+        assert result.executed is False
+        assert "Fuel station 'ST-9' not found" in result.result
+
+    async def test_approval_of_a_retired_tool_records_failure(self):
+        """Approval path: ``_execute_mutation`` raises, which
+        ``ApprovalQueueService.approve`` records as ``success: False``."""
+        protocol = _protocol(None)
+        with pytest.raises(MutationExecutionError):
+            await protocol._execute_mutation(
+                _req("reassign_rider", {"shipment_id": "S-1", "new_rider_id": "R-2"})
+            )
