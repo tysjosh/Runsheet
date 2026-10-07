@@ -1112,6 +1112,20 @@ async def mirror_current_state_fields(
     """
     if not _enabled():
         return
+    # Callers often pass a whole partial doc, which can carry ``tenant_id``
+    # (the location ingest does). As a ``**fields`` key it collided with
+    # ``set_fields``'s own ``tenant_id`` parameter: a TypeError that left the
+    # relational row unchanged on every update. The row's tenant never changes
+    # here, and fields naming a different tenant are refused, not written.
+    fields = dict(fields)
+    stamped = fields.pop("tenant_id", None)
+    if stamped is not None and stamped != tenant_id:
+        logger.error(
+            "Postgres dual-write fields refused for %s %s: the fields name a "
+            "different tenant than the row's tenant %s",
+            aggregate_type, doc_id, tenant_id,
+        )
+        return
     from persistence.database import session_scope
     from persistence.repositories import CurrentStateRepository
 
