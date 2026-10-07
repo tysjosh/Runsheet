@@ -775,11 +775,12 @@ async def initialize(app, container: ServiceContainer) -> None:
                 "(task 9.8)"
             )
         else:
-            logger.warning(
-                "CompartmentLoadingAgent not present in container — "
-                "DyedDieselEnforcer not injected (task 9.8). "
-                "DyedDieselEnforcer is available on "
-                "container.dyed_diesel_enforcer for deferred wiring."
+            # Normal at boot: compliance runs before agents, and
+            # bootstrap/agents.py wires the enforcer when it builds the
+            # agent (OI-02).
+            logger.debug(
+                "CompartmentLoadingAgent not built yet; DyedDieselEnforcer "
+                "wiring deferred to bootstrap/agents.py (task 9.8)."
             )
 
         # Task 9.9 / Req 6.5, 6.7: Wire the DyedDieselEnforcer into

@@ -265,3 +265,53 @@ class TestAgentsBootstrap:
 
         assert container.file_storage_service is core_fss
         fss_ctor.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wires_dyed_diesel_enforcer_into_compartment_agent(
+        self, mock_app, container
+    ):
+        """OI-02: compliance boots before agents, so its wiring never found the
+        agent. bootstrap/agents.py registers the agent and injects the
+        enforcer itself."""
+        enforcer = MagicMock(name="dyed_diesel_enforcer")
+        container.dyed_diesel_enforcer = enforcer
+
+        patches = [
+            patch("redis.asyncio.from_url", return_value=MagicMock()),
+            patch("Agents.agent_ws_manager.AgentActivityWSManager", return_value=MagicMock()),
+            patch("Agents.agent_ws_manager.bind_container"),
+            patch("Agents.risk_registry.RiskRegistry", return_value=MagicMock()),
+            patch("Agents.business_validator.BusinessValidator", return_value=MagicMock()),
+            patch("Agents.activity_log_service.ActivityLogService", return_value=MagicMock()),
+            patch("Agents.autonomy_config_service.AutonomyConfigService", return_value=MagicMock()),
+            patch("Agents.approval_queue_service.ApprovalQueueService", return_value=MagicMock()),
+            patch("Agents.confirmation_protocol.ConfirmationProtocol", return_value=MagicMock()),
+            patch("Agents.memory_service.MemoryService", return_value=MagicMock()),
+            patch("Agents.feedback_service.FeedbackService", return_value=MagicMock()),
+            patch("agent_endpoints.configure_agent_endpoints"),
+            patch("Agents.specialists.FleetAgent", return_value=MagicMock()),
+            patch("Agents.specialists.SchedulingAgent", return_value=MagicMock()),
+            patch("Agents.specialists.FuelAgent", return_value=MagicMock()),
+            patch("Agents.specialists.OpsIntelligenceAgent", return_value=MagicMock()),
+            patch("Agents.specialists.ReportingAgent", return_value=MagicMock()),
+            patch("Agents.execution_planner.ExecutionPlanner", return_value=MagicMock()),
+            patch("Agents.orchestrator.AgentOrchestrator", return_value=MagicMock()),
+            patch("Agents.autonomous.DelayResponseAgent", return_value=_make_agent_mock()),
+            patch("Agents.autonomous.FuelManagementAgent", return_value=_make_agent_mock()),
+            patch("Agents.autonomous.SLAGuardianAgent", return_value=_make_agent_mock()),
+            patch("Agents.mainagent.configure_orchestrator"),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            sys.modules.pop("bootstrap.agents", None)
+            from bootstrap.agents import initialize
+            await initialize(mock_app, container)
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert container.has("compartment_loading_agent")
+        agent = container.compartment_loading_agent
+        assert type(agent).__name__ == "CompartmentLoadingAgent"
+        assert agent._dyed_diesel_enforcer is enforcer

@@ -928,6 +928,22 @@ async def initialize(app, container: ServiceContainer) -> None:
         redis_client=_agent_redis_client,
     )
     compartment_loading_agent = CompartmentLoadingAgent(**overlay_common_args)
+    # Task 9.8 / Req 6.3, 6.4 (OI-02): compliance boots before agents, so its
+    # own wiring attempt finds no agent. Register the agent and inject the
+    # DyedDieselEnforcer here, where both exist.
+    container.compartment_loading_agent = compartment_loading_agent
+    if container.has("dyed_diesel_enforcer"):
+        compartment_loading_agent.set_dyed_diesel_enforcer(
+            container.dyed_diesel_enforcer
+        )
+        logger.info(
+            "DyedDieselEnforcer wired into CompartmentLoadingAgent (task 9.8)"
+        )
+    else:
+        logger.warning(
+            "DyedDieselEnforcer not in container; CompartmentLoadingAgent "
+            "runs without the dyed-diesel compartment check (task 9.8)"
+        )
     route_planning_agent = RoutePlanningAgent(**overlay_common_args)
     exception_replanning_agent = ExceptionReplanningAgent(**overlay_common_args)
 
