@@ -430,6 +430,13 @@ class ErrorCode(str, Enum):
     INVOICING_DISABLED = "INVOICING_DISABLED"
     """Commerce invoicing module is not enabled for the tenant (HTTP 404)"""
 
+    # Margin feed (margin-feed design, "Error handling summary").
+    MARGIN_IMPORT_TOO_LARGE = "MARGIN_IMPORT_TOO_LARGE"
+    """A cost-entry CSV import exceeds 5 MB or 10,000 rows (HTTP 413)"""
+
+    MARGIN_RECOMPUTE_RUNNING = "MARGIN_RECOMPUTE_RUNNING"
+    """A margin recompute run is already running for the tenant (HTTP 409)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -576,6 +583,8 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.CUSTOMERS_DISABLED: 404,
     ErrorCode.PRICING_DISABLED: 404,
     ErrorCode.INVOICING_DISABLED: 404,
+    ErrorCode.MARGIN_IMPORT_TOO_LARGE: 413,
+    ErrorCode.MARGIN_RECOMPUTE_RUNNING: 409,
 }
 
 

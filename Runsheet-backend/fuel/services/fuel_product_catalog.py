@@ -237,6 +237,26 @@ def _build_alias_index() -> Dict[str, str]:
 _ALIAS_INDEX: Dict[str, str] = _build_alias_index()
 
 
+def _build_aliases_by_canonical() -> Dict[str, frozenset[str]]:
+    """Invert :data:`_ALIAS_INDEX`: canonical code -> every stored spelling.
+
+    Each key of the alias index (the canonical code itself and every alias)
+    is included in its catalog form and its lower-case form, because manually
+    uploaded rows may carry either. Used for store-side ``terms`` filters that
+    cannot call :func:`canonicalize` (margin-feed rack reader).
+    """
+
+    grouped: Dict[str, set[str]] = {}
+    for spelling, canonical in _ALIAS_INDEX.items():
+        bucket = grouped.setdefault(canonical, set())
+        bucket.add(spelling)
+        bucket.add(spelling.lower())
+    return {canonical: frozenset(spellings) for canonical, spellings in grouped.items()}
+
+
+_ALIASES_BY_CANONICAL: Dict[str, frozenset[str]] = _build_aliases_by_canonical()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -281,6 +301,21 @@ def canonicalize(code_or_alias: str) -> str:
         return _ALIAS_INDEX[normalized]
     except KeyError as exc:
         raise UnknownFuelProductError(code_or_alias) from exc
+
+
+def aliases_for(canonical: str) -> frozenset[str]:
+    """Return every spelling that :func:`canonicalize` maps to ``canonical``.
+
+    The set holds the canonical code and each catalog alias, in catalog form
+    and lower-case form (for example ``DIESEL_2`` gives ``{"DIESEL_2",
+    "diesel_2", "AGO", "ago"}``). Built once at import time.
+
+    Raises:
+        UnknownFuelProductError: if ``canonical`` is not a known code or alias.
+        TypeError: if ``canonical`` is not a string.
+    """
+
+    return _ALIASES_BY_CANONICAL[canonicalize(canonical)]
 
 
 _CATEGORIES: frozenset[str] = frozenset(get_args(FuelCategory))
@@ -418,6 +453,7 @@ __all__ = [
     "FuelProduct",
     "FUEL_PRODUCT_CATALOG",
     "UnknownFuelProductError",
+    "aliases_for",
     "canonicalize",
     "canonicalize_or_warn",
     "get_products_for_region",
