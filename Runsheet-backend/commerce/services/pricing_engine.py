@@ -268,13 +268,51 @@ class PricingEngine:
     async def _query_es_rules(
         self, tenant_id: str, product_code: str
     ) -> List[Dict[str, Any]]:
-        """Query all rules matching tenant + product.
+        """Query the rules matching tenant + product that belong to an active book.
 
         Reads from Postgres when the commerce read-cutover is active (the
         engine then applies effective-window / quantity / precedence filtering
         in Python, identical to the ES path); otherwise falls back to the
         ``pricing_rules_current`` ES index.
+
+        Rules are written to ``pricing_rules_current`` whatever their book's
+        status, so a draft or archived book's rules are dropped here (OI-42).
+        A rule with no ``price_book_id`` (legacy) is kept. The cached rule
+        set is the filtered one; ``PriceBookService`` invalidates the cache
+        on activate and on every update, so a status change takes effect on
+        the next lookup.
         """
+        rules = await self._query_all_product_rules(tenant_id, product_code)
+        if not any(rule.get("price_book_id") for rule in rules):
+            return rules
+        active_ids = await self._active_price_book_ids(tenant_id)
+        return [
+            rule
+            for rule in rules
+            if not rule.get("price_book_id") or rule["price_book_id"] in active_ids
+        ]
+
+    async def _active_price_book_ids(self, tenant_id: str) -> set:
+        """The tenant's active price book ids, read the way ``PriceBookService.list`` reads."""
+        from commerce.services.price_book_service import PriceBookService
+
+        books = PriceBookService(self._es)
+        ids: set = set()
+        cursor: Optional[str] = None
+        while True:
+            page = await books.list(tenant_id, status="active", cursor=cursor, limit=200)
+            ids.update(
+                item["price_book_id"]
+                for item in page.get("items", [])
+                if item.get("price_book_id")
+            )
+            cursor = page.get("next_cursor")
+            if not cursor:
+                return ids
+
+    async def _query_all_product_rules(
+        self, tenant_id: str, product_code: str
+    ) -> List[Dict[str, Any]]:
         from commerce.services.commerce_persistence_bridge import (
             _NOT_CUT_OVER,
             read_pricing_rules_by_product,

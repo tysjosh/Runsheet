@@ -97,6 +97,8 @@ ACCOUNTS_CURRENT_MAPPING = {
             "credit_balance_cents":       {"type": "long"},
             "credit_state":               {"type": "keyword"},
             "credit_override_expires_at": {"type": "date"},
+            "credit_override_reason":     {"type": "text"},
+            "credit_override_authorized_by": {"type": "keyword"},
             "net_terms_days":             {"type": "integer"},
             "tier":                       {"type": "keyword"},
             "billing_address":            {

@@ -439,6 +439,10 @@ class CreditService:
             {
                 "credit_state": CreditState.OVERRIDE.value,
                 "credit_override_expires_at": expires_at.isoformat(),
+                # On the account itself, not just the event, so a GET shows
+                # why the account is on override and who approved it (OI-42).
+                "credit_override_reason": reason.strip(),
+                "credit_override_authorized_by": authorized_by.strip(),
             },
         )
 
@@ -502,6 +506,8 @@ class CreditService:
             {
                 "credit_state": new_state.value,
                 "credit_override_expires_at": None,
+                "credit_override_reason": None,
+                "credit_override_authorized_by": None,
             },
         )
 

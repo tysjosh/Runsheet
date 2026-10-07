@@ -2219,6 +2219,12 @@ class InvoiceService:
         await self._es.index_document(
             PAYMENTS_CURRENT_INDEX, payment_id, payment_doc
         )
+        # Mirror it to Postgres like any other payment, so the payments table
+        # (and reads under COMMERCE_READ_FROM_POSTGRES) include it (OI-42).
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_payment_create,
+        )
+        await mirror_payment_create(payment_doc)
 
         # Directly update the invoice amounts (invoice is still in draft,
         # so we can't use apply_payment which requires open/partial/overdue)

@@ -106,6 +106,11 @@ async def test_apply_override_is_visible_on_account_get(engine, pg_reads_on):
     got = await AccountService(es).get(TENANT, ACCOUNT)
     assert got["credit_state"] == "override"
     assert got["credit_override_expires_at"] is not None
+    # OI-42: who approved the override and why, on the account itself.
+    assert got["credit_override_reason"] == "QA"
+    assert got["credit_override_authorized_by"] == "qa"
+    assert row.credit_override_reason == "QA"
+    assert row.credit_override_authorized_by == "qa"
 
 
 async def test_expire_override_clears_postgres_row(engine, pg_reads_on):
@@ -122,6 +127,11 @@ async def test_expire_override_clears_postgres_row(engine, pg_reads_on):
     row = await _row()
     assert row.credit_state == "ok"
     assert row.credit_override_expires_at is None
+    assert row.credit_override_reason is None
+    assert row.credit_override_authorized_by is None
+    got = await AccountService(es).get(TENANT, ACCOUNT)
+    assert got["credit_override_reason"] is None
+    assert got["credit_override_authorized_by"] is None
 
 
 async def test_payment_applied_releases_hold_in_postgres(engine, pg_reads_on):

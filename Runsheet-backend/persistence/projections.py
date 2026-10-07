@@ -141,6 +141,8 @@ def account_to_doc(row: AccountORM) -> Dict[str, Any]:
         "credit_balance_cents": row.credit_balance_cents,
         "credit_state": row.credit_state,
         "credit_override_expires_at": _iso(row.credit_override_expires_at),
+        "credit_override_reason": row.credit_override_reason,
+        "credit_override_authorized_by": row.credit_override_authorized_by,
         "net_terms_days": row.net_terms_days,
         "tier": row.tier,
         "billing_address": row.billing_address,

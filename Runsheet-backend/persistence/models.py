@@ -137,6 +137,9 @@ class AccountORM(TimestampMixin, Base):
     credit_balance_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     credit_state: Mapped[str] = mapped_column(String(32), default="ok", nullable=False)
     credit_override_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Who approved the active override and why (OI-42, migration 0010).
+    credit_override_reason: Mapped[Optional[str]] = mapped_column(Text)
+    credit_override_authorized_by: Mapped[Optional[str]] = mapped_column(String(255))
     net_terms_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     tier: Mapped[str] = mapped_column(String(32), default="default", nullable=False)
     billing_address: Mapped[Optional[Dict[str, Any]]] = mapped_column(_JSON)
