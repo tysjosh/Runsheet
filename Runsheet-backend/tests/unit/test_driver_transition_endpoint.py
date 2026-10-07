@@ -102,6 +102,10 @@ class FakeOrderRepository:
             return None
         return dict(self._order)
 
+    async def get_current(self, tenant_id: str, order_id: str):
+        # The transition endpoint reads the stored document (P1-5).
+        return await self.get(tenant_id, order_id)
+
     async def append_event(self, tenant_id: str, event: dict) -> None:
         self.events.append(event)
 

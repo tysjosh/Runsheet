@@ -242,7 +242,10 @@ async def transition_order_status(
             },
         )
 
-    ref = await _require_resolver().resolve_order(order_id, tenant)
+    # Dispatch-board decision P1-5: the base read is the stored current-state
+    # document (``get_current``), the same one the guarded write below compares
+    # against, so a stale relational projection can't refuse every retry.
+    ref = await _require_resolver().resolve_order(order_id, tenant, authoritative=True)
     order: Dict[str, Any] = dict(ref.order_doc or {})
     request_id = _get_request_id(request)
 
@@ -301,12 +304,12 @@ async def transition_order_status(
     return result
 
 
-#: Counts guarded-write refusals. The base read can come from the relational
-#: projection (``commerce_read_from_postgres``) while the guard compares
-#: against ``es_documents``; if a best-effort mirror write failed, the same
-#: order keeps refusing until its next mirrored write. A sustained count for
-#: one tenant with ``read_source=projection`` is that stuck case (Phase 0
-#: review issue 1, Phase 1 review P1-5).
+#: Counts guarded-write refusals. Since decision P1-5 the base read is
+#: ``get_current`` (``read_source=documents``), the document the guard
+#: compares against, so a refusal means a real concurrent write and a retry
+#: on a fresh read succeeds. A sustained count for one order or tenant is the
+#: stuck-retry case this metric exists to surface (Phase 0 review issue 1,
+#: Phase 1 review P1-5).
 GUARD_REFUSAL_METRIC = "driver.transition.guard_refused.count"
 
 
@@ -317,11 +320,10 @@ def _record_guard_refusal(tenant_id: str, reason: str) -> None:
         service = get_telemetry_service()
         if service is None:
             return
-        read_source = "projection" if get_settings().commerce_read_from_postgres else "documents"
         service.record_metric(
             GUARD_REFUSAL_METRIC,
             1.0,
-            {"tenant_id": tenant_id, "reason": reason, "read_source": read_source},
+            {"tenant_id": tenant_id, "reason": reason, "read_source": "documents"},
         )
     except Exception as exc:  # metrics never fail the request
         logger.debug("guard refusal metric not recorded: %s", type(exc).__name__)

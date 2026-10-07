@@ -148,6 +148,26 @@ Commands (same cwd and `$PY`):
 - Full suite, CI env (`REDIS_URL=redis://localhost:6379 JWT_SECRET=ci-test-jwt-secret JWT_ALGORITHM=HS256 ENVIRONMENT=test $PY -m pytest --no-cov -q -p no:cacheprovider -o log_cli=false`) → **13017 passed, 237 skipped, 0 failed** (4 m 25 s). Coverage wasn't measured locally.
 - Postgres suite, CI env → **232 passed**.
 
+#### Phase 1 review fix pass 2 (phase1-review.json still CHANGES_REQUESTED; fixes in `3e9ada8` not yet re-reviewed)
+
+P1-1 to P1-4: re-checked in code (`_load_has_dyed`, `_move_back_adds_no_block`, `write_back=mode != "shadow"`, dispatch-board flag 422 without `provided`); no further change.
+
+**P1-5, DECISION option A (owner via orchestrator, 2026-10-07; reversible, unpushed branch).** The driver status transition's base read switches to `get_current`, the stored current-state document the K5a guard compares against. `WorkRefResolver.resolve_order` gains `authoritative=False`; `transition_endpoints.py` passes `True`. Tenant re-check, `assigned_driver_id` authorization, the no-op check and the gates now run on that document. Other `resolve_order` callers (POD, exceptions, messages) keep `get`. The Phase 1 metric `driver.transition.guard_refused.count` stays; its `read_source` tag is now always `documents`. Recorded in design.md K8.6 as an approved deviation (refs phase0-review.md issue 1) plus two file-table rows. To reverse: drop `authoritative=True`.
+
+| Test | Proves |
+|---|---|
+| `test_driver_transition_guards.py::test_transition_after_board_relink_succeeds_first_try_with_stale_projection` (new) | Real `relink_dispatched_assignment` moves the order onto `bp-load1-r1`/`truck-2` for the same driver; `get` (projection) is stubbed to the pre-relink copy (failed mirror). The first POST answers 200, the order is `in_transit` on the new links, one `order_in_transit` event, the projection is never read, no guard-refusal metric. Fails on the pre-change endpoint (checked by restoring `HEAD`'s `transition_endpoints.py`). |
+| `::test_stale_base_read_keeps_refusing_and_is_counted` (kept, renamed from `test_stale_projection_read_keeps_refusing_and_is_counted`) | Stubs `get_current` with a stale copy: 3 refusals, 3 metrics with tags `{tenant_id, reason: OrderChangedConcurrentlyError, read_source: documents}`, a fresh read heals it. |
+
+`test_driver_transition_endpoint.py` `FakeOrderRepository` gained `get_current` (delegates to `get`); assertions unchanged.
+
+Commands (cwd `.worktrees/dispatch-board/Runsheet-backend`, same `$PY`):
+- `ENVIRONMENT=test JWT_SECRET=x REDIS_URL=redis://localhost:6379 $PY -m pytest --no-cov -q -p no:cacheprovider -o log_cli=false tests/unit/test_driver_transition_guards.py tests/unit/test_driver_transition_endpoint.py tests/unit/test_work_ref.py tests/unit/test_driver_transition_gate_stack.py tests/unit/test_order_guarded_transition.py tests/unit/test_bootstrap_driver_module.py tests/unit/test_driver_error_codes.py tests/unit/test_pod_transition_reconciler.py tests/unit/test_pod_order_endpoints.py tests/unit/test_exception_endpoints.py tests/unit/test_message_endpoints.py tests/unit/test_order_relink.py` → **333 passed**.
+- Full suite, CI env → **13018 passed, 237 skipped, 0 failed** (4 m 38 s).
+- Postgres suite, CI env → **232 passed**.
+- Registry regenerated (353 entries); `git diff --exit-code -- docs/endpoint-registry.md` → clean.
+- Free disk 7.8 GB (no Docker build run).
+
 ### Phase 2: Publish and changes after publish
 Not started.
 

@@ -214,11 +214,12 @@ class _Metrics:
         self.metrics.append((name, value, dict(tags or {})))
 
 
-def test_stale_projection_read_keeps_refusing_and_is_counted(monkeypatch):
-    """Phase 0 review issue 1 / Phase 1 P1-5: the base read serves a stale copy
-    (a failed best-effort mirror under read cutover) while the guard compares
-    against the stored document. Every retry refuses until the next mirrored
-    write, and each refusal is counted so the stuck case shows up."""
+def test_stale_base_read_keeps_refusing_and_is_counted(monkeypatch):
+    """Phase 0 review issue 1 / Phase 1 P1-5: if the base read ever serves a
+    copy older than the stored document the guard compares against, every
+    retry refuses, and each refusal is counted so the stuck case shows up.
+    Since P1-5 the base read is ``get_current``, so this is simulated by
+    stubbing it."""
     import driver.api.transition_endpoints as endpoints
     import telemetry.service as telemetry_service
     from driver.services.order_transition_service import get_work_ref_resolver
@@ -228,10 +229,10 @@ def test_stale_projection_read_keeps_refusing_and_is_counted(monkeypatch):
     store.poke(ORDERS, ORDER, last_event_timestamp="2026-07-29T12:30:00+00:00")
     repo = get_work_ref_resolver()._order_repository
 
-    async def stale_get(tenant_id, order_id):
+    async def stale_read(tenant_id, order_id):
         return dict(stale)
 
-    monkeypatch.setattr(repo, "get", stale_get)
+    monkeypatch.setattr(repo, "get_current", stale_read)
     sink = _Metrics()
     monkeypatch.setattr(telemetry_service, "get_telemetry_service", lambda: sink)
     for _ in range(3):
@@ -241,10 +242,74 @@ def test_stale_projection_read_keeps_refusing_and_is_counted(monkeypatch):
     assert store.doc(ORDERS, ORDER)["status"] == "dispatched"
     counted = [m for m in sink.metrics if m[0] == endpoints.GUARD_REFUSAL_METRIC]
     assert len(counted) == 3
-    assert counted[0][2]["tenant_id"] == T and counted[0][2]["read_source"] in {"projection", "documents"}
-    # The next mirrored write heals it: the base read is fresh again.
+    assert counted[0][2] == {
+        "tenant_id": T,
+        "reason": "OrderChangedConcurrentlyError",
+        "read_source": "documents",
+    }
+    # A fresh read heals it.
     monkeypatch.undo()
     assert _post(app).status_code == 200
+
+
+def test_transition_after_board_relink_succeeds_first_try_with_stale_projection(monkeypatch):
+    """P1-5 option A: the board relinks the order onto this driver's new run and
+    the best-effort mirror fails, so the projection (``get``) still holds the
+    pre-relink copy. The endpoint reads ``get_current`` and the guard compares
+    against the same document, so the first attempt succeeds with no refusal
+    and the projection is never read."""
+    import asyncio
+
+    import telemetry.service as telemetry_service
+    from driver.services.order_transition_service import get_work_ref_resolver
+
+    app, store, _ = _harness()
+    repo = get_work_ref_resolver()._order_repository
+    projection = dict(store.doc(ORDERS, ORDER))
+    verdict = asyncio.run(
+        repo.relink_dispatched_assignment(
+            T,
+            ORDER,
+            from_run_id=AGENT_RUN,
+            from_asset_id="truck-1",
+            from_driver_id=DRIVER,
+            to_run_id=BOARD_RUN,
+            to_asset_id="truck-2",
+            to_driver_id=DRIVER,
+            claim_id="claim-relink-1",
+        )
+    )
+    assert verdict == "relinked"
+    relinked_ts = store.doc(ORDERS, ORDER)["last_event_timestamp"]
+    assert relinked_ts != projection["last_event_timestamp"]
+    # The board plan for the new run is published, so gate 0 lets it start.
+    store.seed(
+        PLANS,
+        BOARD_RUN,
+        {"plan_id": BOARD_RUN, "run_id": BOARD_RUN, "tenant_id": T,
+         "truck_id": "truck-2", "status": "dispatched", "source": "dispatch_board"},
+    )
+
+    projection_reads: list[str] = []
+
+    async def stale_projection(tenant_id, order_id):
+        projection_reads.append(order_id)
+        return dict(projection)
+
+    monkeypatch.setattr(repo, "get", stale_projection)
+    sink = _Metrics()
+    monkeypatch.setattr(telemetry_service, "get_telemetry_service", lambda: sink)
+
+    resp = _post(app)
+    assert resp.status_code == 200, resp.text
+    doc = store.doc(ORDERS, ORDER)
+    assert doc["status"] == "in_transit"
+    assert (doc["assigned_run_id"], doc["assigned_asset_id"]) == (BOARD_RUN, "truck-2")
+    assert [e["event_type"] for e in store.events()] == ["order_in_transit"]
+    assert projection_reads == []
+    from driver.api.transition_endpoints import GUARD_REFUSAL_METRIC
+
+    assert [m for m in sink.metrics if m[0] == GUARD_REFUSAL_METRIC] == []
 
 
 def test_unguarded_happy_path_still_transitions():

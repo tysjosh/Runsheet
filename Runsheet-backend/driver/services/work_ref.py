@@ -251,7 +251,9 @@ class WorkRefResolver:
 
     # -- order-keyed ----------------------------------------------------
 
-    async def resolve_order(self, order_id: str, tenant: TenantContext) -> "WorkRef":
+    async def resolve_order(
+        self, order_id: str, tenant: TenantContext, *, authoritative: bool = False
+    ) -> "WorkRef":
         """Resolve the order-keyed path parameter into a :class:`WorkRef`.
 
         There is no dual acceptance here: the order-keyed surface is new, so
@@ -260,6 +262,12 @@ class WorkRefResolver:
         Args:
             order_id: The ``order_id`` path parameter.
             tenant: The verified Auth_Context for the request.
+            authoritative: Read the stored current-state document
+                (``FuelOrderRepository.get_current``) instead of ``get``,
+                which serves the relational projection under read cutover.
+                The driver status transition passes ``True`` so its base read
+                is the same document its guarded write compares against
+                (dispatch-board decision P1-5).
 
         Returns:
             The resolved work reference, carrying the order document.
@@ -280,7 +288,10 @@ class WorkRefResolver:
                 "configure_* function that constructs the resolver."
             )
 
-        order = await self._order_repository.get(tenant.tenant_id, order_id)
+        if authoritative:
+            order = await self._order_repository.get_current(tenant.tenant_id, order_id)
+        else:
+            order = await self._order_repository.get(tenant.tenant_id, order_id)
         if order is None:
             raise resource_not_found(
                 message="Order not found",
