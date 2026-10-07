@@ -796,6 +796,14 @@ class ImportService:
                         result.errors.append(issue)
                         rows_with_errors.add(row_index)
                         continue
+                if session.data_type == "orders" and session.tenant_id:
+                    issue = await self._customer_tank_issue(
+                        session.tenant_id, row_index, document
+                    )
+                    if issue is not None:
+                        result.errors.append(issue)
+                        rows_with_errors.add(row_index)
+                        continue
                 if (
                     session.data_type == "tank_readings"
                     and self._tank_import_service is not None
@@ -882,6 +890,35 @@ class ImportService:
                 field_name="customer_id",
                 description=exc.message,
                 value=str(customer_id),
+            )
+        return None
+
+    async def _customer_tank_issue(
+        self,
+        tenant_id: str,
+        row_number: int,
+        document: dict[str, Any],
+    ) -> Optional[ValidationIssue]:
+        """Validate-time copy of the intake pipeline's tank check (OI-26).
+
+        Commit refuses an order whose ``customer_tank_id`` is missing from the
+        tenant or belongs to another customer. Running the same check here
+        lets the preview report it before commit.
+        """
+        from errors.exceptions import AppException
+
+        tank_id = document.get("customer_tank_id")
+        verify = getattr(self._order_intake_pipeline, "verify_customer_tank", None)
+        if not tank_id or verify is None:
+            return None
+        try:
+            await verify(document, tenant_id)
+        except AppException as exc:
+            return ValidationIssue(
+                row_number=row_number,
+                field_name="customer_tank_id",
+                description=exc.message,
+                value=str(tank_id),
             )
         return None
 

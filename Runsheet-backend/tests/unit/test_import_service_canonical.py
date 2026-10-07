@@ -276,6 +276,83 @@ async def test_unknown_field_value_names_the_field():
     assert "https://" not in result.errors[0].description
 
 
+# ---------------------------------------------------------------------------
+# OI-26: /api/import/validate runs the pipeline's customer-tank check
+# ---------------------------------------------------------------------------
+
+
+def _pipeline_with_tanks(tanks):
+    """A real ``OrderIntakePipeline`` whose tank repo knows ``tanks``.
+
+    ``tanks`` maps ``(tenant_id, tank_id)`` to the owning customer id.
+    """
+    from fuel.services.order_intake_pipeline import OrderIntakePipeline
+
+    class _TankRepo:
+        async def get(self, tenant_id, tank_id):
+            customer_id = tanks.get((tenant_id, tank_id))
+            if customer_id is None:
+                return None
+            return {"customer_tank_id": tank_id, "customer_id": customer_id}
+
+    pipeline = OrderIntakePipeline.__new__(OrderIntakePipeline)
+    pipeline._customer_tank_repo = _TankRepo()
+    return pipeline
+
+
+async def _validate_orders(service, tenant_id="tenant-a"):
+    content = SchemaTemplates().generate_csv_template("orders").encode()
+    parsed = await service.parse_csv(
+        content, "orders", tenant_id=tenant_id, source_name="orders.csv"
+    )
+    return await service.validate(
+        parsed.session_id, parsed.suggested_mapping, tenant_id=tenant_id
+    )
+
+
+async def test_validate_reports_order_tank_of_another_customer():
+    # The template rows are CUST-100/tank-100 and CUST-200/tank-200.
+    pipeline = _pipeline_with_tanks(
+        {("tenant-a", "tank-100"): "CUST-100", ("tenant-a", "tank-200"): "CUST-999"}
+    )
+    service = ImportService(_Elasticsearch(), order_intake_pipeline=pipeline)
+
+    result = await _validate_orders(service)
+
+    assert result.valid_rows == 1
+    assert len(result.errors) == 1
+    issue = result.errors[0]
+    assert issue.row_number == 2
+    assert issue.field_name == "customer_tank_id"
+    assert issue.value == "tank-200"
+    assert "CUST-999" not in issue.description
+
+
+async def test_validate_reports_order_tank_missing_from_tenant():
+    pipeline = _pipeline_with_tanks(
+        {("tenant-a", "tank-100"): "CUST-100", ("tenant-b", "tank-200"): "CUST-200"}
+    )
+    service = ImportService(_Elasticsearch(), order_intake_pipeline=pipeline)
+
+    result = await _validate_orders(service)
+
+    assert [(e.row_number, e.field_name) for e in result.errors] == [
+        (2, "customer_tank_id")
+    ]
+
+
+async def test_validate_accepts_order_tanks_of_the_same_customer():
+    pipeline = _pipeline_with_tanks(
+        {("tenant-a", "tank-100"): "CUST-100", ("tenant-a", "tank-200"): "CUST-200"}
+    )
+    service = ImportService(_Elasticsearch(), order_intake_pipeline=pipeline)
+
+    result = await _validate_orders(service)
+
+    assert result.valid_rows == 2
+    assert result.errors == []
+
+
 async def test_validate_without_customer_loader_stays_additive():
     resolver = _customer_resolver({}, register=False)
 

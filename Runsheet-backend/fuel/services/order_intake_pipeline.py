@@ -780,6 +780,15 @@ class OrderIntakePipeline:
                 invalid_fields=extract_invalid_fields(exc),
             ) from exc
 
+    async def verify_customer_tank(
+        self, order_doc: Dict[str, Any], tenant_id: str
+    ) -> None:
+        """Public form of the step (i) tank check, for import validate (OI-26).
+
+        Raises the same ``AppException`` commit would raise.
+        """
+        await self._verify_customer_tank(order_doc, tenant_id)
+
     async def _verify_customer_tank(
         self, order_doc: Dict[str, Any], tenant_id: str
     ) -> None:
