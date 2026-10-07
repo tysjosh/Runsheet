@@ -84,6 +84,12 @@ describe("buildContentSecurityPolicy", () => {
     expect(prod).toContain("https://www.gstatic.com");
   });
 
+  it("reports violations to /api/csp-report (OI-10)", () => {
+    const policy = buildContentSecurityPolicy({ isDev: false });
+    expect(directive(policy, "report-uri")).toEqual(["/api/csp-report"]);
+    expect(directive(policy, "report-to")).toEqual(["csp-endpoint"]);
+  });
+
   it("forbids framing and plugins", () => {
     const policy = buildContentSecurityPolicy({ isDev: false });
     expect(directive(policy, "frame-ancestors")).toEqual(["'none'"]);
@@ -100,6 +106,17 @@ describe("buildSecurityHeaders", () => {
       "default-src 'self'",
     );
     expect(byKey["Content-Security-Policy"]).toBeUndefined();
+  });
+
+  it("stays report-only while collecting reports (OI-10)", () => {
+    expect(byKey["Content-Security-Policy-Report-Only"]).toContain(
+      "report-uri /api/csp-report",
+    );
+    expect(byKey["Content-Security-Policy-Report-Only"]).toContain(
+      "report-to csp-endpoint",
+    );
+    expect(Object.keys(byKey)).not.toContain("Content-Security-Policy");
+    expect(byKey["Reporting-Endpoints"]).toBe('csp-endpoint="/api/csp-report"');
   });
 
   it("sends HSTS", () => {

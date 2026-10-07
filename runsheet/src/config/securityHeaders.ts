@@ -6,9 +6,20 @@
  *
  * The Content-Security-Policy is sent as `Content-Security-Policy-Report-Only`.
  * Every page (maps, charts, sign-in, invoices, ops) has not been walked in a
- * browser with an enforcing policy, so violations are reported to the browser
- * console instead of breaking a page. HSTS and the other headers are enforcing.
+ * browser with an enforcing policy, so violations are reported instead of
+ * breaking a page. HSTS and the other headers are enforcing.
+ *
+ * Reports are collected at `/api/csp-report` (OI-10), via `report-uri` for
+ * older browsers and `report-to` plus `Reporting-Endpoints` for the Reporting
+ * API. Switching to an enforcing `Content-Security-Policy` is a follow-up,
+ * after 3-5 days of clean reports and an OAuth "Connect" click-through.
  */
+
+/** Same-origin CSP report sink (`src/app/api/csp-report/route.ts`). */
+export const CSP_REPORT_PATH = "/api/csp-report";
+
+/** Reporting API endpoint name used by `report-to`. */
+export const CSP_REPORT_GROUP = "csp-endpoint";
 
 /** One year, covering subdomains. Same value the API sends. */
 export const HSTS_VALUE = "max-age=31536000; includeSubDomains";
@@ -104,6 +115,8 @@ export function buildContentSecurityPolicy(env: SecurityHeaderEnv): string {
     ["base-uri", ["'self'"]],
     ["form-action", ["'self'"]],
     ["frame-ancestors", ["'none'"]],
+    ["report-uri", [CSP_REPORT_PATH]],
+    ["report-to", [CSP_REPORT_GROUP]],
   ];
 
   return directives
@@ -128,6 +141,12 @@ export function buildSecurityHeaders(
     {
       key: "Content-Security-Policy-Report-Only",
       value: buildContentSecurityPolicy(env),
+    },
+    // A relative URL is a valid URI-reference here, resolved against the
+    // page URL (W3C Reporting API §3.3); browsers only use it over HTTPS.
+    {
+      key: "Reporting-Endpoints",
+      value: `${CSP_REPORT_GROUP}="${CSP_REPORT_PATH}"`,
     },
   ];
 }
