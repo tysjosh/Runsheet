@@ -8,7 +8,7 @@
  * API's own message (the client extracts it with ``extractApiErrorMessage``).
  */
 import { MessageSquare } from "lucide-react";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { extractApiErrorMessage } from "../../services/apiErrors";
 import {
   type DriverActivityItem,
@@ -18,6 +18,8 @@ import {
 } from "../../services/schedulingApi";
 
 const PAGE_SIZE = 20;
+// The backend reads at most 1000 rows (page * size); past that it returns 422.
+const MAX_PAGES = Math.floor(1000 / PAGE_SIZE);
 
 function formatTimestamp(iso: string | null): string {
   if (!iso) return "—";
@@ -55,17 +57,23 @@ export default function DriverActivitySection({
   const [totalPages, setTotalPages] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Only the latest request may update state, so a slow earlier response
+  // (an old page or filter) can't overwrite a newer one.
+  const requestSeq = useRef(0);
 
   const load = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     setError(null);
     const params: DriverActivityParams = { page, size: PAGE_SIZE };
     if (typeFilter) params.type = typeFilter;
     try {
       const res = await getJobDriverActivity(jobId, params);
+      if (seq !== requestSeq.current) return;
       setItems(res.data ?? []);
-      setTotalPages(res.pagination?.total_pages ?? 0);
+      setTotalPages(Math.min(res.pagination?.total_pages ?? 0, MAX_PAGES));
     } catch (err) {
+      if (seq !== requestSeq.current) return;
       setItems([]);
       setError(
         err instanceof Error && err.message
@@ -73,7 +81,7 @@ export default function DriverActivitySection({
           : extractApiErrorMessage(err, "Couldn't load driver activity"),
       );
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [jobId, page, typeFilter]);
 

@@ -6,7 +6,7 @@
  * the empty state, the error text from a 403 envelope, the type filter and
  * pagination.
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 
 jest.mock("../../services/schedulingApi", () => ({
   getJobDriverActivity: jest.fn(),
@@ -172,6 +172,54 @@ describe("DriverActivitySection", () => {
       size: 20,
     });
     expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+  });
+
+  it("ignores a slow earlier response that resolves after a newer one (OI-29)", async () => {
+    mockGetActivity.mockResolvedValueOnce(page([message, exception]));
+    render(<DriverActivitySection jobId="JOB-1" />);
+    await screen.findByText("Gate is locked, waiting for site contact");
+
+    // The first filter change hangs until we release it; the second resolves now.
+    let releaseSlow: (v: ReturnType<typeof page>) => void = () => {};
+    mockGetActivity.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseSlow = resolve;
+      }),
+    );
+    mockGetActivity.mockResolvedValueOnce(page([exception]));
+    const filter = screen.getByLabelText("Activity type");
+    fireEvent.change(filter, { target: { value: "message" } });
+    fireEvent.change(filter, { target: { value: "exception" } });
+
+    expect(await screen.findByText("Tank fill pipe damaged")).toBeVisible();
+
+    await act(async () => {
+      releaseSlow(page([message]));
+    });
+    expect(screen.getByText("Tank fill pipe damaged")).toBeVisible();
+    expect(
+      screen.queryByText("Gate is locked, waiting for site contact"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("caps paging at the backend's 1000-row window (OI-29)", async () => {
+    mockGetActivity.mockResolvedValue(
+      page([message], { page: 1, total: 1600, totalPages: 80 }),
+    );
+    render(<DriverActivitySection jobId="JOB-1" />);
+    await screen.findByText("Gate is locked, waiting for site contact");
+    expect(screen.getByText("Page 1 of 50")).toBeInTheDocument();
+
+    const next = screen.getByRole("button", { name: "Next page" });
+    for (let i = 2; i <= 50; i++) {
+      fireEvent.click(next);
+      expect(await screen.findByText(`Page ${i} of 50`)).toBeInTheDocument();
+    }
+    expect(mockGetActivity).toHaveBeenLastCalledWith("JOB-1", {
+      page: 50,
+      size: 20,
+    });
     expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
   });
 });
