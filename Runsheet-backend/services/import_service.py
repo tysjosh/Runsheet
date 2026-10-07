@@ -389,6 +389,8 @@ class ImportService:
                 session, field_mapping, result
             )
         elif session.data_type in NON_CANONICAL_ID_FIELDS:
+            if session.data_type == "inventory":
+                self._append_inventory_issues(session, field_mapping, result)
             await self._append_ownership_issues(session, field_mapping, result)
         # Stamp the session_id onto the result
         result.session_id = session_id
@@ -726,6 +728,92 @@ class ImportService:
                 document[target_field] = value
         return document
 
+    @staticmethod
+    def _complete_inventory_document(
+        document: dict[str, Any], tenant_id: str
+    ) -> dict[str, Any]:
+        """Fill the ``InventoryItem`` fields the import template leaves optional (OI-27).
+
+        The inventory API reads rows as ``InventoryItem``, which requires
+        fields a minimal import (``item_id``, ``name``, ``quantity``) leaves
+        out. Defaults: category ``general`` (also for an unknown category),
+        unit ``units``, min_threshold 0, max_capacity ``max(quantity, 1)``,
+        location ``Unassigned``, and a status derived from quantity and
+        threshold when missing or not an ``InventoryStatus``. The result is
+        validated as ``InventoryItem``; a ``PydanticValidationError`` means
+        the row can't be stored (for example an explicit ``max_capacity`` 0).
+        """
+        from inventory.models import InventoryCategory, InventoryItem, InventoryStatus
+        from inventory.service import InventoryService
+
+        doc = dict(document)
+        if doc.get("category") not in {c.value for c in InventoryCategory}:
+            doc["category"] = InventoryCategory.GENERAL.value
+        doc.setdefault("unit", "units")
+        doc.setdefault("min_threshold", 0)
+        doc.setdefault("max_capacity", max(doc.get("quantity") or 0, 1))
+        doc.setdefault("location", "Unassigned")
+        if doc.get("status") not in {s.value for s in InventoryStatus}:
+            try:
+                doc["status"] = InventoryService._derive_status(
+                    doc.get("quantity") or 0, doc.get("min_threshold") or 0
+                ).value
+            except TypeError:
+                doc.pop("status", None)  # model validation reports the bad field
+        doc["tenant_id"] = tenant_id or doc.get("tenant_id") or ""
+        item = InventoryItem.model_validate(doc)
+        doc.update(item.model_dump(mode="json", exclude_none=True))
+        return doc
+
+    @staticmethod
+    def _pydantic_issues(
+        row_number: int, exc: PydanticValidationError
+    ) -> list[ValidationIssue]:
+        issues = []
+        for err in exc.errors(include_url=False):
+            field = ".".join(str(part) for part in err.get("loc") or ())
+            issues.append(
+                ValidationIssue(
+                    row_number=row_number,
+                    field_name=field or "record",
+                    description=str(err.get("msg") or "invalid value"),
+                )
+            )
+        return issues
+
+    def _append_inventory_issues(
+        self,
+        session: _ActiveSession,
+        field_mapping: dict[str, str],
+        result: ValidationResult,
+    ) -> None:
+        """Report inventory rows that can't become an ``InventoryItem`` (OI-27)."""
+        rows_with_errors = {issue.row_number for issue in result.errors}
+        for row_index, row in enumerate(session.rows, start=1):
+            if row_index in rows_with_errors:
+                continue
+            try:
+                document = self._map_and_coerce_row(
+                    row, field_mapping, session.data_type
+                )
+                self._complete_inventory_document(
+                    document, session.tenant_id or "import"
+                )
+            except PydanticValidationError as exc:
+                result.errors.extend(self._pydantic_issues(row_index, exc))
+                rows_with_errors.add(row_index)
+            except (TypeError, ValueError) as exc:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name="record",
+                        description=str(exc),
+                    )
+                )
+                rows_with_errors.add(row_index)
+        result.error_count = len(result.errors)
+        result.valid_rows = result.total_rows - len(rows_with_errors)
+
     async def _append_ownership_issues(
         self,
         session: _ActiveSession,
@@ -1018,6 +1106,20 @@ class ImportService:
                 errors.append(f"row {row_number}: missing {id_field}")
                 continue
             in_use = f"row {row_number}: {id_field} '{doc_id}' is already in use"
+            if session.data_type == "inventory":
+                try:
+                    doc = self._complete_inventory_document(doc, tenant_id)
+                except (PydanticValidationError, TypeError, ValueError) as exc:
+                    failed += 1
+                    if isinstance(exc, PydanticValidationError):
+                        detail = "; ".join(
+                            f"{issue.field_name}: {issue.description}"
+                            for issue in self._pydantic_issues(row_number, exc)
+                        )
+                    else:
+                        detail = str(exc)
+                    errors.append(f"row {row_number}: {detail}")
+                    continue
             try:
                 existing = await self.es_service.get_document(target_index, doc_id)
                 if existing is not None:

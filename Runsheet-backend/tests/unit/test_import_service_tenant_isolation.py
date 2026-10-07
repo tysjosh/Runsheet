@@ -171,6 +171,58 @@ async def test_validate_flags_legacy_row_without_tenant():
     assert result.valid_rows == 0
 
 
+async def test_minimal_inventory_row_imports_as_a_valid_inventory_item():
+    """OI-27: item_id, name and quantity are enough; the rest is defaulted."""
+    from inventory.models import InventoryItem
+
+    store = _Store()
+    service = ImportService(store)
+    content = b"item_id,name,quantity\nINV-9,Coolant,12\nINV-10,Fuses,0\n"
+
+    result = await _import(service, "inventory", content, "tenant-a")
+
+    assert result.imported_records == 2
+    stored = store.documents[("inventory", "INV-9")]
+    item = InventoryItem.model_validate(stored)
+    assert item.category.value == "general"
+    assert item.unit == "units"
+    assert item.min_threshold == 0
+    assert item.max_capacity == 12
+    assert item.location == "Unassigned"
+    assert item.status.value == "in_stock"
+    assert item.tenant_id == "tenant-a"
+    empty = InventoryItem.model_validate(store.documents[("inventory", "INV-10")])
+    assert empty.max_capacity == 1
+    assert empty.status.value == "out_of_stock"
+
+
+async def test_template_inventory_rows_store_as_inventory_items():
+    from inventory.models import InventoryItem
+    from services.schema_templates import SchemaTemplates
+
+    store = _Store()
+    service = ImportService(store)
+    content = SchemaTemplates().generate_csv_template("inventory").encode()
+
+    result = await _import(service, "inventory", content, "tenant-a")
+
+    assert result.imported_records == 3
+    for doc_id in ("INV-001", "INV-002", "INV-003"):
+        InventoryItem.model_validate(store.documents[("inventory", doc_id)])
+    assert store.documents[("inventory", "INV-002")]["status"] == "low_stock"
+
+
+async def test_inventory_explicit_zero_capacity_is_a_validate_error():
+    store = _Store()
+    service = ImportService(store)
+    content = b"item_id,name,quantity,max_capacity\nINV-9,Coolant,12,0\n"
+
+    result = await _validate(service, "inventory", content, "tenant-a")
+
+    assert [e.field_name for e in result.errors] == ["max_capacity"]
+    assert result.valid_rows == 0
+
+
 async def test_fuel_stations_import_is_keyed_by_station_id():
     store = _Store()
     service = ImportService(store)
