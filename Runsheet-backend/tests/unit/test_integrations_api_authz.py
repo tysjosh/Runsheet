@@ -86,6 +86,37 @@ def test_route_set_matches_expectations() -> None:
     assert {(m, p) for m, p, _ in _routes()} == set(EXPECTED_AUDIENCE)
 
 
+def _real_router_client(*roles: str) -> TestClient:
+    """The real integrations router. The admin gate runs before any service
+    lookup, so a refused caller never reaches the (unwired) services."""
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(endpoints_module.router)
+    app.dependency_overrides[get_tenant_context] = lambda: _ctx(*roles)
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/integrations"),
+        ("POST", "/api/integrations/inst-1/sync-now"),
+        ("DELETE", "/api/integrations/inst-1"),
+    ],
+)
+def test_real_route_refuses_driver(method: str, path: str) -> None:
+    """OI-28: the gate is wired on the real routes, not only a probe."""
+    response = _real_router_client("driver").request(method, path, json={})
+    assert response.status_code == 403
+    assert response.json()["error_code"] == "INSUFFICIENT_ROLE"
+
+
+def test_real_create_route_lets_admin_past_the_gate() -> None:
+    """Control for the driver case: an admin reaches body validation (422)."""
+    response = _real_router_client("admin").post("/api/integrations", json={})
+    assert response.status_code == 422
+
+
 def test_each_route_carries_its_expected_audience() -> None:
     wrong = []
     for method, path, deps in _routes():
