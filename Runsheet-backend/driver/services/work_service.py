@@ -97,6 +97,11 @@ CACHE_TTL_SECONDS = 60
 #: never ends in a bare separator.
 _NO_RUN = "none"
 
+#: Loading-plan statuses a driver can be working from (dispatch-board R25).
+#: ``proposed``/``draft`` plans have not been applied and ``superseded`` board
+#: revisions were replaced, so neither may become the driver's manifest.
+_MANIFEST_PLAN_STATUSES = ("scheduled", "dispatched", "completed")
+
 #: Field name on the order document that must never leave the server on any
 #: ``/api/driver/*`` response (R5.26).
 _POD_OTP_FIELD = "pod_otp"
@@ -419,7 +424,7 @@ class DriverWorkService:
         asset_id = doc.get("assigned_asset_id") or ""
         run_id = doc.get("assigned_run_id") or ""
 
-        plan = await self._fetch_loading_plan(tenant_id, asset_id)
+        plan = await self._fetch_loading_plan(tenant_id, asset_id, run_id)
         route = await self._fetch_route_plan(tenant_id, run_id, asset_id)
 
         assignments = _nested_list(plan, "assignments")
@@ -455,21 +460,53 @@ class DriverWorkService:
         }
 
     async def _fetch_loading_plan(
-        self, tenant_id: str, asset_id: str
+        self, tenant_id: str, asset_id: str, run_id: str = ""
     ) -> Optional[dict]:
-        """The most recent loading plan for the order's truck (R3.7).
+        """The loading plan for the order's truck and run (R3.7, dispatch-board R25).
 
         The join is the plan's truck identifier against the order's
-        ``assigned_asset_id``, which is the only link between a driver's order
-        and a truck-keyed plan. No asset means no plan, and no plan means
-        ``manifest_available: false`` (R3.11) — not an error.
+        ``assigned_asset_id``. When the order carries an ``assigned_run_id``
+        the plan must also belong to that run (``run_id`` or, for plans whose
+        executor run id is the plan id, ``plan_id``), so a truck with several
+        loads in a day gets the manifest of the load the order is on.
+
+        Only plans a driver can be working from count: ``scheduled``,
+        ``dispatched`` or ``completed``. A ``proposed`` agent plan or a
+        ``superseded`` board revision never shows up as the manifest.
+
+        No asset means no plan, and no plan means ``manifest_available:
+        false`` (R3.11) — not an error.
         """
         if not asset_id:
             return None
+        filters: List[dict] = [
+            {"term": {"truck_id": asset_id}},
+            {"terms": {"status": list(_MANIFEST_PLAN_STATUSES)}},
+        ]
+        if run_id:
+            filters.append(
+                {
+                    "bool": {
+                        "should": [
+                            {"term": {"run_id": run_id}},
+                            {"term": {"plan_id": run_id}},
+                        ],
+                        "minimum_should_match": 1,
+                    }
+                }
+            )
+        query_filters: List[dict] = [
+            {
+                "bool": {
+                    "filter": filters,
+                    "must_not": [{"term": {"status": "superseded"}}],
+                }
+            }
+        ]
         return await self._search_one(
             MVP_LOAD_PLANS_INDEX,
             tenant_id,
-            [{"term": {"truck_id": asset_id}}],
+            query_filters,
             sort=[{"created_at": {"order": "desc"}}],
         )
 

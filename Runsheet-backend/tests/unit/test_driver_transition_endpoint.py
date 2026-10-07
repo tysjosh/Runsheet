@@ -106,10 +106,12 @@ class FakeOrderRepository:
         self.events.append(event)
 
     async def upsert_with_last_event_timestamp(
-        self, tenant_id: str, order: dict
-    ) -> bool:
+        self, tenant_id: str, order: dict, **guard
+    ):
         self.upserts.append(dict(order))
-        return True
+        # The driver path writes guarded (dispatch-board K8.6), and the guarded
+        # form returns the stored document rather than a bool.
+        return dict(order) if guard else True
 
 
 class FakeQualificationService:

@@ -81,6 +81,7 @@ _REGISTRIES: Tuple[Tuple[str, str], ...] = (
     ("fuel.services.fuel_es_mappings", "FUEL_INDEX_MAPPINGS"),
     ("fuel.services.fuel_ops_es_mappings", "FUEL_OPS_INDEX_MAPPINGS"),
     ("fuel.services.order_es_mappings", "ORDER_INTAKE_INDEX_MAPPINGS"),
+    ("fuel.services.dispatch_board_es_mappings", "DISPATCH_BOARD_INDEX_MAPPINGS"),
     ("fuel.voice.voice_es_mappings", "VOICE_INDEX_MAPPINGS"),
     ("integrations.stripe_es_mappings", "STRIPE_INDEX_MAPPINGS"),
     ("scheduling.services.scheduling_es_mappings", "SCHEDULING_INDEX_MAPPINGS"),

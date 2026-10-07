@@ -127,10 +127,45 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
     },
 }
 
+# Dispatch Board fields (dispatch-board design K2.4, K7.3a). Board-published
+# plans and routes live in the same indices as agent plans; agent writes omit
+# these fields and readers treat a missing ``source`` as ``agent``. Each group
+# is spread into both the create-time mapping and MVP_ADDITIVE_MAPPING_UPDATES
+# so the two can't drift.
+_BOARD_PLAN_FIELDS = {
+    "source":                {"type": "keyword"},   # agent | dispatch_board
+    "board_draft_id":        {"type": "keyword"},
+    "board_load_id":         {"type": "keyword"},
+    "service_date":          {"type": "date"},
+    "shift_id":              {"type": "keyword"},
+    "load_seq":              {"type": "integer"},
+    "driver_id":             {"type": "keyword"},
+    "revision":              {"type": "integer"},
+    "supersedes_plan_id":    {"type": "keyword"},
+    "superseded_by_plan_id": {"type": "keyword"},
+}
+_BOARD_ROUTE_FIELDS = {
+    "source":              {"type": "keyword"},
+    "board_load_id":       {"type": "keyword"},
+    "service_date":        {"type": "date"},
+    "revision":            {"type": "integer"},
+    "supersedes_route_id": {"type": "keyword"},
+}
+#: Redispatch recovery markers on plans, routes and executions (K2.4,
+#: freeze rule 10): which attempt retired or staged a document, and the status
+#: a rollback restores.
+_BOARD_RECOVERY_FIELDS = {
+    "superseded_by_attempt": {"type": "keyword"},
+    "status_before_retire":  {"type": "keyword"},
+    "created_by_attempt":    {"type": "keyword"},
+}
+
 MVP_LOAD_PLANS_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
+            **_BOARD_PLAN_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
             "plan_id":  {"type": "keyword"},
             "truck_id": {"type": "keyword"},
             # Sourcing provenance carried on LoadingPlan. Declared here and in
@@ -196,6 +231,8 @@ MVP_ROUTES_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
+            **_BOARD_ROUTE_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
             "route_id": {"type": "keyword"},
             "truck_id": {"type": "keyword"},
             "plan_id":  {"type": "keyword"},
@@ -486,6 +523,7 @@ MVP_PLAN_EXECUTIONS_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
+            **_BOARD_RECOVERY_FIELDS,
             "execution_id":    {"type": "keyword"},
             "plan_id":         {"type": "keyword"},
             "route_id":        {"type": "keyword"},
@@ -606,10 +644,16 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
             "applied_by":            {"type": "keyword"},
             "applied_at":            {"type": "date"},
             "execution_result":      {"type": "object", "dynamic": True},
+            # Dispatch Board (K2.4).
+            **_BOARD_PLAN_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
         }
     },
     MVP_ROUTES_INDEX: {
         "properties": {
+            # Dispatch Board (K2.4).
+            **_BOARD_ROUTE_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
             "stops": {
                 "type": "nested",
                 "properties": {"order_ids": {"type": "keyword"}},
@@ -640,6 +684,12 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
             # already-created index is rejected in full — the operator loses
             # the whole compartment record, not just the new field.
             "allowed_product_codes": {"type": "keyword"},
+        }
+    },
+    # Dispatch Board redispatch recovery markers (K2.4, freeze rule 10).
+    MVP_PLAN_EXECUTIONS_INDEX: {
+        "properties": {
+            **_BOARD_RECOVERY_FIELDS,
         }
     },
     # F10: canonical product codes on forecasts and priority entries, and the

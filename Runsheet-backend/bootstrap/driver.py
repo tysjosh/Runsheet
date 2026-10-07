@@ -626,8 +626,16 @@ async def initialize(app, container: ServiceContainer) -> None:
             feature_flag_service=feature_flag_service,
             hos_advisory_service=hos_advisory_service,
             scheduling_ws_manager=scheduling_ws_manager,
+            # Gate 0 reads board plans (dispatch-board K8.6, freeze rule
+            # 11 (a)); without a reader it refuses in_transit on bp- runs.
+            board_plan_reader=getattr(es_service, "get_document", None),
         )
         mount_router(app, transition_router)
+        if getattr(es_service, "get_document", None) is None:
+            logger.warning(
+                "Driver transition gate stack wired without a board_plan_reader "
+                "— in_transit is refused on every Dispatch Board run"
+            )
         if inspection_service is None:
             logger.warning(
                 "Driver transition gate stack wired without an "

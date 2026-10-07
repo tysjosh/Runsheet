@@ -81,7 +81,12 @@ from driver.services.order_transition_service import (
     get_work_ref_resolver,
 )
 from driver.services.pod_otp_service import POD_OTP_FIELD
-from errors.exceptions import internal_error, invalid_request
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, internal_error, invalid_request
+from fuel.order_repository import (
+    OrderChangedConcurrentlyError,
+    OrderWriteDiscardedError,
+)
 from fuel.order_state_machine import VALID_STATUS_TRANSITIONS
 from middleware.rate_limiter import driver_rate_key, limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
@@ -262,15 +267,33 @@ async def transition_order_status(
     # has not enabled gating, so nothing is written where no gate ran (R17.19).
     hos_record = evaluation.hos_audit_record()
 
-    updated = await _require_order_service().apply_status_transition(
-        order=order,
-        new_status=target_status,
-        reason=body.reason,
-        notes=body.notes,
-        actor_user_id=ref.driver_id,
-        client_event_timestamp=body.event_timestamp,
-        event_payload_extra={"hos_gate": hos_record} if hos_record else None,
-    )
+    # Guarded write (dispatch-board K8.6, freeze rule 10): the order must still
+    # carry the status and ``last_event_timestamp`` this request read, so a
+    # concurrent relink or dispatcher write is never overwritten by a stale
+    # driver write. The refusal is not stored for idempotency, so the offline
+    # queue's retry with the same key runs again on a fresh read.
+    try:
+        updated = await _require_order_service().apply_status_transition(
+            order=order,
+            new_status=target_status,
+            reason=body.reason,
+            notes=body.notes,
+            actor_user_id=ref.driver_id,
+            client_event_timestamp=body.event_timestamp,
+            event_payload_extra={"hos_gate": hos_record} if hos_record else None,
+            guard_stored_state=True,
+        )
+    except (OrderChangedConcurrentlyError, OrderWriteDiscardedError):
+        logger.info(
+            "Driver transition refused: order=%s changed since it was read",
+            order_id,
+        )
+        raise AppException(
+            error_code=ErrorCode.ORDER_CHANGED_CONCURRENTLY,
+            message="The order changed. Refresh and try again.",
+            status_code=409,
+            details={"order_id": order_id},
+        ) from None
 
     result = _envelope(updated, status_changed=True, request_id=request_id)
     await _store(idempotency, tenant.tenant_id, result)
