@@ -123,6 +123,7 @@ export async function apiErrorFromResponse(
 /** Display names for the module-disabled error codes the backend returns. */
 export const MODULE_DISABLED_NAMES: Record<string, string> = {
   CUSTOMERS_DISABLED: "Customers",
+  DISPATCH_BOARD_DISABLED: "Dispatch Board",
   INVOICING_DISABLED: "Invoicing",
 };
 

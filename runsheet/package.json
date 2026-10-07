@@ -19,6 +19,10 @@
     "test:e2e:debug": "playwright test --debug"
   },
   "dependencies": {
+    "@atlaskit/pragmatic-drag-and-drop": "4.0.0",
+    "@atlaskit/pragmatic-drag-and-drop-auto-scroll": "3.2.1",
+    "@atlaskit/pragmatic-drag-and-drop-hitbox": "3.0.0",
+    "@atlaskit/pragmatic-drag-and-drop-live-region": "2.1.0",
     "@vis.gl/react-google-maps": "^1.5.5",
     "jose": "6.2.3",
     "lucide-react": "^0.545.0",
