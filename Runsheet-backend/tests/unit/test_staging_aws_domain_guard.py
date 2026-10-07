@@ -34,6 +34,11 @@ case "$1 $2" in
     case "$args" in
       *--listener-arns*) echo arn:aws:acm:us-east-2:224535575204:certificate/x ;;
       *)
+        # OI-44: a failed lookup (expired SSO, throttling) must not read as "no :443".
+        if [ "${STUB_LISTENERS_FAIL:-0}" = "1" ]; then
+          echo "An error occurred (Throttling) when calling DescribeListeners" >&2
+          exit 255
+        fi
         if [ "${STUB_HTTPS:-0}" = "1" ]; then
           echo arn:aws:elasticloadbalancing:us-east-2:224535575204:listener/app/runsheet-staging-alb/abc/443
         else
@@ -49,7 +54,13 @@ case "$1 $2" in
       echo None
     fi ;;
   "ecs describe-task-definition")
-    if [ "${STUB_LIVE_HUBSPOT:-0}" = "1" ]; then echo live-form-guid; else echo None; fi ;;
+    if [[ "$args" == *"length(taskDefinition.containerDefinitions)"* ]]; then echo 1
+    elif [ "${STUB_LIVE_HUBSPOT:-0}" = "1" ]; then echo live-form-guid
+    else echo None; fi ;;
+  # `verify`'s in-task Redis probe (OI-44 l).
+  "ecs run-task") echo arn:aws:ecs:us-east-2:224535575204:task/runsheet-staging/probe ;;
+  "ecs describe-tasks") echo 0 ;;
+  "logs tail") echo "2026-10-07T00:00:00 REDIS_VERIFY_OK role=master connected_slaves=1" ;;
   # No image in ECR yet, so the deploy reaches the build step (the sentinel).
   "ecr describe-images") exit 1 ;;
   *) echo None ;;
@@ -60,6 +71,28 @@ exit 0
 DOCKER_STUB = r"""#!/usr/bin/env bash
 echo "$0 $*" >> "$STUB_LOG"
 [ "$1" = "build" ] && exit 97
+exit 0
+"""
+
+#: A healthy API for `verify`: readiness names postgres, /api/orders enforces auth.
+CURL_STUB = r"""#!/usr/bin/env bash
+echo "$0 $*" >> "$STUB_LOG"
+out="" url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -m|-w|-D) shift 2 ;;
+    -*) shift ;;
+    *) url="$1"; shift ;;
+  esac
+done
+case "$url" in
+  */health/ready) body='{"status":"ready","checks":[{"name":"postgres","status":"ok"}]}'; code=200 ;;
+  */api/orders) body='{"detail":"unauthorized"}'; code=401 ;;
+  *) body='ok'; code=200 ;;
+esac
+if [ -n "$out" ] && [ "$out" != "/dev/null" ]; then printf '%s' "$body" > "$out"; fi
+printf '%s' "$code"
 exit 0
 """
 
@@ -85,12 +118,17 @@ def harness(tmp_path):
     tree = tmp_path / "tree"
     (tree / "scripts").mkdir(parents=True)
     script = tree / "scripts" / "staging_aws.sh"
-    shutil.copy(SCRIPT, script)
+    # The script's scratch files (task-def JSON, verify's readiness body) go under
+    # tmp_path rather than the real /tmp, so a test run never touches a live deploy's.
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    script.write_text(SCRIPT.read_text().replace("/tmp/", f"{scratch}/"))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     _write_exe(bin_dir / "aws", AWS_STUB)
     _write_exe(bin_dir / "docker", DOCKER_STUB)
     _write_exe(bin_dir / "git", GIT_STUB)
+    _write_exe(bin_dir / "curl", CURL_STUB)
     log = tmp_path / "stub.log"
     log.write_text("")
 
@@ -195,10 +233,35 @@ def test_e_staging_domain_from_env_file(harness):
     assert "api.staging.runsheetops.com" in plan.stdout
 
 
-@pytest.mark.parametrize("command", ["plan", "status"])
+@pytest.mark.parametrize("command", ["plan", "status", "verify"])
 def test_f_read_only_commands_work_without_domain(harness, command):
-    proc, _ = harness(command, https=True)
+    # OI-44 (l): `verify` is never refused by the DOMAIN guard; it checks the
+    # plaintext ALB origin end to end against the curl stub.
+    proc, log = harness(command, https=True)
     assert proc.returncode == 0, proc.stderr
+    if command == "verify":
+        assert "staging verified at http://runsheet-staging-alb-1" in proc.stderr
+        assert "curl" in log
+
+
+def test_j_listener_lookup_error_refuses_undomained_deploy(harness):
+    """OI-44: an AWS error reading the listeners fails closed, not open."""
+    proc, log = harness("deploy", extra_env={"STUB_LISTENERS_FAIL": "1"})
+    assert proc.returncode not in (0, 97), proc.stderr
+    assert "could not read the listeners" in proc.stderr
+    assert "docker build" not in log
+
+
+def test_k_down_warning_lists_dns_and_certificates(harness):
+    """OI-44: the typed DESTROY prompt names every DNS/ACM deletion it will make."""
+    proc, log = harness("down", domain="staging.runsheetops.com", stdin="no\n")
+    assert proc.returncode != 0
+    assert "aborted" in proc.stderr
+    assert "Route 53 A record api.staging.runsheetops.com in the runsheetops.com hosted zone" in proc.stdout
+    assert "ACM certificates for api.staging.runsheetops.com and app.staging.runsheetops.com" in proc.stdout
+    assert "Route 53 hosted zone runsheetops.com itself" in proc.stdout
+    assert " delete-" not in log
+    assert "change-resource-record-sets" not in log
 
 
 def test_g_staging_domain_from_main_checkout(harness, fake_main):

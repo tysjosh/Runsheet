@@ -438,9 +438,17 @@ alb_arn() {
     --query 'LoadBalancers[0].LoadBalancerArn' --output text 2>/dev/null | grep -v '^None$' || true
 }
 
+#: OI-44. Empty with status 0 means "no ALB" or "no :443 listener". A failed
+#: describe-listeners (expired SSO, throttling) returns 1 instead of looking the
+#: same as a plaintext ALB, so require_tls_domain can fail closed.
 https_listener_arn() {
-  aws elbv2 describe-listeners --load-balancer-arn "$(alb_arn)" \
-    --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text 2>/dev/null | grep -v '^None$' || true
+  local alb out
+  alb="$(alb_arn)"
+  [ -n "$alb" ] || return 0
+  out="$(aws elbv2 describe-listeners --load-balancer-arn "$alb" \
+    --query 'Listeners[?Port==`443`].ListenerArn | [0]' --output text 2>/dev/null)" || return 1
+  if [ -n "$out" ] && [ "$out" != "None" ]; then echo "$out"; fi
+  return 0
 }
 
 #: N-new-4. Refuse to build when DOMAIN is unset but the ALB already serves HTTPS:
@@ -450,7 +458,8 @@ https_listener_arn() {
 require_tls_domain() {
   [ -n "$DOMAIN" ] && return 0
   local listener cert host suggest
-  listener="$(https_listener_arn)"
+  listener="$(https_listener_arn)" \
+    || die "$1 refused: could not read the listeners on ${ALB_NAME}, so it is unknown whether it serves HTTPS; set DOMAIN or retry"
   if [ -z "$listener" ]; then
     warn "no HTTPS listener on ${ALB_NAME}; $1 will use plaintext origins"
     return 0
@@ -2230,6 +2239,18 @@ cmd_down() {
   # --skip-final-snapshot, so every row in staging goes with it. That is the right
   # default for a synthetic environment and the wrong one for anything else, which
   # is why the confirmation is typed rather than a -y flag.
+  #
+  # OI-44. DOMAIN can be set implicitly (STAGING_DOMAIN in .env.staging), so the
+  # DNS and certificate deletions below are listed whenever they will run.
+  local _down_dns
+  if [ -n "$DOMAIN" ]; then
+    _down_dns="  Route 53 A record ${API_HOST} in the ${ZONE_DOMAIN} hosted zone
+  ACM certificates for ${API_HOST} and ${APP_HOST}
+  Route 53 hosted zone ${ZONE_DOMAIN} itself -- attempted; Route 53 refuses while
+    any other record remains (${APP_HOST} for Vercel, production records)"
+  else
+    _down_dns="  No DNS records, certificates or hosted zone (DOMAIN is unset)"
+  fi
   cat <<WARNING
 This DESTROYS the Runsheet staging environment in ${AWS_REGION}:
 
@@ -2242,6 +2263,7 @@ This DESTROYS the Runsheet staging environment in ${AWS_REGION}:
   S3 bucket ${FILES_BUCKET} and every object in it (raw BOL / POD uploads)
   CodeBuild ${CB_PROJECT}, role ${CB_ROLE}, bucket ${CB_BUCKET}, secret ${SECRET_MAPS}
   Security groups, subnet group, log group, ECR repo ${ECR_REPO} and its images
+${_down_dns}
 
 It does NOT touch the default VPC, its subnets, or anything belonging to the
 unrelated "cleanup" project in this account.
