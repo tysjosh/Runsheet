@@ -470,7 +470,7 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         }
     except Exception as e:
         logger.exception("Error getting fleet summary")
-        raise internal_error(message="Failed to fetch fleet summary", details={"error": str(e)})
+        raise internal_error(message="Failed to fetch fleet summary") from e
 
 
 
@@ -556,7 +556,7 @@ async def get_trucks(request: Request, tenant: TenantContext = Depends(get_tenan
         }
     except Exception as e:
         logger.exception("Error getting trucks")
-        raise internal_error(message="Failed to fetch trucks", details={"error": str(e)})
+        raise internal_error(message="Failed to fetch trucks") from e
 
 
 @router.get("/fleet/trucks/{truck_id}")
@@ -630,7 +630,7 @@ async def get_truck_by_id(truck_id: str, request: Request, tenant: TenantContext
         raise
     except Exception as e:
         logger.exception("Error getting truck %s", truck_id)
-        raise internal_error(message="Failed to fetch truck", details={"truck_id": truck_id, "error": str(e)})
+        raise internal_error(message="Failed to fetch truck", details={"truck_id": truck_id}) from e
 
 def _format_asset(doc: dict) -> dict:
     """Format an ES document as an Asset response object."""
@@ -795,7 +795,7 @@ async def get_fleet_assets(
         }
     except Exception as e:
         logger.exception("Error getting fleet assets")
-        raise internal_error(message="Failed to fetch fleet assets", details={"error": str(e)})
+        raise internal_error(message="Failed to fetch fleet assets") from e
 
 
 @router.get("/fleet/assets/{asset_id}")
@@ -847,7 +847,7 @@ async def get_asset_by_id(asset_id: str, request: Request, tenant: TenantContext
         raise
     except Exception as e:
         logger.exception("Error getting asset %s", asset_id)
-        raise internal_error(message="Failed to fetch asset", details={"asset_id": asset_id, "error": str(e)})
+        raise internal_error(message="Failed to fetch asset", details={"asset_id": asset_id}) from e
 
 @router.post("/fleet/assets")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
@@ -921,7 +921,7 @@ async def create_fleet_asset(body: CreateAsset, request: Request, tenant: Tenant
         raise
     except Exception as e:
         logger.exception("Error creating asset")
-        raise internal_error(message="Failed to create asset", details={"error": str(e)})
+        raise internal_error(message="Failed to create asset") from e
 
 
 async def _get_tenant_asset_doc(asset_id: str, tenant_id: str) -> Optional[dict]:
@@ -1027,7 +1027,7 @@ async def update_fleet_asset(asset_id: str, body: UpdateAsset, request: Request,
         raise
     except Exception as e:
         logger.exception("Error updating asset %s", asset_id)
-        raise internal_error(message="Failed to update asset", details={"asset_id": asset_id, "error": str(e)})
+        raise internal_error(message="Failed to update asset", details={"asset_id": asset_id}) from e
 
 
 # Support Management
@@ -1072,7 +1072,7 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
         }
     except Exception as e:
         logger.exception("Error getting support tickets")
-        raise internal_error(message="Failed to fetch support tickets", details={"error": str(e)})
+        raise internal_error(message="Failed to fetch support tickets") from e
 
 # Analytics
 @router.get("/analytics/metrics")
@@ -1189,7 +1189,7 @@ async def semantic_search(
                 "timestamp": utcnow().isoformat()
             }
         logger.exception("Error in semantic search")
-        raise internal_error(message="Failed to perform semantic search", details={"error": str(e)})
+        raise internal_error(message="Failed to perform semantic search") from e
 
 # Data Management
 #
@@ -1261,7 +1261,7 @@ async def cleanup_duplicate_data(request: Request, tenant: TenantContext = Depen
         raise
     except Exception as e:
         logger.exception("Error during data cleanup: %s", e)
-        raise internal_error(message="Failed to clean up data", details={"error": str(e)})
+        raise internal_error(message="Failed to clean up data") from e
 
 
 # ---------------------------------------------------------------------------

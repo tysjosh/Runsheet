@@ -304,7 +304,7 @@ async def generate_plan(
         )
     except Exception as e:
         logger.error("Failed to generate plan: %s", e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        raise internal_error(message="Plan could not be generated", details={"tenant_id": tenant_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -497,7 +497,7 @@ async def replan(
         }
     except Exception as e:
         logger.error("Failed to trigger replan for %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Replan could not be started", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -757,7 +757,7 @@ async def configure_compartments(
         raise
     except Exception as e:
         logger.error("Failed to configure compartments for %s: %s", truck_id, e)
-        raise internal_error(message=str(e), details={"truck_id": truck_id})
+        raise internal_error(message="Compartments could not be configured", details={"truck_id": truck_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -811,7 +811,7 @@ async def list_plans(
         )
     except Exception as e:
         logger.error("Failed to list plans: %s", e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        raise internal_error(message="Plans could not be loaded", details={"tenant_id": tenant_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +911,7 @@ async def approve_plan(
         raise
     except Exception as e:
         logger.error("Failed to approve plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan could not be approved", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1042,7 +1042,7 @@ async def reject_plan(
         raise
     except Exception as e:
         logger.error("Failed to reject plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan could not be rejected", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1258,7 +1258,7 @@ async def driver_checkin(
         raise
     except Exception as e:
         logger.error("Failed to record check-in for plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Check-in could not be recorded", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1344,7 +1344,7 @@ async def get_plan_outcomes(
         raise
     except Exception as e:
         logger.error("Failed to get outcomes for plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan outcomes could not be loaded", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1424,7 +1424,7 @@ async def get_plan_costs(
         raise
     except Exception as e:
         logger.error("Failed to get costs for plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan costs could not be loaded", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1469,4 +1469,4 @@ async def update_cost_config(
 
     except Exception as e:
         logger.error("Failed to update cost config for tenant %s: %s", tenant_id, e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        raise internal_error(message="Cost config could not be updated", details={"tenant_id": tenant_id}) from e

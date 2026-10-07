@@ -244,8 +244,7 @@ async def list_notifications(
         logger.exception("Failed to list notifications")
         raise internal_error(
             message="Failed to list notifications",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 @router.get("/summary")
@@ -276,8 +275,7 @@ async def get_notification_summary(
         logger.exception("Failed to get notification summary")
         raise internal_error(
             message="Failed to get notification summary",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 # ===================================================================
@@ -309,8 +307,7 @@ async def list_rules(
         logger.exception("Failed to list notification rules")
         raise internal_error(
             message="Failed to list notification rules",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 @router.patch("/rules/{rule_id}", dependencies=[Depends(notification_write_dependency)])
@@ -342,8 +339,8 @@ async def update_rule(
         logger.exception("Failed to update notification rule %s", rule_id)
         raise internal_error(
             message="Failed to update notification rule",
-            details={"rule_id": rule_id, "error": str(e)},
-        )
+            details={"rule_id": rule_id},
+        ) from e
 
 
 # ===================================================================
@@ -381,8 +378,7 @@ async def list_preferences(
         logger.exception("Failed to list notification preferences")
         raise internal_error(
             message="Failed to list notification preferences",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 @router.get("/preferences/{customer_id}")
@@ -407,8 +403,8 @@ async def get_preference(
         logger.exception("Failed to get preference for customer %s", customer_id)
         raise internal_error(
             message="Failed to get notification preference",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
 @router.put("/preferences/{customer_id}", dependencies=[Depends(notification_write_dependency)])
@@ -435,8 +431,8 @@ async def upsert_preference(
         logger.exception("Failed to upsert preference for customer %s", customer_id)
         raise internal_error(
             message="Failed to upsert notification preference",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
 @router.put("/preferences/{customer_id}/template-opt-outs", dependencies=[Depends(notification_write_dependency)])
@@ -471,8 +467,8 @@ async def update_template_opt_outs(
         )
         raise internal_error(
             message="Failed to update template opt-out preferences",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
 @router.get("/preferences/{customer_id}/template-opt-outs")
@@ -506,8 +502,8 @@ async def get_template_opt_outs(
         )
         raise internal_error(
             message="Failed to get template opt-out preferences",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
 # ===================================================================
@@ -543,8 +539,7 @@ async def list_templates(
         logger.exception("Failed to list notification templates")
         raise internal_error(
             message="Failed to list notification templates",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 @router.put("/templates/{template_id}", dependencies=[Depends(notification_write_dependency)])
@@ -576,8 +571,8 @@ async def update_template(
         logger.exception("Failed to update notification template %s", template_id)
         raise internal_error(
             message="Failed to update notification template",
-            details={"template_id": template_id, "error": str(e)},
-        )
+            details={"template_id": template_id},
+        ) from e
 
 
 # ===================================================================
@@ -608,8 +603,8 @@ async def get_notification(
         logger.exception("Failed to get notification %s", notification_id)
         raise internal_error(
             message="Failed to get notification",
-            details={"notification_id": notification_id, "error": str(e)},
-        )
+            details={"notification_id": notification_id},
+        ) from e
 
 
 @router.post("/{notification_id}/retry", dependencies=[Depends(notification_write_dependency)])
@@ -645,5 +640,5 @@ async def retry_notification(
         logger.exception("Failed to retry notification %s", notification_id)
         raise internal_error(
             message="Failed to retry notification",
-            details={"notification_id": notification_id, "error": str(e)},
-        )
+            details={"notification_id": notification_id},
+        ) from e
