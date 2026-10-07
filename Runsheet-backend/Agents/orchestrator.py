@@ -285,6 +285,7 @@ class AgentOrchestrator:
         session_id: Optional[str] = None,
         request_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Classify intent, delegate, and yield normalized chat events.
 
@@ -307,6 +308,12 @@ class AgentOrchestrator:
 
         ``user_id`` is the verified caller and is recorded on both activity
         entries (OI-60).
+
+        ``history`` is the caller's text-only transcript for this (tenant,
+        user, session), loaded by ``LogisticsAgent`` (OI-17). Only the simple
+        path uses it: it reaches each specialist as ``context["history"]``.
+        The complex (planner) path ignores it, including its fallback to
+        simple execution.
         """
         start_time = time.monotonic()
 
@@ -352,7 +359,7 @@ class AgentOrchestrator:
         else:
             events = self._stream_simple_request(
                 user_message, targets, tenant_id, session_id, request_id, failures,
-                dropped,
+                dropped, history=history,
             )
         async for event in events:
             if event["type"] == "text":
@@ -624,6 +631,7 @@ class AgentOrchestrator:
         request_id: Optional[str],
         failures: Dict[str, Optional[AgentServiceError]],
         dropped: Optional[List[str]] = None,
+        history: Optional[List[Dict[str, str]]] = None,
     ) -> AsyncIterator[ChatEvent]:
         """Run each matched specialist in turn and stream its events.
 
@@ -641,6 +649,9 @@ class AgentOrchestrator:
         context = {"tenant_id": tenant_id}
         if session_id:
             context["session_id"] = session_id
+        if history:
+            # The specialist copies this into a fresh Agent per call (OI-17).
+            context["history"] = list(history)
 
         buffered = len(targets) > 1
         answers: List[Tuple[str, str]] = []

@@ -214,7 +214,8 @@ async def clear_chat_endpoint(
     # awaited, so it removes exactly the history the caller's next turn would
     # load and never another tenant's entry under the same session id (F1).
     # Specialists keep no history between requests, so the session store
-    # entry is the caller's whole history.
+    # entries (the legacy key and its ``orch:`` transcript, OI-17) are the
+    # caller's whole history.
     #
     # A False result means the store delete failed (it is True when there was
     # nothing to clear). Reporting success then would be wrong: the history is

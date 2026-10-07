@@ -203,7 +203,8 @@ class _PartialOrchestrator:
     test exercises ``chat_streaming`` alone)."""
 
     async def route_stream(
-        self, user_message, tenant_id, session_id=None, request_id=None, user_id=None
+        self, user_message, tenant_id, session_id=None, request_id=None, user_id=None,
+        history=None,
     ):
         yield status_event("routing", targets=["fleet", "fuel"])
         yield text_event("12 trucks")

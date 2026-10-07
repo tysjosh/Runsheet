@@ -17,7 +17,7 @@ import asyncio
 import os
 import logging
 import time
-from typing import AsyncGenerator, Optional, Any
+from typing import AsyncGenerator, Dict, List, Optional, Any
 from datetime import datetime
 from strands import Agent
 # The model itself is built by Agents.model_provider.build_agent_model, which
@@ -474,6 +474,76 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to save conversation history for session {session_id}: {e}")
             return False
     
+    # ------------------------------------------------------------------
+    # Orchestrator transcript (OI-17)
+    #
+    # Freeze decision (plan §E2): a text-only transcript of at most
+    # ``_ORCH_MAX_MESSAGES`` messages, each at most ``_ORCH_MAX_CHARS``
+    # characters, under ``orch:{tenant}:{user}:{session}`` with the store's
+    # default TTL. No tool input or output is stored. The simple path uses it;
+    # the planner path doesn't. A store failure means no history, never a
+    # failed request (Requirement 8.6).
+    # ------------------------------------------------------------------
+
+    _ORCH_MAX_MESSAGES = 20
+    _ORCH_MAX_CHARS = 4000
+
+    @classmethod
+    def _orchestrator_key(
+        cls,
+        tenant_id: Optional[str],
+        user_id: Optional[str],
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        """Store key for the orchestrator transcript, or ``None`` (fail closed)."""
+        key = cls._session_key(tenant_id, user_id, session_id)
+        return f"orch:{key}" if key else None
+
+    async def _load_orchestrator_transcript(self, key: str) -> List[Dict[str, str]]:
+        """The stored transcript for ``key``; ``[]`` when absent or on any error."""
+        if not await self._ensure_session_store_connected():
+            return []
+        try:
+            data = await self._session_store.get(key)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load orchestrator transcript: {e}")
+            return []
+        messages = (data or {}).get("messages") if isinstance(data, dict) else None
+        return [
+            {"role": m["role"], "content": m["content"]}
+            for m in messages or []
+            if isinstance(m, dict)
+            and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+        ]
+
+    async def _save_orchestrator_transcript(
+        self,
+        key: str,
+        history: List[Dict[str, str]],
+        message: str,
+        answer: str,
+    ) -> None:
+        """Append one turn, trim to the cap, and store it. Errors are logged only."""
+        cap = self._ORCH_MAX_CHARS
+        messages = list(history) + [
+            {"role": "user", "content": message[:cap]},
+            {"role": "assistant", "content": answer[:cap]},
+        ]
+        messages = messages[-self._ORCH_MAX_MESSAGES:]
+        # A transcript the model sees must open with a user turn.
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
+        if not await self._ensure_session_store_connected():
+            return
+        try:
+            await self._session_store.set(key, {
+                "messages": messages,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            })
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save orchestrator transcript: {e}")
+
     async def _clear_session(
         self,
         session_id: str,
@@ -500,6 +570,8 @@ class LogisticsAgent:
         
         try:
             await self._session_store.delete(key)
+            # The orchestrator transcript for the same conversation (OI-17).
+            await self._session_store.delete(f"orch:{key}")
             logger.info(f"🗑️ Cleared session {session_id}")
             return True
         except Exception as e:
@@ -708,6 +780,12 @@ class LogisticsAgent:
         if _orchestrator is not None:
             yielded_any = False
             saw_error = False
+            # Per-(tenant, user, session) transcript (OI-17). No key, no store.
+            orch_key = self._orchestrator_key(tenant_id, user_id, session_id)
+            history = (
+                await self._load_orchestrator_transcript(orch_key) if orch_key else []
+            )
+            answer_parts: List[str] = []
             try:
                 logger.info("🔀 Routing request through AgentOrchestrator")
                 # Tenant id comes from the caller (injected by the /api/chat
@@ -719,12 +797,16 @@ class LogisticsAgent:
                     session_id=session_id,
                     request_id=request_id,
                     user_id=user_id,
+                    history=history or None,
                 ):
                     yielded_any = True
                     # A partial error (one specialist failed, the rest of
                     # the answer stands) is not a failed response (N4).
                     if event.get("type") == "error" and not event.get("partial"):
                         saw_error = True
+                    elif event.get("type") == "text":
+                        # Only answer text is remembered, never tool events.
+                        answer_parts.append(event.get("content") or "")
                     yield event
             except Exception as e:
                 if yielded_any or isinstance(e, AgentServiceError):
@@ -754,6 +836,11 @@ class LogisticsAgent:
                 self._record_response_metric(
                     start_time, mode, success=not saw_error, method="orchestrator"
                 )
+                answer = "".join(answer_parts).strip()
+                if orch_key and not saw_error and answer:
+                    await self._save_orchestrator_transcript(
+                        orch_key, history, message, answer
+                    )
                 return
         
         # ------------------------------------------------------------------

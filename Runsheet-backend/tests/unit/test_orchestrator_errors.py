@@ -447,7 +447,8 @@ class _ErrorOrchestrator:
         self.user_ids: List[Optional[str]] = []
 
     async def route_stream(
-        self, user_message, tenant_id, session_id=None, request_id=None, user_id=None
+        self, user_message, tenant_id, session_id=None, request_id=None, user_id=None,
+        history=None,
     ):
         self.user_ids.append(user_id)
         yield status_event("routing", targets=["fleet"])

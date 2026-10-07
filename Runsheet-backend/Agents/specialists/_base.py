@@ -19,7 +19,7 @@ Validates:
 """
 
 import logging
-from typing import AsyncIterator, Dict, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from strands import Agent
 from strands.models.litellm import LiteLLMModel
@@ -53,20 +53,34 @@ class SpecialistAgent:
             "✅ %s initialized with %d tools", type(self).__name__, len(self.TOOLS)
         )
 
-    def _new_agent(self) -> Agent:
-        """Build a Strands ``Agent`` with empty history for one request.
+    def _new_agent(self, history: Optional[List[Dict[str, Any]]] = None) -> Agent:
+        """Build a Strands ``Agent`` for one request.
 
         Never cache the result: its ``messages`` list must not outlive the
         call that created it (F1).
+
+        ``history`` is the caller's own text-only transcript
+        (``[{"role": "user"|"assistant", "content": str}, ...]``, OI-17). It
+        is copied into a new ``messages`` list here, so two calls never share
+        one, even when given the same transcript.
 
         ``callback_handler=None`` installs Strands' null handler. The default
         ``PrintingCallbackHandler`` writes every streamed answer and tool call
         to stdout, which on staging put tenant data in CloudWatch (F13).
         """
+        messages = [
+            {"role": m["role"], "content": [{"text": m["content"]}]}
+            for m in history or ()
+            if isinstance(m, dict)
+            and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+            and m["content"]
+        ]
         return Agent(
             model=self._model,
             system_prompt=self.SYSTEM_PROMPT,
             tools=list(self.TOOLS),
+            messages=messages,
             callback_handler=None,
         )
 
@@ -80,13 +94,15 @@ class SpecialistAgent:
 
         Args:
             task: The natural language task to process.
-            context: Optional context dict (e.g. tenant_id, session_id).
+            context: Optional context dict (tenant_id, session_id, and the
+                caller's ``history`` transcript on the orchestrator's simple
+                path, OI-17).
 
         Returns:
             The agent's response as a string.
         """
         prompt, tenant_id = self._prompt(task, context)
-        agent = self._new_agent()
+        agent = self._new_agent((context or {}).get("history"))
         with set_current_tenant(tenant_id):
             result = await agent.invoke_async(prompt)
         return str(result)
@@ -112,7 +128,7 @@ class SpecialistAgent:
         propagate; the orchestrator classifies and retries them.
         """
         prompt, tenant_id = self._prompt(task, context)
-        agent = self._new_agent()
+        agent = self._new_agent((context or {}).get("history"))
         tool_names: Dict[str, str] = {}
         with set_current_tenant(tenant_id):
             async for event in agent.stream_async(prompt):
