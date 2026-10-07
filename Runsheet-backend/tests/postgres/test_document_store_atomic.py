@@ -100,14 +100,27 @@ async def test_the_transform_cannot_mutate_the_stored_document_in_place(
 
 
 async def test_the_tenant_column_follows_the_transformed_document(store, index_name):
-    await store.index_document(index_name, "a", {"tenant_id": TENANT})
-    await store.atomic_update(
-        index_name, "a", lambda c: {**c, "tenant_id": "moved-tenant"}
-    )
+    # A tenantless row adopted by the transform lifts the tenant into the column.
+    await store.index_document(index_name, "a", {"name": "legacy"})
+    await store.atomic_update(index_name, "a", lambda c: {**c, "tenant_id": TENANT})
     found = await store.search_documents(
-        index_name, {"query": {"term": {"tenant_id": "moved-tenant"}}}
+        index_name, {"query": {"term": {"tenant_id": TENANT}}}
     )
     assert found["hits"]["total"]["value"] == 1
+
+
+async def test_a_transform_cannot_move_a_row_to_another_tenant(store, index_name):
+    """L1 defence in depth: a tenanted row is never re-homed."""
+    import pytest
+
+    from persistence.document_store import CrossTenantWriteError
+
+    await store.index_document(index_name, "b", {"tenant_id": TENANT})
+    with pytest.raises(CrossTenantWriteError):
+        await store.atomic_update(
+            index_name, "b", lambda c: {**c, "tenant_id": "moved-tenant"}
+        )
+    assert (await store.get_document(index_name, "b"))["tenant_id"] == TENANT
 
 
 # ---------------------------------------------------------------------------
