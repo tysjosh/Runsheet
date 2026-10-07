@@ -39,6 +39,10 @@ neither in ``CORS_ORIGINS`` nor same-origin with ``Host`` is rejected the same
 way (Cross-Site WebSocket Hijacking, staging finding F2). See
 :func:`_handshake_origin_allowed`.
 
+An open socket re-checks its session handle every ``WS_SESSION_RECHECK_SECONDS``
+and is closed with ``4001 Session ended`` after sign-out or revoke (OI-11). See
+:func:`_watch_session`.
+
 The session-token value is **never** written to application logs: log lines emit
 only ``tenant_id`` and the endpoint path, never the credential (Req 7.4, 7.5).
 
@@ -52,6 +56,8 @@ Validates: Requirements 7.1, 7.2, 7.3, 7.4, 7.5
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime
@@ -270,7 +276,18 @@ async def _resolve_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
         return None
     verifier = _ws_session_verifier or _default_ws_verify
     access_token, anti_csrf = _extract_session_credential(websocket)
-    return await verifier(access_token, anti_csrf)
+    claims = await verifier(access_token, anti_csrf)
+    if claims:
+        # Remember the session handle so _ws_loop can re-check that the
+        # session is still alive after sign-out or revoke (OI-11).
+        handle = claims.get("sessionHandle")
+        try:
+            websocket.state.ws_session_handle = (
+                handle if isinstance(handle, str) and handle else None
+            )
+        except Exception:  # noqa: BLE001 — a fake socket without state
+            pass
+    return claims
 
 
 async def _authenticate_tenant(websocket: WebSocket) -> Optional[str]:
@@ -303,15 +320,111 @@ async def _authenticate_driver(websocket: WebSocket) -> Optional[Tuple[str, str]
 
 
 # ---------------------------------------------------------------------------
+# Session revalidation for long-lived sockets (OI-11)
+# ---------------------------------------------------------------------------
+#
+# The handshake verifies the session once. A socket opened before sign-out or
+# revoke would otherwise stay open for as long as the client keeps it. Every
+# ``WS_SESSION_RECHECK_SECONDS`` the loop asks whether the session handle from
+# the handshake is still alive and closes the socket with ``4001 Session
+# ended`` when it isn't. The check is by session handle, not access token, so
+# an access-token refresh never closes a healthy socket.
+
+# Alive-check seam: ``async (session_handle) -> Optional[bool]``. ``True`` is
+# alive, ``False`` is ended, ``None`` is unknown (the socket stays open).
+WSSessionAliveCheck = Callable[[str], Awaitable[Optional[bool]]]
+
+_ws_session_alive_check: Optional[WSSessionAliveCheck] = None
+
+
+def configure_ws_session_alive_check(check: Optional[WSSessionAliveCheck]) -> None:
+    """Install the session alive-check used by the WS revalidation task.
+
+    Passing ``None`` resets to the default SDK-backed check. Tests use this
+    seam to drive revalidation without a live managed core.
+    """
+    global _ws_session_alive_check
+    _ws_session_alive_check = check
+
+
+async def _default_ws_session_alive(session_handle: str) -> Optional[bool]:
+    """Ask the SuperTokens core whether *session_handle* is still alive.
+
+    Returns ``None`` on any error: a core blip must not disconnect every
+    client, so a transient failure keeps the socket open (logged at WARNING).
+    """
+    try:
+        from supertokens_python.recipe.session.asyncio import (
+            get_session_information,
+        )
+
+        return await get_session_information(session_handle) is not None
+    except Exception as exc:  # noqa: BLE001 — unknown, keep the socket open
+        _logger().warning("WebSocket session re-check failed: %s", exc)
+        return None
+
+
+def _session_recheck_seconds() -> float:
+    """``settings.ws_session_recheck_seconds`` (0 disables), default 60."""
+    try:
+        from config.settings import get_settings
+
+        value = getattr(get_settings(), "ws_session_recheck_seconds", 60)
+    except Exception:  # noqa: BLE001 — settings unavailable, keep the default
+        return 60.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 60.0
+    return float(value)
+
+
+async def _watch_session(websocket, session_handle, interval, endpoint, tenant_id):
+    """Close *websocket* with 4001 once its session is no longer alive."""
+    check = _ws_session_alive_check or _default_ws_session_alive
+    while True:
+        await asyncio.sleep(interval)
+        alive = await check(session_handle)
+        if alive is False:
+            _logger().info(
+                "WebSocket session ended; closing %s (tenant_id=%s)",
+                endpoint, tenant_id,
+            )
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4001, reason="Session ended")
+            return
+
+
+def _start_session_watch(websocket, endpoint, tenant_id) -> Optional[asyncio.Task]:
+    """Start the revalidation task, or return ``None`` when there is no
+    session handle or the interval is 0."""
+    try:
+        handle = getattr(websocket.state, "ws_session_handle", None)
+    except Exception:  # noqa: BLE001 — a fake socket without state
+        handle = None
+    if not isinstance(handle, str) or not handle:
+        return None
+    interval = _session_recheck_seconds()
+    if interval <= 0:
+        return None
+    return asyncio.create_task(
+        _watch_session(websocket, handle, interval, endpoint, tenant_id)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Shared loop + JSON echo handler
 # ---------------------------------------------------------------------------
 
 
 async def _ws_loop(websocket, mgr, endpoint, tenant_id, handler=None,
                    check_connected=False):
-    """Shared WebSocket receive loop with disconnect + error handling."""
+    """Shared WebSocket receive loop with disconnect + error handling.
+
+    Runs the session revalidation task (OI-11) alongside the receive loop and
+    cancels it when the loop ends.
+    """
     if check_connected and websocket not in mgr._clients:
         return
+    watcher = _start_session_watch(websocket, endpoint, tenant_id)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -336,6 +449,10 @@ async def _ws_loop(websocket, mgr, endpoint, tenant_id, handler=None,
                 "Failed to close WebSocket on %s: %s", endpoint, close_err
             )
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watcher
         await mgr.disconnect(websocket)
 
 

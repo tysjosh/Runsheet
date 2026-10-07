@@ -459,6 +459,16 @@ class Settings(BaseSettings):
         ge=60,
         description="Access-token / session lifetime in seconds (Req 2.7).",
     )
+    ws_session_recheck_seconds: float = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Env WS_SESSION_RECHECK_SECONDS. How often an open WebSocket asks "
+            "the SuperTokens core whether its session handle is still alive; "
+            "a signed-out or revoked session is closed with 4001 (OI-11). "
+            "0 disables the re-check."
+        ),
+    )
     session_check_database: bool = Field(
         default=True,
         description=(
