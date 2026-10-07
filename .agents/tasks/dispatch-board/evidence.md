@@ -241,6 +241,8 @@ Free disk before/after: 7.6 GB (no Docker or frontend build was run). Scratch fi
 
 #### Phase 2 review fixes (phase2-review.json, CHANGES_REQUESTED)
 
+Commit `48cf645`.
+
 | Finding | Fix | Named test(s) |
 |---|---|---|
 | P2-1 (MEDIUM) redispatch lease renewed only at phase boundaries | `BoardRedispatchService._renew(run)`: one owner- and attempt-guarded `update_lanes` that moves `lease_until` on every group lane and raises `_LeaseLost` when refused. Called before each retire load, each staged load, each relink, each rollback relink-back, and before every try inside `_with_retries` (so before each apply/amend load and each in-place retry). | `test_freeze_rule_5_slow_apply_renews_the_lease_so_a_retry_is_refused` (200 s inside one apply phase; a Retry mid-phase gets 409 `publishing`), `test_freeze_rule_5_lost_lease_stops_relinks_before_the_next_one` (owner taken after the first relink; the second relink is never called; outcome `lease_lost`), `test_freeze_rule_5_worker_past_its_lease_stops_after_a_takeover` (worker stalls past its lease, a Retry takes over; old worker ends `lease_lost`, new one publishes, one execution per plan, one assignment per driver). With `_renew` disabled the first two fail; the third pins the end state. |
