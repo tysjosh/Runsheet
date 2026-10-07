@@ -48,13 +48,13 @@ function LoadChip({
   const index = lane.loads.findIndex((l) => l.load_id === load.load_id);
   useDraggableItem(ref, {
     item,
-    enabled: !api.readOnly,
+    enabled: !api.readOnly && !api.laneLocked(lane.truck_id),
     previewLabel: () => previewLabel(item, null),
   });
   const over = useDropTarget(ref, {
     target: { target: "load-position", truckId: lane.truck_id, index },
     enabled: true,
-    readOnly: api.readOnly,
+    readOnly: api.readOnly || api.laneLocked(lane.truck_id),
   });
   const placingLoad = api.placeItem?.kind === "load";
   const terminal = load.terminal_id ?? "No terminal";
@@ -179,7 +179,7 @@ export function LoadBlock({
       index: null,
     },
     enabled: true,
-    readOnly: api.readOnly,
+    readOnly: api.readOnly || api.laneLocked(lane.truck_id),
     slotSelector: "[data-stop-card]",
   });
   const cardW = CARD_WIDTH[api.view.density];

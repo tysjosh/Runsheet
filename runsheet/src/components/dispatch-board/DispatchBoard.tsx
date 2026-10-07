@@ -9,6 +9,11 @@
  * (`BoardContext`). Renders the toolbar, banners, every load state, the
  * trays, the lanes grid, Place mode, the shortcut help and the two live
  * regions (mounted at page load, R19.1).
+ *
+ * Phase 6 adds the detail drawer, the Publish review and its progress
+ * (socket + polling), failed / recovering publish banners, agent
+ * suggestions with Generate plan, the map split view and live truck
+ * positions for the Running late badge (R12, R13, R15.4, R16, R17, R22.3).
  */
 import { Truck } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,14 +33,27 @@ import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   type BoardMode,
   type BoardSnapshot,
+  boardErrorCode,
   getBoard,
+  getPublish,
   isAbortError,
   type LaneView,
+  newClientId,
+  type PublishAccepted,
+  type PublishResult,
+  type PublishStatus,
+  publishBoard,
 } from "../../services/dispatchBoardApi";
+import { generatePlan } from "../../services/fuelApi";
+import { getCurrentTenantId } from "../../services/tenant";
 import { getCurrentUserId } from "../../utils/auth";
 import { EmptyState, LoadErrorState, ToastContainer, useToasts } from "../ui";
 import { BoardBanners } from "./BoardBanners";
-import { BoardContext } from "./BoardContext";
+import {
+  BoardContext,
+  type BoardUiActions,
+  type DrawerTarget,
+} from "./BoardContext";
 import { BoardLiveRegion, useAnnouncer } from "./BoardLiveRegion";
 import { BoardToolbar } from "./BoardToolbar";
 import { AssignToMenu } from "./dialogs/AssignToMenu";
@@ -45,9 +63,17 @@ import {
   ShortcutHelpDialog,
   writeSingleKeyEnabled,
 } from "./dialogs/ShortcutHelpDialog";
+import { DetailDrawer } from "./drawer/DetailDrawer";
+import { useTerminalIndex } from "./drawer/useTerminalIndex";
 import { BoardGrid } from "./grid/BoardGrid";
 import { handleShortcut } from "./keyboard/useBoardShortcuts";
+import { LaneRouteMap } from "./map/LaneRouteMap";
+import { LivePositionFeed } from "./map/LivePositionFeed";
+import { minutesLate, type TruckPosition } from "./map/runningLate";
 import { PlaceModeBanner } from "./PlaceModeBanner";
+import { PublishBanners } from "./publish/PublishBanners";
+import { PublishDialog } from "./publish/PublishDialog";
+import { looksReady, retryGroup, trucksText } from "./publish/publishText";
 import {
   announceBlocked,
   announceCommitted,
@@ -65,6 +91,7 @@ import {
   type CommandOutcome,
   useBoardCommands,
 } from "./state/useBoardCommands";
+import { SuggestionsDialog } from "./suggestions/SuggestionsDialog";
 import { TrayPanel } from "./trays/TrayPanel";
 import { useBoardController } from "./useBoardController";
 import {
@@ -135,6 +162,39 @@ function stopCount(lanes: LaneView[]): number {
   );
 }
 
+/** Publish status poll while a publish runs (the socket may be paused). */
+export const PUBLISH_POLL_MS = 2_000;
+/** Running late is re-evaluated this often between position updates. */
+const LATE_TICK_MS = 60_000;
+const RUNNING_STATES = new Set(["queued", "publishing"]);
+
+interface ActivePublish {
+  publishId: string;
+  status: PublishStatus;
+}
+
+/** Merge progress lanes into a status; `done` once no lane is still running. */
+function mergeStatus(
+  prev: PublishStatus,
+  lanes: { truck_id: string; state: string; last_result: unknown }[],
+  done?: boolean,
+): PublishStatus {
+  const byTruck = new Map(prev.lanes.map((l) => [l.truck_id, l]));
+  for (const l of lanes) {
+    byTruck.set(l.truck_id, {
+      truck_id: l.truck_id,
+      state: l.state as PublishStatus["lanes"][number]["state"],
+      last_result: (l.last_result as PublishResult | null) ?? null,
+    });
+  }
+  const merged = [...byTruck.values()];
+  return {
+    publish_id: prev.publish_id,
+    lanes: merged,
+    done: done ?? merged.every((l) => !RUNNING_STATES.has(l.state)),
+  };
+}
+
 const READ_ONLY_TEXT: Record<string, string> = {
   shadow: "Preview mode, changes are not saved.",
   past_service_day: "This day is in the past. The board is read-only.",
@@ -161,6 +221,23 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     [announceTo],
   );
   const [helpOpen, setHelpOpen] = useState(false);
+  const [drawer, setDrawer] = useState<DrawerTarget | null>(null);
+  const [publishDialog, setPublishDialog] = useState<{
+    truckIds: string[];
+    n: number;
+  } | null>(null);
+  const [activePublish, setActivePublish] = useState<ActivePublish | null>(
+    null,
+  );
+  const [suggestionsScope, setSuggestionsScope] = useState<{
+    truckId?: string;
+    suggestionId?: string;
+  } | null>(null);
+  const [splitMap, setSplitMap] = useState(false);
+  const [visibleLanes, setVisibleLanes] = useState<string[]>([]);
+  const [positions, setPositions] = useState<Record<string, TruckPosition>>({});
+  const [generating, setGenerating] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
   const [singleKey, setSingleKey] = useState(() => readSingleKeyEnabled());
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -258,6 +335,10 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   useEffect(() => {
     serverFiltering.current = false;
     void loadRef.current();
+    // The drawer and dialogs belong to the day they were opened on.
+    setDrawer(null);
+    setPublishDialog(null);
+    setSuggestionsScope(null);
     return () => loadAbort.current?.abort();
   }, [serviceDate]);
 
@@ -300,8 +381,31 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   lanesRef.current = state.lanesById;
   const laneActorsRef = useRef(state.laneActors);
   laneActorsRef.current = state.laneActors;
-  // Own echoed events must not name the current user as "the other dispatcher".
+  // Publish result per lane, once, from the socket or the poll (R12.8):
+  // announced (failures assertive) and shown as a toast.
   const announced = useRef<Set<string>>(new Set());
+  const reportPublish = (
+    publishId: string,
+    lanes: { truck_id: string; state: string; last_result: unknown }[],
+  ) => {
+    for (const l of lanes) {
+      const key = `${publishId}:${l.truck_id}:${l.state}`;
+      if (announced.current.has(key)) continue;
+      const result = l.last_result as { writes_made?: unknown } | null;
+      const writes = result?.writes_made as
+        | boolean
+        | "unknown"
+        | null
+        | undefined;
+      const msg = announcePublishResult(l.truck_id, l.state, writes);
+      if (!msg) continue;
+      announced.current.add(key);
+      announce(msg.text, msg.assertive);
+      addToast(msg.text, msg.assertive ? "error" : "success");
+    }
+  };
+  const reportPublishRef = useRef(reportPublish);
+  reportPublishRef.current = reportPublish;
   const socket = useDispatchBoardSocket(
     snapshot ? serviceDate : null,
     {
@@ -322,20 +426,12 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       onLaneStale: (e) => void loadLanes(e.truck_ids),
       onPresence: setPresence,
       onPublishProgress: (e) => {
-        // Publish result per lane, once (R12.8): failures are assertive.
-        for (const l of e.lanes) {
-          const key = `${e.publish_id}:${l.truck_id}:${l.state}`;
-          if (announced.current.has(key)) continue;
-          const writes = l.last_result?.writes_made as
-            | boolean
-            | "unknown"
-            | null
-            | undefined;
-          const msg = announcePublishResult(l.truck_id, l.state, writes);
-          if (!msg) continue;
-          announced.current.add(key);
-          announce(msg.text, msg.assertive);
-        }
+        reportPublishRef.current(e.publish_id, e.lanes);
+        setActivePublish((a) =>
+          a && a.publishId === e.publish_id
+            ? { ...a, status: mergeStatus(a.status, e.lanes) }
+            : a,
+        );
         void loadLanes(e.lanes.map((l) => l.truck_id));
       },
       onSuggestionsChanged: () => void loadRef.current({ background: true }),
@@ -449,11 +545,173 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     ensureVisibleRef.current = fn;
   }, []);
   const visibleRef = useRef<string[]>([]);
+  const splitRef = useRef(splitMap);
+  splitRef.current = splitMap;
   const onVisibleChange = useCallback((ids: string[]) => {
     visibleRef.current = ids;
+    if (splitRef.current) {
+      setVisibleLanes((prev) =>
+        prev.length === ids.length && prev.every((t, i) => t === ids[i])
+          ? prev
+          : ids,
+      );
+    }
   }, []);
   const readOnlyText =
     READ_ONLY_TEXT[readOnlyReason ?? ""] ?? "The board is read-only.";
+
+  // ── Publish (R12, R13.10) ─────────────────────────────────────────────────
+  const startPublish = useCallback((accepted: PublishAccepted) => {
+    if (!accepted.publish_id) return;
+    setActivePublish({
+      publishId: accepted.publish_id,
+      status: {
+        publish_id: accepted.publish_id,
+        lanes: accepted.lanes.map((l) => ({
+          truck_id: l.truck_id,
+          state: l.state as PublishStatus["lanes"][number]["state"],
+          last_result: null,
+        })),
+        done: accepted.lanes.every((l) => l.state === "already_published"),
+      },
+    });
+  }, []);
+
+  const publishId = activePublish?.publishId ?? null;
+  const publishDone = activePublish?.status.done ?? true;
+  useEffect(() => {
+    if (!publishId || publishDone) return;
+    const date = dateRef.current;
+    let stopped = false;
+    const timer = setInterval(() => {
+      void getPublish(date, publishId)
+        .then((status) => {
+          if (stopped || date !== dateRef.current) return;
+          reportPublishRef.current(publishId, status.lanes);
+          setActivePublish((a) =>
+            a && a.publishId === publishId
+              ? {
+                  ...a,
+                  status: mergeStatus(a.status, status.lanes, status.done),
+                }
+              : a,
+          );
+          if (status.done) void loadLanes(status.lanes.map((l) => l.truck_id));
+        })
+        .catch(() => undefined);
+    }, PUBLISH_POLL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [publishId, publishDone, loadLanes]);
+
+  const openPublish = useCallback((truckIds: string[]) => {
+    setPublishDialog((d) => ({ truckIds, n: (d?.n ?? 0) + 1 }));
+  }, []);
+
+  const retryPublish = useCallback(
+    (truckId: string) => {
+      const lane = lanesRef.current[truckId];
+      if (!lane) return;
+      const group = retryGroup(lane);
+      if (lane.state !== "recovering") {
+        openPublish(group);
+        return;
+      }
+      // Recovery: resend the whole recorded group; it resumes the attempt (K7.2).
+      void publishBoard(dateRef.current, {
+        client_request_id: newClientId(),
+        lanes: group.map((t) => ({
+          truck_id: t,
+          expected_version: lanesRef.current[t]?.version ?? 0,
+        })),
+      })
+        .then((accepted) => {
+          startPublish(accepted);
+          announce(`Retrying the publish on ${trucksText(group)}.`);
+        })
+        .catch((err) => {
+          const text =
+            boardErrorCode(err) === "BOARD_LANE_CONFLICT"
+              ? `${trucksText(group)} changed. Retry again.`
+              : `Retry didn't start on ${trucksText(group)}. Try again.`;
+          addToast(text, "error");
+          announce(text, true);
+          void loadLanes(group);
+        });
+    },
+    [openPublish, startPublish, announce, addToast, loadLanes],
+  );
+
+  const publishAllReady = () => {
+    const ready = lanesInOrder(state)
+      .filter(looksReady)
+      .map((l) => l.truck_id);
+    if (ready.length === 0) {
+      const text = "No trucks are ready to publish.";
+      addToast(text, "error");
+      announce(text);
+      return;
+    }
+    openPublish(ready);
+  };
+
+  // ── Suggestions and Generate plan (R16.6) ─────────────────────────────────
+  const generate = async () => {
+    setGenerating(true);
+    try {
+      const res = await generatePlan(getCurrentTenantId());
+      const text =
+        res.degraded || res.status === "degraded"
+          ? "The plan was generated with gaps. Suggestions may be incomplete."
+          : "Plan generated. Suggestions appear on the trucks as they arrive.";
+      addToast(text, res.degraded ? "error" : "success");
+      announce(text);
+      void loadRef.current({ background: true });
+    } catch {
+      const text = "The plan couldn't be generated. Try again.";
+      addToast(text, "error");
+      announce(text);
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // ── Live positions and Running late (R15.4) ───────────────────────────────
+  const onPositions = useCallback((next: Record<string, TruckPosition>) => {
+    setPositions((p) => ({ ...p, ...next }));
+  }, []);
+  const isToday = serviceDate === today;
+  const hasPublished = Object.values(state.lanesById).some(
+    (l) => Object.keys(l.publish.plans).length > 0,
+  );
+  const wantPositions =
+    Boolean(snapshot) &&
+    isToday &&
+    (hasPublished || splitMap || drawer?.tab === "map");
+  useEffect(() => {
+    if (!wantPositions) return;
+    const t = setInterval(() => setNow(Date.now()), LATE_TICK_MS);
+    return () => clearInterval(t);
+  }, [wantPositions]);
+  const lateBy = useCallback(
+    (truckId: string) => {
+      const lane = lanesRef.current[truckId];
+      return lane ? minutesLate(lane, positions[truckId], now) : null;
+    },
+    [positions, now],
+  );
+  const terminals = useTerminalIndex(Boolean(drawer) || splitMap);
+
+  const ui: BoardUiActions = {
+    openDetails: (target) => setDrawer({ tab: "checks", ...target }),
+    openPublish,
+    retryPublish,
+    openSuggestions: (scope) => setSuggestionsScope(scope ?? {}),
+    lateBy,
+  };
+
   const controller = useBoardController({
     state,
     dispatch,
@@ -472,8 +730,18 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     rootRef,
     ensureLaneVisible: (truckId) => ensureVisibleRef.current(truckId),
     visibleLanes: () => visibleRef.current,
+    ui,
   });
   const { api } = controller;
+  const selectedStops = useMemo(
+    () =>
+      new Set(
+        state.selection
+          .filter((k) => k.startsWith("stop:"))
+          .map((k) => k.slice(5)),
+      ),
+    [state.selection],
+  );
 
   const canUndo = !readOnly && state.undoStack.length > 0;
   const canRedo = !readOnly && state.redoStack.length > 0;
@@ -515,6 +783,28 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       onUndo={() => void commands.undo()}
       onRedo={() => void commands.redo()}
       onHelp={() => setHelpOpen(true)}
+      suggestionCount={snapshot?.suggestions.length ?? 0}
+      onSuggestions={() => setSuggestionsScope({})}
+      generateDisabledReason={
+        readOnly
+          ? "Plans can't be generated while the board is read-only."
+          : !isToday
+            ? "Plans are generated for today."
+            : null
+      }
+      generating={generating}
+      onGenerate={() => void generate()}
+      splitMap={splitMap}
+      onToggleMap={() => {
+        setVisibleLanes(visibleRef.current);
+        setSplitMap((on) => !on);
+      }}
+      publishDisabledReason={
+        readOnly
+          ? "Nothing can be published while the board is read-only."
+          : null
+      }
+      onPublishAll={publishAllReady}
     />
   );
 
@@ -555,13 +845,35 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
           plannedCount={stopCount(lanes)}
           onGoToOrders={() => router.push("/dashboard/orders")}
         />
-        <BoardGrid
-          lanes={lanes}
-          zone={timezone ? zoneAbbreviation(timezone) : ""}
-          focusTruckId={view.truck}
-          registerEnsureVisible={registerEnsureVisible}
-          onVisibleChange={onVisibleChange}
-        />
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <BoardGrid
+            lanes={lanes}
+            zone={timezone ? zoneAbbreviation(timezone) : ""}
+            focusTruckId={view.truck}
+            registerEnsureVisible={registerEnsureVisible}
+            onVisibleChange={onVisibleChange}
+          />
+          {splitMap && (
+            <LaneRouteMap
+              lanes={lanes.filter((l) => visibleLanes.includes(l.truck_id))}
+              selectedOrderIds={selectedStops}
+              onSelectStop={(orderId) => api.selectStops([orderId])}
+              positions={positions}
+              terminals={terminals.coords}
+              label="Routes of the trucks on screen"
+              className="h-72 shrink-0 border-t border-gray-200"
+            />
+          )}
+        </div>
+        {drawer && (
+          <DetailDrawer
+            target={drawer}
+            onTab={(tab) => setDrawer((d) => (d ? { ...d, tab } : d))}
+            onClose={() => setDrawer(null)}
+            terminals={terminals}
+            positions={positions}
+          />
+        )}
       </div>
     );
   }
@@ -583,6 +895,7 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
           truncated={false}
         />
       )}
+      {api && currentDay && <PublishBanners lanes={lanes} />}
       {api && currentDay && <PlaceModeBanner />}
       {body}
       <CardMenu request={controller.menu} onClose={controller.closeMenu} />
@@ -594,6 +907,28 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
           onClose={controller.closeAssign}
         />
       )}
+      {api && currentDay && publishDialog && (
+        <PublishDialog
+          key={publishDialog.n}
+          initialTruckIds={publishDialog.truckIds}
+          onClose={() => setPublishDialog(null)}
+          onAccepted={startPublish}
+          progress={activePublish?.status ?? null}
+        />
+      )}
+      {api && currentDay && suggestionsScope && (
+        <SuggestionsDialog
+          truckId={suggestionsScope.truckId}
+          suggestionId={suggestionsScope.suggestionId}
+          onClose={() => setSuggestionsScope(null)}
+          notify={(text, kind) => {
+            addToast(text, kind);
+            announce(text);
+          }}
+          refresh={() => void loadRef.current({ background: true })}
+        />
+      )}
+      {wantPositions && <LivePositionFeed onPositions={onPositions} />}
       <ShortcutHelpDialog
         isOpen={helpOpen}
         onClose={() => setHelpOpen(false)}

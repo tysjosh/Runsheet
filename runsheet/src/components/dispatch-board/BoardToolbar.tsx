@@ -1,7 +1,8 @@
 /**
  * Board toolbar (design K14.1): date navigation (today − 7 … today + 14),
- * shift, zoom, density, search, filters, presence, undo/redo and help.
- * Generate plan and Publish all ready join in Phase 6.
+ * shift, zoom, density, search, filters, presence, undo/redo and help,
+ * plus Generate plan and agent suggestions (R16.6), the map split view
+ * (R17.3) and Publish all ready (R12.1).
  *
  * It is a labelled `role="group"`, not an APG `toolbar`: it holds a date
  * input and a search box, whose arrow keys must keep editing text, so each
@@ -12,8 +13,11 @@ import {
   ChevronRight,
   CircleHelp,
   Filter,
+  Map as MapIcon,
   Redo2,
   Search,
+  Send,
+  Sparkles,
   Undo2,
 } from "lucide-react";
 import { useState } from "react";
@@ -46,12 +50,27 @@ export interface BoardToolbarProps {
   onUndo: () => void;
   onRedo: () => void;
   onHelp: () => void;
+  /** Number of open agent suggestions. */
+  suggestionCount: number;
+  onSuggestions: () => void;
+  /** `null` = enabled; otherwise why Generate plan is unavailable. */
+  generateDisabledReason: string | null;
+  generating: boolean;
+  onGenerate: () => void;
+  splitMap: boolean;
+  onToggleMap: () => void;
+  /** `null` = enabled; otherwise why Publish all ready is unavailable. */
+  publishDisabledReason: string | null;
+  onPublishAll: () => void;
 }
 
 const segment = (active: boolean) =>
   `min-h-9 px-3 text-sm font-medium ${
     active ? "bg-primary text-white" : "bg-white text-gray-700 hover:bg-gray-50"
   }`;
+
+const textButton =
+  "inline-flex min-h-9 items-center gap-1 rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50";
 
 const iconButton =
   "inline-flex min-h-9 min-w-9 items-center justify-center rounded-md border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50";
@@ -72,6 +91,15 @@ export function BoardToolbar({
   onUndo,
   onRedo,
   onHelp,
+  suggestionCount,
+  onSuggestions,
+  generateDisabledReason,
+  generating,
+  onGenerate,
+  splitMap,
+  onToggleMap,
+  publishDisabledReason,
+  onPublishAll,
 }: BoardToolbarProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const min = addDays(today, -DAYS_BACK);
@@ -207,8 +235,57 @@ export function BoardToolbar({
           Filters{filterCount > 0 ? ` (${filterCount})` : ""}
         </button>
 
+        <button
+          type="button"
+          className={textButton}
+          aria-pressed={splitMap}
+          onClick={onToggleMap}
+        >
+          <MapIcon className="h-4 w-4" aria-hidden="true" />
+          Map
+        </button>
+
         <div className="ml-auto flex items-center gap-2">
           <PresenceBar users={presence} />
+          <button type="button" className={textButton} onClick={onSuggestions}>
+            <Sparkles className="h-4 w-4" aria-hidden="true" />
+            Suggestions ({suggestionCount})
+          </button>
+          <button
+            type="button"
+            className={textButton}
+            disabled={generateDisabledReason !== null || generating}
+            title={generateDisabledReason ?? undefined}
+            aria-describedby={
+              generateDisabledReason ? "board-generate-why" : undefined
+            }
+            onClick={onGenerate}
+          >
+            {generating ? "Generating…" : "Generate plan"}
+          </button>
+          {generateDisabledReason && (
+            <span id="board-generate-why" className="sr-only">
+              {generateDisabledReason}
+            </span>
+          )}
+          <button
+            type="button"
+            className="inline-flex min-h-9 items-center gap-1 rounded-md bg-primary px-3 text-sm font-medium text-white hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={publishDisabledReason !== null}
+            title={publishDisabledReason ?? undefined}
+            aria-describedby={
+              publishDisabledReason ? "board-publish-why" : undefined
+            }
+            onClick={onPublishAll}
+          >
+            <Send className="h-4 w-4" aria-hidden="true" />
+            Publish all ready
+          </button>
+          {publishDisabledReason && (
+            <span id="board-publish-why" className="sr-only">
+              {publishDisabledReason}
+            </span>
+          )}
           <button
             type="button"
             className={iconButton}

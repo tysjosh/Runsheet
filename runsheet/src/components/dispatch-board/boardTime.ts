@@ -147,3 +147,7 @@ export function formatGallons(gallons: number): string {
 export function litersToGallons(liters: number): number {
   return liters / LITERS_PER_GALLON;
 }
+
+export function gallonsToLiters(gallons: number): number {
+  return gallons * LITERS_PER_GALLON;
+}

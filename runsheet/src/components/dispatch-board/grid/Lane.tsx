@@ -12,6 +12,8 @@ import type { LaneView } from "../../../services/dispatchBoardApi";
 import { useBoard } from "../BoardContext";
 import { formatTime, HOUR_MS } from "../boardTime";
 import { useRovingItem } from "../keyboard/roving";
+import { GHOST_WIDTH, GhostLoad } from "../suggestions/GhostLoad";
+import { isAccepted } from "../suggestions/suggestionModel";
 import { hosHours } from "../trays/DriverTray";
 import { LaneHeader, laneSummary } from "./LaneHeader";
 import { LoadBlock } from "./LoadBlock";
@@ -159,11 +161,15 @@ export const Lane = memo(function Lane({
   if (placingStops) tail += 120;
   const shelfLeft = tail;
   const showShelf = lane.shelf.length > 0;
-  const width = Math.max(
-    minWidth,
-    layout.width,
-    tail + (showShelf ? lane.shelf.length * (cardW + 4) + 96 : 0),
+  if (showShelf) tail += lane.shelf.length * (cardW + 4) + 96;
+  // Open agent suggestions as ghost loads after the lane's own work (R16.1).
+  const ghostLoads = api.snapshot.suggestions.filter(
+    (s) => s.truck_id === lane.truck_id && !isAccepted(s, api.lanesById),
   );
+  const ghostLeft = tail + 8;
+  if (ghostLoads.length)
+    tail = ghostLeft + ghostLoads.length * (GHOST_WIDTH + 8);
+  const width = Math.max(minWidth, layout.width, tail);
   const showHos =
     api.isToday && layout.mode === "timeline" && Boolean(lane.driver?.hos);
 
@@ -215,9 +221,17 @@ export const Lane = memo(function Lane({
             ))}
             {placingStops && <NewLoadSlot lane={lane} left={newLoadLeft} />}
             {showShelf && <ReassignShelf lane={lane} left={shelfLeft} />}
+            {ghostLoads.map((s, i) => (
+              <GhostLoad
+                key={s.suggestion_id}
+                suggestion={s}
+                left={ghostLeft + i * (GHOST_WIDTH + 8)}
+              />
+            ))}
             {lane.loads.length === 0 &&
               !placingStops &&
-              pending.length === 0 && (
+              pending.length === 0 &&
+              ghostLoads.length === 0 && (
                 <div className="absolute inset-y-0 left-2 flex items-center text-xs text-gray-500">
                   No loads yet. Drop an order on the truck header.
                 </div>

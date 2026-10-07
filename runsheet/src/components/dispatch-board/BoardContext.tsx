@@ -15,7 +15,11 @@ import type {
 import type { MatchContext } from "./boardMatch";
 import type { BoardItem, BoardTarget } from "./intents";
 import type { BoardState } from "./state/boardReducer";
-import type { OptimisticEntry } from "./state/useBoardCommands";
+import type {
+  CommandIntent,
+  CommandOutcome,
+  OptimisticEntry,
+} from "./state/useBoardCommands";
 import type { BoardView } from "./viewState";
 
 export interface MenuItem {
@@ -41,7 +45,32 @@ export interface PositionResult {
   result: CandidateResult | null;
 }
 
-export interface BoardApi {
+export type DrawerTab = "checks" | "compartments" | "map" | "history";
+
+/** What the detail drawer shows: a lane, one of its loads, or one stop (R8.7). */
+export interface DrawerTarget {
+  truckId: string;
+  loadId?: string | null;
+  orderId?: string | null;
+  tab?: DrawerTab;
+}
+
+/** Board-level actions owned by `DispatchBoard` (Phase 6: drawer, publish, suggestions, map). */
+export interface BoardUiActions {
+  openDetails: (target: DrawerTarget) => void;
+  /** Opens the Publish review for these lanes (R12.1, R12.2). */
+  openPublish: (truckIds: string[]) => void;
+  /** Failed lane: review again; Recovering lane: resend the whole group (R12.6, R13.10). */
+  retryPublish: (truckId: string) => void;
+  openSuggestions: (scope?: {
+    truckId?: string;
+    suggestionId?: string;
+  }) => void;
+  /** Minutes behind the route ETA beyond the threshold, else `null` (R15.4). */
+  lateBy: (truckId: string) => number | null;
+}
+
+export interface BoardApi extends BoardUiActions {
   state: BoardState;
   snapshot: BoardSnapshot;
   lanesById: Record<string, LaneView>;
@@ -84,6 +113,17 @@ export interface BoardApi {
     originKey?: string | null,
   ) => void;
   releaseHold: (orderId: string) => void;
+  /** Any command intent through the shared path; `null` when the board is read-only. */
+  command: (
+    intent: CommandIntent,
+    modality?: InputModality,
+  ) => Promise<CommandOutcome | null>;
+  /** "Discard changes" on a Modified lane (R10.4). */
+  discard: (truckId: string) => void;
+  /** A lane being published or in recovery takes no edits (K14.7). */
+  laneLocked: (truckId: string) => boolean;
+  /** Board selection without Place mode (map ↔ board sync, R17.2). */
+  selectStops: (orderIds: string[]) => void;
   requestFocus: (keys: string[]) => void;
   announce: (text: string, assertive?: boolean) => void;
 

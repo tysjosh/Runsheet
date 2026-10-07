@@ -31,6 +31,7 @@ import { releaseHoldOrder } from "../../services/ordersApi";
 import type {
   AssignMode,
   BoardApi,
+  BoardUiActions,
   MenuRequest,
   PositionResult,
 } from "./BoardContext";
@@ -49,10 +50,11 @@ import {
   laneOfLoad,
   laneOfOrder,
 } from "./state/boardReducer";
-import type {
-  BoardCommands,
-  CommandIntent,
-  CommandOutcome,
+import {
+  type BoardCommands,
+  type CommandIntent,
+  type CommandOutcome,
+  touchedLanes,
 } from "./state/useBoardCommands";
 import type { BoardView } from "./viewState";
 
@@ -88,7 +90,15 @@ export interface ControllerOptions {
   visibleLanes: () => string[];
   validate?: typeof validateBoard;
   releaseHold?: typeof releaseHoldOrder;
+  /** Drawer, publish, suggestion and map actions owned by `DispatchBoard`. */
+  ui: BoardUiActions;
 }
+
+/** Lane states that take no edits: publishing, or a publish in recovery (K14.7). */
+const LOCKED_STATES = new Set(["publishing", "recovering"]);
+
+export const LOCKED_TEXT =
+  "This truck is being published. Wait for it to finish, or use Retry.";
 
 function keyOf(kind: BoardItem["kind"], id: string) {
   return `${kind}:${id}`;
@@ -283,6 +293,16 @@ export function useBoardController(opts: ControllerOptions) {
     : null;
 
   // ── The one command path ──────────────────────────────────────────────────
+  /** True (and announced) when a lane the intent touches is locked. */
+  const lockedFor = useCallback((intent: CommandIntent): boolean => {
+    const s = stateRef.current;
+    const locked = touchedLanes(s, intent).some((t) =>
+      LOCKED_STATES.has(s.lanesById[t]?.state ?? ""),
+    );
+    if (locked) latest.current.announce(LOCKED_TEXT);
+    return locked;
+  }, []);
+
   const perform = useCallback(
     (
       item: BoardItem,
@@ -296,7 +316,7 @@ export function useBoardController(opts: ControllerOptions) {
         return;
       }
       const intent = intentFor(item, target, stateRef.current.lanesById);
-      if (!intent) return;
+      if (!intent || lockedFor(intent)) return;
       const origin = originKey ?? originOf(item);
       dispatch({ type: "selectionChanged", keys: [] });
       dispatch({ type: "placeModeExited" });
@@ -310,7 +330,7 @@ export function useBoardController(opts: ControllerOptions) {
         );
       });
     },
-    [dispatch, requestFocus],
+    [dispatch, requestFocus, lockedFor],
   );
 
   const placeOn = useCallback(
@@ -335,6 +355,7 @@ export function useBoardController(opts: ControllerOptions) {
         o.announce(o.readOnlyText);
         return;
       }
+      if (lockedFor(intent)) return;
       void o.commands.run(intent, modality).then((outcome) => {
         requestFocus(
           outcome.kind === "committed"
@@ -345,7 +366,54 @@ export function useBoardController(opts: ControllerOptions) {
         );
       });
     },
-    [requestFocus],
+    [requestFocus, lockedFor],
+  );
+
+  /** Drawer and suggestion actions: same path, the caller handles focus. */
+  const command = useCallback(
+    async (
+      intent: CommandIntent,
+      modality: InputModality = "menu",
+    ): Promise<CommandOutcome | null> => {
+      const o = latest.current;
+      if (o.readOnly) {
+        o.announce(o.readOnlyText);
+        return null;
+      }
+      if (lockedFor(intent)) return null;
+      return o.commands.run(intent, modality);
+    },
+    [lockedFor],
+  );
+
+  const discard = useCallback(
+    (truckId: string) =>
+      runIntent(
+        { type: "discard_lane_changes", truck_id: truckId },
+        "menu",
+        focusKey.lane(truckId),
+      ),
+    [runIntent],
+  );
+
+  const laneLocked = useCallback(
+    (truckId: string) =>
+      LOCKED_STATES.has(stateRef.current.lanesById[truckId]?.state ?? ""),
+    [],
+  );
+
+  const selectStops = useCallback(
+    (orderIds: string[]) => {
+      dispatch({
+        type: "selectionChanged",
+        keys: orderIds.map((id) => keyOf("stop", id)),
+      });
+      const truck = orderIds[0]
+        ? laneOfOrder(stateRef.current, orderIds[0])?.truck_id
+        : undefined;
+      if (truck) ensureLaneVisible(truck);
+    },
+    [dispatch, ensureLaneVisible],
   );
 
   const unpair = useCallback(
@@ -596,6 +664,11 @@ export function useBoardController(opts: ControllerOptions) {
         showMenu,
         openAssign,
         releaseHold,
+        command,
+        discard,
+        laneLocked,
+        selectStops,
+        ...opts.ui,
         requestFocus,
         announce,
         dragItem,

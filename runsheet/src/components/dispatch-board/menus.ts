@@ -97,7 +97,17 @@ export function stopMenu(
       },
     );
   }
-  return readOnlyItems(api, items);
+  const load = lane.loads.find((l) =>
+    l.stops.some((s) => s.order_id === orderId),
+  );
+  return [
+    ...readOnlyItems(api, items),
+    detailsItem(api, {
+      truckId: lane.truck_id,
+      loadId: load?.load_id ?? null,
+      orderId,
+    }),
+  ];
 }
 
 export function loadMenu(
@@ -119,14 +129,24 @@ export function loadMenu(
       reason: !target ? "Already there" : undefined,
     };
   };
-  return readOnlyItems(api, [
-    {
-      label: "Move load to…",
-      onSelect: () => api.openAssign("load", item),
-    },
-    step("Move load earlier", "earlier"),
-    step("Move load later", "later"),
-  ]);
+  return [
+    detailsItem(api, { truckId: lane.truck_id, loadId }),
+    ...readOnlyItems(api, [
+      {
+        label: "Move load to…",
+        onSelect: () => api.openAssign("load", item),
+      },
+      step("Move load earlier", "earlier"),
+      step("Move load later", "later"),
+    ]),
+  ];
+}
+
+function detailsItem(
+  api: BoardApi,
+  target: Parameters<BoardApi["openDetails"]>[0],
+): MenuItem {
+  return { label: "Details", onSelect: () => api.openDetails(target) };
 }
 
 export function driverMenu(api: BoardApi, driverId: string): MenuItem[] {
@@ -137,6 +157,34 @@ export function driverMenu(api: BoardApi, driverId: string): MenuItem[] {
         api.openAssign("pair", { kind: "driver", ids: [driverId] }),
     },
   ]);
+}
+
+const LOCKED_REASON = "Publishing, wait for it to finish";
+
+/** "Publish lane" / "Retry publish" for the lane menu (R12.1, R12.6). */
+function publishItem(api: BoardApi, lane: LaneView): MenuItem | null {
+  switch (lane.state) {
+    case "failed":
+    case "recovering":
+      return {
+        label: "Retry publish",
+        onSelect: () => api.retryPublish(lane.truck_id),
+      };
+    case "published":
+      return {
+        label: "Publish lane",
+        onSelect: () => undefined,
+        disabled: true,
+        reason: "Already published",
+      };
+    case "publishing":
+      return null;
+    default:
+      return {
+        label: "Publish lane",
+        onSelect: () => api.openPublish([lane.truck_id]),
+      };
+  }
 }
 
 export function laneMenu(api: BoardApi, lane: LaneView): MenuItem[] {
@@ -160,7 +208,35 @@ export function laneMenu(api: BoardApi, lane: LaneView): MenuItem[] {
       onSelect: () => api.unpair(lane.truck_id),
     });
   }
-  const mutating = readOnlyItems(api, items);
+  if (lane.state === "modified") {
+    items.push({
+      label: "Discard changes",
+      onSelect: () => api.discard(lane.truck_id),
+    });
+  }
+  // A lane in recovery keeps Retry as its only action (K14.7).
+  const locked = api.laneLocked(lane.truck_id);
+  const editable = locked
+    ? items.map((i) => ({ ...i, disabled: true, reason: LOCKED_REASON }))
+    : items;
+  const publish = publishItem(api, lane);
+  const mutating = readOnlyItems(api, [
+    ...(publish ? [publish] : []),
+    ...editable,
+  ]);
+  const suggestions = api.snapshot.suggestions.filter(
+    (s) => s.truck_id === lane.truck_id,
+  ).length;
+  if (suggestions > 0) {
+    mutating.push({
+      label: `Review suggestions (${suggestions})`,
+      onSelect: () => api.openSuggestions({ truckId: lane.truck_id }),
+    });
+  }
+  mutating.unshift({
+    label: "Details",
+    onSelect: () => api.openDetails({ truckId: lane.truck_id }),
+  });
   const collapsed = api.collapsed.has(lane.truck_id);
   mutating.push({
     label: collapsed ? "Expand lane" : "Collapse lane",

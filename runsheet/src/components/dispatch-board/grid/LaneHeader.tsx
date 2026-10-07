@@ -96,17 +96,19 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
   const api = useBoard();
   const truckRef = useRef<HTMLButtonElement>(null);
   const driverRef = useRef<HTMLButtonElement>(null);
+  const locked = api.readOnly || api.laneLocked(lane.truck_id);
   const truckRoving = useRovingItem(focusKey.lane(lane.truck_id));
   const driverRoving = useRovingItem(focusKey.driverSlot(lane.truck_id));
+  const retryRoving = useRovingItem(`retry:${lane.truck_id}`);
   const overLane = useDropTarget(truckRef, {
     target: { target: "lane", truckId: lane.truck_id },
     enabled: true,
-    readOnly: api.readOnly,
+    readOnly: locked,
   });
   const overDriver = useDropTarget(driverRef, {
     target: { target: "driver-slot", truckId: lane.truck_id },
     enabled: true,
-    readOnly: api.readOnly,
+    readOnly: locked,
   });
   const state = LANE_STATE_LABEL[lane.state];
   const issues = openIssues(lane, api.snapshot.acknowledged);
@@ -183,6 +185,10 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
     }
   };
 
+  const retryable =
+    !api.readOnly && (lane.state === "failed" || lane.state === "recovering");
+  const late = api.isToday ? api.lateBy(lane.truck_id) : null;
+
   const hos = api.isToday
     ? hosHours(lane.driver?.hos, "remaining_drive_time")
     : null;
@@ -254,6 +260,22 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
         {hos !== null && (
           <span className="text-[11px] text-gray-600">
             HOS {hos.toFixed(1)} h
+          </span>
+        )}
+        {retryable && (
+          <button
+            type="button"
+            {...retryRoving}
+            aria-label={`Retry publish on Truck ${lane.truck_id}`}
+            onClick={() => api.retryPublish(lane.truck_id)}
+            className="min-h-6 rounded-md border border-error px-1.5 text-[11px] font-medium text-error-dark outline-none hover:bg-error-light focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            Retry
+          </button>
+        )}
+        {late !== null && (
+          <span className="text-[11px] font-medium text-error-dark">
+            Running late +{late} min
           </span>
         )}
         {editor && (

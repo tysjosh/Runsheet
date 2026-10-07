@@ -48,13 +48,14 @@ export const StopCard = memo(function StopCard({
   const grip = useRef<HTMLSpanElement>(null);
   const id = stop.order_id;
   const pinned = PINNED_STATUSES.has(stop.snapshot.status ?? "");
+  const locked = api.readOnly || api.laneLocked(lane.truck_id);
   const onShelf = index === null;
   const card = { kind: "stop" as const, ids: [id], fromTruckId: lane.truck_id };
   const roving = useRovingItem(focusKey.stop(id));
   const dragging = useDraggableItem(ref, {
     item: api.itemFor(card),
     handleRef: grip,
-    enabled: !pinned && !api.readOnly,
+    enabled: !pinned && !locked,
     previewLabel: () => {
       const item = api.itemFor(card);
       const gallons = item.ids.reduce((sum, oid) => {
@@ -74,7 +75,7 @@ export const StopCard = memo(function StopCard({
       index: index ?? 0,
     },
     enabled: !onShelf && loadId !== null,
-    readOnly: api.readOnly,
+    readOnly: locked,
     edge: true,
   });
   const selected = api.isSelected("stop", id);
@@ -161,7 +162,7 @@ export const StopCard = memo(function StopCard({
         selected ? "border-primary bg-primary-soft" : "border-gray-300"
       } ${dragging ? "opacity-50" : ""} ${over ? "ring-2 ring-primary" : ""} ${matchClass(state)}`}
     >
-      {!pinned && !api.readOnly ? (
+      {!pinned && !locked ? (
         <span
           ref={grip}
           aria-hidden="true"
