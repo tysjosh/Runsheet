@@ -107,6 +107,9 @@ class _FakeES:
             invoice_id = _term(query, "invoice_id")
             doc = self.invoices.get(invoice_id)
             hits = [{"_source": dict(doc)}] if doc else []
+            # Yield after the read, so two overlapping voids both see the
+            # invoice before either writes it.
+            await asyncio.sleep(0)
             return {"hits": {"hits": hits, "total": {"value": len(hits)}}}
         return {
             "hits": {"hits": [], "total": {"value": 0}},
@@ -131,6 +134,17 @@ class _FakeES:
 
     async def atomic_update(self, index, doc_id, transform, **kwargs):
         """Read-modify-write under a lock, like the Postgres ``FOR UPDATE``."""
+        if index == "invoices_current":
+            if doc_id not in self.invoices:
+                return (None, False)
+            async with self._row_lock:
+                current = dict(self.invoices[doc_id])
+                await asyncio.sleep(0)
+                updated = transform(dict(current))
+                if updated is None:
+                    return (current, False)
+                self.invoices[doc_id] = dict(updated)
+                return (dict(updated), True)
         if index != "price_protection_contracts" or not self._contract:
             return (None, False)
         if self._contract.get("contract_id") != doc_id:
@@ -474,6 +488,31 @@ async def test_void_gives_the_contract_gallons_back():
     # The next invoice gets the full contract again.
     again = await _invoice(es, gallons=800.0, market_cents=350, order_id="QA-ORD-2")
     assert again["subtotal_cents"] == 248_000
+
+
+@pytest.mark.asyncio
+async def test_concurrent_voids_give_the_gallons_back_once():
+    """Two overlapping voids of one invoice restore its gallons exactly once."""
+    contract = _contract(contracted_gallons=1_000.0, remaining_gallons=1_000.0)
+    es = _FakeES(contract)
+    first = await _invoice(es, gallons=300.0, market_cents=350)
+    await _invoice(es, gallons=300.0, market_cents=350, order_id="QA-ORD-2")
+    assert es._contract["remaining_gallons"] == pytest.approx(400.0)
+
+    svc = _service(es)
+    await asyncio.gather(
+        *(
+            svc.void(
+                tenant_id=TENANT, invoice_id=first["invoice_id"],
+                reason="QA test", actor="qa",
+            )
+            for _ in range(2)
+        ),
+        return_exceptions=True,
+    )
+    # 300 back once (700), not twice (1000).
+    assert es._contract["remaining_gallons"] == pytest.approx(700.0)
+    assert es.invoices[first["invoice_id"]]["status"] == "void"
 
 
 @pytest.mark.asyncio

@@ -439,6 +439,45 @@ class InvoiceService:
             INVOICES_CURRENT_INDEX, invoice_id, partial
         )
 
+    async def _claim_void(
+        self,
+        invoice_id: str,
+        partial: Dict[str, Any],
+        event_sequence: int,
+        consumption: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Flip the projection to void under the row lock; return what to restore.
+
+        Returns the invoice's contract consumption when this call made the
+        flip, and ``[]`` when the projection was already void (another void
+        of the same invoice won). With no projection row to lock, it falls
+        back to a plain projection update and the caller's consumption.
+        """
+        partial["updated_at"] = utcnow().isoformat()
+        partial["_last_applied_seq"] = event_sequence
+
+        def _flip(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("status") == InvoiceStatus.VOID.value:
+                return None
+            return {**current, **partial}
+
+        document, applied = await self._es.atomic_update(
+            INVOICES_CURRENT_INDEX, invoice_id, _flip
+        )
+        if document is None:
+            await self._es.update_document(
+                INVOICES_CURRENT_INDEX, invoice_id, partial
+            )
+            return consumption
+        if not applied:
+            logger.info(
+                "InvoiceService: invoice %s was already voided; not restoring "
+                "its contract gallons again",
+                invoice_id,
+            )
+            return []
+        return list(document.get("contract_consumption") or consumption)
+
     async def _broadcast_invoice_ws(self, invoice_doc: Dict[str, Any]) -> None:
         """Non-blocking broadcast of the updated invoice projection on the WS channel.
 
@@ -1748,9 +1787,21 @@ class InvoiceService:
             "amount_paid_cents": 0,
             "remaining_cents": 0,
         }
-        await self._update_projection(
-            invoice_id, partial, event_doc["sequence_number"]
+        consumption = list(
+            invoice.get("contract_consumption")
+            or await self._stored_contract_consumption(tenant_id, invoice_id)
         )
+        if consumption:
+            # Restoring gallons isn't idempotent, so only the void that flips
+            # the projection to void restores them; an overlapping void of
+            # the same invoice (double-click, retry) restores nothing (D14c).
+            consumption = await self._claim_void(
+                invoice_id, partial, event_doc["sequence_number"], consumption
+            )
+        else:
+            await self._update_projection(
+                invoice_id, partial, event_doc["sequence_number"]
+            )
 
         # Mirror the void transition to Postgres when opted in.
         from commerce.services.commerce_persistence_bridge import (
@@ -1770,12 +1821,9 @@ class InvoiceService:
         )
 
         # A void invoice bills nothing, so its contract gallons go back
-        # (D14c). Void is terminal, so this runs once per invoice.
+        # (D14c). Empty unless this call won the void claim above.
         await self._restore_contract_consumption(
-            tenant_id,
-            invoice_id,
-            invoice.get("contract_consumption")
-            or await self._stored_contract_consumption(tenant_id, invoice_id),
+            tenant_id, invoice_id, consumption
         )
 
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
