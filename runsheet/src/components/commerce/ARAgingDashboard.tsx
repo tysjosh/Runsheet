@@ -80,6 +80,8 @@ export default function ARAgingDashboard({
           backLabel="Back to Today"
           homeHref="/dashboard/billing"
           homeLabel="Go to Billing"
+          staffOnly
+          embedded
         />
       </div>
     );

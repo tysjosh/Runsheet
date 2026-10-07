@@ -118,6 +118,7 @@ export default function InvoicesListPage({
           entityLabel="Invoices"
           onBack={() => router.push("/dashboard")}
           backLabel="Back to Today"
+          embedded
         />
       </div>
     );

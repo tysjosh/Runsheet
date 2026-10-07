@@ -4,22 +4,24 @@ import { LoadErrorState } from "./LoadErrorState";
 
 function renderState(
   failure: LoadFailure,
-  extra: { onRetry?: () => void } = {},
+  extra: { onRetry?: () => void; staffOnly?: boolean; embedded?: boolean } = {},
 ) {
   const onBack = jest.fn();
-  render(
-    <LoadErrorState
-      failure={failure}
-      entityLabel="Terminal"
-      entityId="T-1"
-      onBack={onBack}
-      backLabel="Back to Terminals"
-      homeHref="/dashboard/compliance"
-      homeLabel="Go to Compliance"
-      {...extra}
-    />,
-  );
-  return { onBack };
+  return {
+    onBack,
+    ...render(
+      <LoadErrorState
+        failure={failure}
+        entityLabel="Terminal"
+        entityId="T-1"
+        onBack={onBack}
+        backLabel="Back to Terminals"
+        homeHref="/dashboard/compliance"
+        homeLabel="Go to Compliance"
+        {...extra}
+      />,
+    ),
+  };
 }
 
 function expectCommonActions(onBack: jest.Mock) {
@@ -63,16 +65,44 @@ describe("LoadErrorState", () => {
     expectCommonActions(onBack);
   });
 
-  it("renders forbidden as staff access required", () => {
+  it("renders forbidden with the API's message by default", () => {
     const { onBack } = renderState({
       kind: "forbidden",
-      message: "x",
+      message: "This action requires one of the roles: admin, dispatcher",
       status: 403,
     });
+    expect(
+      screen.getByRole("heading", {
+        name: "You don't have access to this terminal",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This action requires one of the roles: admin, dispatcher",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Runsheet staff/)).toBeNull();
+    expectCommonActions(onBack);
+  });
+
+  it("renders forbidden as staff access required when staffOnly", () => {
+    const { onBack } = renderState(
+      { kind: "forbidden", message: "x", status: 403 },
+      { staffOnly: true },
+    );
     expect(
       screen.getByRole("heading", { name: "Runsheet staff access required" }),
     ).toBeInTheDocument();
     expectCommonActions(onBack);
+  });
+
+  it("pads itself by default and drops the padding when embedded", () => {
+    const failure: LoadFailure = { kind: "error", message: "boom" };
+    const { container, unmount } = renderState(failure);
+    expect(container.firstElementChild).toHaveClass("p-6");
+    unmount();
+    const embedded = renderState(failure, { embedded: true });
+    expect(embedded.container.firstElementChild).not.toHaveClass("p-6");
   });
 
   it("renders the error banner with retry", () => {

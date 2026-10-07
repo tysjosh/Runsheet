@@ -130,6 +130,7 @@ export default function AccountDetailPage({
         onBack={() => (onBack ? onBack() : router.back())}
         homeHref="/dashboard/billing"
         homeLabel="Go to Billing"
+        staffOnly
       />
     );
     if (loadFailure.kind !== "forbidden") return state;

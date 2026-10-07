@@ -134,6 +134,7 @@ export default function CustomersListPage({
           entityLabel="Customers"
           onBack={() => router.push("/dashboard")}
           backLabel="Back to Today"
+          embedded
         />
       </div>
     );

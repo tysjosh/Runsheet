@@ -3,8 +3,13 @@
  *
  * Renders a distinct state per `LoadFailure.kind` (see
  * `services/apiErrors.classifyLoadError`): not found, module disabled,
- * Runsheet-staff-only, or a generic error banner with an optional retry.
+ * forbidden, or a generic error banner with an optional retry.
  * Every variant offers a way back.
+ *
+ * A 403 shows the API's own message by default. Pages gated to Runsheet
+ * staff (platform_admin) pass `staffOnly` to get the staff-access copy.
+ * Pages that already pad their content pass `embedded` to drop the outer
+ * padding.
  */
 
 import Link from "next/link";
@@ -21,12 +26,17 @@ export interface LoadErrorStateProps {
   homeHref?: string;
   homeLabel?: string;
   onRetry?: () => void;
+  /** The page is Runsheet-staff only: a 403 shows the staff-access copy. */
+  staffOnly?: boolean;
+  /** Rendered inside an already-padded page: drop the outer `p-6`. */
+  embedded?: boolean;
 }
 
 function copyFor(
   failure: LoadFailure,
   entityLabel: string,
-  entityId?: string,
+  entityId: string | undefined,
+  staffOnly: boolean,
 ): { title: string; description: string } | null {
   switch (failure.kind) {
     case "not_found":
@@ -43,6 +53,12 @@ function copyFor(
           "This module is turned off for your workspace. Contact your Runsheet administrator if you need it.",
       };
     case "forbidden":
+      if (!staffOnly) {
+        return {
+          title: `You don't have access to this ${entityLabel.toLowerCase()}`,
+          description: failure.message,
+        };
+      }
       return {
         title: "Runsheet staff access required",
         description:
@@ -62,8 +78,11 @@ export function LoadErrorState({
   homeHref,
   homeLabel,
   onRetry,
+  staffOnly = false,
+  embedded = false,
 }: LoadErrorStateProps) {
-  const copy = copyFor(failure, entityLabel, entityId);
+  const copy = copyFor(failure, entityLabel, entityId, staffOnly);
+  const wrapperClass = embedded ? undefined : "p-6";
 
   const actions = (
     <div className="flex flex-wrap items-center gap-4 mt-4">
@@ -88,7 +107,7 @@ export function LoadErrorState({
 
   if (!copy) {
     return (
-      <div className="p-6">
+      <div className={wrapperClass}>
         <div
           role="alert"
           className="bg-error-light border border-error-light text-error-dark p-4 rounded"
@@ -101,7 +120,7 @@ export function LoadErrorState({
   }
 
   return (
-    <div className="p-6">
+    <div className={wrapperClass}>
       <div role="status" className="max-w-xl">
         <h2 className="text-xl font-semibold text-gray-900">{copy.title}</h2>
         <p className="mt-2 text-gray-600">{copy.description}</p>
