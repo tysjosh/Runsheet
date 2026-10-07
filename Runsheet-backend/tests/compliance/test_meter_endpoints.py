@@ -92,6 +92,19 @@ def test_duplicate_meter_number_is_409_envelope(client, es):
     es.index_document.assert_not_awaited()
 
 
+def test_duplicate_number_with_reversed_dates_is_422(client, es):
+    """OI-34: the payload is validated before the duplicate check."""
+    es.search_documents = AsyncMock(return_value=_resp([_existing_meter()]))
+    resp = client.post(
+        URL,
+        json=_body(calibration_date="2026-06-01", calibration_expiry_date="2026-01-01"),
+        headers=HEADERS,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "meters.invalid_payload" in resp.text
+    es.index_document.assert_not_awaited()
+
+
 def test_valid_meter_is_created(client, es):
     resp = client.post(URL, json=_body(), headers=HEADERS)
     assert resp.status_code == 201, resp.text

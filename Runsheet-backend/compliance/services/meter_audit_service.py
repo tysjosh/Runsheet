@@ -135,15 +135,12 @@ class MeterAuditService:
         has no unique constraint, so two simultaneous creates of the same
         number can both succeed. Accepted for an admin-only form.
 
+        The model is validated before the duplicate check, so an invalid
+        payload (for example reversed calibration dates) is a 422 even when
+        the number is already registered (OI-34).
+
         Validates: Requirement 8.1, 8.3
         """
-        if await self.get_meter_by_number(tenant_id, meter_number.strip()) is not None:
-            raise AppException(
-                ErrorCode.DUPLICATE_METER_NUMBER,
-                f"Meter number '{meter_number}' is already registered",
-                details={"meter_number": meter_number},
-            )
-
         if calibration_expiry_date < utcnow().date():
             status = "expired_calibration"
 
@@ -157,6 +154,13 @@ class MeterAuditService:
             weights_measures_authority=weights_measures_authority,
             status=status,
         )
+
+        if await self.get_meter_by_number(tenant_id, meter_number.strip()) is not None:
+            raise AppException(
+                ErrorCode.DUPLICATE_METER_NUMBER,
+                f"Meter number '{meter_number}' is already registered",
+                details={"meter_number": meter_number},
+            )
 
         doc = self._serialize_meter(meter)
 
