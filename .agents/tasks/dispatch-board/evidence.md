@@ -388,7 +388,7 @@ Status: tasks 26–32 done (no `phase5-review.json` existed, so implemented from
 - Full WCAG 2.2 conformance needs manual assistive-technology testing and expert review (task 40).
 
 ### Phase 6: Publish, after-publish, suggestions, map, history UI
-Status: tasks 33–36 done. No `phase6-review.json` existed, so this was implemented from scratch on `feature/dispatch-board`. Frontend only, with no backend, staging, AWS, deploy or CodeBuild action. The board stays behind the flag, and no dependency or lockfile changed (`@vis.gl/react-google-maps` was already a dependency).
+Status: tasks 33–36 done. No `phase6-review.json` existed, so this was implemented from scratch. Commit `7017539` on `feature/dispatch-board`. Frontend only, with no backend, staging, AWS, deploy or CodeBuild action. The board stays behind the flag, and no dependency or lockfile changed (`@vis.gl/react-google-maps` was already a dependency).
 #### What landed (under `runsheet/src/components/dispatch-board/` unless named)
 | Task | Change | Tests |
 |---|---|---|
