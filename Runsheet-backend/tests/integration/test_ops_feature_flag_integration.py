@@ -126,6 +126,8 @@ class TestApiFeatureFlagGating:
         self.ff_service = FakeFeatureFlagService()
 
         app = FastAPI()
+        from errors.handlers import register_exception_handlers
+        register_exception_handlers(app)
 
         mock_es_client = MagicMock()
         mock_es_client.search = MagicMock(return_value={
@@ -169,7 +171,7 @@ class TestApiFeatureFlagGating:
         resp = self.client.get("/api/ops/shipments")
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "TENANT_DISABLED"
+        assert body["error_code"] == "TENANT_DISABLED"
 
     def test_disabled_tenant_riders_returns_404(self):
         resp = self.client.get("/api/ops/riders")

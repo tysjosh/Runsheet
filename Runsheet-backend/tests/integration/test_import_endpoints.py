@@ -95,6 +95,8 @@ def mock_es():
 def test_app(mock_es):
     """Create a minimal FastAPI app with the import router and mocked ES."""
     app = FastAPI()
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(app)
 
     # Set up rate limiter on the test app
     app.state.limiter = limiter
@@ -174,7 +176,7 @@ class TestUploadCSV:
             data={"data_type": "fleet"},
         )
         assert resp.status_code == 400
-        assert "10MB" in resp.json()["detail"] or "size limit" in resp.json()["detail"].lower()
+        assert "10MB" in resp.json()["message"] or "size limit" in resp.json()["message"].lower()
 
     async def test_upload_non_csv_file(self, client):
         """Reject a non-CSV file. Validates: Requirement 3.4"""
@@ -184,7 +186,7 @@ class TestUploadCSV:
             data={"data_type": "fleet"},
         )
         assert resp.status_code == 400
-        assert "csv" in resp.json()["detail"].lower()
+        assert "csv" in resp.json()["message"].lower()
 
     async def test_upload_invalid_data_type(self, client):
         """Reject an unsupported data type."""
@@ -195,7 +197,7 @@ class TestUploadCSV:
             data={"data_type": "nonexistent"},
         )
         assert resp.status_code == 422
-        assert "unsupported" in resp.json()["detail"].lower() or "Unsupported" in resp.json()["detail"]
+        assert "unsupported" in resp.json()["message"].lower() or "Unsupported" in resp.json()["message"]
 
     async def test_upload_csv_empty_file(self, client):
         """Reject an empty CSV (no header row)."""
@@ -224,7 +226,7 @@ class TestUploadSheets:
             json={"url": "https://example.com/not-a-sheet", "data_type": "fleet"},
         )
         assert resp.status_code == 422
-        assert "google" in resp.json()["detail"].lower() or "sheet" in resp.json()["detail"].lower()
+        assert "google" in resp.json()["message"].lower() or "sheet" in resp.json()["message"].lower()
 
     async def test_upload_sheets_invalid_data_type(self, client):
         """Reject an unsupported data type for sheets."""
@@ -302,7 +304,7 @@ class TestValidate:
             },
         )
         assert resp.status_code == 404
-        assert "not found" in resp.json()["detail"].lower()
+        assert "not found" in resp.json()["message"].lower()
 
     async def test_validate_with_full_mapping(self, client):
         """Validate with all fields mapped produces valid rows."""
@@ -417,7 +419,7 @@ class TestCommit:
             json={"session_id": session_id, "skip_errors": False},
         )
         assert resp.status_code == 409
-        assert "not been validated" in resp.json()["detail"].lower()
+        assert "not been validated" in resp.json()["message"].lower()
 
 
 # ===========================================================================
@@ -543,7 +545,7 @@ class TestHistorySession:
         )
         resp = await client.get(f"/api/import/history/{uuid.uuid4()}")
         assert resp.status_code == 404
-        assert "not found" in resp.json()["detail"].lower()
+        assert "not found" in resp.json()["message"].lower()
 
 
 # ===========================================================================

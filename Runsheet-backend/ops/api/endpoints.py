@@ -16,13 +16,19 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.legacy_flags import is_legacy_ng_delivery_enabled
 from config.settings import get_settings
 from auth.tenant_scope import require_tenant_scope
-from errors.exceptions import legacy_ng_delivery_disabled, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    legacy_ng_delivery_disabled,
+    tenant_disabled,
+    validation_error,
+)
 from middleware.rate_limiter import limiter
 from ops.middleware.pii_masker import PIIMasker, log_pii_access
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
@@ -88,7 +94,7 @@ async def require_ops_enabled(
        feature-flag admin routes deliberately do NOT depend on this, so
        operators can still observe and manage a disabled surface.
        Audit reference: product-owner-audit-2026-05-08 recommendation #1.
-    2. Per-tenant ops rollout flag — raises HTTPException(404) with
+    2. Per-tenant ops rollout flag — raises AppException(404) with
        TENANT_DISABLED when the Ops Intelligence Layer is disabled for the
        requesting tenant.
 
@@ -129,13 +135,7 @@ async def require_ops_enabled(
                 "Ops API request blocked: tenant_id=%s is disabled",
                 tenant.tenant_id,
             )
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error_code": "TENANT_DISABLED",
-                    "message": "Ops intelligence is not enabled for this tenant",
-                },
-            )
+            raise tenant_disabled()
     return tenant
 
 
@@ -570,8 +570,11 @@ async def get_shipment(
     pg = await read_hybrid_get("shipment", tenant.tenant_id, shipment_id)
     if pg is not _NOT_CUT_OVER:
         if pg is None:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Shipment not found")
+            raise AppException(
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                message="Shipment not found",
+                status_code=404,
+            )
         shipment_data = pg
     else:
         # Fetch the shipment document (tenant-scoped)
@@ -588,8 +591,11 @@ async def get_shipment(
         )
 
         if not shipment_result["hits"]["hits"]:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Shipment not found")
+            raise AppException(
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                message="Shipment not found",
+                status_code=404,
+            )
 
         shipment_data = shipment_result["hits"]["hits"][0]["_source"]
 
@@ -775,8 +781,11 @@ async def get_rider(
     )
 
     if not rider_result["hits"]["hits"]:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Rider not found")
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message="Rider not found",
+            status_code=404,
+        )
 
     rider_data = rider_result["hits"]["hits"][0]["_source"]
 
@@ -1611,7 +1620,11 @@ async def enable_feature_flag(
     )
 
     if _feature_flag_service is None:
-        raise HTTPException(status_code=503, detail="Feature flag service not configured")
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Feature flag service not configured",
+            status_code=503,
+        )
 
     await _feature_flag_service.enable(tenant_id, tenant.user_id)
 
@@ -1645,7 +1658,11 @@ async def disable_feature_flag(
     )
 
     if _feature_flag_service is None:
-        raise HTTPException(status_code=503, detail="Feature flag service not configured")
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Feature flag service not configured",
+            status_code=503,
+        )
 
     await _feature_flag_service.disable(tenant_id, tenant.user_id)
 
@@ -1705,7 +1722,11 @@ async def rollback_feature_flag(
     )
 
     if _feature_flag_service is None:
-        raise HTTPException(status_code=503, detail="Feature flag service not configured")
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Feature flag service not configured",
+            status_code=503,
+        )
 
     await _feature_flag_service.rollback(tenant_id, tenant.user_id, purge_data=purge_data)
 
@@ -1762,9 +1783,10 @@ async def trigger_replay(
     """
     replay_svc = get_replay_service()
     if replay_svc is None:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Replay service not configured",
             status_code=503,
-            detail="Replay service not configured",
         )
 
     # Parse and validate time range
@@ -1813,18 +1835,27 @@ async def get_replay_status(
     """
     replay_svc = get_replay_service()
     if replay_svc is None:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Replay service not configured",
             status_code=503,
-            detail="Replay service not configured",
         )
 
     job = await replay_svc.get_job_status(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Replay job not found")
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message="Replay job not found",
+            status_code=404,
+        )
 
     # Ensure the caller can only see their own tenant's jobs
     if job.tenant_id != tenant.tenant_id:
-        raise HTTPException(status_code=404, detail="Replay job not found")
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message="Replay job not found",
+            status_code=404,
+        )
 
     return {
         "data": job.model_dump(mode="json"),

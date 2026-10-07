@@ -93,6 +93,8 @@ def mock_es_client():
 def _build_app(mock_es_client, mock_ff_service):
     """Build a FastAPI app with ops router, mocked ES and feature flag service."""
     test_app = FastAPI()
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(test_app)
 
     mock_ops_es = MagicMock(spec=OpsElasticsearchService)
     mock_ops_es.client = mock_es_client
@@ -143,7 +145,7 @@ class TestFeatureFlagDisabledReturns404:
         resp = self.client.request(method, path)
         assert resp.status_code == 404, f"{method} {path} returned {resp.status_code}"
         body = resp.json()
-        assert body["detail"]["error_code"] == "TENANT_DISABLED"
+        assert body["error_code"] == "TENANT_DISABLED"
 
     @pytest.mark.parametrize("method,path", TENANT_SCOPED_ENDPOINTS)
     def test_feature_flag_checked_with_tenant_id(self, method, path, mock_ff_service):
@@ -173,9 +175,7 @@ class TestFeatureFlagEnabledAllowsAccess:
         # but the detail should NOT be TENANT_DISABLED
         if resp.status_code == 404:
             body = resp.json()
-            detail = body.get("detail", "")
-            if isinstance(detail, dict):
-                assert detail.get("error_code") != "TENANT_DISABLED"
+            assert body.get("error_code") != "TENANT_DISABLED"
 
 
 class TestFeatureFlagNotConfigured:

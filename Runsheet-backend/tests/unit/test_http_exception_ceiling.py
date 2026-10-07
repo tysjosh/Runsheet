@@ -5,10 +5,10 @@ added to the codebase.
 Handlers should raise through ``errors/exceptions.py`` (``forbidden``,
 ``internal_error``, ``resource_not_found``, ``validation_error``, ...)
 so every response goes through the structured ``ErrorResponse`` envelope
-the frontend parses. The remaining 23 raw-``HTTPException`` call sites
-are tolerated as tech debt but cannot grow. (A raw one that does slip
-through still renders the envelope via ``errors.handlers.handle_http_exception``,
-OI-35.)
+the frontend parses. OI-35 migrated the last 73 raw-``HTTPException``
+call sites, so the frozen count is zero and must stay there. (A raw one
+that does slip through still renders the envelope via
+``errors.handlers.handle_http_exception``.)
 
 This test freezes a per-file counter. A migration that removes call
 sites will cause the freeze to drift below the counter and the test
@@ -39,9 +39,8 @@ from pathlib import Path
 #
 # Paths are relative to the backend repo root.
 EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
-    "ops/api/endpoints.py": 11,
-    "import_endpoints.py": 12,
-    # compliance/api/* and integrations/api/* migrated to AppException (OI-35).
+    # Empty: compliance/api/*, integrations/api/*, ops/api/endpoints.py and
+    # import_endpoints.py were migrated to AppException (OI-35).
 }
 
 #: Total ceiling — sum of per-file counts. A handy second gate that
