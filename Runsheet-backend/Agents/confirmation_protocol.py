@@ -42,6 +42,23 @@ _DEDUP_IDENTITY_KEYS: Dict[str, tuple] = {
 }
 
 
+#: Job tools executed through JobService (OI-15). They never write the
+#: legacy ``jobs`` index: JobService writes ``jobs_current`` (what the UI and
+#: the scheduling API read) and enforces the transition rules.
+_JOB_SERVICE_TOOLS = frozenset(
+    {"update_job_status", "assign_asset_to_job", "cancel_job", "create_job"}
+)
+
+
+class MutationExecutionError(Exception):
+    """A mutation did not execute; the message says why (OI-15).
+
+    Raised instead of returning a "Failed to execute ..." string, which the
+    immediate path reported as ``executed=True`` and the approval path
+    recorded as ``success: True``.
+    """
+
+
 @dataclass
 class MutationRequest:
     """Represents a request to execute a mutation tool.
@@ -100,6 +117,7 @@ class ConfirmationProtocol:
         business_validator,
         es_service=None,
         notification_service=None,
+        job_service=None,
     ):
         self._risk_registry = risk_registry
         self._approval_queue = approval_queue_service
@@ -108,6 +126,10 @@ class ConfirmationProtocol:
         self._validator = business_validator
         self._es = es_service
         self._notification_service = notification_service
+        # JobService for the four job tools (OI-15). None disables them:
+        # each refuses with MutationExecutionError rather than writing the
+        # legacy ``jobs`` index.
+        self._job_service = job_service
         # Set after construction by bootstrap (the order services are built
         # later than the protocol); None means approvals record
         # executor_unavailable (loading-plan-executor K1, R1.4).
@@ -266,7 +288,20 @@ class ConfirmationProtocol:
                 )
                 return mutation_result
             # 4a. Execute immediately
-            result = await self._execute_mutation(request)
+            try:
+                result = await self._execute_mutation(request)
+            except MutationExecutionError as exc:
+                # Not executed: report it as such (OI-15), and log the
+                # attempt with no result so it can't read as a success.
+                await self._activity_log.log_mutation(
+                    request, risk_level, "immediate", None
+                )
+                return MutationResult(
+                    executed=False,
+                    risk_level=risk_level.value,
+                    result=str(exc),
+                    confirmation_method="immediate",
+                )
             await self._activity_log.log_mutation(
                 request, risk_level, "immediate", result
             )
@@ -437,6 +472,9 @@ class ConfirmationProtocol:
             )
             return "apply_loading_plan runs only through the approval queue; no mutation executed"
 
+        if tool_name in _JOB_SERVICE_TOOLS:
+            return await self._execute_job_mutation(request)
+
         if self._es is None:
             logger.warning(
                 "ConfirmationProtocol: no ES service wired, mutation %s "
@@ -451,33 +489,7 @@ class ConfirmationProtocol:
 
         # Dispatch to tool-specific ES writes
         try:
-            if tool_name == "update_job_status":
-                await self._es.update_document(
-                    "jobs",
-                    params["job_id"],
-                    {"status": params["new_status"], "tenant_id": tenant_id},
-                )
-            elif tool_name == "assign_asset_to_job":
-                await self._es.update_document(
-                    "jobs",
-                    params["job_id"],
-                    {"assigned_asset_id": params["asset_id"], "tenant_id": tenant_id},
-                )
-            elif tool_name == "cancel_job":
-                await self._es.update_document(
-                    "jobs",
-                    params["job_id"],
-                    {"status": "cancelled", "cancel_reason": params.get("reason", ""), "tenant_id": tenant_id},
-                )
-            elif tool_name == "create_job":
-                import uuid
-                job_id = f"JOB_{uuid.uuid4().hex[:8].upper()}"
-                await self._es.index_document(
-                    "jobs",
-                    job_id,
-                    {**params, "job_id": job_id, "status": "scheduled", "tenant_id": tenant_id},
-                )
-            elif tool_name == "reassign_rider":
+            if tool_name == "reassign_rider":
                 await self._es.update_document(
                     "shipments_current",
                     params["shipment_id"],
@@ -560,3 +572,93 @@ class ConfirmationProtocol:
                 e,
             )
             return f"Failed to execute {tool_name}: {e}"
+
+    async def _execute_job_mutation(self, request: MutationRequest) -> str:
+        """Run a job tool through JobService (OI-15).
+
+        JobService applies ``VALID_TRANSITIONS``, asset compatibility checks
+        and the job event log, and writes ``jobs_current`` where the UI reads.
+        Any refusal raises :class:`MutationExecutionError` so neither the
+        immediate path nor the approval queue reports a success.
+        """
+        from scheduling.models import CreateJob, StatusTransition
+
+        tool_name = request.tool_name
+        params = request.parameters or {}
+        tenant_id = request.tenant_id
+        if self._job_service is None:
+            logger.error(
+                "ConfirmationProtocol: %s refused for tenant %s: JobService not wired",
+                tool_name,
+                tenant_id,
+            )
+            raise MutationExecutionError(
+                "Job tools are disabled: JobService is not wired"
+            )
+
+        actor_id = f"agent:{request.agent_id}"
+        try:
+            if tool_name == "create_job":
+                job = await self._job_service.create_job(
+                    CreateJob(
+                        job_type=params["job_type"],
+                        origin=params["origin"],
+                        destination=params["destination"],
+                        scheduled_time=params["scheduled_time"],
+                        asset_assigned=params.get("asset_id"),
+                        cargo_manifest=params.get("cargo_manifest"),
+                    ),
+                    tenant_id,
+                    actor_id=actor_id,
+                )
+                outcome = f"created job {job.job_id}"
+            elif tool_name == "assign_asset_to_job":
+                await self._job_service.assign_asset(
+                    params["job_id"], params["asset_id"], tenant_id,
+                    actor_id=actor_id,
+                )
+                outcome = f"assigned asset {params['asset_id']} to job {params['job_id']}"
+            elif tool_name == "update_job_status":
+                new_status = params["new_status"]
+                reason = params.get("reason") or None
+                await self._job_service.transition_status(
+                    params["job_id"],
+                    StatusTransition(
+                        status=new_status,
+                        failure_reason=reason if new_status == "failed" else None,
+                    ),
+                    tenant_id,
+                    actor_id=actor_id,
+                )
+                outcome = f"moved job {params['job_id']} to {new_status}"
+            else:  # cancel_job
+                await self._job_service.transition_status(
+                    params["job_id"],
+                    StatusTransition(status="cancelled"),
+                    tenant_id,
+                    actor_id=actor_id,
+                )
+                # StatusTransition has no reason field; keep it in the result
+                # (and so in the activity log / approval execution_result).
+                reason = params.get("reason") or ""
+                outcome = f"cancelled job {params['job_id']}" + (
+                    f" (reason: {reason})" if reason else ""
+                )
+        except Exception as exc:
+            message = getattr(exc, "message", None) or str(exc)
+            logger.warning(
+                "ConfirmationProtocol: %s refused for tenant %s: %s",
+                tool_name,
+                tenant_id,
+                message,
+            )
+            raise MutationExecutionError(
+                f"Failed to execute {tool_name}: {message}"
+            ) from exc
+
+        logger.info(
+            "ConfirmationProtocol: executed %s via JobService for tenant %s",
+            tool_name,
+            tenant_id,
+        )
+        return f"Successfully executed {tool_name} for tenant {tenant_id}: {outcome}"

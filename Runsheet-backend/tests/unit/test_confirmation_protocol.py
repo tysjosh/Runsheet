@@ -69,6 +69,7 @@ def _make_protocol(
     validation_reason: str = None,
     approval_id: str = "approval-123",
     notification_service=None,
+    job_service=None,
 ) -> ConfirmationProtocol:
     """Create a ConfirmationProtocol with mocked dependencies."""
     risk_registry = MagicMock()
@@ -95,6 +96,7 @@ def _make_protocol(
         activity_log_service=activity_log,
         business_validator=business_validator,
         notification_service=notification_service,
+        job_service=job_service,
     )
 
 
@@ -285,10 +287,15 @@ class TestProcessMutationImmediate:
         assert result.result is not None
 
     async def test_medium_risk_auto_medium_executes_immediately(self):
+        # Job tools run through JobService (OI-15).
         protocol = _make_protocol(
-            risk_level=RiskLevel.MEDIUM, autonomy_level="auto-medium"
+            risk_level=RiskLevel.MEDIUM, autonomy_level="auto-medium",
+            job_service=AsyncMock(),
         )
-        request = _make_request(tool_name="assign_asset_to_job")
+        request = _make_request(
+            tool_name="assign_asset_to_job",
+            parameters={"job_id": "JOB_1", "asset_id": "T-1"},
+        )
         result = await protocol.process_mutation(request)
 
         assert result.executed is True
@@ -297,9 +304,10 @@ class TestProcessMutationImmediate:
 
     async def test_high_risk_full_auto_executes_immediately(self):
         protocol = _make_protocol(
-            risk_level=RiskLevel.HIGH, autonomy_level="full-auto"
+            risk_level=RiskLevel.HIGH, autonomy_level="full-auto",
+            job_service=AsyncMock(),
         )
-        request = _make_request(tool_name="cancel_job")
+        request = _make_request(tool_name="cancel_job", parameters={"job_id": "JOB_1"})
         result = await protocol.process_mutation(request)
 
         assert result.executed is True
@@ -544,8 +552,8 @@ class TestExecuteMutation:
         assert "t1" in result
 
     async def test_includes_tool_name_in_result(self):
-        protocol = _make_protocol()
-        request = _make_request(tool_name="cancel_job")
+        protocol = _make_protocol(job_service=AsyncMock())
+        request = _make_request(tool_name="cancel_job", parameters={"job_id": "JOB_1"})
         result = await protocol._execute_mutation(request)
 
         assert "cancel_job" in result

@@ -594,6 +594,8 @@ async def initialize(app, container: ServiceContainer) -> None:
         business_validator=business_validator,
         es_service=es_service,
         notification_service=container.notification_service if container.has("notification_service") else None,
+        # Job tools go through JobService (OI-15); scheduling boots first.
+        job_service=container.job_service if container.has("job_service") else None,
     )
     container.confirmation_protocol = confirmation_protocol
 

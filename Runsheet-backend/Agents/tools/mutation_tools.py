@@ -106,6 +106,9 @@ def _format_mutation_result(result) -> str:
         )
     elif result.executed:
         return f"✅ Action executed (risk: {result.risk_level}): {result.result}"
+    elif result.confirmation_method == "immediate":
+        # Ran immediately but did not execute (OI-15): never "queued".
+        return f"❌ Action not executed (risk: {result.risk_level}): {result.result}"
     else:
         return (
             f"⏳ Action queued for approval (risk: {result.risk_level}). "
