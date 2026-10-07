@@ -87,7 +87,7 @@ Open: the one manual iPad long-press check for criterion (c).
 
 ### Phase 1: Backend core
 
-Status: tasks 7–14 done (plan ticked). No staging, AWS or CodeBuild action. The board flag defaults to `disabled` (unset → 404 on every board route), so nothing changes for any tenant until the flag is set; the only change outside `/api/fuel/board` is the new admin flag pair.
+Status: tasks 7–14 done (plan ticked), commit `90013c2` on `feature/dispatch-board`. No staging, AWS or CodeBuild action. The board flag defaults to `disabled` (unset → 404 on every board route), so nothing changes for any tenant until the flag is set; the only change outside `/api/fuel/board` is the new admin flag pair.
 
 #### What landed
 
