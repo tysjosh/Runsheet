@@ -31,6 +31,10 @@ _ar_aging_snapshot_task = None
 # so shutdown can cancel it.
 _analytics_snapshot_task = None
 
+# Margin feed background tasks (gap sweep, weekly report).
+_margin_gap_sweep_task = None
+_margin_weekly_report_task = None
+
 # ── Commerce / Intake flag dependency keys ──────────────────────────
 COMMERCE_BACKBONE_FLAG_KEY = "commerce_backbone"
 ORDER_INTAKE_PIPELINE_FLAG_KEY = "order_intake_pipeline"
@@ -255,6 +259,58 @@ async def assert_driver_surface_wired(container: ServiceContainer) -> None:
         return
 
     raise DriverBootstrapMisconfigurationError(msg)
+
+
+def wire_margin_feed(container: ServiceContainer, elasticsearch_service) -> object:
+    """Construct the margin feed services and attach the hooks (margin-feed FR3).
+
+    Builds MarginRepository, MarginCostEntryService and MarginService, sets
+    the invoice margin hook and, when the OrderService already exists,
+    registers MarginOrderSubscriber (otherwise bootstrap/fuel late-binds it,
+    the same reason as the invoice subscriber). Every hook and job checks
+    ``commerce_margin_feed_enabled`` per event / cycle, so a flag flip needs
+    no restart. The signal bus is resolved lazily: bootstrap/agents creates
+    it after core.
+    """
+    from commerce.services.margin_cost_entry_service import MarginCostEntryService
+    from commerce.services.margin_repository import MarginRepository
+    from commerce.services.margin_service import MarginService
+    from fuel.terminal_models import TerminalRepository
+
+    terminals = TerminalRepository(elasticsearch_service)
+    margin_repository = MarginRepository()
+    invoice_service = (
+        container.commerce_invoice_service
+        if container.has("commerce_invoice_service")
+        else None
+    )
+    margin_service = MarginService(
+        margin_repository,
+        es_service=elasticsearch_service,
+        terminals=terminals,
+        invoice_service=invoice_service,
+        signal_bus_provider=lambda: (
+            container.signal_bus if container.has("signal_bus") else None
+        ),
+    )
+    container.margin_repository = margin_repository
+    container.margin_cost_entry_service = MarginCostEntryService(
+        margin_repository,
+        terminals=terminals,
+        es_service=elasticsearch_service,
+    )
+    container.margin_service = margin_service
+    if invoice_service is not None:
+        invoice_service.set_margin_hook(margin_service.hook)
+    if container.has("order_service"):
+        from commerce.hooks.margin_order_subscriber import (
+            register_margin_order_subscribers,
+        )
+
+        container.margin_order_subscribers = register_margin_order_subscribers(
+            container.order_service, margin_service.hook
+        )
+    return margin_service
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -718,6 +774,16 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Commerce external sync wiring failed: %s", exc)
 
+        # ── Margin feed (margin-feed FR3) ──────────────────────────────
+        # MarginService, the invoice margin hook and the order-event
+        # subscriber. The margin API router is configured next to this
+        # wiring (FEAT-005).
+        try:
+            wire_margin_feed(container, elasticsearch_service)
+            logger.info("Margin feed services wired")
+        except Exception as exc:
+            logger.warning("Margin feed wiring failed: %s", exc)
+
         # ── Commerce Sync Pull Subscribers (Task 9.3) ─────────────────
         # Register on_qbo_payment_observed and on_stripe_charge_observed
         # as subscribers on the respective connector sync_pull output
@@ -825,6 +891,62 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
         except Exception as exc:
             logger.warning("Credit override expiry job wiring failed: %s", exc)
+
+        # ── Margin gap sweep + weekly report jobs (margin-feed) ────────
+        # Leader-elected via run_periodic. Each cycle returns before any
+        # query when commerce_margin_feed_enabled or persistence is off.
+        try:
+            global _margin_gap_sweep_task, _margin_weekly_report_task
+            from commerce.services.margin_jobs import (
+                MARGIN_GAP_SWEEP_INTERVAL_SECONDS,
+                MARGIN_WEEKLY_REPORT_INTERVAL_SECONDS,
+                run_margin_gap_sweep_cycle,
+                run_margin_weekly_report_cycle,
+            )
+
+            if container.has("margin_service"):
+                _margin_service = container.margin_service
+
+                async def _margin_gap_sweep_cycle() -> None:
+                    """One margin gap-sweep pass."""
+                    counts = await run_margin_gap_sweep_cycle(
+                        _margin_service, es_service=elasticsearch_service
+                    )
+                    if counts.get("written"):
+                        logger.info(
+                            "Margin gap sweep: %d record(s) written",
+                            counts["written"],
+                        )
+
+                async def _margin_weekly_report_cycle() -> None:
+                    """One margin weekly-report pass."""
+                    written = await run_margin_weekly_report_cycle(_margin_service)
+                    if written:
+                        logger.info(
+                            "Margin weekly report job: %d report(s) written", written
+                        )
+
+                _margin_gap_sweep_task = asyncio.create_task(
+                    run_periodic(
+                        "commerce.margin-gap-sweep",
+                        MARGIN_GAP_SWEEP_INTERVAL_SECONDS,
+                        _margin_gap_sweep_cycle,
+                    )
+                )
+                _margin_weekly_report_task = asyncio.create_task(
+                    run_periodic(
+                        "commerce.margin-weekly-report",
+                        MARGIN_WEEKLY_REPORT_INTERVAL_SECONDS,
+                        _margin_weekly_report_cycle,
+                    )
+                )
+                logger.info(
+                    "Margin jobs started (gap sweep %ds, weekly report %ds)",
+                    MARGIN_GAP_SWEEP_INTERVAL_SECONDS,
+                    MARGIN_WEEKLY_REPORT_INTERVAL_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning("Margin job wiring failed: %s", exc)
 
         # ── Invoice overdue scheduled job ────────────────────────────────
         # Scans invoices_current for open/partial invoices past their
@@ -1037,6 +1159,8 @@ async def shutdown(app, container: ServiceContainer) -> None:
     global _invoice_overdue_task
     global _ar_aging_snapshot_task
     global _analytics_snapshot_task
+    global _margin_gap_sweep_task
+    global _margin_weekly_report_task
 
     # Stand down as sweep leader first, so the replacement task can pick up
     # leadership as soon as this one's lock connection closes rather than
@@ -1085,6 +1209,23 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("Analytics snapshot task stopped")
+
+    # Margin feed: let in-flight margin tasks finish (bounded), then stop
+    # the margin jobs.
+    if container.has("margin_service"):
+        try:
+            await container.margin_service.drain(timeout=10)
+        except Exception as exc:
+            logger.warning("Margin service drain failed: %s", exc)
+    for _task in (_margin_gap_sweep_task, _margin_weekly_report_task):
+        if _task is not None and not _task.done():
+            _task.cancel()
+            try:
+                await _task
+            except asyncio.CancelledError:
+                pass
+    _margin_gap_sweep_task = None
+    _margin_weekly_report_task = None
 
     # Redis client cleanup is handled by modules that own the connection.
     logger.info("Core infrastructure shut down")

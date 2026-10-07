@@ -75,11 +75,14 @@ def _invoice_must_clauses(
     created_from: Optional[datetime] = None,
     created_before: Optional[datetime] = None,
     created_until: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Document-store must-clauses shared by ``InvoiceService.list`` and ``count``.
 
     Invoice ``created_at`` is written as ``utcnow().isoformat()`` (``+00:00``
     suffix) and compared as text, so date bounds use the same form.
+    ``updated_from`` filters ``updated_at >=`` the bound (margin gap sweep);
+    it is a filter only, paging stays on the ``created_at`` keyset.
     """
     from services.date_range import to_doc_bound
 
@@ -103,6 +106,10 @@ def _invoice_must_clauses(
         bounds["lte"] = to_doc_bound(created_until, z_suffix=False)
     if bounds:
         must_clauses.append({"range": {"created_at": bounds}})
+    if updated_from is not None:
+        must_clauses.append(
+            {"range": {"updated_at": {"gte": to_doc_bound(updated_from, z_suffix=False)}}}
+        )
     return must_clauses
 
 
@@ -229,6 +236,11 @@ class InvoiceService:
         # notification sent to prevent duplicate notifications on
         # repeated overdue scans (idempotency).
         self._notified_overdue_invoices: set = set()
+        # Optional MarginHook (margin feed). Injected via set_margin_hook()
+        # from bootstrap. Its methods are synchronous and schedule the
+        # margin work in the background; _notify_margin also catches any
+        # exception, so margin work never fails or blocks an invoice call.
+        self._margin_hook: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Dependency injection setters
@@ -282,6 +294,32 @@ class InvoiceService:
         Validates: Requirement 12.6
         """
         self._notification_service = notification_service
+
+    def set_margin_hook(self, margin_hook) -> None:
+        """Inject the MarginHook (margin feed, FR3).
+
+        generate_from_order, finalize_draft and void hand the persisted
+        invoice doc to the hook after the operation completed. The hook
+        deep-copies the doc and schedules the margin computation; it never
+        raises and is never awaited.
+        """
+        self._margin_hook = margin_hook
+
+    def _notify_margin(self, method: str, doc: Dict[str, Any]) -> None:
+        """Call ``margin_hook.<method>(doc)``; any exception is logged, never raised."""
+        hook = self._margin_hook
+        if hook is None:
+            return
+        try:
+            getattr(hook, method)(doc)
+        except Exception as exc:  # noqa: BLE001 - margin never fails the invoice
+            logger.error(
+                "InvoiceService: margin hook %s failed for invoice %s tenant %s: %s",
+                method,
+                doc.get("invoice_id"),
+                doc.get("tenant_id"),
+                type(exc).__name__,
+            )
 
     def set_dunning_service(self, dunning_service) -> None:
         """Inject the DunningService for overdue-invoice dunning cancellation.
@@ -1130,6 +1168,9 @@ class InvoiceService:
                 doc=doc,
             )
 
+        # --- Margin feed (FR3): last statement before the log line ------
+        self._notify_margin("invoice_generated", doc)
+
         logger.info(
             "Generated invoice %s from order %s for tenant %s (total: %d cents)",
             invoice_id,
@@ -1272,6 +1313,9 @@ class InvoiceService:
 
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
+
+        # Margin feed (FR3): freeze the invoice's margin records.
+        self._notify_margin("invoice_finalized", merged)
 
         # Post-commit callback: fire external sync as a non-blocking
         # asyncio task so HTTP latency is unaffected by QBO push latency.
@@ -1606,6 +1650,9 @@ class InvoiceService:
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
 
+        # Margin feed (FR3): void the invoice's margin records.
+        self._notify_margin("invoice_voided", merged)
+
         # Cancel dunning notifications when invoice is voided (Req 7.5)
         if self._dunning_service:
             try:
@@ -1880,6 +1927,7 @@ class InvoiceService:
         created_from: Optional[datetime] = None,
         created_before: Optional[datetime] = None,
         created_until: Optional[datetime] = None,
+        updated_from: Optional[datetime] = None,
     ) -> int:
         """Count Invoices matching the :meth:`list` filters (data export)."""
         from commerce.services.commerce_persistence_bridge import (
@@ -1891,12 +1939,13 @@ class InvoiceService:
             account_id=account_id, order_id=order_id,
             qbo_push_state=qbo_push_state, created_from=created_from,
             created_before=created_before, created_until=created_until,
+            updated_from=updated_from,
         )
         if pg is not _NOT_CUT_OVER:
             return int(pg)
         clauses = _invoice_must_clauses(
             status, customer_id, account_id, order_id, qbo_push_state,
-            created_from, created_before, created_until,
+            created_from, created_before, created_until, updated_from,
         )
         base_query: Dict[str, Any] = {
             "query": {"bool": {"must": clauses if clauses else [{"match_all": {}}]}},
@@ -1921,6 +1970,7 @@ class InvoiceService:
         created_from: Optional[datetime] = None,
         created_before: Optional[datetime] = None,
         created_until: Optional[datetime] = None,
+        updated_from: Optional[datetime] = None,
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
     ) -> Dict[str, Any]:
@@ -1947,14 +1997,14 @@ class InvoiceService:
             account_id=account_id, order_id=order_id,
             qbo_push_state=qbo_push_state, created_from=created_from,
             created_before=created_before, created_until=created_until,
-            cursor=cursor, limit=limit,
+            updated_from=updated_from, cursor=cursor, limit=limit,
         )
         if pg is not _NOT_CUT_OVER:
             return pg
 
         must_clauses = _invoice_must_clauses(
             status, customer_id, account_id, order_id, qbo_push_state,
-            created_from, created_before, created_until,
+            created_from, created_before, created_until, updated_from,
         )
 
         base_query: Dict[str, Any] = {

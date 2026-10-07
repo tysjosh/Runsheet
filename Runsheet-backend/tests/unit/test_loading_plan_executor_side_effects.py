@@ -5,8 +5,8 @@
 * ``fuel/services/loading_plan_executor.py`` imports none of the dispatch-time
   modules (AST scan).
 * Subscriber pin: every ``.subscribe("order.*", ...)`` registration in the
-  backend (excluding tests and the venv) is for ``order.dispatched`` or
-  ``order.delivered``. A new subscriber on a status the executor reaches would
+  backend (excluding tests and the venv) is for ``order.dispatched``,
+  ``order.delivered``, ``order.cancelled`` or ``order.failed``. A new subscriber on a status the executor reaches would
   turn plan approval into a side effect; this test makes that visible.
 """
 
@@ -156,4 +156,7 @@ def test_order_subscriber_pin():
                 non_constant.append(f"{path.relative_to(BACKEND)}:{node.lineno}")
 
     assert non_constant == [], f"non-constant order_service.subscribe(...) calls: {non_constant}"
-    assert constants == {"order.dispatched", "order.delivered"}
+    # order.cancelled / order.failed: the margin feed voids an order's estimate
+    # record (commerce/hooks/margin_order_subscriber.py). The executor never
+    # reaches either status (it moves orders to confirmed / scheduled only).
+    assert constants == {"order.dispatched", "order.delivered", "order.cancelled", "order.failed"}

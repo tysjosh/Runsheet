@@ -103,3 +103,24 @@ def make_candidate() -> Callable[..., MarginCandidate]:
 @pytest.fixture
 def make_missing_cost() -> Callable[..., MarginCandidate]:
     return _missing_cost
+
+
+# Margin service / sweep fixtures (FEAT-003).
+
+
+@pytest.fixture
+def flag_on(monkeypatch):
+    monkeypatch.setenv("COMMERCE_MARGIN_FEED_ENABLED", "true")
+    clear_settings_cache()
+    yield
+    clear_settings_cache()
+
+
+@pytest.fixture(params=[False, True], ids=["es_path", "postgres_path"])
+def read_path(request, monkeypatch, margin_engine):
+    """Run once with the ES fake and once with the SQLite mirror (freeze 10/13)."""
+
+    monkeypatch.setenv("COMMERCE_READ_FROM_POSTGRES", "true" if request.param else "false")
+    clear_settings_cache()
+    yield request.param
+    clear_settings_cache()
