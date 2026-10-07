@@ -61,15 +61,33 @@ def _inventory_csv(quantity):
     ).encode()
 
 
-async def _import(service, data_type, content, tenant_id):
+FLEET_HEADER = "truck_id,plate_number,status\n"
+
+
+def _fleet_row(truck_id):
+    return f"{truck_id},PLATE-{truck_id},on_time\n"
+
+
+async def _import(service, data_type, content, tenant_id, *, expect_valid=True):
     parsed = await service.parse_csv(
         content, data_type, tenant_id=tenant_id, source_name=f"{data_type}.csv"
     )
     validated = await service.validate(
         parsed.session_id, parsed.suggested_mapping, tenant_id=tenant_id
     )
-    assert validated.error_count == 0, validated.errors
+    if expect_valid:
+        assert validated.error_count == 0, validated.errors
+    # Commit without skip_errors so the commit-time check still runs (C1).
     return await service.commit(parsed.session_id, tenant=_tenant(tenant_id))
+
+
+async def _validate(service, data_type, content, tenant_id):
+    parsed = await service.parse_csv(
+        content, data_type, tenant_id=tenant_id, source_name=f"{data_type}.csv"
+    )
+    return await service.validate(
+        parsed.session_id, parsed.suggested_mapping, tenant_id=tenant_id
+    )
 
 
 async def test_two_tenants_cannot_overwrite_each_others_rows():
@@ -83,7 +101,9 @@ async def test_two_tenants_cannot_overwrite_each_others_rows():
     assert stored_a["tenant_id"] == "tenant-a"
     assert stored_a["quantity"] == 150
 
-    second = await _import(service, "inventory", _inventory_csv(1), "tenant-b")
+    second = await _import(
+        service, "inventory", _inventory_csv(1), "tenant-b", expect_valid=False
+    )
     assert second.imported_records == 0
     assert second.error_count == 1
     assert second.status.value == "failed"
@@ -112,10 +132,43 @@ async def test_legacy_row_without_tenant_is_not_adopted():
     store.documents[("inventory", "INV-1")] = {"item_id": "INV-1", "quantity": 9}
     service = ImportService(store)
 
-    result = await _import(service, "inventory", _inventory_csv(150), "tenant-a")
+    result = await _import(
+        service, "inventory", _inventory_csv(150), "tenant-a", expect_valid=False
+    )
 
     assert result.error_count == 1
     assert store.documents[("inventory", "INV-1")] == {"item_id": "INV-1", "quantity": 9}
+
+
+async def test_validate_reports_foreign_tenant_id_collision():
+    """OI-25: validate flags an id another tenant owns, before commit."""
+    store = _Store()
+    store.documents[("trucks", "TRK-1")] = {"truck_id": "TRK-1", "tenant_id": "tenant-a"}
+    store.documents[("trucks", "TRK-2")] = {"truck_id": "TRK-2", "tenant_id": "tenant-b"}
+    service = ImportService(store)
+    content = FLEET_HEADER + "".join(
+        _fleet_row(truck_id) for truck_id in ("TRK-1", "TRK-2", "TRK-3")
+    )
+
+    result = await _validate(service, "fleet", content.encode(), "tenant-b")
+
+    collisions = [e for e in result.errors if e.field_name == "truck_id"]
+    assert [(e.row_number, e.value) for e in collisions] == [(1, "TRK-1")]
+    assert collisions[0].description == "truck_id 'TRK-1' is already in use"
+    assert "tenant-a" not in collisions[0].description
+    assert result.error_count == len(result.errors) == 1
+    assert result.valid_rows == 2
+
+
+async def test_validate_flags_legacy_row_without_tenant():
+    store = _Store()
+    store.documents[("inventory", "INV-1")] = {"item_id": "INV-1", "quantity": 9}
+    service = ImportService(store)
+
+    result = await _validate(service, "inventory", _inventory_csv(150), "tenant-a")
+
+    assert [e.field_name for e in result.errors] == ["item_id"]
+    assert result.valid_rows == 0
 
 
 async def test_fuel_stations_import_is_keyed_by_station_id():

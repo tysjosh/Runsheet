@@ -388,6 +388,8 @@ class ImportService:
             await self._append_canonical_validation_issues(
                 session, field_mapping, result
             )
+        elif session.data_type in NON_CANONICAL_ID_FIELDS:
+            await self._append_ownership_issues(session, field_mapping, result)
         # Stamp the session_id onto the result
         result.session_id = session_id
 
@@ -723,6 +725,51 @@ class ImportService:
             else:
                 document[target_field] = value
         return document
+
+    async def _append_ownership_issues(
+        self,
+        session: _ActiveSession,
+        field_mapping: dict[str, str],
+        result: ValidationResult,
+    ) -> None:
+        """Validate-time copy of the commit-time id ownership check (OI-25).
+
+        Commit refuses a row whose id another tenant (or a legacy row with no
+        tenant) already holds. Reporting it here lets the preview show the
+        collision before commit. The text is the same generic one commit uses
+        and never names the other owner. Commit keeps its own check for rows
+        claimed between the two steps.
+        """
+        if not session.tenant_id:
+            return
+        id_field = NON_CANONICAL_ID_FIELDS[session.data_type]
+        target_index = self.schema_templates.get_index(session.data_type)
+        rows_with_errors = {issue.row_number for issue in result.errors}
+        for row_index, row in enumerate(session.rows, start=1):
+            if row_index in rows_with_errors:
+                continue
+            try:
+                document = self._map_and_coerce_row(
+                    row, field_mapping, session.data_type
+                )
+            except (TypeError, ValueError):
+                continue
+            doc_id = str(document.get(id_field) or "").strip()
+            if not doc_id:
+                continue
+            existing = await self.es_service.get_document(target_index, doc_id)
+            if existing is not None and existing.get("tenant_id") != session.tenant_id:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name=id_field,
+                        description=f"{id_field} '{doc_id}' is already in use",
+                        value=doc_id,
+                    )
+                )
+                rows_with_errors.add(row_index)
+        result.error_count = len(result.errors)
+        result.valid_rows = result.total_rows - len(rows_with_errors)
 
     async def _append_canonical_validation_issues(
         self,
