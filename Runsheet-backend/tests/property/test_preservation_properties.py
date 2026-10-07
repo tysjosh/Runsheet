@@ -856,11 +856,10 @@ class TestFeatureFlagTenantDisabled:
         )
 
         body = resp.json()
-        detail = body.get("detail", {})
-        if isinstance(detail, dict):
-            assert detail.get("error_code") == "TENANT_DISABLED", (
-                f"Expected TENANT_DISABLED error_code, got: {detail}"
-            )
+        # Standard envelope (OI-35): error_code is top-level.
+        assert body.get("error_code") == "TENANT_DISABLED", (
+            f"Expected TENANT_DISABLED error_code, got: {body}"
+        )
 
         # Re-enable for other tests
         mock_ff.is_enabled = AsyncMock(return_value=True)

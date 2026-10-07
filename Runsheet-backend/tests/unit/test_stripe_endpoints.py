@@ -303,7 +303,7 @@ class TestWebhookEndpoint:
                 headers={"Stripe-Signature": "bad-sig"},
             )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "invalid_signature"
+        assert resp.json()["error_code"] == "invalid_signature"
 
     def test_missing_signature_header_returns_400(self):
         connector = _build_connector(stripe_module=_FakeStripeSDK())
@@ -314,7 +314,7 @@ class TestWebhookEndpoint:
                 content=b'{"id":"evt_3"}',
             )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "missing_stripe_signature"
+        assert resp.json()["error_code"] == "missing_stripe_signature"
 
     def test_webhook_returns_404_when_no_integration(self):
         app, calls = _build_app(connector=None)
@@ -561,7 +561,7 @@ class TestListPaymentsEndpoint:
                 "/api/integrations/stripe/payments?created.gte=not-a-date"
             )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "invalid_timestamp"
+        assert resp.json()["error_code"] == "invalid_timestamp"
 
     def test_connector_error_returns_503(self):
         pi_api = _FakeListingPaymentIntentAPI(
@@ -574,7 +574,7 @@ class TestListPaymentsEndpoint:
             resp = client.get("/api/integrations/stripe/payments")
         assert resp.status_code == 503
         assert (
-            resp.json()["detail"]["error_code"]
+            resp.json()["error_code"]
             == "stripe_list_payments_failed"
         )
 

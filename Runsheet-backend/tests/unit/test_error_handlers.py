@@ -237,14 +237,18 @@ class TestRegisterExceptionHandlers:
         
         register_exception_handlers(mock_app)
         
-        # Should have called add_exception_handler twice
-        assert mock_app.add_exception_handler.call_count == 2
+        # AppException, HTTPException, RequestValidationError and Exception (OI-35)
+        assert mock_app.add_exception_handler.call_count == 4
         
-        # Check that AppException handler was registered
         calls = mock_app.add_exception_handler.call_args_list
         exception_types = [call[0][0] for call in calls]
         
+        from fastapi.exceptions import RequestValidationError
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
         assert AppException in exception_types
+        assert StarletteHTTPException in exception_types
+        assert RequestValidationError in exception_types
         assert Exception in exception_types
 
 

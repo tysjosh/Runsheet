@@ -306,14 +306,14 @@ class TestComputeTaxEndpoint:
         )
 
         assert resp.status_code == 400, resp.text
-        detail = resp.json()["detail"]
-        assert detail["error_code"] == "tax.jurisdiction_not_found"
-        assert detail["fips_code"] == "06"
-        assert detail["jurisdiction_level"] == "state"
-        assert detail["tax_type"] == "excise"
-        assert detail["product_code"] == "DIESEL_2"
-        assert detail["effective_date"] == "2026-01-15"
-        assert "message" in detail and detail["message"]
+        body = resp.json()
+        assert body["error_code"] == "tax.jurisdiction_not_found"
+        assert body["details"]["fips_code"] == "06"
+        assert body["details"]["jurisdiction_level"] == "state"
+        assert body["details"]["tax_type"] == "excise"
+        assert body["details"]["product_code"] == "DIESEL_2"
+        assert body["details"]["effective_date"] == "2026-01-15"
+        assert body["message"]
 
     def test_invalid_input_maps_to_http_422(self):
         app, es = _build_app(tenant_id="tenant-A")
@@ -404,14 +404,13 @@ class TestCreateTaxJurisdiction:
         )
 
         assert resp.status_code == 422, resp.text
-        detail = resp.json()["detail"]
-        # Our handler returns a dict for custom validation failures;
-        # Pydantic schema-level failures return a list. Accept either
-        # shape so long as the error_code / message is present when
-        # it's a dict.
-        if isinstance(detail, dict):
-            assert detail["error_code"] == "tax_jurisdiction.invalid_payload"
-            assert "fips_code" in detail["message"].lower() or "length" in detail["message"].lower()
+        body = resp.json()
+        # Standard envelope (OI-35): the handler's own check reports
+        # tax_jurisdiction.invalid_payload; a schema-level failure reports
+        # VALIDATION_ERROR.
+        assert body["error_code"] in ("tax_jurisdiction.invalid_payload", "VALIDATION_ERROR")
+        if body["error_code"] == "tax_jurisdiction.invalid_payload":
+            assert "fips_code" in body["message"].lower() or "length" in body["message"].lower()
 
 
 # ---------------------------------------------------------------------------

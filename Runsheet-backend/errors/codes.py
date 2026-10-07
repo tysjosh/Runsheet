@@ -37,6 +37,10 @@ class ErrorCode(str, Enum):
     """A create used an id that is already taken, in any tenant (HTTP 409)"""
     ASSET_CONFLICT = "ASSET_CONFLICT"
     """The asset is already assigned to another active job (HTTP 409)"""
+    CONFLICT = "CONFLICT"
+    """Generic conflict for a framework or raw HTTPException 409 (HTTP 409)"""
+    METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    """The route exists but not for this HTTP method (HTTP 405)"""
     
     # Authentication errors (4xx)
     UNAUTHORIZED = "UNAUTHORIZED"
@@ -428,6 +432,8 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.RESOURCE_NOT_FOUND: 404,
     ErrorCode.RESOURCE_ALREADY_EXISTS: 409,
     ErrorCode.ASSET_CONFLICT: 409,
+    ErrorCode.CONFLICT: 409,
+    ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.RATE_LIMITED: 429,
