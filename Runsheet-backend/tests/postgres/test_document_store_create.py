@@ -84,6 +84,25 @@ async def test_concurrent_creates_of_one_id_insert_exactly_once(store, index_nam
     assert (await store.get_document(index_name, "X-4"))["n"] == winner
 
 
+async def test_index_document_cannot_rehome_a_tenanted_row(store, index_name, pg_sessionmaker):
+    """L1 defence in depth: a plain re-index by another tenant is refused."""
+    import pytest
+
+    from persistence.document_store import CrossTenantWriteError
+
+    await store.index_document(index_name, "X-5", {"tenant_id": "tenant-a", "name": "A"})
+
+    with pytest.raises(CrossTenantWriteError):
+        await store.index_document(
+            index_name, "X-5", {"tenant_id": "tenant-b", "name": "B"}
+        )
+
+    stored = await store.get_document(index_name, "X-5")
+    assert stored["tenant_id"] == "tenant-a" and stored["name"] == "A"
+    row = await _row(pg_sessionmaker, index_name, "X-5")
+    assert row.tenant_id == "tenant-a"
+
+
 async def test_create_requires_a_doc_id(store, index_name):
     import pytest
 

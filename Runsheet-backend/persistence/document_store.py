@@ -55,6 +55,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import delete as sql_delete, func, select
 
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from persistence.document_aggregations import (
     collect_aggregation_fields,
     run_aggregations,
@@ -77,7 +79,45 @@ from persistence.document_query import (
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["PostgresDocumentStore"]
+__all__ = ["CrossTenantWriteError", "PostgresDocumentStore"]
+
+
+class CrossTenantWriteError(AppException):
+    """A write would move a stored document from one tenant to another (L1).
+
+    The store key ``(index_name, doc_id)`` carries no tenant, so without this a
+    write by tenant B on an id tenant A already owns replaced A's body and
+    rewrote the row's ``tenant_id``. The 409 is the same one a create-if-absent
+    endpoint returns, and the message is generic: it never names the owner.
+    """
+
+    def __init__(self, index: str, doc_id: str) -> None:
+        super().__init__(
+            error_code=ErrorCode.RESOURCE_ALREADY_EXISTS,
+            message="A record with this id already exists",
+            details={"index": index, "doc_id": str(doc_id)},
+        )
+
+
+def _refuse_rehome(
+    index: str,
+    doc_id: str,
+    stored_tenant: Optional[str],
+    incoming_tenant: Optional[str],
+) -> None:
+    """Raise :class:`CrossTenantWriteError` if a write would change the owner.
+
+    Only a change between two non-null tenants is refused. A stored row with no
+    tenant (the legacy ``trucks``/``locations`` documents, or seeded rows) can
+    still be adopted, and an incoming document with no tenant is unchanged.
+    """
+    if stored_tenant and incoming_tenant and stored_tenant != incoming_tenant:
+        logger.error(
+            "Refused cross-tenant write on %s/%s (stored tenant differs from incoming)",
+            index,
+            doc_id,
+        )
+        raise CrossTenantWriteError(index, doc_id)
 
 #: Cap on the rows a single search returns. Elasticsearch's own ``index.max_result_window``
 #: default is 10,000 and several call sites pass ``size=10000`` right up against
@@ -233,6 +273,7 @@ class PostgresDocumentStore:
                 )
                 result = "created"
             else:
+                _refuse_rehome(index, doc_id, _stored_tenant(row), _tenant_of(document))
                 row.document = dict(document)
                 row.tenant_id = _tenant_of(document)
                 result = "updated"
@@ -312,6 +353,7 @@ class PostgresDocumentStore:
                 raise DocumentNotFound(index, str(doc_id))
             merged = dict(row.document or {})
             merged.update(partial_doc)
+            _refuse_rehome(index, doc_id, _stored_tenant(row), _tenant_of(merged))
             row.document = merged
             row.tenant_id = _tenant_of(merged)
         return {"_index": index, "_id": str(doc_id), "result": "updated"}
@@ -363,8 +405,26 @@ class PostgresDocumentStore:
                         )
                     )
                 else:
+                    stored_tenant = _stored_tenant(row)
+                    incoming_tenant = _tenant_of(document)
+                    if (
+                        stored_tenant
+                        and incoming_tenant
+                        and stored_tenant != incoming_tenant
+                    ):
+                        # Same refusal as _refuse_rehome, reported per document
+                        # so one foreign id doesn't fail the whole batch (L1).
+                        logger.error(
+                            "Refused cross-tenant bulk write on %s/%s",
+                            index,
+                            doc_id,
+                        )
+                        errors.append(
+                            {"position": position, "reason": "id already exists"}
+                        )
+                        continue
                     row.document = document
-                    row.tenant_id = _tenant_of(document)
+                    row.tenant_id = incoming_tenant
                 successful += 1
 
         return {
@@ -455,6 +515,7 @@ class PostgresDocumentStore:
             updated = transform(dict(current))
             if updated is None:
                 return (current, False)
+            _refuse_rehome(index, doc_id, _stored_tenant(row), _tenant_of(updated))
             updated["updated_at"] = self._clock()
             row.document = updated
             row.tenant_id = _tenant_of(updated)
@@ -548,6 +609,15 @@ class PostgresDocumentStore:
             for row in rows:
                 updated = transform(dict(row.document or {}))
                 if updated is None:
+                    continue
+                stored_tenant = _stored_tenant(row)
+                incoming_tenant = _tenant_of(updated)
+                if stored_tenant and incoming_tenant and stored_tenant != incoming_tenant:
+                    logger.error(
+                        "Refused cross-tenant update_by_query write on %s/%s",
+                        index,
+                        row.doc_id,
+                    )
                     continue
                 updated["updated_at"] = self._clock()
                 row.document = updated
@@ -926,6 +996,11 @@ def _tenant_of(document: Dict[str, Any]) -> Optional[str]:
     """
     value = document.get("tenant_id")
     return str(value) if isinstance(value, (str, int)) and str(value) else None
+
+
+def _stored_tenant(row: Any) -> Optional[str]:
+    """The tenant that owns a stored row: the typed column, else the body's."""
+    return row.tenant_id or _tenant_of(row.document or {})
 
 
 #: Index-specific id fields, copied from ``ElasticsearchService.bulk_index_documents``
