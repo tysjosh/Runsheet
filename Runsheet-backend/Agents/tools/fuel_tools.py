@@ -73,6 +73,9 @@ _GENERIC_STATION_WORDS = frozenset({
     "fuel", "station", "stations", "stock", "level", "levels", "tank", "tanks",
     "show", "me", "all", "list", "find", "the", "and", "or", "with", "which",
     "are", "is", "what", "any", "in", "of",
+    # Prepositions before a place (OI-37): "low stock stations near Nairobi"
+    # must search for "Nairobi", not "near Nairobi".
+    "near", "at", "around", "by", "on", "for",
 })
 
 

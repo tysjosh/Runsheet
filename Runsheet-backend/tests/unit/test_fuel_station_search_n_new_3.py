@@ -83,3 +83,20 @@ async def test_ago_stations_matches_an_ago_station():
     ago = {**CRITICAL_STATION, "fuel_type": "AGO"}
     assert matches(ago, query)
     assert not matches({**ago, "fuel_type": "PMS"}, query)
+
+
+def test_docstring_example_strips_the_preposition():
+    """OI-37: the tool docstring's own example splits to (["low"], "Nairobi")."""
+    from Agents.tools.fuel_tools import _split_station_query
+
+    assert _split_station_query("low stock stations near Nairobi") == (["low"], "Nairobi")
+
+
+@pytest.mark.parametrize("word", ["near", "at", "around", "by", "on", "for"])
+def test_place_prepositions_are_not_free_text(word):
+    from Agents.tools.fuel_tools import _split_station_query
+
+    assert _split_station_query(f"critical stations {word} Industrial Area") == (
+        ["critical"],
+        "Industrial Area",
+    )
