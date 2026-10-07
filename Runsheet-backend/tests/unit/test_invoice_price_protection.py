@@ -9,6 +9,7 @@ through ``InvoiceService.generate_from_order`` with a fake ES.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
@@ -87,9 +88,18 @@ class _FakeES:
         self.indexed: List[tuple] = []
         self.invoices: Dict[str, Dict[str, Any]] = {}
         self.fail_invoice_write = False
+        # Stands in for the Postgres row lock ``atomic_update`` takes.
+        self._row_lock = asyncio.Lock()
+        #: One-shot coroutine run while the next ``atomic_update`` holds the
+        #: lock, after its read: lets a test start a competing writer at the
+        #: worst moment.
+        self.on_locked = None
 
     async def search_documents(self, index, query, size=10, **kwargs):
         if index == "price_protection_contracts" and self._contract:
+            # Yield so concurrent callers interleave here, as they would
+            # against a real store.
+            await asyncio.sleep(0)
             return {"hits": {"hits": [{"_source": dict(self._contract)}]}}
         if index == "pricing_rules" and self._rule:
             return {"hits": {"hits": [{"_source": dict(_RULE)}]}}
@@ -113,10 +123,30 @@ class _FakeES:
 
     async def update_document(self, index, doc_id, partial, **kwargs):
         if index == "price_protection_contracts" and self._contract:
+            await asyncio.sleep(0)
             self._contract.update(partial)
         if index == "invoices_current" and doc_id in self.invoices:
             self.invoices[doc_id].update(partial)
         return {"result": "updated"}
+
+    async def atomic_update(self, index, doc_id, transform, **kwargs):
+        """Read-modify-write under a lock, like the Postgres ``FOR UPDATE``."""
+        if index != "price_protection_contracts" or not self._contract:
+            return (None, False)
+        if self._contract.get("contract_id") != doc_id:
+            return (None, False)
+        async with self._row_lock:
+            current = dict(self._contract)
+            await asyncio.sleep(0)  # other writers queue on the lock here
+            if self.on_locked is not None:
+                hook, self.on_locked = self.on_locked, None
+                await hook()
+            updated = transform(dict(current))
+            if updated is None:
+                return (current, False)
+            self._contract.clear()
+            self._contract.update(updated)
+            return (dict(updated), True)
 
     async def get_document(self, *args, **kwargs):
         return None
@@ -348,6 +378,84 @@ async def test_gallons_taken_since_the_quote_bill_at_the_rule_price():
     assert contract_line["subtotal_cents"] == 9_300  # 30 × 310
     assert excess_line["subtotal_cents"] == 23_310  # 70 × 333
     assert result["subtotal_cents"] == 32_610
+
+
+def _pp_service(es: _FakeES, tenant: str = TENANT):
+    from commerce.services.price_protection_service import PriceProtectionService
+
+    return PriceProtectionService(es, tenant)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_consumes_grant_no_more_than_remaining():
+    """Two invoices racing for a contract's last 40 gal: one gets 40, the
+    other nothing. Under the old write-then-re-read check both got 40."""
+    es = _FakeES(_contract(contracted_gallons=1_000.0, remaining_gallons=40.0, version=5))
+    svc = _pp_service(es)
+    grants = await asyncio.gather(
+        svc.consume_gallons("ppc-qa", 100.0), svc.consume_gallons("ppc-qa", 100.0)
+    )
+    assert sorted(grants) == [0.0, 40.0]
+    assert es._contract["remaining_gallons"] == pytest.approx(0.0)
+    assert es._contract["version"] == 6
+
+
+@pytest.mark.asyncio
+async def test_concurrent_partial_consumes_lose_no_decrement():
+    es = _FakeES(_contract(contracted_gallons=1_000.0, remaining_gallons=100.0, version=1))
+    svc = _pp_service(es)
+    grants = await asyncio.gather(
+        *(svc.consume_gallons("ppc-qa", 30.0) for _ in range(4))
+    )
+    assert sorted(grants) == [10.0, 30.0, 30.0, 30.0]
+    assert sum(grants) == pytest.approx(100.0)
+    assert es._contract["remaining_gallons"] == pytest.approx(0.0)
+    assert es._contract["version"] == 5
+
+
+@pytest.mark.asyncio
+async def test_restore_interleaved_with_consume_keeps_both():
+    """A void's restore has read the contract (500 left) when another
+    invoice's consume of 200 starts. The consume waits for the restore's
+    write instead of landing in between, so neither is lost:
+    500 + 300 - 200 = 600 (a clobbering restore would leave 800)."""
+    es = _FakeES(_contract(contracted_gallons=1_000.0, remaining_gallons=500.0, version=1))
+    svc = _pp_service(es)
+    consume_task: List[asyncio.Task] = []
+
+    async def _start_consume_mid_restore() -> None:
+        consume_task.append(asyncio.create_task(svc.consume_gallons("ppc-qa", 200.0)))
+        for _ in range(10):
+            await asyncio.sleep(0)
+        assert not consume_task[0].done()  # blocked on the row lock
+        assert es._contract["remaining_gallons"] == pytest.approx(500.0)
+
+    es.on_locked = _start_consume_mid_restore
+    await svc.restore_gallons("ppc-qa", 300.0)
+    assert consume_task, "restore did not go through atomic_update"
+    granted = await consume_task[0]
+    assert granted == pytest.approx(200.0)
+    assert es._contract["remaining_gallons"] == pytest.approx(600.0)
+    assert es._contract["version"] == 3
+
+
+@pytest.mark.asyncio
+async def test_restore_is_capped_at_contracted_gallons():
+    es = _FakeES(_contract(contracted_gallons=1_000.0, remaining_gallons=900.0))
+    await _pp_service(es).restore_gallons("ppc-qa", 500.0)
+    assert es._contract["remaining_gallons"] == pytest.approx(1_000.0)
+
+
+@pytest.mark.asyncio
+async def test_other_tenant_cannot_consume_or_restore():
+    es = _FakeES(_contract(remaining_gallons=500.0))
+    svc = _pp_service(es, tenant="qa-tenant-b")
+    with pytest.raises(ValueError, match="contract_not_found"):
+        await svc.consume_gallons("ppc-qa", 100.0)
+    with pytest.raises(ValueError, match="contract_not_found"):
+        await svc.restore_gallons("ppc-qa", 100.0)
+    assert es._contract["remaining_gallons"] == pytest.approx(500.0)
+    assert es._contract["version"] == 1
 
 
 @pytest.mark.asyncio

@@ -104,6 +104,18 @@ class MockESService:
             self.documents[key].update(updates)
             logger.debug(f"MockES: updated {key}")
 
+    async def atomic_update(self, index: str, doc_id: str, transform, **kwargs):
+        """Read-modify-write one document (no concurrency in these tests)."""
+        key = f"{index}:{doc_id}"
+        current = self.documents.get(key)
+        if current is None:
+            return (None, False)
+        updated = transform(dict(current))
+        if updated is None:
+            return (dict(current), False)
+        self.documents[key] = updated
+        return (dict(updated), True)
+
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int = 100
     ) -> Dict[str, Any]:

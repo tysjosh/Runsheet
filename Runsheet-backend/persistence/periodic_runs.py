@@ -17,6 +17,17 @@ when the run starts, so its successor always sees it.
 Short-interval jobs (under :data:`PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS`)
 don't use the ledger. Running one of them early after a leader change is
 harmless, and writing a row every 30 s per agent is not worth it.
+
+Semantics: **at most once per interval.** The run is claimed (written here)
+before the job body starts, so a cycle that is interrupted (SIGTERM during a
+deploy, a crash, or the agent stopping between the claim and the cycle) counts
+as done and the next run is a full interval later. That is the deliberate side
+of the trade-off: the daily sweeps this serves (asset-cert expiry, contract
+expiry) send alerts, and a skipped day is recoverable where a duplicate burst
+of critical alerts is not. Two edges follow from scheduling off the stored
+time: a ``last_run_at`` in the future (clock skew, a hand-edited row) delays
+the job until that time plus the interval, and a ledger read or write that
+fails open falls back to the in-process schedule.
 """
 
 from __future__ import annotations
