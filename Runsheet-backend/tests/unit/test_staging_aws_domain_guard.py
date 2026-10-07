@@ -264,6 +264,21 @@ def test_k_down_warning_lists_dns_and_certificates(harness):
     assert "change-resource-record-sets" not in log
 
 
+def test_m_files_bucket_grants_textract_to_task_role(harness):
+    """OI-43: meter-ticket OCR gets exactly the two Textract calls it makes."""
+    proc, log = harness("files-bucket")
+    assert proc.returncode == 0, proc.stderr
+    calls = [
+        ln for ln in log.splitlines()
+        if "iam put-role-policy" in ln and "--policy-name runsheet-staging-textract" in ln
+    ]
+    assert len(calls) == 1, log
+    assert "--role-name runsheet-staging-task" in calls[0]
+    assert '"textract:AnalyzeDocument"' in calls[0]
+    assert '"textract:DetectDocumentText"' in calls[0]
+    assert '"Resource":"*"' in calls[0]
+
+
 def test_g_staging_domain_from_main_checkout(harness, fake_main):
     """OI-09: a worktree with no .env.staging uses the main checkout's copy."""
     (fake_main / "Runsheet-backend" / ".env.staging").write_text(

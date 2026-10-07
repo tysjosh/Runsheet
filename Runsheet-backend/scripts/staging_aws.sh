@@ -1101,13 +1101,12 @@ ensure_task_role() {
   fi
   # Created with no policies. Its only grants are the inline policies added by
   # ensure_vault_kms (the credentials-vault key) and ensure_files_bucket (the
-  # file-storage bucket's tenants/ prefix). Textract OCR is not granted; it is
-  # read from the environment by bootstrap/agents.py and degrades to manual
-  # entry on AccessDenied.
+  # file-storage bucket's tenants/ prefix, plus the two Textract calls that
+  # meter-ticket OCR makes, OI-43).
   aws iam create-role --role-name "$role" \
     --assume-role-policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ecs-tasks.amazonaws.com"},"Action":"sts:AssumeRole"}]}' \
     --tags "Key=Project,Value=${PROJECT}" "Key=Environment,Value=${ENV_NAME}" >/dev/null
-  ok "created role $role (no policies — staging needs no AWS API access)"
+  ok "created role $role (no policies yet; KMS, S3 and Textract are added by ensure_vault_kms and ensure_files_bucket)"
 }
 
 #: The credentials vault (TenantCredentialsVault) envelope-encrypts tenant
@@ -1187,11 +1186,17 @@ ensure_files_bucket() {
     "$(printf '{"CORSRules":[{"AllowedOrigins":["%s"],"AllowedMethods":["GET","PUT"],"AllowedHeaders":["*"],"MaxAgeSeconds":3000}]}' "$(app_origin)")"
   ok "s3 ${FILES_BUCKET}: private, SSE-S3, owner-enforced, TLS only, tenants/ expire after 90 days, CORS $(app_origin)"
   # ListBucket lets a missing key come back as NoSuchKey instead of AccessDenied.
-  # Textract is deliberately NOT granted: OCR then degrades to manual gallons
-  # entry (MeterTicketOCRService logs the provider error and never raises).
   aws iam put-role-policy --role-name "${PREFIX}-task" --policy-name "${PREFIX}-files-s3" \
     --policy-document "$(printf '{"Version":"2012-10-17","Statement":[{"Sid":"FileStorageObjects","Effect":"Allow","Action":["s3:PutObject","s3:GetObject"],"Resource":"arn:aws:s3:::%s/tenants/*"},{"Sid":"ListTenantPrefix","Effect":"Allow","Action":"s3:ListBucket","Resource":"arn:aws:s3:::%s","Condition":{"StringLike":{"s3:prefix":"tenants/*"}}}]}' "${FILES_BUCKET}" "${FILES_BUCKET}")" >/dev/null
-  ok "task role may Put/Get ${FILES_BUCKET}/tenants/* (no Textract)"
+  ok "task role may Put/Get ${FILES_BUCKET}/tenants/*"
+  # OI-43. Meter-ticket OCR (MeterTicketOCRService) sends the image bytes it read
+  # from the bucket above, so Textract needs no S3 grant. Textract has no
+  # resource-level permissions, hence Resource "*". Without this OCR degraded to
+  # manual gallons entry on AccessDenied. Cost: ~$0.05/page (FORMS), staging POD
+  # volume only. cmd_down removes it with the role's other inline policies.
+  aws iam put-role-policy --role-name "${PREFIX}-task" --policy-name "${PREFIX}-textract" \
+    --policy-document '{"Version":"2012-10-17","Statement":[{"Sid":"MeterTicketOCR","Effect":"Allow","Action":["textract:AnalyzeDocument","textract:DetectDocumentText"],"Resource":"*"}]}' >/dev/null
+  ok "task role may call Textract AnalyzeDocument/DetectDocumentText (meter-ticket OCR)"
 }
 
 cmd_files_bucket() {
@@ -1672,7 +1677,8 @@ image, exec_arn, task_arn = sys.argv[1:4]
 #
 # The UI also holds no credentials. It talks to the API over the public internet like
 # any browser would, so it needs no database, no Redis, and no Secrets Manager
-# access. The task role is the same empty one the API uses.
+# access. The task role is the same one the API uses (vault KMS, files bucket and
+# Textract inline policies, unused by the UI).
 #
 # HUBSPOT_* are the exception that proves the rule, and belong here precisely
 # BECAUSE they carry no NEXT_PUBLIC_ prefix. The /api/pilot-request route handler
