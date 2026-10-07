@@ -5,7 +5,7 @@ added to the codebase.
 Handlers should raise through ``errors/exceptions.py`` (``forbidden``,
 ``internal_error``, ``resource_not_found``, ``validation_error``, ...)
 so every response goes through the structured ``ErrorResponse`` envelope
-the frontend parses. The remaining 37 raw-``HTTPException`` call sites
+the frontend parses. The remaining 23 raw-``HTTPException`` call sites
 are tolerated as tech debt but cannot grow. (A raw one that does slip
 through still renders the envelope via ``errors.handlers.handle_http_exception``,
 OI-35.)
@@ -40,10 +40,8 @@ from pathlib import Path
 # Paths are relative to the backend repo root.
 EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
     "ops/api/endpoints.py": 11,
-    "integrations/api/integrations_endpoints.py": 7,
-    "integrations/api/stripe_endpoints.py": 7,
     "import_endpoints.py": 12,
-    # compliance/api/* migrated to AppException (OI-35).
+    # compliance/api/* and integrations/api/* migrated to AppException (OI-35).
 }
 
 #: Total ceiling — sum of per-file counts. A handy second gate that

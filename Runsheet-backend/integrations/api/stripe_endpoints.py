@@ -163,12 +163,10 @@ async def _resolve_connector_or_404(tenant_id: str) -> StripeConnector:
         logger.error(
             "StripeConnector factory failed tenant=%s: %s", tenant_id, exc
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="stripe_connector_unavailable",
+            message="Stripe connector factory raised an error.",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "stripe_connector_unavailable",
-                "message": "Stripe connector factory raised an error.",
-            },
         )
     if connector is None:
         raise AppException(
@@ -291,16 +289,14 @@ async def get_public_config(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="stripe_envelope_corrupt",
+            message=(
+                "Stripe integration envelope is missing the "
+                "publishable_key. Disconnect and reconnect the "
+                "integration."
+            ),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "stripe_envelope_corrupt",
-                "message": (
-                    "Stripe integration envelope is missing the "
-                    "publishable_key. Disconnect and reconnect the "
-                    "integration."
-                ),
-            },
         )
     return StripePublicConfigResponse(publishable_key=publishable_key)
 
@@ -316,7 +312,7 @@ def _parse_iso8601_timestamp(raw: Optional[str], *, field_name: str) -> Optional
     Accepts the "Z" suffix for UTC (common from JS ``Date.toISOString()``)
     and bare offset forms. Naive datetimes are treated as UTC to keep the
     Stripe ``created`` epoch conversion deterministic across deployments.
-    Raises :class:`HTTPException` 400 on invalid input.
+    Raises :class:`AppException` 400 on invalid input.
     """
 
     if raw is None:
@@ -328,15 +324,13 @@ def _parse_iso8601_timestamp(raw: Optional[str], *, field_name: str) -> Optional
     try:
         parsed = datetime.fromisoformat(candidate)
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="invalid_timestamp",
+            message=(
+                f"{field_name} must be an ISO-8601 timestamp "
+                f"(got {raw!r}): {exc}"
+            ),
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_timestamp",
-                "message": (
-                    f"{field_name} must be an ISO-8601 timestamp "
-                    f"(got {raw!r}): {exc}"
-                ),
-            },
         )
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -422,15 +416,13 @@ async def list_payments(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="stripe_list_payments_failed",
+            message=(
+                "Unable to list Stripe PaymentIntents for this tenant. "
+                "Retry or verify the Stripe credentials."
+            ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "stripe_list_payments_failed",
-                "message": (
-                    "Unable to list Stripe PaymentIntents for this tenant. "
-                    "Retry or verify the Stripe credentials."
-                ),
-            },
         )
 
     items = [StripePaymentItem(**item) for item in page.get("items", [])]
@@ -528,12 +520,10 @@ async def receive_stripe_webhook(
 
     signature_header = request.headers.get("stripe-signature")
     if not signature_header:
-        raise HTTPException(
+        raise AppException(
+            error_code="missing_stripe_signature",
+            message="Stripe-Signature header is required.",
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "missing_stripe_signature",
-                "message": "Stripe-Signature header is required.",
-            },
         )
 
     try:
@@ -544,12 +534,10 @@ async def receive_stripe_webhook(
             tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="invalid_request_body",
+            message="Failed to read the webhook request body.",
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_request_body",
-                "message": "Failed to read the webhook request body.",
-            },
         )
 
     connector = await _resolve_connector_or_404(tenant_id)
@@ -564,12 +552,10 @@ async def receive_stripe_webhook(
             tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="invalid_signature",
+            message=str(exc),
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_signature",
-                "message": str(exc),
-            },
         )
 
     summary: Dict[str, Any] = {}
