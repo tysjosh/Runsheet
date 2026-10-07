@@ -61,6 +61,39 @@ from persistence.models import (
 logger = logging.getLogger(__name__)
 
 
+def _foreign_row(
+    existing: Any,
+    incoming_tenant: Optional[str],
+    *,
+    adoptable: Tuple[str, ...] = (),
+) -> bool:
+    """True when ``existing`` belongs to a different tenant than the write (L1).
+
+    The hybrid tables are keyed by a global id, so an upsert by tenant B on an
+    id tenant A owns used to replace A's ``document`` while the ``tenant_id``
+    column kept A, and a read-cutover deployment would then serve B's body to
+    A. A row whose stored tenant is in ``adoptable`` (the current-state
+    ``"unknown"`` sentinel for legacy tenantless docs) is not foreign, and
+    neither is a write whose incoming tenant is empty or itself a sentinel.
+    """
+    if existing is None:
+        return False
+    stored = getattr(existing, "tenant_id", None)
+    if not stored or stored in adoptable:
+        return False
+    if not incoming_tenant or incoming_tenant in adoptable:
+        return False
+    return stored != incoming_tenant
+
+
+def _log_foreign(aggregate_type: str, doc_id: Any) -> None:
+    logger.error(
+        "Refused cross-tenant mirror upsert for %s %s (row owned by another tenant)",
+        aggregate_type,
+        doc_id,
+    )
+
+
 # Invoice columns whose values may arrive as ISO-8601 strings from the ES-shaped
 # service docs but must be native datetime/date for the Postgres column types.
 _INVOICE_DATETIME_FIELDS = {
@@ -707,7 +740,9 @@ class PricingRuleRepository:
                     pass
         return out
 
-    async def upsert(self, session: AsyncSession, *, rule: Dict[str, Any]) -> PricingRuleORM:
+    async def upsert(
+        self, session: AsyncSession, *, rule: Dict[str, Any]
+    ) -> Optional[PricingRuleORM]:
         """Insert or update a pricing rule from the service's rule dict."""
         rule_id = rule["rule_id"]
         tenant_id = rule["tenant_id"]
@@ -716,6 +751,9 @@ class PricingRuleRepository:
                 select(PricingRuleORM).where(PricingRuleORM.rule_id == rule_id)
             )
         ).scalar_one_or_none()
+        if _foreign_row(existing, tenant_id):
+            _log_foreign("pricing_rule", rule_id)
+            return None
         vals = self._coerce_effective(rule)
         if existing is None:
             row = PricingRuleORM(
@@ -904,11 +942,15 @@ class ArAgingSnapshotRepository:
                 return None
         return value
 
-    async def upsert(self, session: AsyncSession, *, doc: Dict[str, Any]) -> ArAgingSnapshotORM:
+    async def upsert(
+        self, session: AsyncSession, *, doc: Dict[str, Any]
+    ) -> Optional[ArAgingSnapshotORM]:
         snapshot_id = doc["snapshot_id"]
         existing = await session.get(ArAgingSnapshotORM, snapshot_id)
+        if _foreign_row(existing, doc["tenant_id"]):
+            _log_foreign("ar_aging_snapshot", snapshot_id)
+            return None
         fields = dict(
-            tenant_id=doc["tenant_id"],
             snapshot_date=self._date(doc.get("snapshot_date")),
             total_open_cents=doc.get("total_open_cents", 0),
             bucket_0_30_cents=doc.get("bucket_0_30_cents", 0),
@@ -918,7 +960,9 @@ class ArAgingSnapshotRepository:
             account_count_with_balance=doc.get("account_count_with_balance", 0),
         )
         if existing is None:
-            row = ArAgingSnapshotORM(snapshot_id=snapshot_id, **fields)
+            row = ArAgingSnapshotORM(
+                snapshot_id=snapshot_id, tenant_id=doc["tenant_id"], **fields
+            )
             session.add(row)
         else:
             row = existing
@@ -986,6 +1030,9 @@ class ComplianceConfigRepository:
         doc_id = doc[self.pk_field]
         tenant_id = doc["tenant_id"]
         existing = await session.get(self.model, doc_id)
+        if _foreign_row(existing, tenant_id):
+            _log_foreign(self.aggregate_type, doc_id)
+            return None
         typed = {col: doc.get(col) for col in self.typed_cols if col in doc}
         # version defaults to 0 when the source doc omits it.
         if "version" in self.typed_cols and typed.get("version") is None:
@@ -1169,6 +1216,9 @@ class CurrentStateRepository:
         # NOT NULL column is satisfied and tenant-scoped reads still work.
         tenant_id = doc.get("tenant_id") or "unknown"
         existing = await session.get(self.model, resolved_id)
+        if _foreign_row(existing, tenant_id, adoptable=("unknown",)):
+            _log_foreign(self.aggregate_type, resolved_id)
+            return None
 
         # Stale-event guard.
         if self.has_event_ts and existing is not None:
