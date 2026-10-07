@@ -1183,6 +1183,7 @@ async def driver_checkin(
             stop_data=stop_data,
             completed_stops=result["completed_stops"],
             total_stops=result["total_stops"],
+            tenant_id=tenant_id,
         )
 
         # If all stops are complete, transition plan to "completed" and

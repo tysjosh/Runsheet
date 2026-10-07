@@ -186,17 +186,22 @@ class TestBroadcastExcludesDisabledTenants:
 
     @pytest.mark.asyncio
     async def test_broadcast_without_tenant_id_in_data(self):
-        """Data without tenant_id is broadcast normally (no flag check)."""
+        """W3: data without tenant_id reaches nobody (fail closed)."""
         mgr = OpsWebSocketManager()
-        mgr.set_feature_flag_service(_make_ff_service(enabled=False))
+        mgr.set_feature_flag_service(_make_ff_service(enabled=True))
 
         ws = _make_ws()
+        other = _make_ws()
         mgr._clients[ws] = _make_client_meta(tenant_id="tenant-x")
+        mgr._clients[other] = _make_client_meta(tenant_id="tenant-y")
 
-        sent = await mgr.broadcast_rider_update({"status": "active"})
+        assert await mgr.broadcast_rider_update({"status": "active"}) == 0
+        ws.send_json.assert_not_awaited()
 
+        sent = await mgr.broadcast_fuel_alert({"station_id": "S1", "tenant_id": "tenant-x"})
         assert sent == 1
         ws.send_json.assert_awaited_once()
+        other.send_json.assert_not_awaited()
 
         await mgr.shutdown()
 

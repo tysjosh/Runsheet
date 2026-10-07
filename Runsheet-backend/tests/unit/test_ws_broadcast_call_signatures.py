@@ -55,13 +55,17 @@ CALL_SITES: Dict[Tuple[str, str], Type] = {
     # .broadcast( there would reach every tenant and fails registration.
     # Each manager calling its own broadcast
     ("websocket/connection_manager.py", "self"): ConnectionManager,
-    ("fuel/services/fuel_planning_ws_manager.py", "self"): FuelPlanningWSManager,
     ("scheduling/websocket/scheduling_ws.py", "self"): SchedulingWebSocketManager,
-    ("driver/ws/driver_ws_manager.py", "self"): DriverWSManager,
-    ("Agents/agent_ws_manager.py", "self"): AgentActivityWSManager,
-    ("Agents/support/plan_execution_ws_manager.py", "self"): PlanExecutionWSManager,
-    ("notifications/ws/notification_ws_manager.py", "self"): NotificationWSManager,
+    # The fuel-planning, driver, agent-activity, plan-execution and
+    # notification managers no longer call their own all-clients broadcast:
+    # they send with broadcast_to_tenant and drop tenantless data (OI-01, L2,
+    # W1-W4). A new self-call there fails registration until it's reviewed.
 }
+
+#: The only functions allowed to send through ``BaseWSManager.broadcast`` (the
+#: one-argument send to every connected client of every tenant). A heartbeat
+#: carries no data, so it is the one reviewed exception.
+GLOBAL_BROADCAST_ALLOWLIST = {("websocket/connection_manager.py", "send_heartbeat")}
 
 
 def _broadcast_calls() -> List[Tuple[str, int, str, ast.Call]]:
@@ -206,4 +210,54 @@ def test_every_scheduling_broadcast_passes_tenant_id():
     assert tenantless == [], (
         "SchedulingWebSocketManager.broadcast refuses a call without tenant_id: "
         + ", ".join(tenantless)
+    )
+
+
+def _enclosing_functions() -> Dict[Tuple[str, int], str]:
+    """``(relpath, call line) -> enclosing function name`` for .broadcast( calls."""
+    out: Dict[Tuple[str, int], str] = {}
+    for path in sorted(BACKEND.rglob("*.py")):
+        rel = path.relative_to(BACKEND)
+        if _SKIP_DIRS.intersection(rel.parts):
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(rel))
+        for fn in ast.walk(tree):
+            if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(fn):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "broadcast"
+                ):
+                    out.setdefault((rel.as_posix(), node.lineno), fn.name)
+    return out
+
+
+def test_no_registered_call_site_is_stale():
+    present = {(rel, receiver) for rel, _line, receiver, _call in _broadcast_calls()}
+    stale = sorted(set(CALL_SITES) - present)
+    assert stale == [], f"CALL_SITES entries with no call left, remove them: {stale}"
+
+
+def test_only_the_heartbeat_sends_to_every_tenant():
+    """L2/W1-W4: a send that reaches every client must be reviewed here.
+
+    Any registered call whose manager's ``broadcast`` is still the base
+    one-argument all-clients send has to be in GLOBAL_BROADCAST_ALLOWLIST.
+    """
+    from websocket.base_ws_manager import BaseWSManager
+
+    enclosing = _enclosing_functions()
+    offenders = []
+    for rel, line, receiver, _call in _broadcast_calls():
+        cls = CALL_SITES.get((rel, receiver))
+        if cls is None or cls.broadcast is not BaseWSManager.broadcast:
+            continue
+        func = enclosing.get((rel, line), "<module>")
+        if (rel, func) not in GLOBAL_BROADCAST_ALLOWLIST:
+            offenders.append(f"{rel}:{line} in {func}")
+    assert offenders == [], (
+        "These send to every tenant's sockets; use broadcast_to_tenant: "
+        + ", ".join(offenders)
     )

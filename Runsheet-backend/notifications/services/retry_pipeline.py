@@ -181,6 +181,9 @@ class RetryPipeline:
                     DeliveryStatus.DEAD_LETTER.value,
                     {
                         "notification_id": notification_id,
+                        # The WS manager routes by tenant and drops tenantless
+                        # updates (W2).
+                        "tenant_id": dlq_doc["tenant_id"],
                         "delivery_status": DeliveryStatus.DEAD_LETTER.value,
                         "moved_to_dlq": True,
                         "failure_reasons": dlq_doc["failure_reasons"],

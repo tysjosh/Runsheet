@@ -199,7 +199,7 @@ class TestOpsWSManagerTenantMatrix:
         await self.manager.connect(ws, tenant_id=ENABLED_TENANT)
 
         count = await self.manager.broadcast_shipment_update(
-            {"shipment_id": "SHP-001", "status": "in_transit"},
+            {"shipment_id": "SHP-001", "status": "in_transit", "tenant_id": ENABLED_TENANT},
         )
         assert count >= 1
         # Check that the client received the broadcast
@@ -382,10 +382,10 @@ class TestAgentActivityWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_agent_ws_broadcast_activity(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="t1")
 
         count = await self.manager.broadcast_activity(
-            {"agent_id": "delay_response", "action": "monitor_cycle"}
+            {"agent_id": "delay_response", "action": "monitor_cycle", "tenant_id": "t1"}
         )
         assert count == 1
         activity_msgs = [m for m in ws.messages if m.get("type") == "agent_activity"]
@@ -449,7 +449,7 @@ class TestFullDisableEnableCycleAllManagers:
 
         # Broadcast works
         count = await manager.broadcast_shipment_update(
-            {"shipment_id": "SHP-001"},
+            {"shipment_id": "SHP-001", "tenant_id": "cycle-tenant"},
         )
         assert count >= 1
 
@@ -495,11 +495,11 @@ class TestFullDisableEnableCycleAllManagers:
         manager = AgentActivityWSManager()
 
         ws = FakeWebSocket()
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         assert not ws.closed
         assert manager.get_connection_count() == 1
 
-        count = await manager.broadcast_activity({"agent_id": "test"})
+        count = await manager.broadcast_activity({"agent_id": "test", "tenant_id": "t1"})
         assert count == 1
 
         await manager.disconnect(ws)

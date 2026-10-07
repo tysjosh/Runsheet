@@ -1039,16 +1039,31 @@ class TestBroadcastToAllDrivers:
         await manager.connect_driver(ws2, "driver-2", "tenant-1")
 
         event = {"type": "escalation", "data": {"severity": "critical"}}
-        count = await manager.broadcast_to_all_drivers(event)
+        count = await manager.broadcast_to_all_drivers(event, tenant_id="tenant-1")
 
         assert count == 2
+
+    @pytest.mark.asyncio
+    async def test_broadcast_reaches_only_the_tenant_and_blank_reaches_nobody(self):
+        """W4: never every driver in every tenant."""
+        manager = DriverWSManager()
+        ws1 = _make_websocket()
+        ws2 = _make_websocket()
+        await manager.connect_driver(ws1, "driver-1", "tenant-1")
+        await manager.connect_driver(ws2, "driver-2", "tenant-2")
+        before = ws2.send_json.await_count
+        event = {"type": "escalation", "data": {}}
+        assert await manager.broadcast_to_all_drivers(event, tenant_id="tenant-1") == 1
+        assert ws2.send_json.await_count == before
+        assert await manager.broadcast_to_all_drivers(dict(event), tenant_id="") == 0
+        assert ws2.send_json.await_count == before
 
     @pytest.mark.asyncio
     async def test_broadcast_no_clients_returns_zero(self):
         manager = DriverWSManager()
 
         count = await manager.broadcast_to_all_drivers(
-            {"type": "escalation", "data": {}}
+            {"type": "escalation", "data": {}}, tenant_id="tenant-1"
         )
         assert count == 0
 
@@ -1071,7 +1086,7 @@ class TestBroadcastToAllDrivers:
         manager._driver_connections["driver-dead"] = ws_dead
 
         event = {"type": "escalation", "data": {}}
-        count = await manager.broadcast_to_all_drivers(event)
+        count = await manager.broadcast_to_all_drivers(event, tenant_id="tenant-1")
 
         assert count == 1
         assert ws_dead not in manager._clients

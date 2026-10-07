@@ -628,17 +628,22 @@ class DriverWSManager(BaseWSManager):
     # Broadcasting to all drivers
     # ------------------------------------------------------------------
 
-    async def broadcast_to_all_drivers(self, event: dict) -> int:
+    async def broadcast_to_all_drivers(self, event: dict, *, tenant_id: str) -> int:
         """
-        Broadcast an event to all connected drivers.
+        Broadcast an event to every connected driver of one tenant.
 
-        Wraps the event in a standard message envelope with a timestamp.
+        Wraps the event in a standard message envelope with a timestamp. A
+        blank ``tenant_id`` reaches nobody (W4): this used to send to every
+        driver in every tenant.
 
         Returns the number of drivers that successfully received the message.
         """
+        if not tenant_id:
+            logger.warning("broadcast_to_all_drivers without tenant_id dropped")
+            return 0
         if "timestamp" not in event:
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
-        return await self.broadcast(event)
+        return await self.broadcast_to_tenant(tenant_id, event)
 
 
 # ---------------------------------------------------------------------------
