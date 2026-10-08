@@ -206,12 +206,14 @@ describe("Home", () => {
     expect(calls.some((u) => u.includes("/portal/invoices"))).toBe(false);
   });
 
-  it("uses the server balance (PE4) and links Pay to the one payable invoice", async () => {
+  it("uses the server balance (PE4) and sends Pay to the list when more invoices are open", async () => {
     install({
       tanks: list(TANKS),
       orders: list([]),
+      // Only one payable invoice comes back in the capped window …
       invoices: list([invoice({ invoice_id: "QA-INV-9", payable: true })]),
     });
+    // … but the server says two are open.
     renderHome({
       ...ME,
       open_balance_cents: 526600,
@@ -224,10 +226,28 @@ describe("Home", () => {
       within(balance).getByText("2 invoices · 1 overdue"),
     ).toBeInTheDocument();
     expect(within(balance).queryByText(/At least/)).toBeNull();
-    expect(within(balance).getByRole("link", { name: "Pay" })).toHaveAttribute(
-      "href",
-      "/portal/invoices/QA-INV-9/pay",
-    );
+    expect(
+      await within(balance).findByRole("link", { name: "View and pay" }),
+    ).toHaveAttribute("href", "/portal/invoices");
+    expect(within(balance).queryByRole("link", { name: "Pay" })).toBeNull();
+  });
+
+  it("links Pay straight to the invoice when it is the only open one", async () => {
+    install({
+      tanks: list(TANKS),
+      orders: list([]),
+      invoices: list([invoice({ invoice_id: "QA-INV-9", payable: true })]),
+    });
+    renderHome({
+      ...ME,
+      open_balance_cents: 367447,
+      open_invoice_count: 1,
+      overdue_count: 0,
+    });
+    const balance = await screen.findByRole("region", { name: "Balance due" });
+    expect(
+      await within(balance).findByRole("link", { name: "Pay" }),
+    ).toHaveAttribute("href", "/portal/invoices/QA-INV-9/pay");
   });
 
   it("asks for active orders only (PE7) and shows them", async () => {

@@ -16,6 +16,7 @@ import {
   PHONE,
   VIEWPORTS,
 } from "./fixtures/helpers";
+import { INVOICES } from "./fixtures/portalFake";
 
 const PAGES = [
   { id: "home", path: "/portal" },
@@ -117,4 +118,28 @@ test.describe("portal chrome budget", () => {
     );
     expect(small).toEqual([]);
   });
+
+  // Numbers are `INV-` + 6 zero-padded digits (invoice_service), growing past
+  // a million; both must show whole and keep the budget.
+  for (const number of ["INV-001021", "INV-12345678"]) {
+    test(`phone: invoice detail shows the whole number ${number} within budget`, async ({
+      page,
+    }) => {
+      const invoice = { ...INVOICES[0], invoice_number: number };
+      await openPortal(page, "/portal/invoices/QA-INV-OPEN", PHONE, {
+        invoice: { data: invoice, request_id: "e2e" },
+      });
+      const h1 = page.locator("main#main h1");
+      await expect(h1).toContainText(number);
+      // Not ellipsised: the identifier wraps instead of being cut.
+      const clipped = await h1.evaluate(
+        (el) => el.scrollWidth > el.clientWidth + 1,
+      );
+      expect(clipped).toBe(false);
+      await page.locator("main [data-portal-first]").first().waitFor();
+      expect((await firstContentTop(page)) as number).toBeLessThanOrEqual(
+        BUDGET[PHONE.width],
+      );
+    });
+  }
 });

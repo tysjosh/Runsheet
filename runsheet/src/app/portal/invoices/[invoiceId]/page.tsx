@@ -142,6 +142,7 @@ export default function PortalInvoiceDetailPage() {
     <>
       <PortalTitleRow
         title={invoiceName(inv)}
+        wrapTitle
         back={BACK}
         badge={
           <PortalStatus

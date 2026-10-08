@@ -86,6 +86,7 @@ export default function PortalPayInvoicePage() {
             : "Pay invoice"
         }
         back={back}
+        wrapTitle
       />
       <div className="space-y-4">
         <section

@@ -4,10 +4,15 @@
  * The 48 px title row under the top bar (design §11.1): an optional back
  * button, exactly one `<h1>` (20 px bold), an optional status badge, and at
  * most one primary action on the right. No subtitles.
+ *
+ * `wrapTitle` is for titles that carry an identifier the reader must see in
+ * full (invoice numbers): below 640 px the title drops to 18/24 px and wraps
+ * instead of truncating, so two lines still fit the 120 px chrome budget
+ * (56 top bar + 56 row + 8 gap). From 640 px up it behaves like the default.
  */
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
-import { forwardRef, type ReactNode } from "react";
+import { Fragment, forwardRef, type ReactNode } from "react";
 import { focusRing } from "./styles";
 
 export interface PortalTitleRowProps {
@@ -15,10 +20,27 @@ export interface PortalTitleRowProps {
   back?: { href: string; label: string };
   badge?: ReactNode;
   action?: ReactNode;
+  wrapTitle?: boolean;
+}
+
+/**
+ * Each word as an inline-block, so a line breaks between words ("Invoice" /
+ * "INV-001020") rather than at the hyphen inside an identifier; a word wider
+ * than the row still breaks inside (overflow-wrap on the h1).
+ */
+function wrapWords(title: string): ReactNode {
+  const words = title.split(" ");
+  return words.map((word, i) => (
+    // biome-ignore lint/suspicious/noArrayIndexKey: words of a fixed string
+    <Fragment key={i}>
+      {i > 0 && " "}
+      <span className="inline-block max-w-full">{word}</span>
+    </Fragment>
+  ));
 }
 
 const PortalTitleRow = forwardRef<HTMLHeadingElement, PortalTitleRowProps>(
-  ({ title, back, badge, action }, ref) => (
+  ({ title, back, badge, action, wrapTitle = false }, ref) => (
     <div className="flex min-h-12 items-center gap-2 py-1">
       {back && (
         <Link
@@ -33,9 +55,13 @@ const PortalTitleRow = forwardRef<HTMLHeadingElement, PortalTitleRowProps>(
       <h1
         ref={ref}
         tabIndex={-1}
-        className="min-w-0 truncate text-xl font-bold leading-tight text-text focus:outline-none"
+        className={`min-w-0 font-bold text-text focus:outline-none ${
+          wrapTitle
+            ? "text-lg leading-6 [overflow-wrap:anywhere] sm:truncate sm:text-xl sm:leading-tight"
+            : "truncate text-xl leading-tight"
+        }`}
       >
-        {title}
+        {wrapTitle ? wrapWords(title) : title}
       </h1>
       {badge && <span className="shrink-0">{badge}</span>}
       {action && (

@@ -9,7 +9,6 @@ margin, driver data or internal ids.
 """
 from __future__ import annotations
 
-import json
 from datetime import timedelta
 
 import pytest
@@ -34,12 +33,18 @@ class FakeRedis:
 
     def __init__(self) -> None:
         self.data: dict = {}
+        self.ttl: dict = {}
 
     async def get(self, key):
         return self.data.get(key)
 
-    async def set(self, key, value, ex=None):  # noqa: ARG002
+    async def set(self, key, value, ex=None):
         self.data[key] = value
+        self.ttl[key] = ex
+
+    async def delete(self, key):
+        self.data.pop(key, None)
+        self.ttl.pop(key, None)
 
 
 @pytest.fixture
@@ -50,10 +55,7 @@ def tenant_names(cA):  # noqa: ARG001 — after the session fixture resets the g
 
     redis = FakeRedis()
     service = TenantSettingsService(redis_client=redis)
-    redis.data[f"tenant:{T1}:settings"] = json.dumps(
-        {"region": "US", "measurement_units": {"volume": "gal", "distance": "mi"},
-         "display_name": "QA Demo Fuels"}
-    )
+    redis.data[f"tenant:{T1}:display_name"] = "QA Demo Fuels"
     tenant_guard.configure_tenant_guard(service)
     try:
         yield service
@@ -78,20 +80,45 @@ def test_me_supplier_name_falls_back_to_the_tenant_id(client, portal_on, tenant_
     assert resp.json()["data"]["supplier_name"] == T2
 
 
-async def test_tenant_settings_display_name_round_trip_and_survives_other_writes():
+async def test_tenant_display_name_round_trip_has_no_ttl_and_survives_other_writes():
     from services.tenant_settings import TenantSettingsService
 
-    service = TenantSettingsService(redis_client=FakeRedis())
+    redis = FakeRedis()
+    service = TenantSettingsService(redis_client=redis)
     assert await service.get_display_name(T1) is None
-    await service.set_display_name(T1, "  QA   Demo Fuels ")
+    assert await service.set_display_name(T1, "  QA   Demo Fuels ") == "QA Demo Fuels"
     assert await service.get_display_name(T1) == "QA Demo Fuels"
+    # Own key, written without a TTL: the settings document's 30-day idle
+    # expiry can't revert the name to the tenant id.
+    assert redis.ttl[f"tenant:{T1}:display_name"] is None
     await service.set_region(T1, "US")
     await service.set_default_depot_id(T1, "QA-DEPOT-1")
     assert await service.get_display_name(T1) == "QA Demo Fuels"
-    await service.set_display_name(T1, None)
-    assert await service.get_display_name(T1) is None
-    # Unset names stay out of the stored payload (existing shape unchanged).
+    # Settings payload shape is unchanged by the name.
     assert "display_name" not in (await service.get(T1)).to_dict()
+    # The settings document expiring leaves the name in place.
+    redis.data.pop(f"tenant:{T1}:settings")
+    assert await service.get_display_name(T1) == "QA Demo Fuels"
+    # Per tenant.
+    assert await service.get_display_name(T2) is None
+    assert await service.set_display_name(T1, "   ") is None
+    assert f"tenant:{T1}:display_name" not in redis.data
+    with pytest.raises(ValueError):
+        await service.set_display_name(T1, "x" * 121)
+
+
+async def test_set_tenant_display_name_script_sets_shows_and_clears():
+    from scripts.set_tenant_display_name import _parse, run
+    from services.tenant_settings import TenantSettingsService
+
+    service = TenantSettingsService(redis_client=FakeRedis())
+    assert await run(service, T1, name="QA Demo Fuels") == "QA Demo Fuels"
+    assert await run(service, T1) == "QA Demo Fuels"
+    assert await run(service, T1, clear=True) is None
+    with pytest.raises(SystemExit):
+        _parse(["--tenant", T1, "--name", "  "])
+    with pytest.raises(SystemExit):
+        _parse(["--tenant", T1])
 
 
 # ---------------------------------------------------------------------------

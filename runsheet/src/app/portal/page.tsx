@@ -145,13 +145,15 @@ export default function PortalHomePage() {
   );
 
   const b = balance.data;
+  // A direct Pay link only when the one payable invoice is the whole open
+  // set: the lists above are capped, so `count` (server or client) decides.
   const payTarget =
-    b && b.payable.length === 1
+    b && b.payable.length === 1 && b.count <= 1 && !b.lowerBound
       ? {
           href: `/portal/invoices/${encodeURIComponent(b.payable[0].invoice_id)}/pay`,
           label: "Pay",
         }
-      : b && b.payable.length > 1
+      : b && b.payable.length > 0
         ? { href: "/portal/invoices", label: "View and pay" }
         : null;
 
