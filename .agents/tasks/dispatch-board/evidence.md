@@ -538,7 +538,7 @@ Before the `useDeferredValue` change, the same fixture gave p95 33.4–34.1 ms (
 - Task 36b (truck type, tanker endorsement, nearest expiry) is still open from Phase 5.
 
 ### Phase 8: Staging rollout and docs
-Status: task 42 done. Task 41 is deferred (runbook only). The owner deferred the staging rollout for this workflow, so no staging, AWS, deploy, CodeBuild, staging-data or flag action was taken. No push.
+Status: task 42 done. Task 41 is deferred (runbook only). Commit `505e967` on `feature/dispatch-board`. The owner deferred the staging rollout for this workflow, so no staging, AWS, deploy, CodeBuild, staging-data or flag action was taken. No push.
 
 #### Task 41: deferred, written as a runbook
 The procedure is in `staging-runbook.md`, in run order:
