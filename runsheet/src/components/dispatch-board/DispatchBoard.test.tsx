@@ -54,7 +54,7 @@ import {
   makeSnapshot,
   makeTrayOrder,
 } from "./state/testFixtures";
-import { todayIn } from "./viewState";
+import { todayIn, writeStoredZone } from "./viewState";
 
 const mockGetBoard = getBoard as jest.MockedFunction<typeof getBoard>;
 const today = todayIn("America/Chicago");
@@ -85,6 +85,9 @@ beforeEach(() => {
   socketState.paused = false;
   socketHandlers = {};
   window.localStorage.clear();
+  // The fixtures' tenant zone, as if stored by an earlier visit, so the first
+  // fetch is Chicago's today even on a UTC machine after midnight UTC.
+  writeStoredZone(window.localStorage, "America/Chicago");
 });
 
 describe("load states", () => {

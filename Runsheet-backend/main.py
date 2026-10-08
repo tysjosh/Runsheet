@@ -218,11 +218,8 @@ for _router in (
     driver_ops_router,
     stripe_router, stripe_webhook_router,
     mvp_fuel_router,
-    fuel_ops_router,
-    fuel_ops_mvp_router,
-    # /api/fuel/board — flag-gated (404 until a tenant's dispatch_board flag
-    # is on); services wired by bootstrap/agents.py.
-    dispatch_board_router,
+    fuel_ops_router, fuel_ops_mvp_router,
+    dispatch_board_router,  # /api/fuel/board: 404 until the tenant's flag is on
     auth_admin_router,
     auth_account_router,
     # GET /api/auth/public-config — unauthenticated by an explicit

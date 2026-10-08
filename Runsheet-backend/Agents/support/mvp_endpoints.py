@@ -522,7 +522,7 @@ async def replan(
         )
     except Exception as e:
         logger.error("Failed to read plan %s before replan: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Replan could not be started", details={"plan_id": plan_id}) from e
     for hit in (plan_resp or {}).get("hits", {}).get("hits", []) or []:
         _refuse_board_plan(hit.get("_source") or {}, plan_id)
 
