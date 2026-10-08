@@ -15,7 +15,11 @@ export function renderWithQuery(ui: ReactElement) {
     // Jest would not exit.
     defaultOptions: { queries: { retry: false, gcTime: 0 }, mutations: { retry: false, gcTime: 0 } },
   });
-  return render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+  const result = render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
+  // Re-render the same tree with the same client (e.g. after changing params).
+  const rerenderWithQuery = (next: ReactElement) =>
+    result.rerender(<QueryClientProvider client={client}>{next}</QueryClientProvider>);
+  return { ...result, rerenderWithQuery };
 }
 
 export const NEXT_ORDER: FuelOrder = {

@@ -2,7 +2,8 @@
  * Dates, times and product labels, with the same rules as the staff app's
  * `runsheet/src/lib/format.ts` (UI revamp R13.9, design.md §3.1). It is a port,
  * not a shared module (D15: no shared component package), so keep the two in
- * step; `__tests__/format.test.ts` pins the outputs both apps must produce.
+ * step; `__tests__/format-parity.test.ts` pins the outputs both apps must produce
+ * (rules tested in `__tests__/format-handoff.test.ts`).
  *
  * - Times are 24 h and never show seconds ("08:30").
  * - Dates read weekday, day, month ("Wed 8 Oct").

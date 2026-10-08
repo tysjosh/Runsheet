@@ -189,6 +189,24 @@ describe('Route', () => {
     expect(await screen.findByText('Check in · 1. TANK-MGC-01')).toBeTruthy();
     expect(screen.getByLabelText('Diesel #2 (on-road) (gal)').props.value).toBe('4200');
   });
+
+  it('Arrive → Cancel → Arrive for the same stop reopens the check-in (per-tap nonce)', async () => {
+    mockParams.current = { orderId: NEXT_ORDER.order_id, checkin: '0', t: '1' };
+    const { rerenderWithQuery } = renderWithQuery(<RouteScreen />);
+    expect(await screen.findByText('Check in · 1. TANK-MGC-01')).toBeTruthy();
+    fireEvent.press(screen.getByText('Cancel'));
+    await waitFor(() => expect(screen.queryByText('Check in · 1. TANK-MGC-01')).toBeNull());
+
+    // Same params again (Route is a mounted tab): stays closed.
+    mockParams.current = { orderId: NEXT_ORDER.order_id, checkin: '0', t: '1' };
+    rerenderWithQuery(<RouteScreen />);
+    expect(screen.queryByText('Check in · 1. TANK-MGC-01')).toBeNull();
+
+    // A second Arrive tap carries a new nonce and reopens it.
+    mockParams.current = { orderId: NEXT_ORDER.order_id, checkin: '0', t: '2' };
+    rerenderWithQuery(<RouteScreen />);
+    expect(await screen.findByText('Check in · 1. TANK-MGC-01')).toBeTruthy();
+  });
 });
 
 describe('Profile', () => {

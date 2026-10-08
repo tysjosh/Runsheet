@@ -118,7 +118,7 @@ it('Arrive opens the existing Route check-in for the next pending stop', async (
   fireEvent.press(within(card).getByLabelText(/Arrive at Midwest Grain Cooperative/));
   expect(mockPush).toHaveBeenCalledWith({
     pathname: '/route',
-    params: { orderId: 'ord-1', checkin: '0' },
+    params: { orderId: 'ord-1', checkin: '0', t: expect.any(String) },
   });
 });
 

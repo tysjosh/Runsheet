@@ -93,9 +93,12 @@ export default function RouteScreen() {
   const queryClient = useQueryClient();
   const router = useRouter();
   // Work's Arrive button lands here with the order and the stop to check in at.
-  const params = useLocalSearchParams<{ orderId?: string; checkin?: string }>();
+  // `t` is a per-tap nonce so a second Arrive for the same stop (after a
+  // cancelled check-in) still reopens it; Route stays mounted as a tab.
+  const params = useLocalSearchParams<{ orderId?: string; checkin?: string; t?: string }>();
   const paramOrderId = Array.isArray(params.orderId) ? params.orderId[0] : params.orderId;
   const paramCheckin = Array.isArray(params.checkin) ? params.checkin[0] : params.checkin;
+  const paramNonce = Array.isArray(params.t) ? params.t[0] : params.t;
   const driverId = currentSessionIdentity()?.driverId ?? '';
 
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
@@ -193,7 +196,7 @@ export default function RouteScreen() {
     if (!paramOrderId) {
       return;
     }
-    const key = `${paramOrderId}:${paramCheckin ?? ''}`;
+    const key = `${paramOrderId}:${paramCheckin ?? ''}:${paramNonce ?? ''}`;
     if (handledArrival.current === key) {
       return;
     }
@@ -218,7 +221,7 @@ export default function RouteScreen() {
     if (stop && stop.status !== 'completed') {
       openCheckin(stop);
     }
-  }, [paramOrderId, paramCheckin, orders, selectedOrderId, order, stops]);
+  }, [paramOrderId, paramCheckin, paramNonce, orders, selectedOrderId, order, stops]);
 
   const acknowledge = (row: CompartmentLedgerRow) => {
     acknowledgeCompartment(row.compartmentId);

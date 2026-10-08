@@ -54,6 +54,8 @@ export function NextStopCard({ order }: { order: FuelOrder }) {
       params: {
         orderId: order.order_id,
         ...(stop ? { checkin: String(stop.sequence) } : {}),
+        // Per-tap nonce: lets Route reopen the same stop's check-in.
+        t: String(Date.now()),
       },
     });
 
