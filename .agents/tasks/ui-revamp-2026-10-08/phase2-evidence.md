@@ -2,6 +2,30 @@
 
 Branch `production-readiness/ui-phase2` in `.worktrees/ui-phase2`, created from `origin/production-readiness/go-live-blockers` @ `3c5dc4a` (Phase 1, live as ui:25). Code commit `d48decb`. Not pushed, not merged, not deployed (none of that was in scope for this step).
 
+## Release (2026-10-08)
+
+### Rebase and pre-push gate
+
+Rebased onto `origin/production-readiness/go-live-blockers` @ `d10b314` (Phase 4 driver-app commits). No conflicts. Upstream touched only `driver-app/**` and the driver block of `scripts/build-tokens.mjs`, so web tokens are unchanged. Phase 2 commits after the rebase: `62f9e4c`, `e684f8a`, `3472170`, `8fbb421`. No backend files differ from upstream, so the backend gate was skipped.
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm run lint` | 0 errors, 1 warning (the existing `DispatchBoard.tsx:327` one) |
+| `node scripts/build-tokens.mjs --check` | up to date |
+| `npx jest --ci -w 4` | 138 suites, 1796 passed, 1 skipped |
+| `npm run build` | exit 0 |
+| Fresh checkout (detached worktree @ `8fbb421`) | `tsc` 0, `next build` 0, jest for dashboard/live/dispatch/lib/ui: 41 suites, 512 passed. Worktree removed. |
+| ui-revamp e2e (chromium, no snapshot update) | 128 passed. Covers the chrome-height budget for every Phase 2 page, whole-page axe (0 critical/serious) and the visual baselines. |
+| Dispatch board e2e (`PW_BOARD_PROD=1`) | 17 passed, 2 skipped (iPad). N1 at 60 lanes / 1,500 stops: median 16.7, p95 17.7 ms (budget 20), hover 17.7, scroll 17.7. |
+| Contrast / CVD (`styles/tokens.test.ts`) | passes in the jest run |
+
+### CI on `c5163ad` (run 37822467480): one failure, fixed
+
+All jobs passed except `dispatch-board-e2e`. Its "200 % zoom approximation and forced colours" test found the page 4 px wider than the 640 px viewport on Linux. The macOS run passed. A local diagnostic at 640/600/560 px showed the cause: the board toolbar row is already full at 640 px, and the search box couldn't shrink below its 128 px `min-w-32` floor, so Linux's wider fonts pushed the `⋯` button past the edge. The fix lowers the floor to `min-w-24` (96 px). The search box only shrinks when the row is full, so the 1024 px and wider layouts are unchanged. After the fix, locally: tsc and lint clean, dispatch-board jest 22 suites / 292 passed, `npm run build` 0, board e2e 17 passed / 2 skipped (p95 17.7 ms), and ui-revamp e2e 128 passed with the visual baselines unchanged.
+
+The CI perf line on that run read p95 66.6 ms, but CI only reports it and does not assert it (the job's runner is slower). The test passed.
+
 ## Iteration 2: review fixes (commit `ba98b9f`)
 
 This iteration fixes every finding in `phase2-review.json` (verdict CHANGES_REQUESTED). The notes are added under tasks 2.1, 2.4, 2.6 and 2.7 in `spec/tasks.md`, and only Phase 2 text changed there.
