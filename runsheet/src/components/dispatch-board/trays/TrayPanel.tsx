@@ -6,7 +6,7 @@
 import { type KeyboardEvent, useRef, useState } from "react";
 import { useBoard } from "../BoardContext";
 import { DriverTray } from "./DriverTray";
-import { OrderTray } from "./OrderTray";
+import { OrderTray, type TraySort, TraySortSelect } from "./OrderTray";
 import { TruckTray } from "./TruckTray";
 import { trayOrders } from "./trayOrders";
 
@@ -27,6 +27,7 @@ export function TrayPanel({
 }: TrayPanelProps) {
   const api = useBoard();
   const [tab, setTab] = useState<TrayTab>("orders");
+  const [sort, setSort] = useState<TraySort>("priority");
   const refs = useRef<Record<TrayTab, HTMLButtonElement | null>>({
     orders: null,
     drivers: null,
@@ -62,34 +63,39 @@ export function TrayPanel({
           : "flex w-80 shrink-0 flex-col border-r border-gray-200 bg-white"
       }
     >
-      <div
-        role="tablist"
-        aria-label="Trays"
-        onKeyDown={onKeyDown}
-        className="flex border-b border-gray-200 px-2"
-      >
-        {TABS.map((t) => (
-          <button
-            key={t}
-            ref={(el) => {
-              refs.current[t] = el;
-            }}
-            id={`tray-tab-${t}`}
-            type="button"
-            role="tab"
-            aria-selected={tab === t}
-            aria-controls={`tray-panel-${t}`}
-            tabIndex={tab === t ? 0 : -1}
-            onClick={() => setTab(t)}
-            className={`min-h-10 flex-1 border-b-2 px-2 text-xs font-medium ${
-              tab === t
-                ? "border-primary text-gray-900"
-                : "border-transparent text-gray-600 hover:text-gray-900"
-            }`}
-          >
-            {label[t]}
-          </button>
-        ))}
+      {/* One row: the tray tabs, then (Orders only) the Sort control. The
+          tray's own "Orders (n)" heading repeated the tab, so it's gone. */}
+      <div className="flex items-center gap-1 border-b border-gray-200 pr-2">
+        <div
+          role="tablist"
+          aria-label="Trays"
+          onKeyDown={onKeyDown}
+          className="flex min-w-0 flex-1 px-2"
+        >
+          {TABS.map((t) => (
+            <button
+              key={t}
+              ref={(el) => {
+                refs.current[t] = el;
+              }}
+              id={`tray-tab-${t}`}
+              type="button"
+              role="tab"
+              aria-selected={tab === t}
+              aria-controls={`tray-panel-${t}`}
+              tabIndex={tab === t ? 0 : -1}
+              onClick={() => setTab(t)}
+              className={`min-h-10 flex-1 whitespace-nowrap border-b-2 px-1.5 text-xs font-medium ${
+                tab === t
+                  ? "border-primary text-gray-900"
+                  : "border-transparent text-gray-600 hover:text-gray-900"
+              }`}
+            >
+              {label[t]}
+            </button>
+          ))}
+        </div>
+        {tab === "orders" && <TraySortSelect value={sort} onChange={setSort} />}
       </div>
       <div
         id={`tray-panel-${tab}`}
@@ -98,7 +104,11 @@ export function TrayPanel({
         className="flex min-h-0 flex-1 flex-col p-3"
       >
         {tab === "orders" && (
-          <OrderTray plannedCount={plannedCount} onGoToOrders={onGoToOrders} />
+          <OrderTray
+            plannedCount={plannedCount}
+            onGoToOrders={onGoToOrders}
+            sort={sort}
+          />
         )}
         {tab === "drivers" && <DriverTray />}
         {tab === "trucks" && <TruckTray />}

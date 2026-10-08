@@ -70,11 +70,45 @@ export interface OrderTrayProps {
   /** Stops on lanes, for "All orders are planned (n)". */
   plannedCount: number;
   onGoToOrders: () => void;
+  /**
+   * Sort order, owned by the tray panel so the control sits in the tray tab
+   * row (owner item 3.x-owner-4). Defaults to priority.
+   */
+  sort?: TraySort;
 }
 
-export function OrderTray({ plannedCount, onGoToOrders }: OrderTrayProps) {
+/** The tray's Sort control (rendered in the TrayPanel tab row). */
+export function TraySortSelect({
+  value,
+  onChange,
+}: {
+  value: TraySort;
+  onChange: (s: TraySort) => void;
+}) {
+  return (
+    <label className="flex shrink-0 items-center gap-1 text-xs text-gray-600">
+      Sort
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as TraySort)}
+        className="min-h-8 rounded-md border border-gray-300 px-1 text-xs"
+      >
+        {(Object.keys(SORT_LABEL) as TraySort[]).map((s) => (
+          <option key={s} value={s}>
+            {SORT_LABEL[s]}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
+export function OrderTray({
+  plannedCount,
+  onGoToOrders,
+  sort = "priority",
+}: OrderTrayProps) {
   const api = useBoard();
-  const [sort, setSort] = useState<TraySort>("priority");
   const [holdOpen, setHoldOpen] = useState(false);
   const dropRef = useRef<HTMLElement>(null);
   const over = useDropTarget(dropRef, {
@@ -114,26 +148,6 @@ export function OrderTray({ plannedCount, onGoToOrders }: OrderTrayProps) {
       data-drop-over={over || undefined}
       className={`flex min-h-0 flex-1 flex-col ${over ? "rounded-md ring-2 ring-primary" : ""}`}
     >
-      <div className="flex items-center justify-between gap-2 pb-2">
-        <h2 className="text-sm font-semibold text-gray-900">
-          Orders ({orders.length})
-        </h2>
-        <label className="flex items-center gap-1 text-xs text-gray-600">
-          Sort
-          <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as TraySort)}
-            className="min-h-8 rounded-md border border-gray-300 px-1 text-xs"
-          >
-            {(Object.keys(SORT_LABEL) as TraySort[]).map((s) => (
-              <option key={s} value={s}>
-                {SORT_LABEL[s]}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
-
       {orders_truncated && (
         <p
           role="note"

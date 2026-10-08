@@ -644,10 +644,9 @@ test.describe("accessibility (N5, R18, R19)", () => {
           - tab "Orders (4)" [selected]
           - tab "Drivers (3)"
           - tab "Trucks (1)"
+        - combobox "Sort"
         - tabpanel "Orders (4)":
           - region "Order tray":
-            - heading "Orders (4)" [level=2]
-            - combobox "Sort"
             - listbox "Orders to plan":
               - option "Order 5000, QA- Customer 1, DIESEL_2, 1,200 gal, No window, One off"
     `);
@@ -661,6 +660,45 @@ test.describe("accessibility (N5, R18, R19)", () => {
     expect(await axe(page)).toEqual([]);
   });
 
+  test("order tray: Sort sits in the tray tab row, no duplicate heading", async ({
+    page,
+  }) => {
+    // Owner item 3.x-owner-4: the "Orders (n)" heading + Sort row (40 px:
+    // a 32 px control and 8 px padding) repeated the tab label.
+    const board = new FakeBoard(SMALL);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await boot(page, board);
+    const trays = page.getByRole("region", { name: "Trays" });
+    await expect(
+      trays.getByRole("heading", { name: /^Orders \(/ }),
+    ).toHaveCount(0);
+    const tabs = trays.getByRole("tablist", { name: "Trays" });
+    const sort = trays.getByRole("combobox", { name: "Sort" });
+    const tabBox = await tabs.boundingBox();
+    const sortBox = await sort.boundingBox();
+    // Same row as the tabs.
+    expect(
+      Math.abs(
+        (sortBox?.y ?? 0) -
+          (tabBox?.y ?? 99) -
+          ((tabBox?.height ?? 0) - (sortBox?.height ?? 0)) / 2,
+      ),
+    ).toBeLessThanOrEqual(6);
+    const first = trays
+      .getByRole("listbox", { name: "Orders to plan" })
+      .getByRole("option")
+      .first();
+    const top = Math.round((await first.boundingBox())?.y ?? 999);
+    const tabBottom = Math.round((tabBox?.y ?? 0) + (tabBox?.height ?? 0));
+    console.log(
+      `order tray first card top 1280x800: ${top} (tab row bottom ${tabBottom})`,
+    );
+    test
+      .info()
+      .annotations.push({ type: "trayFirstCardTop", description: String(top) });
+    // Only the tab panel's 12 px padding sits between the tabs and the first card.
+    expect(top - tabBottom).toBeLessThanOrEqual(16);
+  });
   test("Place mode, card menu, publish review and drawer have no axe violations", async ({
     page,
   }) => {
