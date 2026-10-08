@@ -93,15 +93,19 @@ export default defineConfig({
     },
   ],
 
-  // Run your local dev server before starting the tests
-  webServer: {
-    command: "npm run dev",
-    url: "http://localhost:3000",
-    reuseExistingServer: !process.env.CI,
-    timeout: 120000, // 2 minutes to start the dev server
-    stdout: "pipe",
-    stderr: "pipe",
-  },
+  // Run your local dev server before starting the tests. Skipped when
+  // PLAYWRIGHT_BASE_URL points the run at a deployed UI (the customer-portal
+  // specs run against staging, FREEZE F5), where a local server is unused.
+  webServer: process.env.PLAYWRIGHT_BASE_URL
+    ? undefined
+    : {
+        command: "npm run dev",
+        url: "http://localhost:3000",
+        reuseExistingServer: !process.env.CI,
+        timeout: 120000, // 2 minutes to start the dev server
+        stdout: "pipe",
+        stderr: "pipe",
+      },
 
   // Output folder for test artifacts (screenshots, videos, traces)
   outputDir: "test-results",
