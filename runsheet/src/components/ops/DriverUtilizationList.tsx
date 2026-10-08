@@ -62,7 +62,6 @@ type SortField =
   | "completed_today"
   | "last_seen"
   | "utilization";
-type SortOrder = "asc" | "desc";
 
 interface DriverUtilizationListProps {
   drivers: DriverUtilization[];

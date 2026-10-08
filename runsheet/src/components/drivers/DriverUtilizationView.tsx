@@ -7,7 +7,6 @@ import type {
   DriverUtilization,
 } from "../ops/DriverUtilizationList";
 import DriverUtilizationList from "../ops/DriverUtilizationList";
-import { Skeleton } from "../ui";
 
 /**
  * Driver Utilization View — displays real-time driver availability and workload
