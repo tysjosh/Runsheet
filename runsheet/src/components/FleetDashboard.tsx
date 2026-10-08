@@ -90,8 +90,11 @@ export default function FleetDashboard({
           className="flex-1 min-h-0 overflow-hidden"
         >
           {shows("trucks") && (
-            <div className="flex h-full min-h-0 flex-col lg:flex-row">
-              <div className="min-h-[360px] w-full overflow-hidden border-slate-200 bg-surface lg:min-h-0 lg:w-3/5 lg:border-r">
+            // Table and map side by side only on wide screens (≥ 1536 px); at
+            // 1280–1440 the table gets the full width (its toolbar needs it
+            // for the status chips) and the map follows below.
+            <div className="flex h-full min-h-0 flex-col overflow-auto 2xl:flex-row 2xl:overflow-hidden">
+              <div className="h-full min-h-[480px] w-full shrink-0 overflow-hidden border-slate-200 bg-surface 2xl:min-h-0 2xl:w-3/5 2xl:shrink 2xl:border-r">
                 <ErrorBoundary componentName="Fleet Tracking">
                   <Suspense fallback={<LoadingSpinner message="Loading..." />}>
                     <FleetTracking
@@ -101,7 +104,7 @@ export default function FleetDashboard({
                   </Suspense>
                 </ErrorBoundary>
               </div>
-              <div className="min-h-[360px] w-full overflow-hidden bg-surface lg:min-h-0 lg:w-2/5">
+              <div className="min-h-[360px] w-full shrink-0 overflow-hidden border-t border-slate-200 bg-surface 2xl:min-h-0 2xl:w-2/5 2xl:shrink 2xl:border-t-0">
                 {mapView}
               </div>
             </div>
