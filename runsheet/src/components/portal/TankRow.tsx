@@ -88,7 +88,10 @@ export default function TankRow({
         className="min-w-0 truncate text-[15px] font-bold text-text"
       >
         {linkToDetail ? (
-          <Link href={href} className={`${textLink} text-text`}>
+          <Link
+            href={href}
+            className={`${textLink} min-h-11 text-text md:min-h-6`}
+          >
             {title}
           </Link>
         ) : (

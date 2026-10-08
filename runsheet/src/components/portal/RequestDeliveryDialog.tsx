@@ -304,11 +304,20 @@ export default function RequestDeliveryDialog({
       size="custom"
       closeLabel="Close"
       className={`max-h-[calc(100vh-32px)] sm:max-w-[560px] max-sm:mx-0 max-sm:h-[100dvh] max-sm:max-h-none max-sm:rounded-none`}
-      bodyClassName="min-h-0 flex-1 overflow-y-auto"
+      bodyClassName="flex min-h-0 flex-1 flex-col"
       footer={footer}
       overlay={overlay}
     >
-      <div ref={bodyRef} data-sheet={phone || undefined} className="px-5 py-4">
+      {/* The scrolling body. While every field is disabled it has nothing
+          focusable, so it takes focus itself (axe scrollable-region-focusable). */}
+      <div
+        ref={bodyRef}
+        data-sheet={phone || undefined}
+        tabIndex={fieldsDisabled ? 0 : undefined}
+        role={fieldsDisabled ? "region" : undefined}
+        aria-label={fieldsDisabled ? "Request details" : undefined}
+        className="min-h-0 flex-1 overflow-y-auto px-5 py-4 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
+      >
         {/* Always mounted so the PD10 and 429 texts are announced (R4.6). */}
         <div
           role="status"
