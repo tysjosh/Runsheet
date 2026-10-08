@@ -29,6 +29,8 @@ export type { FilterBarProps, FilterSelectProps } from "./FilterBar";
 export { FilterBar, FilterSelect } from "./FilterBar";
 export type { FilterChipOption, FilterChipsProps } from "./FilterChips";
 export { FilterChips } from "./FilterChips";
+export type { FilterPopoverProps } from "./FilterPopover";
+export { FilterPopover } from "./FilterPopover";
 export type {
   FieldErrors,
   FormDialogProps,

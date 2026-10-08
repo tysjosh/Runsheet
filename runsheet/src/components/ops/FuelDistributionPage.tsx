@@ -49,16 +49,29 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Button,
   type Column,
-  PageHeader,
+  DataTable,
+  Field,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
   type Tab,
   Table,
-  TabNavigation,
+  TabPanel,
+  Tabs,
   ToastContainer,
+  Toolbar,
   useToasts,
+  useUrlTab,
 } from "@/components/ui";
 import type { ExecutionUpdateData } from "../../hooks/usePlanExecutionSocket";
 import { usePlanExecutionSocket } from "../../hooks/usePlanExecutionSocket";
+import {
+  dateTime as formatDateTime,
+  money as formatMoney,
+  pct as formatPct,
+} from "../../lib/format";
 import type {
   CombinableGroup,
   CombinableGroupListResponse,
@@ -165,8 +178,6 @@ const TABS: Tab[] = [
   { id: "clusters", label: "Clusters", icon: <Layers className="w-4 h-4" /> },
 ];
 
-type TabId = string;
-
 const URGENCY_CONFIG: Record<string, { color: string; bg: string }> = {
   low: { color: "text-success-dark", bg: "bg-success-light" },
   medium: { color: "text-warning-dark", bg: "bg-warning-light" },
@@ -231,72 +242,37 @@ function StatusBadge({ status }: { status: string }) {
 
 interface RejectDialogProps {
   planId: string;
-  onConfirm: (reason: string) => void;
+  /** Rejects with the reason; throws to keep the dialog open with the error. */
+  onConfirm: (reason: string) => Promise<void>;
   onCancel: () => void;
-  loading: boolean;
 }
 
-function RejectDialog({
-  planId,
-  onConfirm,
-  onCancel,
-  loading,
-}: RejectDialogProps) {
-  const [reason, setReason] = useState("");
-
+function RejectDialog({ planId, onConfirm, onCancel }: RejectDialogProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">Reject Plan</h2>
-          <button
-            onClick={onCancel}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close rejection dialog"
-            disabled={loading}
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="px-6 py-4 space-y-4">
-          <p className="text-sm text-gray-600">
-            Are you sure you want to reject plan{" "}
-            <span className="font-medium">{planId}</span>?
-          </p>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Reason (optional)
-            </label>
-            <textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Enter rejection reason..."
-              rows={3}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white resize-none"
-              disabled={loading}
-            />
-          </div>
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={loading}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => onConfirm(reason)}
-              disabled={loading}
-              className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
-            >
-              {loading ? "Rejecting..." : "Reject Plan"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <FormDialog<{ reason: string }>
+      open
+      size="sm"
+      title="Reject plan"
+      help={`Reject plan ${planId}? Its loads go back to planning.`}
+      submitLabel="Reject plan"
+      initialValues={{ reason: "" }}
+      // The page's handler toasts the result; a failure shows in the banner.
+      successMessage={null}
+      onSubmit={(v) => onConfirm(v.reason)}
+      onClose={onCancel}
+    >
+      {({ values, set }) => (
+        <Field label="Reason (optional)">
+          <textarea
+            value={values.reason}
+            onChange={(e) => set("reason", e.target.value)}
+            placeholder="Why is this plan rejected?"
+            rows={3}
+            className={`${INPUT_CLASS} h-auto resize-none py-2`}
+          />
+        </Field>
+      )}
+    </FormDialog>
   );
 }
 
@@ -889,166 +865,128 @@ interface ReplanFormProps {
 }
 
 function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [form, setForm] = useState<ReplanRequest>({
-    disruption_type: "",
-    description: "",
-    entity_id: "",
-  });
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.disruption_type || !form.description || !form.entity_id) {
-      setError("All fields are required.");
-      return;
-    }
-    setError("");
-    setSubmitting(true);
-    try {
-      const res = await replan(planId, form, activeTenantId());
-      onSuccess(res);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to submit replan");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
+  const entityLabel = (type: string) =>
+    type === "truck_breakdown"
+      ? "Truck"
+      : type === "station_closure" || type === "demand_spike"
+        ? "Station"
+        : "Entity ID";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">Replan</h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close replan form"
+    <FormDialog<ReplanRequest & Record<string, unknown>, ReplanResponse>
+      open
+      size="md"
+      title="Replan"
+      help={`Report a disruption on plan ${planId} and generate a new plan around it.`}
+      submitLabel="Submit replan"
+      initialValues={{ disruption_type: "", description: "", entity_id: "" }}
+      validate={(v) => ({
+        disruption_type: v.disruption_type
+          ? undefined
+          : "Choose a disruption type.",
+        description: v.description.trim()
+          ? undefined
+          : "Describe the disruption.",
+        entity_id: v.entity_id
+          ? undefined
+          : `Choose the affected ${entityLabel(v.disruption_type).toLowerCase()}.`,
+      })}
+      onSubmit={(v) =>
+        replan(
+          planId,
+          {
+            disruption_type: v.disruption_type,
+            description: v.description,
+            entity_id: v.entity_id,
+          },
+          activeTenantId(),
+        )
+      }
+      // The page's success handler toasts.
+      successMessage={null}
+      onSaved={onSuccess}
+      onClose={onClose}
+    >
+      {({ values, set, setValues, errors }) => (
+        <>
+          <Field
+            label="Disruption type"
+            required
+            error={errors.disruption_type}
           >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Disruption Type
-            </label>
             <select
-              value={form.disruption_type}
+              value={values.disruption_type}
               onChange={(e) =>
-                // Changing the disruption type changes what the entity refers
-                // to (truck vs station vs free-form), so clear the prior pick.
-                setForm({
-                  ...form,
+                // A new type changes what the entity refers to (truck vs
+                // station vs free-form), so clear the prior pick.
+                setValues((prev) => ({
+                  ...prev,
                   disruption_type: e.target.value,
                   entity_id: "",
-                })
+                }))
               }
-              className={inputClass}
-              required
+              className={INPUT_CLASS}
             >
-              <option value="">Select type...</option>
-              <option value="truck_breakdown">Truck Breakdown</option>
-              <option value="station_closure">Station Closure</option>
-              <option value="demand_spike">Demand Spike</option>
-              <option value="road_closure">Road Closure</option>
+              <option value="">Select type…</option>
+              <option value="truck_breakdown">Truck breakdown</option>
+              <option value="station_closure">Station closure</option>
+              <option value="demand_spike">Demand spike</option>
+              <option value="road_closure">Road closure</option>
               <option value="other">Other</option>
             </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Description
-            </label>
+          </Field>
+          <Field label="Description" required error={errors.description}>
             <textarea
-              value={form.description}
-              onChange={(e) =>
-                setForm({ ...form, description: e.target.value })
-              }
-              placeholder="Describe the disruption..."
+              value={values.description}
+              onChange={(e) => set("description", e.target.value)}
+              placeholder="Describe the disruption…"
               rows={3}
-              className={`${inputClass} resize-none`}
-              required
+              className={`${INPUT_CLASS} h-auto resize-none py-2`}
             />
-          </div>
-
-          <div>
-            <label
-              htmlFor="replan-entity"
-              className="block text-xs font-medium text-gray-600 mb-1"
+          </Field>
+          {values.disruption_type === "truck_breakdown" ? (
+            <Field
+              label="Truck"
+              required
+              error={errors.entity_id}
+              id="replan-entity"
             >
-              {form.disruption_type === "truck_breakdown"
-                ? "Truck"
-                : form.disruption_type === "station_closure" ||
-                    form.disruption_type === "demand_spike"
-                  ? "Station"
-                  : "Entity ID"}
-            </label>
-            {form.disruption_type === "truck_breakdown" ? (
               <AssetPicker
                 id="replan-entity"
                 assetType="vehicle"
-                value={form.entity_id || null}
-                onChange={(entityId) =>
-                  setForm({ ...form, entity_id: entityId })
-                }
+                value={values.entity_id || null}
+                onChange={(entityId) => set("entity_id", entityId)}
                 aria-label="Truck"
               />
-            ) : form.disruption_type === "station_closure" ||
-              form.disruption_type === "demand_spike" ? (
+            </Field>
+          ) : values.disruption_type === "station_closure" ||
+            values.disruption_type === "demand_spike" ? (
+            <Field
+              label="Station"
+              required
+              error={errors.entity_id}
+              id="replan-entity"
+            >
               <StationPicker
                 id="replan-entity"
-                value={form.entity_id || null}
-                onChange={(entityId) =>
-                  setForm({ ...form, entity_id: entityId })
-                }
+                value={values.entity_id || null}
+                onChange={(entityId) => set("entity_id", entityId)}
                 aria-label="Station"
               />
-            ) : (
+            </Field>
+          ) : (
+            <Field label="Entity ID" required error={errors.entity_id}>
               <input
-                id="replan-entity"
                 type="text"
-                value={form.entity_id}
-                onChange={(e) =>
-                  setForm({ ...form, entity_id: e.target.value })
-                }
+                value={values.entity_id}
+                onChange={(e) => set("entity_id", e.target.value)}
                 placeholder="Affected entity (e.g. road segment or route ID)"
-                className={inputClass}
-                required
+                className={INPUT_CLASS}
               />
-            )}
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-            >
-              {submitting ? "Submitting..." : "Submit Replan"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+            </Field>
+          )}
+        </>
+      )}
+    </FormDialog>
   );
 }
 
@@ -1932,7 +1870,7 @@ function PaginationControls({
 
 // ─── Plans Tab ───────────────────────────────────────────────────────────────
 
-function PlansTab() {
+function PlansTab({ subNav }: { subNav?: React.ReactNode }) {
   // Plan list state (fetched from backend)
   const [planList, setPlanList] = useState<PlanListItem[]>([]);
   const [planPagination, setPlanPagination] = useState<PaginationMeta | null>(
@@ -1951,7 +1889,6 @@ function PlansTab() {
   const [error, setError] = useState("");
   const [showReplan, setShowReplan] = useState(false);
   const [showRejectDialog, setShowRejectDialog] = useState<string | null>(null);
-  const [rejectLoading, setRejectLoading] = useState(false);
   const [approveLoading, setApproveLoading] = useState<string | null>(null);
   const [showCostConfig, setShowCostConfig] = useState(false);
 
@@ -2108,32 +2045,22 @@ function PlansTab() {
   const handleReject = useCallback(
     async (reason: string) => {
       if (!showRejectDialog) return;
-      setRejectLoading(true);
-      try {
-        const dispatcherId = await getCurrentUserId();
-        if (!dispatcherId) {
-          addToast("Your session has expired. Please sign in again.", "error");
-          return;
-        }
-        await rejectPlan(
-          showRejectDialog,
-          activeTenantId(),
-          dispatcherId,
-          reason || undefined,
-        );
-        addToast(`Plan ${showRejectDialog} rejected`, "success");
-        setShowRejectDialog(null);
-        refreshPlanList();
-        if (selectedPlanId === showRejectDialog) {
-          setSelectedPlanStatus("rejected");
-        }
-      } catch (err) {
-        addToast(
-          err instanceof Error ? err.message : "Failed to reject plan",
-          "error",
-        );
-      } finally {
-        setRejectLoading(false);
+      // Failures throw: the reject dialog stays open and shows the message.
+      const dispatcherId = await getCurrentUserId();
+      if (!dispatcherId) {
+        throw new Error("Your session has expired. Please sign in again.");
+      }
+      await rejectPlan(
+        showRejectDialog,
+        activeTenantId(),
+        dispatcherId,
+        reason || undefined,
+      );
+      addToast(`Plan ${showRejectDialog} rejected`, "success");
+      setShowRejectDialog(null);
+      refreshPlanList();
+      if (selectedPlanId === showRejectDialog) {
+        setSelectedPlanStatus("rejected");
       }
     },
     [showRejectDialog, addToast, refreshPlanList, selectedPlanId],
@@ -2204,185 +2131,213 @@ function PlansTab() {
             planId={showRejectDialog}
             onConfirm={handleReject}
             onCancel={() => setShowRejectDialog(null)}
-            loading={rejectLoading}
           />
         )}
       </>
     );
   }
 
-  return (
-    <div className="space-y-4">
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-
-      {/* Header with generate button and settings */}
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-primary">
-          Distribution Plans
-        </h3>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowCostConfig(true)}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
-            aria-label="Cost configuration settings"
+  const planColumns: Column<PlanListItem>[] = [
+    {
+      key: "plan_id",
+      header: "Plan",
+      width: 150,
+      truncate: true,
+      title: (p) => p.plan_id,
+      className: "font-semibold text-slate-900",
+      cell: (p) => p.plan_id,
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 130,
+      cell: (p) => <StatusBadge status={p.status} />,
+    },
+    {
+      key: "truck_id",
+      header: "Truck",
+      width: 130,
+      truncate: true,
+      cell: (p) => p.truck_id || "—",
+    },
+    {
+      key: "run_id",
+      header: "Run",
+      truncate: true,
+      className: "text-slate-700",
+      cell: (p) => p.run_id || "—",
+    },
+    {
+      key: "created_at",
+      header: "Created",
+      width: 130,
+      className: "whitespace-nowrap tabular-nums text-slate-700",
+      cell: (p) => (p.created_at ? formatDateTime(p.created_at) : "—"),
+    },
+    {
+      key: "utilization",
+      header: "Utilization",
+      width: 100,
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (p) =>
+        p.total_utilization_pct != null
+          ? formatPct(p.total_utilization_pct)
+          : "—",
+    },
+    {
+      key: "cost",
+      header: "Cost",
+      width: 110,
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (p) =>
+        p.status === "completed" && p.actual_cost != null
+          ? `Actual ${formatMoney(p.actual_cost, { decimals: 0 })}`
+          : p.status === "dispatched" && p.estimated_cost != null
+            ? `Est. ${formatMoney(p.estimated_cost, { decimals: 0 })}`
+            : "—",
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      width: 230,
+      align: "right",
+      cell: (p) => (
+        <div
+          className="flex items-center justify-end gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Approve for draft/proposed/scheduled; Reject for draft/proposed with no executor run in flight or applied (R12.7) */}
+          {DISPATCHABLE_STATUSES.includes(p.status) && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => handleApprove(p.plan_id)}
+              loading={approveLoading === p.plan_id}
+              icon={<Check className="h-3 w-3" />}
+              aria-label={`Approve plan ${p.plan_id}`}
+            >
+              Approve
+            </Button>
+          )}
+          {isRejectable(
+            p.status,
+            (p as WithExecutionStatus).execution_status,
+          ) && (
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => setShowRejectDialog(p.plan_id)}
+              icon={<X className="h-3 w-3" />}
+              aria-label={`Reject plan ${p.plan_id}`}
+            >
+              Reject
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              setSelectedPlanId(p.plan_id);
+              setSelectedPlanStatus(p.status);
+            }}
+            icon={<Eye className="h-3 w-3" />}
+            aria-label={`View plan ${p.plan_id}`}
           >
-            <Settings className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-          >
-            {generating ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Play className="w-4 h-4" />
-            )}
-            {generating ? "Generating..." : "Generate Plan"}
-          </button>
+            View
+          </Button>
         </div>
-      </div>
+      ),
+    },
+  ];
 
-      {/* Status filter */}
-      <div className="flex items-center gap-3">
-        <select
-          value={statusFilter}
-          onChange={(e) => {
-            setStatusFilter(e.target.value);
-            setPlanPage(1);
-          }}
-          className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
-        >
-          <option value="">All statuses</option>
-          <option value="draft">Draft</option>
-          <option value="proposed">Proposed</option>
-          <option value="scheduled">Scheduled</option>
-          <option value="dispatched">Dispatched</option>
-          <option value="completed">Completed</option>
-          <option value="rejected">Rejected</option>
-        </select>
-        <button
-          onClick={refreshPlanList}
-          className="p-1.5 text-gray-500 hover:text-gray-600 rounded"
-          aria-label="Refresh plan list"
-        >
-          <RefreshCw className="w-4 h-4" />
-        </button>
-      </div>
+  return (
+    <div className="flex min-h-0 flex-col">
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+      {/* One toolbar row: the sub-view switch, then this view's controls. */}
+      <Toolbar
+        label="Plans"
+        views={subNav}
+        end={
+          <>
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                setPlanPage(1);
+              }}
+              aria-label="Filter plans by status"
+              className="h-7 rounded-lg border border-slate-300 bg-surface px-2 text-xs font-semibold text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+            >
+              <option value="">All statuses</option>
+              <option value="draft">Draft</option>
+              <option value="proposed">Proposed</option>
+              <option value="scheduled">Scheduled</option>
+              <option value="dispatched">Dispatched</option>
+              <option value="completed">Completed</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <IconButton
+              label="Refresh plan list"
+              size="sm"
+              onClick={refreshPlanList}
+              icon={<RefreshCw className="h-3.5 w-3.5" />}
+            />
+            <IconButton
+              label="Cost configuration settings"
+              size="sm"
+              onClick={() => setShowCostConfig(true)}
+              icon={<Settings className="h-3.5 w-3.5" />}
+            />
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={handleGenerate}
+              loading={generating}
+              icon={<Play className="h-3.5 w-3.5" />}
+            >
+              {generating ? "Generating..." : "Generate Plan"}
+            </Button>
+          </>
+        }
+      />
 
       {error && (
-        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
+        <p
+          role="alert"
+          className="mx-4 mt-3 rounded-lg bg-red-50 px-4 py-2 text-sm text-red-800"
+        >
           {error}
         </p>
       )}
 
-      {/* Plan list */}
-      {listLoading ? (
-        <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
-        </div>
-      ) : planList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
-          <Truck className="w-8 h-8 mb-2" />
-          <p className="text-sm">No plans found</p>
-          <p className="text-xs mt-1">
-            Click &quot;Generate Plan&quot; to create a distribution plan
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {planList.map((p) => (
-            <div
-              key={p.plan_id}
-              className="flex items-center justify-between border border-gray-100 rounded-lg p-4 hover:border-gray-200 transition-colors"
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium text-primary truncate">
-                    {p.plan_id}
-                  </p>
-                  <StatusBadge status={p.status} />
-                </div>
-                <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                  {p.truck_id && <span>Truck: {p.truck_id}</span>}
-                  {p.run_id && <span>Run: {p.run_id}</span>}
-                  {p.created_at && (
-                    <span>{new Date(p.created_at).toLocaleDateString()}</span>
-                  )}
-                  {p.total_utilization_pct != null && (
-                    <span>{p.total_utilization_pct.toFixed(0)}% util</span>
-                  )}
-                  {/* Cost summary in list view */}
-                  {p.status === "completed" && p.actual_cost != null && (
-                    <span className="text-success font-medium">
-                      Actual: ${p.actual_cost.toFixed(0)}
-                    </span>
-                  )}
-                  {p.status === "dispatched" && p.estimated_cost != null && (
-                    <span className="text-info font-medium">
-                      Est: ${p.estimated_cost.toFixed(0)}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-2 ml-4">
-                {/* Approve for draft/proposed/scheduled; Reject for draft/proposed with no executor run in flight or applied (R12.7) */}
-                {DISPATCHABLE_STATUSES.includes(p.status) && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleApprove(p.plan_id);
-                    }}
-                    disabled={approveLoading === p.plan_id}
-                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors disabled:opacity-50"
-                    aria-label={`Approve plan ${p.plan_id}`}
-                  >
-                    {approveLoading === p.plan_id ? (
-                      <Loader2 className="w-3 h-3 animate-spin" />
-                    ) : (
-                      <Check className="w-3 h-3" />
-                    )}
-                    Approve
-                  </button>
-                )}
-                {isRejectable(
-                  p.status,
-                  (p as WithExecutionStatus).execution_status,
-                ) && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowRejectDialog(p.plan_id);
-                    }}
-                    className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
-                    aria-label={`Reject plan ${p.plan_id}`}
-                  >
-                    <X className="w-3 h-3" />
-                    Reject
-                  </button>
-                )}
-                <button
-                  onClick={() => {
-                    setSelectedPlanId(p.plan_id);
-                    setSelectedPlanStatus(p.status);
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                  aria-label={`View plan ${p.plan_id}`}
-                >
-                  <Eye className="w-3 h-3" />
-                  View
-                </button>
-              </div>
-            </div>
-          ))}
-
-          {/* Pagination */}
-          {planPagination && (
-            <PaginationControls
-              pagination={planPagination}
-              onPageChange={setPlanPage}
-            />
-          )}
+      <DataTable<PlanListItem>
+        ariaLabel="Distribution plans"
+        columns={planColumns}
+        data={planList}
+        getRowId={(p) => p.plan_id}
+        loading={listLoading}
+        onRowClick={(p) => {
+          setSelectedPlanId(p.plan_id);
+          setSelectedPlanStatus(p.status);
+        }}
+        emptyState={
+          <div className="flex flex-col items-center text-text-muted">
+            <Truck aria-hidden="true" className="mb-2 h-8 w-8" />
+            <p className="text-sm">No plans found</p>
+            <p className="mt-1 text-xs">
+              Click &quot;Generate Plan&quot; to create a distribution plan
+            </p>
+          </div>
+        }
+      />
+      {!listLoading && planList.length > 0 && planPagination && (
+        <div className="px-4 py-2">
+          <PaginationControls
+            pagination={planPagination}
+            onPageChange={setPlanPage}
+          />
         </div>
       )}
 
@@ -2392,7 +2347,6 @@ function PlansTab() {
           planId={showRejectDialog}
           onConfirm={handleReject}
           onCancel={() => setShowRejectDialog(null)}
-          loading={rejectLoading}
         />
       )}
 
@@ -3522,35 +3476,54 @@ function ClustersTab() {
 
 // ─── Main Page Component ─────────────────────────────────────────────────────
 
+/**
+ * Dispatch → Plans (UI revamp R8.7, §7.2). Dispatch owns the title row, so
+ * this view has no header and no tab row of its own: Plans, Forecasts,
+ * Priorities and Clusters are a segmented control in a single toolbar row,
+ * synced to `?sub=` so a refresh or a shared link keeps the sub-view.
+ */
 export default function FuelDistributionPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("plans");
-
+  const ids = TABS.map((t) => t.id);
+  const [activeTab, setActiveTab] = useUrlTab(ids, {
+    param: "sub",
+    fallback: "plans",
+  });
+  // The sub-view switch sits in each view's single toolbar row, next to
+  // that view's own controls (Plans: status, refresh, costs, Generate).
+  const subNav = (
+    <Tabs
+      tabs={TABS}
+      value={activeTab}
+      onChange={setActiveTab}
+      param="sub"
+      label="Plan views"
+      idBase="plans-sub"
+    />
+  );
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50">
-      {/* Storm_Mode banner (Task 11.7, Req 9.4.1) — pinned to the top of
-          operations control pages, visible only when the backend reports
-          Storm_Mode is active. The override form is gated on the verified
-          session's role claims (Req 8.6). */}
+    <div className="flex h-full flex-1 flex-col bg-surface">
+      {/* Storm_Mode banner (Task 11.7, Req 9.4.1): 0 px unless the backend
+          reports Storm_Mode is active. The override form is gated on the
+          verified session's role claims (Req 8.6). */}
       <StormModeBanner />
-
-      <PageHeader
-        title="Fuel Distribution"
-        subtitle="Plan generation, forecasts, and delivery priorities"
-        icon={<Droplets className="w-5 h-5" />}
-      />
-      <TabNavigation
-        tabs={TABS}
-        activeTab={activeTab}
-        onChange={setActiveTab}
-      />
-
-      {/* Tab content */}
-      <div className="flex-1 min-h-0 overflow-auto bg-white border-t border-gray-200 px-6 py-6">
-        {activeTab === "plans" && <PlansTab />}
-        {activeTab === "forecasts" && <ForecastsTab />}
-        {activeTab === "priorities" && <PrioritiesTab />}
-        {activeTab === "clusters" && <ClustersTab />}
-      </div>
+      <TabPanel
+        idBase="plans-sub"
+        value={activeTab}
+        className="min-h-0 flex-1 overflow-auto bg-surface"
+      >
+        {activeTab === "plans" ? (
+          <PlansTab subNav={subNav} />
+        ) : (
+          <>
+            <Toolbar label="Plans" views={subNav} />
+            <div className="px-4 py-3">
+              {activeTab === "forecasts" && <ForecastsTab />}
+              {activeTab === "priorities" && <PrioritiesTab />}
+              {activeTab === "clusters" && <ClustersTab />}
+            </div>
+          </>
+        )}
+      </TabPanel>
     </div>
   );
 }

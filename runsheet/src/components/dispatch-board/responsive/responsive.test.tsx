@@ -51,6 +51,7 @@ import {
   mockGetBoard,
   renderBoard,
   resetBoardMocks,
+  viewItem,
 } from "../testBoard";
 import { resetMocks } from "../testMocks";
 import { STACKED_QUERY } from "./useStackedLayout";
@@ -113,9 +114,8 @@ describe("stacked layout below 1024 px (R20.2)", () => {
       "data-layout",
       "panels",
     );
-    expect(
-      screen.getByRole("button", { name: "Timeline", pressed: true }),
-    ).toBeEnabled();
+    expect(viewItem(/^Timeline/)).toHaveAttribute("aria-checked", "true");
+    expect(viewItem(/^Timeline/)).not.toHaveAttribute("aria-disabled");
   });
 
   it("forces Sequence without changing the saved zoom", async () => {
@@ -128,18 +128,14 @@ describe("stacked layout below 1024 px (R20.2)", () => {
     const root = container.querySelector("[data-layout]");
     expect(root).toHaveAttribute("data-layout", "stacked");
     expect(root).toHaveAttribute("data-zoom", "sequence");
-    const timeline = screen.getByRole("button", { name: "Timeline" });
-    expect(timeline).toBeDisabled();
-    expect(timeline).toHaveAccessibleDescription(
+    // The View menu's Timeline item is disabled and says why in its visible
+    // label, not only to screen readers (review P7-5).
+    const timeline = viewItem(/^Timeline/);
+    expect(timeline).toHaveAttribute("aria-disabled", "true");
+    expect(timeline).toHaveTextContent(
       "Timeline needs a screen at least 1,024 pixels wide.",
     );
-    // Shown as text too, not only to screen readers (review P7-5).
-    expect(
-      screen.getByText("Timeline needs a screen at least 1,024 pixels wide."),
-    ).not.toHaveClass("sr-only");
-    expect(
-      screen.getByRole("button", { name: "Sequence", pressed: true }),
-    ).toBeInTheDocument();
+    expect(viewItem("Sequence")).toHaveAttribute("aria-checked", "true");
     expect(
       JSON.parse(
         window.localStorage.getItem("runsheet.dispatchBoard.view.v1") ?? "{}",

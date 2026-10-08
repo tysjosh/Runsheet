@@ -1,9 +1,18 @@
 /**
- * JobBoard: the Actions column stays pinned to the right edge (OI-49), so
- * Reject/Cancel stay visible when the table scrolls horizontally. jsdom has
- * no layout engine, so this asserts the sticky classes rather than geometry.
+ * JobBoard (Dispatch → Jobs list, UI revamp R8.6): DataTable with status
+ * badges (icon + label, no row tinting), formatted dates, sortable headers
+ * with `aria-sort` on the `th`, and the status transitions in a row menu. The
+ * menu sits in the last column, so it stays reachable when the table scrolls
+ * horizontally (OI-49).
  */
-import { render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import type { Job } from "../../types/api";
 import JobBoard from "./JobBoard";
 
@@ -21,25 +30,89 @@ const job: Job = {
   delayed: false,
 };
 
-describe("JobBoard Actions column", () => {
-  it("pins the Actions header and cells to the right with an opaque background", () => {
+describe("JobBoard", () => {
+  it("renders status as a badge and no status row tint (R5.5)", () => {
     render(
       <JobBoard
-        jobs={[job]}
-        onTransition={jest.fn().mockResolvedValue(undefined)}
+        jobs={[
+          job,
+          {
+            ...job,
+            job_id: "JOB-2",
+            delayed: true,
+            delay_duration_minutes: 25,
+          },
+        ]}
+        onTransition={jest.fn()}
       />,
     );
     const table = screen.getByRole("table", { name: "Job board" });
+    const rows = within(table).getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("In progress");
+    expect(rows[1]).toHaveTextContent("Delayed +25 min");
+    for (const r of rows)
+      expect(r.className).not.toMatch(/bg-(warning|info|success|error)-light/);
+    expect(
+      within(table).getByRole("columnheader", { name: /Scheduled/ }),
+    ).toHaveAttribute("aria-sort", "ascending");
+  });
 
-    const header = within(table).getByRole("columnheader", { name: "Actions" });
-    expect(header).toHaveClass("sticky", "right-0", "bg-gray-50");
-
-    const rows = within(table).getAllByRole("row");
-    const cells = within(rows[1]).getAllByRole("cell");
-    const actionsCell = cells[cells.length - 1];
-    expect(actionsCell).toHaveClass("sticky", "right-0", "bg-white");
-    expect(within(actionsCell).getAllByRole("button").length).toBeGreaterThan(
-      0,
+  it("offers only valid transitions in the row menu and runs them", async () => {
+    const onTransition = jest.fn().mockResolvedValue(undefined);
+    render(<JobBoard jobs={[job]} onTransition={onTransition} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Actions for job JOB-1" }),
     );
+    const menu = screen.getByRole("menu");
+    expect(
+      within(menu)
+        .getAllByRole("menuitem")
+        .map((m) => m.textContent),
+    ).toEqual(["Complete", "Fail…", "Cancel"]);
+    await act(async () => {
+      fireEvent.click(within(menu).getByRole("menuitem", { name: "Complete" }));
+    });
+    expect(onTransition).toHaveBeenCalledWith("JOB-1", "completed");
+  });
+
+  it("Fail asks for a reason in a dialog first", async () => {
+    const onTransition = jest.fn().mockResolvedValue(undefined);
+    render(<JobBoard jobs={[job]} onTransition={onTransition} />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Actions for job JOB-1" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Fail…" }));
+    const dialog = screen.getByRole("dialog", {
+      name: "Mark job JOB-1 as failed",
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Mark failed" }),
+      );
+    });
+    expect(onTransition).not.toHaveBeenCalled();
+    expect(within(dialog).getByText("Enter a reason.")).toBeInTheDocument();
+    fireEvent.change(within(dialog).getByLabelText(/Failure reason/), {
+      target: { value: "Site closed" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Mark failed" }),
+      );
+    });
+    expect(onTransition).toHaveBeenCalledWith("JOB-1", "failed", "Site closed");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("sorts by a header", () => {
+    render(
+      <JobBoard
+        jobs={[job, { ...job, job_id: "JOB-0", origin: "Aardvark" }]}
+        onTransition={jest.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Origin/ }));
+    const rows = screen.getAllByRole("row").slice(1);
+    expect(rows[0]).toHaveTextContent("JOB-0");
   });
 });

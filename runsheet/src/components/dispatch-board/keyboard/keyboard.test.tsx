@@ -41,11 +41,13 @@ import { makeLane, makeLoad, makeTrayOrder } from "../state/testFixtures";
 import {
   boardSnap,
   mockSend,
+  moreAction,
   okResponse,
   renderBoard,
   resetBoardMocks,
   sentBodies,
   TODAY,
+  viewButton,
 } from "../testBoard";
 import { navigation, resetMocks } from "../testMocks";
 import { addDays } from "../viewState";
@@ -150,10 +152,7 @@ describe("shortcuts (R18.5)", () => {
     );
     act(() => q("order:O1").focus());
     fireEvent.keyDown(q("order:O1"), { key: "t" });
-    expect(screen.getByRole("button", { name: "Sequence" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(viewButton()).toHaveAccessibleName(/^View: Sequence/);
     fireEvent.keyDown(q("order:O1"), { key: "?" });
     const dialog = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
     fireEvent.keyDown(dialog, { key: "Escape" });
@@ -167,16 +166,15 @@ describe("shortcuts (R18.5)", () => {
   it("single-key shortcuts are off while typing in an input", () => {
     const search = screen.getByRole("searchbox", { name: /Search orders/ });
     fireEvent.keyDown(search, { key: "t" });
-    expect(screen.getByRole("button", { name: "Timeline" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(viewButton()).toHaveAccessibleName(/^View: Timeline/);
   });
 
   it("the help dialog turns single-key shortcuts off and returns focus (SC 2.1.4)", () => {
-    const help = screen.getByRole("button", { name: "Keyboard shortcuts" });
+    // Shortcuts live in the toolbar's overflow menu (UI revamp R8.2); the
+    // menu returns focus to its trigger.
+    const help = screen.getByRole("button", { name: "More board actions" });
     act(() => help.focus());
-    fireEvent.click(help);
+    moreAction("Keyboard shortcuts");
     const dialog = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
     expect(within(dialog).getByText("Assign selected")).toBeInTheDocument();
     fireEvent.click(
@@ -187,10 +185,7 @@ describe("shortcuts (R18.5)", () => {
     expect(document.activeElement).toBe(help);
     act(() => q("order:O1").focus());
     fireEvent.keyDown(q("order:O1"), { key: "t" });
-    expect(screen.getByRole("button", { name: "Timeline" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(viewButton()).toHaveAccessibleName(/^View: Timeline/);
   });
 
   it("Cmd/Ctrl+Z undoes and Shift+Cmd/Ctrl+Z redoes (R11.4)", async () => {

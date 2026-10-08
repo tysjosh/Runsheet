@@ -43,7 +43,7 @@ export function GhostLoad({
             suggestionId: suggestion.suggestion_id,
           });
         }}
-        className="flex h-full w-full flex-col items-start justify-center gap-0.5 rounded-md border border-dashed border-info bg-info-light/40 px-2 text-left text-[11px] leading-tight text-info-dark outline-none hover:bg-info-light focus-visible:ring-2 focus-visible:ring-primary"
+        className="flex h-full w-full flex-col items-start justify-center gap-0.5 rounded-md border-2 border-dashed border-fuchsia-600 bg-white px-2 text-left text-[11px] leading-tight text-fuchsia-800 outline-none hover:bg-fuchsia-50 focus-visible:ring-2 focus-visible:ring-primary"
       >
         <span className="flex items-center gap-1 font-semibold">
           <Sparkles className="h-3 w-3" aria-hidden="true" />

@@ -1,8 +1,9 @@
 /**
- * Shell pages the UI revamp measures (design.md §6). `migrated` names the
- * task that brings each page under the 172 px budget / to zero serious axe
- * findings; until it lands, chrome.spec and axe.spec mark the page
- * `test.fail()` (flipped as pages land, removed by task 3.10).
+ * Shell pages the UI revamp measures (design.md §6). `chromeTask` /
+ * `axeTask` name the task that brings each page under the 172 px budget / to
+ * zero serious axe findings; until it lands, chrome.spec and axe.spec mark
+ * the page `test.fail()` (flipped as pages land, removed by task 3.10).
+ * Phase 2 flipped Dashboard, Dispatch (Board, Jobs, Plans), Orders and Live.
  */
 export interface ShellPage {
   id: string;
@@ -23,9 +24,9 @@ export const SHELL_PAGES: ShellPage[] = [
   {
     id: "dashboard",
     path: "/dashboard",
-    h1: "Today",
+    h1: "Dashboard",
     ready: "[data-feed-row]",
-    chromeTask: "2.1",
+    chromeTask: null,
     axeTask: null,
   },
   {
@@ -33,7 +34,7 @@ export const SHELL_PAGES: ShellPage[] = [
     path: "/dashboard/dispatch?tab=board",
     h1: "Dispatch",
     ready: '[role="grid"] [role="row"]',
-    chromeTask: "2.2",
+    chromeTask: null,
     axeTask: null,
   },
   {
@@ -41,30 +42,32 @@ export const SHELL_PAGES: ShellPage[] = [
     path: "/dashboard/dispatch?tab=jobs",
     h1: "Dispatch",
     ready: "tbody tr",
-    chromeTask: "2.4",
-    axeTask: "2.4",
+    chromeTask: null,
+    axeTask: null,
   },
   {
     id: "dispatch-plans",
     path: "/dashboard/dispatch?tab=plans",
+    ready: "tbody tr",
     h1: "Dispatch",
-    chromeTask: "2.5",
-    axeTask: "2.5",
+    chromeTask: null,
+    axeTask: null,
   },
   {
     id: "orders",
     path: "/dashboard/orders",
     h1: "Orders",
     ready: "tbody tr",
-    chromeTask: "2.7",
+    chromeTask: null,
     axeTask: null,
   },
   {
     id: "live",
     path: "/dashboard/control",
+    ready: "[data-feed-row]",
     h1: "Live",
-    chromeTask: "2.6",
-    axeTask: "2.6",
+    chromeTask: null,
+    axeTask: null,
   },
   {
     id: "fleet-trucks",

@@ -54,3 +54,24 @@ for (const p of SHELL_PAGES) {
     });
   }
 }
+
+// R4.7: the Dispatch Board's first lane also fits at 1024×768 (the narrowest
+// panels layout; below 1024 px the board stacks).
+test(`dispatch-board: first lane ≤ ${FIRST_ROW_BUDGET} px at 1024×768`, async ({
+  page,
+  context,
+}) => {
+  await signIn(context);
+  await installShellFake(page);
+  await page.setViewportSize({ width: 1024, height: 768 });
+  await page.goto("/dashboard/dispatch?tab=board");
+  await expect(page.locator("h1")).toHaveText("Dispatch");
+  await page.locator('[role="grid"] [role="row"]').first().waitFor();
+  await expect(page.locator('[data-layout="panels"]')).toHaveCount(1);
+  const top = await firstRowTop(page);
+  test
+    .info()
+    .annotations.push({ type: "firstRowTop", description: String(top) });
+  expect(top).not.toBeNull();
+  expect(top as number).toBeLessThanOrEqual(FIRST_ROW_BUDGET);
+});

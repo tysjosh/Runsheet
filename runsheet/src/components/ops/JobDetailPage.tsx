@@ -62,6 +62,7 @@ import type {
 import LoadingSpinner from "../LoadingSpinner";
 import { entityHref } from "../ui/EntityLink";
 import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
 import CargoManifestEditor from "./CargoManifestEditor";
 import DriverActivitySection from "./DriverActivitySection";
 import JobActionButtons from "./JobActionButtons";
@@ -631,11 +632,12 @@ export default function JobDetailPage({
           // Re-fetch failed — use the transition response as fallback
         }
       } catch (err) {
-        setTransitionError(
+        const msg =
           err instanceof Error
             ? err.message
-            : "Failed to transition job status",
-        );
+            : "Failed to transition job status";
+        setTransitionError(msg);
+        notify({ type: "error", message: `Job ${id}: ${msg}` });
       }
     },
     [onTransition, jobId, applyJobResponse],
@@ -693,9 +695,16 @@ export default function JobDetailPage({
         </div>
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
-            <AlertTriangle className="w-10 h-10 text-error mx-auto mb-3" />
-            <p className="text-sm text-error mb-4">
-              {error || "Job not found"}
+            <AlertTriangle
+              aria-hidden="true"
+              className="w-10 h-10 text-error mx-auto mb-3"
+            />
+            {/* One heading even when the job can't be shown (R2.5). */}
+            <PageTitle className="mb-1 text-base font-semibold text-slate-900">
+              Job not found
+            </PageTitle>
+            <p className="text-sm text-red-800 mb-4">
+              {error || `We couldn't find job "${jobId}".`}
             </p>
             <button
               onClick={loadData}

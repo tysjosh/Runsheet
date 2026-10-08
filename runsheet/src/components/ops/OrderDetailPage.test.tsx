@@ -197,7 +197,10 @@ describe("OrderDetailPage — render", () => {
 
     render(<OrderDetailPage />);
 
-    expect(await screen.findByText(/not found/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Order not found" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Not found")).toBeInTheDocument();
   });
 
   it("renders without crashing when intake_metadata is absent", async () => {

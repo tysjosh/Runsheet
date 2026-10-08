@@ -25,8 +25,41 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
+// Plans' sub-views are URL-synced (`?sub=`, UI revamp R8.7): a stateful
+// router mock so a click on "Clusters" actually switches the view.
+jest.mock("next/navigation", () => {
+  const { useSyncExternalStore } = jest.requireActual("react");
+  let qs = "";
+  const listeners = new Set<() => void>();
+  const replace = (url: string) => {
+    qs = url.split("?")[1] ?? "";
+    for (const l of listeners) l();
+  };
+  return {
+    useRouter: () => ({ push: replace, replace, prefetch() {}, back() {} }),
+    usePathname: () => "/dashboard/dispatch",
+    useSearchParams: () =>
+      new URLSearchParams(
+        useSyncExternalStore(
+          (l: () => void) => {
+            listeners.add(l);
+            return () => listeners.delete(l);
+          },
+          () => qs,
+        ),
+      ),
+    useParams: () => ({}),
+    __reset: () => {
+      qs = "";
+    },
+  };
+});
+beforeEach(() => {
+  (jest.requireMock("next/navigation") as { __reset: () => void }).__reset();
+});
 jest.mock("../../services/fuelApi", () => {
   const actual = jest.requireActual("../../services/fuelApi");
   return {
@@ -40,8 +73,13 @@ jest.mock("../../services/fuelApi", () => {
     getPlan: jest.fn(),
     getPlanCosts: jest.fn(),
     getPlanOutcomes: jest.fn(),
+    rejectPlan: jest.fn(),
   };
 });
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserId: jest.fn().mockResolvedValue("dispatcher-1"),
+}));
 
 // StormModeBanner polls the status endpoint on mount; stub it out so
 // the tests don't have to care about its internal fetch.
@@ -221,7 +259,7 @@ describe("FuelDistributionPage — Clusters tab", () => {
   async function goToClustersTab() {
     render(<FuelDistributionPage />);
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /^Clusters$/i }));
+      fireEvent.click(screen.getByRole("tab", { name: /^Clusters$/i }));
     });
   }
 
@@ -432,7 +470,8 @@ describe("FuelDistributionPage — Plans tab", () => {
 
     await waitFor(() => {
       expect(screen.getByText("plan-new")).toBeInTheDocument();
-      expect(screen.getByText("Run: run-new")).toBeInTheDocument();
+      // The list is a table now: the run id has its own column.
+      expect(screen.getByText("run-new")).toBeInTheDocument();
     });
     expect(mockGeneratePlan).toHaveBeenCalledWith("dev-tenant");
     expect(mockListPlans).toHaveBeenCalledWith("dev-tenant", 1, 10, undefined);
@@ -753,5 +792,81 @@ describe.skip("FuelDistributionPage — emergency-stop destination picker", () =
     // Intentionally skipped — see block comment above for rationale.
     // ``insertEmergencyStop`` is the helper invoked on submit; the
     // destination-picker effect uses ``listDeliveryDestinations``.
+  });
+});
+
+describe("Dispatch → Plans chrome (UI revamp task 2.5, R8.7)", () => {
+  beforeEach(() => {
+    window.localStorage.setItem("tenant_id", "dev-tenant");
+    mockListPlans.mockResolvedValue({
+      data: [
+        {
+          plan_id: "plan-r",
+          run_id: "run-r",
+          status: "proposed",
+          truck_id: "truck-9",
+          created_at: "2026-10-04T12:00:00Z",
+          total_utilization_pct: 80,
+          execution_status: null,
+        },
+      ],
+      pagination: { page: 1, size: 10, total: 1, total_pages: 1 },
+      request_id: "req-r",
+    } as never);
+  });
+
+  it("has no header or tab row of its own; sub-views are a toolbar segment synced to ?sub=", async () => {
+    render(<FuelDistributionPage />);
+    expect(screen.queryByRole("heading", { level: 1 })).toBeNull();
+    expect(screen.queryByText("Fuel Distribution")).toBeNull();
+    const views = screen.getByRole("tablist", { name: "Plan views" });
+    expect(
+      within(views)
+        .getAllByRole("tab")
+        .map((t) => t.textContent),
+    ).toEqual(["Plans", "Forecasts", "Priorities", "Clusters"]);
+    expect(views.closest('[role="toolbar"]')).not.toBeNull();
+    fireEvent.click(within(views).getByRole("tab", { name: "Forecasts" }));
+    // Each view has its own toolbar row, so query the switch again.
+    expect(
+      within(screen.getByRole("tablist", { name: "Plan views" })).getByRole(
+        "tab",
+        { name: "Forecasts" },
+      ),
+    ).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("Reject opens a FormDialog and keeps it open with the error on failure", async () => {
+    const { rejectPlan } = jest.requireMock("../../services/fuelApi");
+    rejectPlan.mockRejectedValueOnce(new Error("Plan already dispatched"));
+    render(<FuelDistributionPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Reject plan plan-r" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Reject plan" });
+    fireEvent.change(within(dialog).getByLabelText(/Reason/), {
+      target: { value: "Wrong truck" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Reject plan" }),
+      );
+    });
+    expect(rejectPlan).toHaveBeenCalledWith(
+      "plan-r",
+      expect.anything(),
+      "dispatcher-1",
+      "Wrong truck",
+    );
+    expect(
+      await within(dialog).findByText("Plan already dispatched"),
+    ).toBeInTheDocument();
+    rejectPlan.mockResolvedValueOnce({ plan_id: "plan-r", status: "rejected" });
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Reject plan" }),
+      );
+    });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 });

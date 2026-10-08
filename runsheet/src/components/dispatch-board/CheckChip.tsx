@@ -15,12 +15,13 @@ import type { CheckOutcome } from "../../services/dispatchBoardApi";
 
 export type ChipOutcome = CheckOutcome | "checking";
 
+// Status tokens (100 bg, 300 border, 800 text: all ≥ 4.5:1) + icon + text.
 const STYLE: Record<ChipOutcome, string> = {
-  pass: "border-success bg-success-light text-success-dark",
-  warn: "border-warning bg-warning-light text-warning-dark",
-  block: "border-error bg-error-light text-error-dark",
-  info: "border-gray-300 bg-gray-50 text-gray-700",
-  checking: "border-gray-300 bg-white text-gray-700",
+  pass: "border-brand-300 bg-brand-100 text-brand-800",
+  warn: "border-amber-300 bg-amber-100 text-amber-800",
+  block: "border-red-300 bg-red-100 text-red-800",
+  info: "border-blue-300 bg-blue-50 text-blue-800",
+  checking: "border-slate-300 bg-white text-slate-700",
 };
 
 const PREFIX: Record<ChipOutcome, string> = {

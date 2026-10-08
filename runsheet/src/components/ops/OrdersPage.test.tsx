@@ -9,6 +9,11 @@
  * - WebSocket update reception
  * - Error state rendering
  * - Empty state rendering
+ * - Status chips with counts, the Filters popover, bulk Confirm / Hold
+ *   (UI revamp task 2.7)
+ *
+ * The page also issues `size: 1` reads for the status-chip counts, so list
+ * assertions look only at the list reads (`size: 20`).
  */
 
 import {
@@ -17,11 +22,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 // Mock the ordersApi module
 jest.mock("../../services/ordersApi", () => ({
   listOrders: jest.fn(),
+  updateOrderStatus: jest.fn(),
+  holdOrder: jest.fn(),
 }));
 
 // Mock the WebSocket hook
@@ -50,11 +58,22 @@ jest.mock("../../utils/auth", () => ({
 import { useOrdersWebSocket } from "../../hooks/useOrdersWebSocket";
 import { downloadCsvExport } from "../../services/exportApi";
 import type { FuelOrder, OrderListResponse } from "../../services/ordersApi";
-import { listOrders } from "../../services/ordersApi";
+import {
+  holdOrder,
+  listOrders,
+  updateOrderStatus,
+} from "../../services/ordersApi";
 import { getCurrentUserRoles } from "../../utils/auth";
+import { GlobalToaster } from "../ui/toast/notify";
 import OrdersPage from "./OrdersPage";
 
 const mockListOrders = listOrders as jest.MockedFunction<typeof listOrders>;
+/** The list reads (not the `size: 1` chip-count reads). */
+const listCalls = () =>
+  mockListOrders.mock.calls.map((c) => c[0]).filter((f) => f?.size === 20);
+const chip = (name: RegExp) => screen.getByRole("button", { name });
+const openFilters = () =>
+  fireEvent.click(screen.getByRole("button", { name: /^Filters/ }));
 const mockUseOrdersWebSocket = useOrdersWebSocket as jest.MockedFunction<
   typeof useOrdersWebSocket
 >;
@@ -138,7 +157,7 @@ describe("OrdersPage — list render", () => {
 
     render(<OrdersPage tenantId="tenant-a" />);
 
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listCalls()).toHaveLength(1));
     expect(await screen.findByText("Acme Fuel Co")).toBeInTheDocument();
     expect(screen.getByText("Beta Corp")).toBeInTheDocument();
   });
@@ -255,8 +274,8 @@ describe("OrdersPage — intake channel badge", () => {
     await waitFor(() => expect(mockListOrders).toHaveBeenCalled());
     const badges = await screen.findAllByTestId("intake-channel-badge");
     expect(badges.length).toBe(2);
-    expect(badges[0]).toHaveTextContent("voice");
-    expect(badges[1]).toHaveTextContent("csv");
+    expect(badges[0]).toHaveTextContent("Voice");
+    expect(badges[1]).toHaveTextContent("CSV");
   });
 });
 
@@ -266,14 +285,12 @@ describe("OrdersPage — filters", () => {
 
     render(<OrdersPage tenantId="tenant-a" />);
 
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listCalls()).toHaveLength(1));
 
-    fireEvent.change(screen.getByLabelText(/filter by status/i), {
-      target: { value: "delivered" },
-    });
+    fireEvent.click(chip(/^Delivered/));
 
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
-    const lastCall = mockListOrders.mock.calls[1][0];
+    await waitFor(() => expect(listCalls()).toHaveLength(2));
+    const lastCall = listCalls()[1];
     expect(lastCall).toEqual(expect.objectContaining({ status: "delivered" }));
   });
 
@@ -284,12 +301,13 @@ describe("OrdersPage — filters", () => {
 
     await waitFor(() => expect(mockListOrders).toHaveBeenCalled());
 
+    openFilters();
     fireEvent.change(screen.getByLabelText(/filter by intake channel/i), {
       target: { value: "voice" },
     });
 
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
-    const lastCall = mockListOrders.mock.calls[1][0];
+    await waitFor(() => expect(listCalls()).toHaveLength(2));
+    const lastCall = listCalls()[1];
     expect(lastCall).toEqual(
       expect.objectContaining({ intake_channel: "voice" }),
     );
@@ -299,14 +317,16 @@ describe("OrdersPage — filters", () => {
     mockListOrders.mockResolvedValue(paginatedResponse([orderFixture()]));
 
     render(<OrdersPage tenantId="tenant-a" />);
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listCalls()).toHaveLength(1));
 
-    const quick = screen.getByRole("button", { name: "Awaiting confirmation" });
+    const quick = screen.getByRole("button", {
+      name: /^Awaiting confirmation/,
+    });
     expect(quick).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(quick);
 
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
-    expect(mockListOrders.mock.calls[1][0]).toEqual(
+    await waitFor(() => expect(listCalls()).toHaveLength(2));
+    expect(listCalls()[1]).toEqual(
       expect.objectContaining({
         status: "on_hold",
         hold_reason: "awaiting_dispatcher_confirmation",
@@ -314,14 +334,11 @@ describe("OrdersPage — filters", () => {
       }),
     );
     expect(quick).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByLabelText(/filter by status/i)).toHaveValue("on_hold");
 
-    // A manual status choice replaces the quick filter.
-    fireEvent.change(screen.getByLabelText(/filter by status/i), {
-      target: { value: "placed" },
-    });
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(3));
-    const last = mockListOrders.mock.calls[2][0];
+    // A status chip replaces the quick filter.
+    fireEvent.click(chip(/^Placed/));
+    await waitFor(() => expect(listCalls()).toHaveLength(3));
+    const last = listCalls()[2];
     expect(last).toEqual(expect.objectContaining({ status: "placed" }));
     expect(last?.hold_reason).toBeUndefined();
     expect(quick).toHaveAttribute("aria-pressed", "false");
@@ -341,14 +358,14 @@ describe("OrdersPage — pagination", () => {
     render(<OrdersPage tenantId="tenant-a" />);
 
     // Wait for the data to load and render
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(listCalls()).toHaveLength(1));
     expect(await screen.findByText("Acme Fuel Co")).toBeInTheDocument();
 
     const nextBtn = await screen.findByRole("button", { name: /next page/i });
     fireEvent.click(nextBtn);
 
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
-    const lastCall = mockListOrders.mock.calls[1][0];
+    await waitFor(() => expect(listCalls()).toHaveLength(2));
+    const lastCall = listCalls()[1];
     expect(lastCall?.page).toBe(2);
   });
 });
@@ -391,7 +408,8 @@ describe("OrdersPage — WebSocket updates", () => {
     render(<OrdersPage tenantId="tenant-a" />);
 
     await waitFor(() => expect(mockListOrders).toHaveBeenCalled());
-    expect(await screen.findByText("placed")).toBeInTheDocument();
+    const table = await screen.findByRole("table", { name: "Orders" });
+    expect(await within(table).findByText("Placed")).toBeInTheDocument();
 
     // Simulate WebSocket update
     act(() => {
@@ -401,7 +419,7 @@ describe("OrdersPage — WebSocket updates", () => {
       });
     });
 
-    expect(await screen.findByText("dispatched")).toBeInTheDocument();
+    expect(await within(table).findByText("Dispatched")).toBeInTheDocument();
   });
 });
 
@@ -435,10 +453,8 @@ describe("OrdersPage — Export CSV", () => {
     const button = await screen.findByRole("button", {
       name: /^Export CSV ?: orders$/,
     });
-    fireEvent.change(screen.getByLabelText(/filter by status/i), {
-      target: { value: "delivered" },
-    });
-    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
+    fireEvent.click(chip(/^Delivered/));
+    await waitFor(() => expect(listCalls()).toHaveLength(2));
     await act(async () => {
       fireEvent.click(button);
     });
@@ -448,5 +464,111 @@ describe("OrdersPage — Export CSV", () => {
     expect(params).toEqual(expect.objectContaining({ status: "delivered" }));
     expect(params).not.toHaveProperty("page");
     expect(params).not.toHaveProperty("size");
+  });
+});
+
+describe("OrdersPage — UI revamp list template (task 2.7)", () => {
+  it("has one header with no create button; product names, not codes (R5.4)", async () => {
+    mockListOrders.mockResolvedValue(paginatedResponse([orderFixture()]));
+    render(<OrdersPage tenantId="tenant-a" onCreateOrder={jest.fn()} />);
+    const table = await screen.findByRole("table", { name: "Orders" });
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(screen.queryByRole("button", { name: /create order/i })).toBeNull();
+    expect(within(table).getByText("Diesel #2 (on-road)")).toBeInTheDocument();
+    expect(within(table).queryByText("DIESEL_2")).toBeNull();
+    expect(within(table).getByText("500 gal")).toBeInTheDocument();
+    // One search field (the toolbar's).
+    expect(screen.getAllByRole("searchbox")).toHaveLength(1);
+  });
+
+  it("shows status counts inside the chips", async () => {
+    mockListOrders.mockImplementation(async (f) =>
+      paginatedResponse(f?.size === 1 ? [] : [orderFixture()], {
+        total: f?.size === 1 ? (f.status === "placed" ? 7 : 2) : 1,
+      }),
+    );
+    render(<OrdersPage tenantId="tenant-a" />);
+    await waitFor(() => expect(chip(/^Placed/)).toHaveTextContent("7"));
+    expect(
+      mockListOrders.mock.calls.some(
+        ([f]) => f?.size === 1 && f.status === "placed",
+      ),
+    ).toBe(true);
+  });
+
+  it("bulk Confirm calls the per-order endpoint in turn and reports each row", async () => {
+    mockListOrders.mockResolvedValue(
+      paginatedResponse([
+        orderFixture({ order_id: "ord_1" }),
+        orderFixture({ order_id: "ord_2", customer_name: "Beta Corp" }),
+      ]),
+    );
+    const mockUpdate = updateOrderStatus as jest.MockedFunction<
+      typeof updateOrderStatus
+    >;
+    mockUpdate.mockReset();
+    mockUpdate
+      .mockResolvedValueOnce(
+        orderFixture({ order_id: "ord_1", status: "confirmed" }),
+      )
+      .mockRejectedValueOnce(new Error("not allowed from delivered"));
+    render(
+      <>
+        <OrdersPage tenantId="tenant-a" />
+        <GlobalToaster />
+      </>,
+    );
+    await screen.findByText("Beta Corp");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Select all rows" }));
+    expect(screen.getByText("2 selected")).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    });
+    expect(mockUpdate.mock.calls.map((c) => c[0])).toEqual(["ord_1", "ord_2"]);
+    expect(mockUpdate.mock.calls[0][1]).toEqual({ new_status: "confirmed" });
+    expect(
+      await screen.findByText(
+        "Confirmed 1 of 2 orders. Not changed: ord_2: not allowed from delivered.",
+      ),
+    ).toBeInTheDocument();
+    // The failed row stays selected.
+    expect(screen.getByText("1 selected")).toBeInTheDocument();
+  });
+
+  it("bulk Hold asks for one reason and holds each order", async () => {
+    mockListOrders.mockResolvedValue(
+      paginatedResponse([orderFixture({ order_id: "ord_1" })]),
+    );
+    const mockHold = holdOrder as jest.MockedFunction<typeof holdOrder>;
+    mockHold.mockReset();
+    mockHold.mockResolvedValue(
+      orderFixture({ order_id: "ord_1", status: "on_hold" }),
+    );
+    render(
+      <>
+        <OrdersPage tenantId="tenant-a" />
+        <GlobalToaster />
+      </>,
+    );
+    await screen.findByText("Acme Fuel Co");
+    fireEvent.click(
+      screen.getByRole("checkbox", { name: "Select order ord_1" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Hold" }));
+    const dialog = screen.getByRole("dialog", { name: "Hold 1 order" });
+    fireEvent.change(within(dialog).getByLabelText(/Hold reason/), {
+      target: { value: "Credit check" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Put on hold" }),
+      );
+    });
+    expect(mockHold).toHaveBeenCalledWith("ord_1", {
+      hold_reason: "Credit check",
+    });
+    expect(
+      await screen.findByText("Put on hold 1 of 1 order."),
+    ).toBeInTheDocument();
   });
 });
