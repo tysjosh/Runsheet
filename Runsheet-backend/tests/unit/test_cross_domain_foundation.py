@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from scheduling.models import RerouteJobRequest, GeoPoint
 from Agents.confirmation_protocol import (
     ConfirmationProtocol,
+    MutationExecutionError,
     MutationRequest,
 )
 from Agents.overlay.overlay_es_mappings import JOB_PRIORITIES_INDEX, JOB_PRIORITIES_MAPPING
@@ -192,7 +193,10 @@ class TestConfirmationProtocolRerouteJob:
             },
         )
 
-        result = await protocol._execute_mutation(request)
+        # Not executed: raised, never returned as a result string (D15d).
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "Failed" in result
         assert "ES connection lost" in result
@@ -289,7 +293,10 @@ class TestConfirmationProtocolTruckFuelAlert:
             parameters={"truck_id": "TRUCK_005"},
         )
 
-        result = await protocol._execute_mutation(request)
+        # Not executed: raised, never returned as a result string (D15d).
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "Failed" in result
         assert "ES write failed" in result

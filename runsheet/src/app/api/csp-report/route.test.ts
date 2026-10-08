@@ -9,28 +9,33 @@
  * the log, and oversized, mistyped or flooding requests must be refused.
  */
 import {
+  clientKey,
   extractReports,
   PER_KEY_LIMIT,
   RATE_WINDOW_MS,
   rateLimiter,
   reduceBlocked,
   sanitizeReport,
+  trustedProxyHops,
 } from "./report";
 import { POST } from "./route";
 
 const URL_ = "https://app.staging.runsheetops.com/api/csp-report";
 const CLIENT_IP = "203.0.113.77";
 
+/** As the ALB forwards it: whatever the client sent, then the address the
+ * ALB saw appended on the right. */
 function post(
   body: string,
   contentType = "application/csp-report",
   ip = CLIENT_IP,
+  spoofed = "10.0.0.1",
 ): Request {
   return new Request(URL_, {
     method: "POST",
     headers: {
       "Content-Type": contentType,
-      "X-Forwarded-For": `${ip}, 10.0.0.1`,
+      "X-Forwarded-For": `${spoofed}, ${ip}`,
     },
     body,
   });
@@ -58,6 +63,17 @@ const LEGACY = {
 
 let warn: jest.SpyInstance;
 let clock = 0;
+
+const ORIGINAL_HOPS = process.env.TRUSTED_PROXY_HOPS;
+
+beforeAll(() => {
+  process.env.TRUSTED_PROXY_HOPS = "1"; // behind the ALB, as on staging
+});
+
+afterAll(() => {
+  if (ORIGINAL_HOPS === undefined) delete process.env.TRUSTED_PROXY_HOPS;
+  else process.env.TRUSTED_PROXY_HOPS = ORIGINAL_HOPS;
+});
 
 beforeEach(() => {
   clock = 1_000_000;
@@ -196,6 +212,53 @@ it("rate-limits one client to 30 requests a minute", async () => {
   // The next window starts fresh.
   clock += RATE_WINDOW_MS;
   expect((await POST(post(body))).status).toBe(204);
+});
+
+it("keeps limiting a client that rotates the spoofable first hop", async () => {
+  const body = JSON.stringify(LEGACY);
+  for (let i = 0; i < PER_KEY_LIMIT; i += 1) {
+    const res = await POST(
+      post(body, "application/csp-report", CLIENT_IP, `192.0.2.${i}`),
+    );
+    expect(res.status).toBe(204);
+  }
+  expect(
+    (await POST(post(body, "application/csp-report", CLIENT_IP, "192.0.2.250")))
+      .status,
+  ).toBe(429);
+});
+
+it("keys on the Nth entry from the right, like the backend", () => {
+  const headers = new Headers({
+    "X-Forwarded-For": "1.1.1.1, 203.0.113.9, 10.0.0.2",
+  });
+  expect(clientKey(headers, 1)).toBe("10.0.0.2");
+  expect(clientKey(headers, 2)).toBe("203.0.113.9");
+  expect(clientKey(headers, 4)).toBe("unknown");
+  expect(clientKey(headers, 0)).toBe("unknown");
+  expect(clientKey(new Headers({ "X-Forwarded-For": "a, not-an-ip" }), 1)).toBe(
+    "unknown",
+  );
+  expect(clientKey(new Headers(), 1)).toBe("unknown");
+});
+
+it("trusts one proxy in production and none locally unless configured", () => {
+  const env = process.env as Record<string, string | undefined>;
+  const saved = { hops: env.TRUSTED_PROXY_HOPS, node: env.NODE_ENV };
+  try {
+    delete env.TRUSTED_PROXY_HOPS;
+    env.NODE_ENV = "production";
+    expect(trustedProxyHops()).toBe(1);
+    env.NODE_ENV = "development";
+    expect(trustedProxyHops()).toBe(0);
+    env.TRUSTED_PROXY_HOPS = "2";
+    expect(trustedProxyHops()).toBe(2);
+    env.TRUSTED_PROXY_HOPS = "junk";
+    expect(trustedProxyHops()).toBe(0);
+  } finally {
+    env.TRUSTED_PROXY_HOPS = saved.hops;
+    env.NODE_ENV = saved.node;
+  }
 });
 
 it("answers malformed JSON with 204 and logs nothing", async () => {

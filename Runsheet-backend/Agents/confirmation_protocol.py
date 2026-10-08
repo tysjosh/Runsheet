@@ -50,6 +50,11 @@ _JOB_SERVICE_TOOLS = frozenset(
 )
 
 
+#: Tools that targeted the retired ``shipments_current`` index (D15d). They
+#: refuse with :class:`MutationExecutionError` instead of writing it.
+_RETIRED_SHIPMENT_TOOLS = frozenset({"reassign_rider", "escalate_shipment"})
+
+
 class MutationExecutionError(Exception):
     """A mutation did not execute; the message says why (OI-15).
 
@@ -408,7 +413,7 @@ class ConfirmationProtocol:
         """Execute the actual mutation via Elasticsearch.
 
         Dispatches the mutation to the appropriate ES index based on
-        tool_name. Falls back to a no-op log if no ES service is wired.
+        tool_name. Raises MutationExecutionError when nothing was executed.
 
         Args:
             request: The mutation request to execute.
@@ -430,7 +435,7 @@ class ConfirmationProtocol:
                     "cannot execute send_customer_notification for tenant %s",
                     tenant_id,
                 )
-                return (
+                raise MutationExecutionError(
                     "Notification dispatch failed: notification_service not configured"
                 )
 
@@ -447,13 +452,6 @@ class ConfirmationProtocol:
                     },
                     tenant_id=tenant_id,
                 )
-                if notifications:
-                    notification_ids = [n["notification_id"] for n in notifications]
-                    return (
-                        f"Dispatched {len(notifications)} notification(s): "
-                        f"{','.join(notification_ids)}"
-                    )
-                return "Notification dispatch failed: no notifications created"
             except Exception as e:
                 logger.error(
                     "ConfirmationProtocol: failed to execute %s for tenant %s: %s",
@@ -461,7 +459,18 @@ class ConfirmationProtocol:
                     tenant_id,
                     e,
                 )
-                return f"Failed to execute {tool_name}: {e}"
+                raise MutationExecutionError(
+                    f"Failed to execute {tool_name}: {e}"
+                ) from e
+            if notifications:
+                notification_ids = [n["notification_id"] for n in notifications]
+                return (
+                    f"Dispatched {len(notifications)} notification(s): "
+                    f"{','.join(notification_ids)}"
+                )
+            raise MutationExecutionError(
+                "Notification dispatch failed: no notifications created"
+            )
 
         # Loading plans run only through ApprovalQueueService.approve (K1,
         # R1.3); a direct call is a regression and writes nothing.
@@ -470,38 +479,43 @@ class ConfirmationProtocol:
                 "apply_loading_plan reached _execute_mutation directly (tenant=%s); refused",
                 tenant_id,
             )
-            return "apply_loading_plan runs only through the approval queue; no mutation executed"
+            raise MutationExecutionError(
+                "apply_loading_plan runs only through the approval queue; no mutation executed"
+            )
 
         if tool_name in _JOB_SERVICE_TOOLS:
             return await self._execute_job_mutation(request)
 
+        if tool_name in _RETIRED_SHIPMENT_TOOLS:
+            # D15d: these wrote ``shipments_current``, which nothing reads
+            # since the shipment aggregate was retired (rev 0007), and the
+            # caller was told they succeeded.
+            logger.warning(
+                "ConfirmationProtocol: %s refused for tenant %s: shipment "
+                "mutations are not available",
+                tool_name,
+                tenant_id,
+            )
+            raise MutationExecutionError(
+                f"{tool_name} is not available: shipment records were retired, "
+                "so there is nothing to update; no mutation executed"
+            )
+
         if self._es is None:
             logger.warning(
                 "ConfirmationProtocol: no ES service wired, mutation %s "
-                "logged but not persisted for tenant %s",
+                "not executed for tenant %s",
                 request.tool_name,
                 request.tenant_id,
             )
-            return (
-                f"Mutation {request.tool_name} approved but ES not wired "
-                f"for tenant {request.tenant_id}"
+            raise MutationExecutionError(
+                f"Mutation {request.tool_name} not executed: the data store "
+                "is not wired"
             )
 
-        # Dispatch to tool-specific ES writes
+        # Dispatch to tool-specific writes
         try:
-            if tool_name == "reassign_rider":
-                await self._es.update_document(
-                    "shipments_current",
-                    params["shipment_id"],
-                    {"rider_id": params["new_rider_id"], "tenant_id": tenant_id},
-                )
-            elif tool_name == "escalate_shipment":
-                await self._es.update_document(
-                    "shipments_current",
-                    params["shipment_id"],
-                    {"priority": params.get("priority", "high"), "tenant_id": tenant_id},
-                )
-            elif tool_name == "request_fuel_refill":
+            if tool_name == "request_fuel_refill":
                 import uuid
                 refill_id = f"REFILL_{uuid.uuid4().hex[:8].upper()}"
                 await self._es.index_document(
@@ -516,10 +530,14 @@ class ConfirmationProtocol:
                     },
                 )
             elif tool_name == "update_fuel_threshold":
-                await self._es.update_document(
-                    "fuel_stations",
-                    params["station_id"],
-                    {"threshold_pct": params["threshold_pct"], "tenant_id": tenant_id},
+                # D15d: through FuelService, as PATCH .../threshold does. The
+                # old raw write used the bare station id (stations are keyed
+                # ``<station>::<fuel type>``) and a ``threshold_pct`` field
+                # nothing reads, so it never changed the alert threshold.
+                from fuel.services.fuel_service import FuelService
+
+                await FuelService(self._es).update_threshold(
+                    params["station_id"], float(params["threshold_pct"]), tenant_id
                 )
             elif tool_name == "reroute_job":
                 from datetime import datetime, timezone
@@ -555,7 +573,9 @@ class ConfirmationProtocol:
                     "ConfirmationProtocol: unknown tool %s, no ES write performed",
                     tool_name,
                 )
-                return f"Unknown tool {tool_name} — no mutation executed"
+                raise MutationExecutionError(
+                    f"Unknown tool {tool_name} — no mutation executed"
+                )
 
             logger.info(
                 "ConfirmationProtocol: executed %s for tenant %s",
@@ -564,14 +584,19 @@ class ConfirmationProtocol:
             )
             return f"Successfully executed {tool_name} for tenant {tenant_id}"
 
+        except MutationExecutionError:
+            raise
         except Exception as e:
+            message = getattr(e, "message", None) or str(e)
             logger.error(
                 "ConfirmationProtocol: failed to execute %s for tenant %s: %s",
                 tool_name,
                 tenant_id,
-                e,
+                message,
             )
-            return f"Failed to execute {tool_name}: {e}"
+            raise MutationExecutionError(
+                f"Failed to execute {tool_name}: {message}"
+            ) from e
 
     async def _execute_job_mutation(self, request: MutationRequest) -> str:
         """Run a job tool through JobService (OI-15).
