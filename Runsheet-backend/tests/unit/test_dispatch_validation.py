@@ -133,6 +133,67 @@ async def test_build_context_reads_every_source_tenant_scoped():
     assert requirements == {"requires_hazmat": True, "requires_tanker": True, "min_cdl_class": "A"}
 
 
+class _DQByIdQualification(FakeQualification):
+    """Like the real service: only DQ ids resolve; anything else is 404."""
+
+    def __init__(self, dq_ids, ineligible=None):
+        super().__init__(ineligible)
+        self.dq_ids = set(dq_ids)
+
+    async def is_dispatch_eligible(self, tenant_id, driver_id, route_requirements=None):
+        if driver_id not in self.dq_ids:
+            from errors.exceptions import resource_not_found
+
+            raise resource_not_found(f"Driver '{driver_id}' not found")
+        return await super().is_dispatch_eligible(tenant_id, driver_id, route_requirements)
+
+
+async def _qual_ctx(store, qualification):
+    _seed(store)
+    svc, _deps = _service(
+        store,
+        driver_repository=FakeDriverRepository([driver("d1"), driver("d2"), driver("d3")]),
+        qualification_service=qualification,
+    )
+    return await svc.build_context(
+        T, TODAY, truck_ids=["T1"], driver_ids=["d1", "d2", "d3"], order_ids=["o1"],
+        plan_ids=[], terminal_ids=[], timezone_name=TZ,
+    )
+
+
+async def test_qualification_resolves_ops_driver_ids_through_the_dq_link():
+    """Staging task 41: board lanes hold ops driver ids, DQ records ``driver_<uuid>``
+    ids linked by ``external_refs.ops_driver_id`` (B10). The check follows the link;
+    an ops driver with no DQ record blocks with ``no_qualification_record``, not
+    ``check_unavailable``; another tenant's link is never followed."""
+    store = BoardStore()
+    store.seed("drivers", "dq-1", {"tenant_id": T, "driver_id": "driver_aaa", "external_refs": {"ops_driver_id": "d1"}})
+    store.seed("drivers", "dq-x", {"tenant_id": "tenant-2", "driver_id": "driver_xxx", "external_refs": {"ops_driver_id": "d3"}})
+    qual = _DQByIdQualification({"driver_aaa", "d2", "driver_xxx"}, ineligible={"d2": ["CDL expired on 2026-01-01"]})
+    ctx = await _qual_ctx(store, qual)
+    assert not ctx.unavailable
+    assert ctx.qualification["d1"]["eligible"] is True and ctx.qualification["d1"]["driver_id"] == "driver_aaa"
+    assert ctx.qualification["d2"]["reasons"] == ["CDL expired on 2026-01-01"]  # a DQ id used directly
+    assert ctx.qualification["d3"] == {"driver_id": "d3", "eligible": False, "reasons": ["no_qualification_record"]}
+    asked = [d for _t, d, _r in qual.calls]
+    assert "driver_xxx" not in asked
+    d, lane = lane_with(ctx, "o1", driver_id="d3")
+    rows = by_check(lane_checks(ctx, lane, draft=d), "driver_qualification")
+    assert [(c.outcome, c.reason_code, c.message) for c in rows] == [
+        ("block", "no_qualification_record", "The driver has no qualification record on file.")
+    ]
+
+
+async def test_qualification_service_errors_other_than_not_found_stay_unavailable():
+    class _Down(FakeQualification):
+        async def is_dispatch_eligible(self, *a, **k):
+            raise RuntimeError("dq store down")
+
+    store = BoardStore()
+    ctx = await _qual_ctx(store, _Down())
+    assert "qualification" in ctx.unavailable
+
+
 async def test_build_context_runs_sources_in_parallel():
     store = BoardStore()
     _seed(store)
