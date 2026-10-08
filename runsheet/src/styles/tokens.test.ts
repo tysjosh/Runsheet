@@ -23,6 +23,7 @@ import {
   STATUS_KEYS,
   type StatusKey,
 } from "./tokens";
+import { LEVEL_FILL, LEVEL_TRACK } from "../components/portal/tankLevel";
 
 // ── colour maths ─────────────────────────────────────────────────────────
 type RGB = [number, number, number];
@@ -187,10 +188,40 @@ const CO_OCCURRING: Record<string, StatusKey[]> = {
     "cancelled",
   ],
   health: ["ok", "warning", "critical"],
-  billing: ["draft", "paid", "overdue", "cancelled"],
+  billing: ["draft", "open", "partial", "paid", "overdue", "cancelled"],
+  // design §11.4 portal co-occurrence set (moved from the portal's own test
+  // in task 3.11).
+  portal: [
+    "draft",
+    "planned",
+    "in_transit",
+    "delivered",
+    "exception",
+    "cancelled",
+    "open",
+    "partial",
+    "overdue",
+    "paid",
+    "ok",
+    "warning",
+    "critical",
+  ],
 };
 // Delayed (operations) and Overdue (billing) never share a screen (R1.6).
-const EXEMPT = new Set(["delayed|overdue", "overdue|delayed"]);
+// Declared pairs (design §11.4, D21): Open and Partially paid share the blue
+// family on purpose and differ by icon and label; Warning (tank level) and
+// Overdue (invoice) never share a portal panel.
+const EXEMPT = new Set([
+  "delayed|overdue",
+  "overdue|delayed",
+  "open|partial",
+  "partial|open",
+  "warning|overdue",
+  "overdue|warning",
+]);
+// Same hue = same meaning in another vocabulary (Delivered = Paid = OK on
+// brand green; Exception = Critical on red): the same colour on purpose.
+const sameHue = (a: StatusKey, b: StatusKey) => STATUS[a].hue === STATUS[b].hue;
 
 describe("colour-vision separation of status dots", () => {
   const cases: [string, string, StatusKey, StatusKey][] = [];
@@ -199,6 +230,7 @@ describe("colour-vision separation of status dots", () => {
       for (let i = 0; i < group.length; i++) {
         for (let j = i + 1; j < group.length; j++) {
           if (EXEMPT.has(`${group[i]}|${group[j]}`)) continue;
+          if (sameHue(group[i], group[j])) continue;
           cases.push([
             vision,
             `${group[i]} vs ${group[j]}`,
@@ -235,6 +267,20 @@ describe("colour-vision separation of status dots", () => {
       for (const t of pair) expect(tokens.has(t)).toBe(true);
     }
   });
+});
+
+describe("portal statuses and level bars (task 3.11, design §11.4–§11.5)", () => {
+  it("open and partial share the blue family and differ by icon and label", () => {
+    expect(STATUS.open.dot).toBe(STATUS.partial.dot);
+    expect(STATUS.open.icon).not.toBe(STATUS.partial.icon);
+    expect(STATUS.open.label).not.toBe(STATUS.partial.label);
+  });
+  it.each(Object.entries(LEVEL_FILL))(
+    "level bar %s fill on the slate-200 track ≥ 3:1",
+    (_k, hex) => {
+      expect(contrast(hex, LEVEL_TRACK)).toBeGreaterThanOrEqual(UI_MIN);
+    },
+  );
 });
 
 // ── product catalog coverage ─────────────────────────────────────────────

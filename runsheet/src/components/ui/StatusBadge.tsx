@@ -14,7 +14,9 @@ import {
   CircleAlert,
   CircleCheck,
   CircleDashed,
+  CircleDollarSign,
   Clock,
+  FileText,
   type LucideIcon,
   OctagonAlert,
   Send,
@@ -38,6 +40,8 @@ export const STATUS_ICONS: Record<string, LucideIcon> = {
   OctagonAlert,
   BadgeCheck,
   CalendarX,
+  FileText,
+  CircleDollarSign,
 };
 
 /**
@@ -102,6 +106,11 @@ export interface StatusBadgeProps {
   size?: "sm" | "md";
   /** Rendered after the label, e.g. a filter count. */
   count?: number;
+  /**
+   * Icon name from `STATUS_ICONS` overriding the token's (e.g. a payment in
+   * flight shows `Clock` on the Open style). Additive (task 3.11).
+   */
+  icon?: string;
   className?: string;
 }
 
@@ -110,16 +119,19 @@ export function StatusBadge({
   label,
   size = "sm",
   count,
+  icon,
   className = "",
 }: StatusBadgeProps) {
   const token = STATUS[status];
-  const Icon = STATUS_ICONS[token.icon] ?? CircleDashed;
+  const iconName = icon ?? token.icon;
+  const Icon = STATUS_ICONS[iconName] ?? CircleDashed;
   const text = label ?? token.label;
   const dims =
     size === "md" ? "h-6 px-2.5 text-xs gap-1.5" : "h-5 px-2 text-xs gap-1";
   return (
     <span
       data-status={status}
+      data-icon={iconName}
       className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-full border font-semibold leading-none ${dims} ${className}`}
       style={{
         backgroundColor: token.bg,

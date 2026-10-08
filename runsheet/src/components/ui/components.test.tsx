@@ -60,8 +60,23 @@ describe("StatusBadge", () => {
       "true",
     );
   });
-  it("covers all 13 statuses", () => {
-    expect(STATUS_KEYS).toHaveLength(13);
+  it("covers all 15 statuses (13 + Open and Partially paid, task 3.11)", () => {
+    expect(STATUS_KEYS).toHaveLength(15);
+  });
+  it("renders Open and Partially paid with their own icons, and an icon override", () => {
+    const { container } = render(
+      <>
+        <StatusBadge status="open" />
+        <StatusBadge status="partial" />
+        <StatusBadge status="open" icon="Clock" label="Payment pending" />
+      </>,
+    );
+    const badges = container.querySelectorAll("[data-status]");
+    expect(badges[0]).toHaveAttribute("data-icon", "FileText");
+    expect(badges[1]).toHaveAttribute("data-icon", "CircleDollarSign");
+    expect(badges[1]).toHaveTextContent("Partially paid");
+    expect(badges[2]).toHaveAttribute("data-icon", "Clock");
+    expect(badges[2]).toHaveTextContent("Payment pending");
   });
   it("strikes Cancelled and dashes Draft", () => {
     render(

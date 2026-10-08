@@ -130,7 +130,7 @@ export const SEMANTIC = {
   "link": "#096b50"
 } as const;
 
-export type StatusKey = "draft" | "planned" | "dispatched" | "in_transit" | "delivered" | "delayed" | "exception" | "cancelled" | "ok" | "warning" | "critical" | "paid" | "overdue";
+export type StatusKey = "draft" | "planned" | "dispatched" | "in_transit" | "delivered" | "delayed" | "exception" | "cancelled" | "ok" | "warning" | "critical" | "paid" | "overdue" | "open" | "partial";
 
 export interface StatusToken {
   hue: string;
@@ -273,6 +273,26 @@ export const STATUS: Record<StatusKey, StatusToken> = {
     "fg": "#9a3412",
     "dot": "#ea580c",
     "border": "#fdba74"
+  },
+  "open": {
+    "hue": "blue",
+    "icon": "FileText",
+    "label": "Open",
+    "strike": false,
+    "bg": "#dbeafe",
+    "fg": "#1e40af",
+    "dot": "#2563eb",
+    "border": "#93c5fd"
+  },
+  "partial": {
+    "hue": "blue",
+    "icon": "CircleDollarSign",
+    "label": "Partially paid",
+    "strike": false,
+    "bg": "#dbeafe",
+    "fg": "#1e40af",
+    "dot": "#2563eb",
+    "border": "#93c5fd"
   }
 };
 
@@ -289,7 +309,9 @@ export const STATUS_KEYS = [
   "warning",
   "critical",
   "paid",
-  "overdue"
+  "overdue",
+  "open",
+  "partial"
 ] as StatusKey[];
 
 export type ProductCode = "GASOLINE_REG" | "GASOLINE_PREM" | "DIESEL_2" | "OFF_ROAD_DIESEL" | "HEATING_OIL" | "KEROSENE" | "ETHANOL_E85" | "PROPANE" | "DEF";
