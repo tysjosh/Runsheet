@@ -29,6 +29,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile, status
 
@@ -50,6 +51,7 @@ from commerce.models.margin import (
     margin_pct,
 )
 from commerce.services.margin_repository import RecordFilters
+from commerce.services.margin_service import local_midnight_utc
 from config.settings import get_settings
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
@@ -218,8 +220,46 @@ def _clean(value: Optional[str]) -> Optional[str]:
     return text or None
 
 
+def _bare_date(raw: Optional[str]) -> Optional[date]:
+    """The day of a ``YYYY-MM-DD`` value (already validated), else ``None``."""
+    value = (raw or "").strip()
+    return date.fromisoformat(value) if len(value) == 10 else None
+
+
+def _as_of_bounds(
+    start_date: Optional[str], end_date: Optional[str], zone: ZoneInfo
+) -> Tuple[Optional[datetime], Optional[datetime]]:
+    """Half-open ``[from, to)`` on ``as_of``.
+
+    A bare ``YYYY-MM-DD`` is a day in the settings timezone, the same axis as
+    summary, recompute and the weekly report (Simplification 13), so the end
+    is ``(end + 1 day) 00:00`` local. An ISO datetime keeps its exact instant,
+    and a datetime end stays inclusive. Each bound is parsed on its own so
+    the order check below runs on the local-day bounds, not on UTC days.
+    """
+    start = parse_date_range(start_date, None).gte
+    end_inclusive = parse_date_range(None, end_date).lte
+    start_day, end_day = _bare_date(start_date), _bare_date(end_date)
+    as_of_from = local_midnight_utc(start_day, zone) if start_day is not None else start
+    if end_day is not None:
+        as_of_to: Optional[datetime] = local_midnight_utc(end_day + timedelta(days=1), zone)
+    elif end_inclusive is not None:
+        as_of_to = end_inclusive + timedelta(microseconds=1)
+    else:
+        as_of_to = None
+    if as_of_from is not None and as_of_to is not None and as_of_from >= as_of_to:
+        raise AppException(
+            ErrorCode.VALIDATION_ERROR,
+            "start_date must not be after end_date",
+            status_code=422,
+            details={"field": "start_date", "reason": "after_end_date"},
+        )
+    return as_of_from, as_of_to
+
+
 def _record_filters(
     *,
+    zone: ZoneInfo,
     start_date: Optional[str],
     end_date: Optional[str],
     customer_id: Optional[str],
@@ -229,10 +269,7 @@ def _record_filters(
     flag: Optional[str],
     status_value: str,
 ) -> RecordFilters:
-    date_range = parse_date_range(start_date, end_date)
-    as_of_to = date_range.lt
-    if as_of_to is None and date_range.lte is not None:
-        as_of_to = date_range.lte + timedelta(microseconds=1)  # inclusive ISO end
+    as_of_from, as_of_to = _as_of_bounds(start_date, end_date, zone)
     if stage is not None and stage not in _STAGES:
         raise _invalid("stage", "use order_estimate, delivery or invoice", "invalid_choice")
     if flag is not None and flag not in _FLAGS:
@@ -240,7 +277,7 @@ def _record_filters(
     if status_value not in _RECORD_STATUSES:
         raise _invalid("status", "use active, superseded, void or all", "invalid_choice")
     return RecordFilters(
-        as_of_from=date_range.gte,
+        as_of_from=as_of_from,
         as_of_to=as_of_to,
         customer_id=_clean(customer_id),
         product_code=_product_filter(product_code),
@@ -382,8 +419,12 @@ async def get_cost_basis(
 async def list_records(
     request: Request,
     tenant: TenantContext = Depends(require_margin_admin),
-    start_date: Optional[str] = Query(default=None, description="Sale date (as_of) from: YYYY-MM-DD or ISO-8601."),
-    end_date: Optional[str] = Query(default=None, description="Sale date (as_of) to: YYYY-MM-DD (whole day) or ISO-8601."),
+    start_date: Optional[str] = Query(
+        default=None, description="Sale date (as_of) from: YYYY-MM-DD (settings timezone) or ISO-8601."
+    ),
+    end_date: Optional[str] = Query(
+        default=None, description="Sale date (as_of) to: YYYY-MM-DD (whole day, settings timezone) or ISO-8601."
+    ),
     customer_id: Optional[str] = Query(default=None, max_length=128),
     product_code: Optional[str] = Query(default=None, max_length=64),
     terminal_id: Optional[str] = Query(default=None, max_length=128),
@@ -393,9 +434,14 @@ async def list_records(
     cursor: Optional[str] = Query(default=None),
     limit: int = Query(default=LIST_DEFAULT_LIMIT, ge=1, le=LIST_MAX_LIMIT),
 ) -> Dict[str, Any]:
-    """Margin records, newest sale first (``as_of`` desc, ``record_id`` desc)."""
+    """Margin records, newest sale first (``as_of`` desc, ``record_id`` desc).
+
+    ``timezone`` is the settings timezone the date filters use; the UI shows
+    each record's sale date in it.
+    """
+    zone = await _service().settings_zone(tenant.tenant_id)
     filters = _record_filters(
-        start_date=start_date, end_date=end_date, customer_id=customer_id,
+        zone=zone, start_date=start_date, end_date=end_date, customer_id=customer_id,
         product_code=product_code, terminal_id=terminal_id, stage=stage, flag=flag,
         status_value=status_filter,
     )
@@ -405,6 +451,7 @@ async def list_records(
     return _envelope(request, {
         "items": [_record_view(item) for item in page.items],
         "next_cursor": _encode_cursor(page.next_key),
+        "timezone": str(zone.key),
     })
 
 
@@ -504,6 +551,7 @@ async def export_records(
 ):
     """CSV of the records matching the list filters (admin only, 50,000 rows max)."""
     filters = _record_filters(
+        zone=await _service().settings_zone(tenant.tenant_id),
         start_date=start_date, end_date=end_date, customer_id=customer_id,
         product_code=product_code, terminal_id=terminal_id, stage=stage, flag=flag,
         status_value=status_filter,
@@ -552,7 +600,8 @@ async def get_summary(
 ) -> Dict[str, Any]:
     """Stage-preferred totals; ``cost_cents``/``margin_cents`` cover costed records only."""
     end = end_date or (start_date + timedelta(days=SUMMARY_DEFAULT_DAYS - 1) if start_date else None)
-    end = end or datetime.now(timezone.utc).date()
+    if end is None:  # "today" on the settings-timezone axis (Simplification 13)
+        end = datetime.now(await _service().settings_zone(tenant.tenant_id)).date()
     start = start_date or end - timedelta(days=SUMMARY_DEFAULT_DAYS - 1)
     summary = await _service().summary(tenant.tenant_id, start_date=start, end_date=end, group_by=group_by)
     return _envelope(request, summary)

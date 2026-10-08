@@ -20,7 +20,11 @@ jest.mock("../../../../services/marginApi", () => ({
   getMarginRecomputeRun: jest.fn(),
   getMarginAlerts: jest.fn(),
   resolveMarginAlert: jest.fn(),
-  getMarginRecords: jest.fn(async () => ({ items: [], next_cursor: null })),
+  getMarginRecords: jest.fn(async () => ({
+    items: [],
+    next_cursor: null,
+    timezone: "America/Chicago",
+  })),
   getMarginSettings: jest.fn(async () => ({
     wac_window_days: 30,
     rack_staleness_days: 4,
@@ -217,6 +221,53 @@ describe("MarginSummaryPanel", () => {
       .getByRole("rowheader", { name: "Cost (costed records)" })
       .closest("tr");
     expect(costRow?.textContent).toContain("$2,500.00");
+  });
+
+  it("shows No cost, not $0.00, for a group with no costed record", async () => {
+    const uncosted = block({
+      records: 1,
+      revenue_cents: 120_000,
+      revenue_cents_with_cost: 0,
+      revenue_cents_missing_cost: 120_000,
+      cost_cents: 0,
+      margin_cents: 0,
+      margin_bp: null,
+      margin_pct: null,
+      flag_counts: { missing_cost: { records: 1, gallons_ugal: 1_000_000 } },
+      missing_cost_share_bp: 10_000,
+    });
+    mockSummary.mockResolvedValue({
+      group_by: "day",
+      start_date: "2026-10-01",
+      end_date: "2026-10-02",
+      timezone: "America/Chicago",
+      groups: [
+        { key: "2026-10-01", ...block() },
+        { key: "2026-10-02", ...uncosted },
+      ],
+      totals: uncosted,
+      skipped_sources: { count: 0, sample: [] },
+    });
+    render(<MarginSummaryPanel />);
+    const grouped = await screen.findByRole("table", { name: "By day" });
+    const row = within(grouped)
+      .getByRole("rowheader", { name: "2026-10-02" })
+      .closest("tr") as HTMLElement;
+    // Cells: records, revenue (costed), revenue (no cost), cost, margin, %.
+    const cells = within(row)
+      .getAllByRole("cell")
+      .map((c) => c.textContent);
+    expect(cells.slice(3)).toEqual(["No cost", "No cost", "No cost"]);
+    // A costed group keeps its numbers.
+    const costed = within(grouped)
+      .getByRole("rowheader", { name: "2026-10-01" })
+      .closest("tr") as HTMLElement;
+    expect(costed.textContent).toContain("$2,500.00");
+    const totals = screen.getByRole("table", { name: "Totals" });
+    const costRow = within(totals)
+      .getByRole("rowheader", { name: "Cost (costed records)" })
+      .closest("tr");
+    expect(costRow?.textContent).toContain("No cost");
   });
 
   it("asks for a shorter range on 422", async () => {

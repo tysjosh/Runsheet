@@ -69,6 +69,11 @@ export interface MarginPage<T> {
   total?: number | null;
 }
 
+/** `GET /records` page plus the settings timezone its dates use. */
+export interface MarginRecordPage extends MarginPage<MarginRecord> {
+  timezone: string;
+}
+
 export interface MarginRecordFilters {
   start_date?: string;
   end_date?: string;
@@ -333,7 +338,7 @@ export function getMarginRecords(
   filters: MarginRecordFilters,
   cursor?: string | null,
   limit = 50,
-): Promise<MarginPage<MarginRecord>> {
+): Promise<MarginRecordPage> {
   const qs = buildQueryString({
     ...recordFilterParams(filters),
     ...(cursor ? { cursor } : {}),

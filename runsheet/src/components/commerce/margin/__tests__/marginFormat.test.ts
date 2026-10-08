@@ -8,7 +8,9 @@ import * as path from "node:path";
 import {
   formatBasisPoints,
   formatCents,
+  formatCostedCents,
   formatGallons,
+  formatLocalDate,
   formatMicros,
   formatPct,
   microsToDecimalString,
@@ -93,6 +95,36 @@ describe("other integer formatters", () => {
     expect(noCostReasonLabel("no_lots_no_rack")).toMatch(/No purchases/);
     expect(noCostReasonLabel(null)).toBe("Reason not recorded");
     expect(noCostReasonLabel("new_reason")).toBe("new_reason");
+  });
+});
+
+describe("formatLocalDate", () => {
+  it("returns the calendar date in the given zone", () => {
+    expect(
+      formatLocalDate("2026-10-05T03:00:00+00:00", "America/Chicago"),
+    ).toBe("2026-10-04");
+    expect(formatLocalDate("2026-10-05T03:00:00+00:00", "UTC")).toBe(
+      "2026-10-05",
+    );
+    // Winter (CST, UTC-6): 05:59Z is still the previous day.
+    expect(formatLocalDate("2026-01-10T05:59:00Z", "America/Chicago")).toBe(
+      "2026-01-09",
+    );
+  });
+});
+
+describe("formatCostedCents", () => {
+  const block = (records: number, missing: number) => ({
+    records,
+    flag_counts: { missing_cost: { records: missing } },
+  });
+  it("is No cost when the block has no costed record", () => {
+    expect(formatCostedCents(block(2, 2), 0)).toBe(NO_COST);
+    expect(formatCostedCents(block(0, 0), 0)).toBe(NO_COST);
+  });
+  it("shows a real zero when a costed record exists", () => {
+    expect(formatCostedCents(block(2, 1), 0)).toBe("$0.00");
+    expect(formatCostedCents(block(1, 0), -20_000)).toBe("-$200.00");
   });
 });
 

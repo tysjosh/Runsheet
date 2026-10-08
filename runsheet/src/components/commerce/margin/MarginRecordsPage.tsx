@@ -22,6 +22,7 @@ import {
   FLAG_LABELS,
   formatCents,
   formatGallons,
+  formatLocalDate,
   formatMicros,
   formatPct,
   MISSING_COST,
@@ -91,6 +92,8 @@ export default function MarginRecordsPage() {
   const [applied, setApplied] = useState<MarginRecordFilters>(EMPTY_FILTERS);
   const [items, setItems] = useState<MarginRecord[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  // The settings timezone: the date filters and the Sale date column use it.
+  const [timeZone, setTimeZone] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<MarginRecordDetail | null>(null);
@@ -104,6 +107,7 @@ export default function MarginRecordsPage() {
         const page = await getMarginRecords(filters, after);
         setItems((prev) => (after ? [...prev, ...page.items] : page.items));
         setCursor(page.next_cursor);
+        setTimeZone(page.timezone);
       } catch (e) {
         setError(errorText(e));
       } finally {
@@ -258,7 +262,7 @@ export default function MarginRecordsPage() {
           <thead>
             <tr className="text-left text-gray-600 border-b">
               <th scope="col" className="py-2 pr-3">
-                Sale date
+                Sale date{timeZone ? ` (${timeZone})` : ""}
               </th>
               <th scope="col" className="py-2 pr-3">
                 Order
@@ -302,7 +306,9 @@ export default function MarginRecordsPage() {
             {items.map((r) => (
               <tr key={r.record_id} className="border-b last:border-0">
                 <td className="py-2 pr-3 whitespace-nowrap">
-                  {r.as_of.slice(0, 10)}
+                  {timeZone
+                    ? formatLocalDate(r.as_of, timeZone)
+                    : r.as_of.slice(0, 10)}
                 </td>
                 <td className="py-2 pr-3">{r.order_id ?? "—"}</td>
                 <td className="py-2 pr-3">{r.stage}</td>

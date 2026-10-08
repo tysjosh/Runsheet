@@ -11,11 +11,13 @@ import csv
 import io
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 import pytest
 
 from commerce.services.margin_repository import RecordFilters
 from tests.unit.commerce.margin._cost_basis_support import add_entry
+from tests.unit.commerce.margin._service_support import invoice_doc, seed_invoice
 from tests.unit.commerce.margin.conftest import AS_OF, TENANT_A, TENANT_B, _candidate, _missing_cost
 
 from ._margin_api import BASE, TERMINAL, TERMINAL_B_ONLY, error_code
@@ -470,6 +472,107 @@ async def test_summary_defaults_to_the_last_30_days(margin_api):
     start = datetime.fromisoformat(data["start_date"]).date()
     end = datetime.fromisoformat(data["end_date"]).date()
     assert (end - start).days == 29
+
+
+async def test_summary_default_end_is_today_in_the_settings_timezone(margin_api):
+    data = (await margin_api.as_("admin").client.get(f"{BASE}/summary")).json()["data"]
+    assert data["timezone"] == "America/Chicago"
+    assert data["end_date"] == datetime.now(ZoneInfo("America/Chicago")).date().isoformat()
+
+
+# ---------------------------------------------------------------------------
+# One date axis for every admin surface (Simplification 13, review R1)
+# ---------------------------------------------------------------------------
+
+#: 03:00Z on Oct 5 is 22:00 on Oct 4 in America/Chicago (the default zone).
+LATE_SALE = datetime(2026, 10, 5, 3, 0, tzinfo=UTC)
+DAY_BEFORE, DAY_OF_UTC = "2026-10-04", "2026-10-05"
+
+
+def _one_day(day: str) -> str:
+    return f"start_date={day}&end_date={day}"
+
+
+def _export_invoice_ids(resp) -> List[str]:
+    assert resp.status_code == 200, resp.text
+    assert resp.content[:3] == b"\xef\xbb\xbf"
+    return [row["invoice_id"] for row in csv.DictReader(io.StringIO(resp.content[3:].decode("utf-8")))]
+
+
+async def test_records_export_summary_and_recompute_share_the_settings_timezone_day(margin_api, repo):
+    api = margin_api.as_("admin")
+    c = api.client
+    await seed_invoice(api.store, invoice_doc(
+        "I-LATE", created_at=LATE_SALE, delivered_at=LATE_SALE, status="open", finalized_at=LATE_SALE,
+    ))
+    key = "invoice:I-LATE:line:0"
+    await repo.write_record(TENANT_A, _missing_cost(
+        stage="invoice", source_key=key, invoice_id="I-LATE", line_index=0, as_of=LATE_SALE,
+    ), "finalize")
+
+    # Records: listed under D-1 (local), not under D (its UTC date).
+    listed = (await c.get(f"{BASE}/records?{_one_day(DAY_BEFORE)}")).json()["data"]
+    assert listed["timezone"] == "America/Chicago"
+    assert [r["invoice_id"] for r in listed["items"]] == ["I-LATE"]
+    assert (await c.get(f"{BASE}/records?{_one_day(DAY_OF_UTC)}")).json()["data"]["items"] == []
+
+    # The export uses the same filters.
+    assert _export_invoice_ids(await c.get(f"{BASE}/records/export?{_one_day(DAY_BEFORE)}")) == ["I-LATE"]
+    assert _export_invoice_ids(await c.get(f"{BASE}/records/export?{_one_day(DAY_OF_UTC)}")) == []
+
+    # Summary counts it on D-1.
+    summary = (await c.get(
+        f"{BASE}/summary?start_date={DAY_BEFORE}&end_date={DAY_OF_UTC}&group_by=day"
+    )).json()["data"]
+    assert [g["key"] for g in summary["groups"]] == [DAY_BEFORE]
+
+    # A late cost arrives. A recompute over D alone does not reach the record...
+    await add_entry(repo, TENANT_A, "override", unit_cost_micros=2_500_000,
+                    effective_at=datetime(2026, 1, 1, tzinfo=UTC))
+    body = {"stages": ["invoice"], "only_missing": True, "reason": "late BOLs"}
+    miss = await c.post(f"{BASE}/recompute", json={**body, "start_date": DAY_OF_UTC, "end_date": DAY_OF_UTC})
+    assert miss.status_code == 202, miss.text
+    await api.drain_runs()
+    miss_run = (await c.get(f"{BASE}/recompute/{miss.json()['data']['run_id']}")).json()["data"]
+    assert miss_run["status"] == "completed"
+    assert miss_run["counts"]["written"] == 0 and miss_run["counts"]["out_of_range"] == 1
+    assert [v["version"] for v in await repo.record_versions(TENANT_A, "invoice", key)] == [1]
+
+    # ...and a recompute over D-1 alone does.
+    hit = await c.post(f"{BASE}/recompute", json={**body, "start_date": DAY_BEFORE, "end_date": DAY_BEFORE})
+    assert hit.status_code == 202, hit.text
+    await api.drain_runs()
+    hit_run = (await c.get(f"{BASE}/recompute/{hit.json()['data']['run_id']}")).json()["data"]
+    assert hit_run["status"] == "completed" and hit_run["counts"]["written"] == 1
+    versions = await repo.record_versions(TENANT_A, "invoice", key)
+    assert [(v["version"], v["status"]) for v in versions] == [(1, "superseded"), (2, "active")]
+    assert versions[-1]["method"] == "override"
+
+
+@pytest.mark.parametrize("query,expected", [
+    # ISO datetimes keep their exact instant.
+    ("start_date=2026-10-05T03:00:00Z&end_date=2026-10-05T03:00:00Z", ["I-LATE"]),
+    ("start_date=2026-10-05T03:00:01Z", []),
+    # A bare start is local midnight: 2026-10-05 00:00 Chicago is 05:00Z.
+    ("start_date=2026-10-05", []),
+    ("end_date=2026-10-04", ["I-LATE"]),
+])
+async def test_record_date_bounds(margin_api, repo, query, expected):
+    await repo.write_record(TENANT_A, _missing_cost(
+        stage="invoice", source_key="invoice:I-LATE:line:0", invoice_id="I-LATE", line_index=0, as_of=LATE_SALE,
+    ), "finalize")
+    resp = await margin_api.as_("admin").client.get(f"{BASE}/records?{query}")
+    assert resp.status_code == 200, resp.text
+    assert [r["invoice_id"] for r in resp.json()["data"]["items"]] == expected
+
+
+async def test_record_range_order_is_checked_on_local_days(margin_api):
+    # 2026-10-05 00:00 Chicago (05:00Z) is after 04:00Z: 422.
+    resp = await margin_api.as_("admin").client.get(
+        f"{BASE}/records?start_date=2026-10-05&end_date=2026-10-05T04:00:00Z"
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["details"]["reason"] == "after_end_date"
 
 
 # ---------------------------------------------------------------------------

@@ -5,8 +5,9 @@
  *
  * Revenue is split into "Revenue (costed)" and "Revenue (no cost)". Cost and
  * margin cover costed records only, so they pair with the costed revenue,
- * never with the total. Sources the feed could not compute are shown as
- * "Sources not computed".
+ * never with the total; a group with no costed record shows "No cost", not
+ * "$0.00". Sources the feed could not compute are shown as "Sources not
+ * computed".
  */
 import { type FormEvent, useCallback, useEffect, useState } from "react";
 import { ApiError } from "../../../services/api";
@@ -19,6 +20,7 @@ import { Button } from "../../ui";
 import {
   formatBasisPoints,
   formatCents,
+  formatCostedCents,
   formatGallons,
   formatPct,
 } from "./marginFormat";
@@ -49,8 +51,8 @@ function totalsRows(block: SummaryBlock): [string, string][] {
       SUMMARY_LABELS.revenueNoCost,
       formatCents(block.revenue_cents_missing_cost),
     ],
-    [SUMMARY_LABELS.cost, formatCents(block.cost_cents)],
-    [SUMMARY_LABELS.margin, formatCents(block.margin_cents)],
+    [SUMMARY_LABELS.cost, formatCostedCents(block, block.cost_cents)],
+    [SUMMARY_LABELS.margin, formatCostedCents(block, block.margin_cents)],
     [SUMMARY_LABELS.marginPct, formatPct(block.margin_pct)],
     [
       SUMMARY_LABELS.missingShare,
@@ -226,10 +228,10 @@ export default function MarginSummaryPanel() {
                         {formatCents(g.revenue_cents_missing_cost)}
                       </td>
                       <td className="py-2 pr-3 text-right">
-                        {formatCents(g.cost_cents)}
+                        {formatCostedCents(g, g.cost_cents)}
                       </td>
                       <td className="py-2 pr-3 text-right">
-                        {formatCents(g.margin_cents)}
+                        {formatCostedCents(g, g.margin_cents)}
                       </td>
                       <td className="py-2 text-right">
                         {formatPct(g.margin_pct)}

@@ -1336,6 +1336,16 @@ class MarginService:
 
     # -- summary ------------------------------------------------------------
 
+    async def settings_zone(self, tenant_id: str) -> ZoneInfo:
+        """The settings timezone: the one ``as_of`` date axis of every admin surface.
+
+        Records, the export, summary, recompute and the weekly report all read
+        a ``YYYY-MM-DD`` as a day in this zone (Simplification 13).
+        """
+
+        settings = await self._repo.get_settings(tenant_id)
+        return _zone(settings.get("timezone"))
+
     async def summary(
         self,
         tenant_id: str,
@@ -1366,8 +1376,7 @@ class MarginService:
                 status_code=422,
                 details={"errors": errors},
             )
-        settings = await self._repo.get_settings(tenant_id)
-        zone = _zone(settings.get("timezone"))
+        zone = await self.settings_zone(tenant_id)
         rows = await self.counted_rows(
             tenant_id,
             as_of_from=local_midnight_utc(start_date, zone),

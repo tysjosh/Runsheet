@@ -110,6 +110,44 @@ export function formatGallons(ugal: number): string {
 }
 
 /** Integer basis points as a percentage: 1250 -> "12.50%"; null -> "n/a". */
+/**
+ * The calendar date (YYYY-MM-DD) of an ISO instant in an IANA time zone.
+ * Records use the margin settings timezone, the same date axis as the
+ * filters, summary and recompute: "2026-10-05T03:00:00Z" in America/Chicago
+ * is "2026-10-04".
+ */
+export function formatLocalDate(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(iso));
+  const part = (type: string) =>
+    parts.find((p) => p.type === type)?.value ?? "";
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+/**
+ * Summary cost and margin cover costed records only. A block with none of
+ * them has no cost to show, so it renders "No cost" rather than "$0.00".
+ * (`missing_cost` is set exactly when a record's method is `none`.)
+ */
+export function hasCostedRecords(block: {
+  records: number;
+  flag_counts: Record<string, { records: number }>;
+}): boolean {
+  return block.records - (block.flag_counts.missing_cost?.records ?? 0) > 0;
+}
+
+/** Summary cost or margin cents: "No cost" when the block has no costed record. */
+export function formatCostedCents(
+  block: Parameters<typeof hasCostedRecords>[0],
+  cents: number,
+): string {
+  return formatCents(hasCostedRecords(block) ? cents : null);
+}
+
 export function formatBasisPoints(value: number | null): string {
   if (value === null) return "n/a";
   const bp = requireInteger(value, "basis points");

@@ -762,7 +762,7 @@ All responses use `{"data": ..., "request_id": ...}`. Lists return `{"items": [.
 | `POST /cost-entries/{id}/void` | `{reason}` | 200 | 404, 409, 422 |
 | `POST /cost-entries/import` | multipart `file`, `dry_run` (default true) | 200 report | 413, 422, 409 race |
 | `GET /cost-basis` | `product_code` (required), `terminal_id?`, `as_of?` (ISO, default now) | 200 `CostBasis` + lots | 422 unknown product or terminal, 503 resolver failure |
-| `GET /records` | `start_date`, `end_date` (`parse_date_range` on `as_of`), `customer_id`, `product_code`, `terminal_id`, `stage`, `flag` (one `MarginFlag`), `status` (default `active`), `cursor`, `limit` (1–200, default 50) | 200 | 422 |
+| `GET /records` | `start_date`, `end_date` on `as_of` (a bare `YYYY-MM-DD` is a day in the settings timezone, the Simplification 13 axis; an ISO datetime is an exact instant; the response carries `timezone`), `customer_id`, `product_code`, `terminal_id`, `stage`, `flag` (one `MarginFlag`), `status` (default `active`), `cursor`, `limit` (1–200, default 50) | 200 | 422 |
 | `GET /records/{record_id}` | | 200, including `cost_snapshot` and version history | 404 |
 | `GET /records/export` | same filters, no paging | CSV stream | 413 over 50k, 429 |
 | `GET /summary` | `group_by` = `day`\|`customer`\|`product`\|`terminal`, `start_date`, `end_date` (default the last 30 days, span ≤ 92 days) | 200 | 422 |

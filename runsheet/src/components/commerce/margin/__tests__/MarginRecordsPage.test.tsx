@@ -86,6 +86,8 @@ function record(overrides: Partial<MarginRecord> = {}): MarginRecord {
   };
 }
 
+const TZ = "America/Chicago";
+
 const MISSING = record({
   record_id: "mr_2",
   order_id: "ORD-2",
@@ -107,6 +109,7 @@ beforeEach(() => {
   mockRecords.mockResolvedValue({
     items: [record(), MISSING],
     next_cursor: null,
+    timezone: TZ,
   });
 });
 
@@ -128,6 +131,22 @@ it("renders a method=none record as Missing cost with its reason, never $0.00", 
   const costed = screen.getByText("ORD-1").closest("tr") as HTMLElement;
   expect(within(costed).getByText("$2,500.00")).toBeInTheDocument();
   expect(within(costed).getByText("16.67%")).toBeInTheDocument();
+});
+
+it("shows the sale date in the settings timezone, the filters' date axis", async () => {
+  // 03:00Z on Oct 5 is 22:00 on Oct 4 in Chicago.
+  mockRecords.mockResolvedValue({
+    items: [record({ as_of: "2026-10-05T03:00:00+00:00" }), MISSING],
+    next_cursor: null,
+    timezone: TZ,
+  });
+  await renderPage();
+  const row = screen.getByText("ORD-1").closest("tr") as HTMLElement;
+  expect(within(row).getByText("2026-10-04")).toBeInTheDocument();
+  expect(row.textContent).not.toContain("2026-10-05");
+  expect(
+    screen.getByRole("columnheader", { name: "Sale date (America/Chicago)" }),
+  ).toBeInTheDocument();
 });
 
 it("maps the filters to query params", async () => {
@@ -185,8 +204,16 @@ it("hides the export from a dispatcher", async () => {
 
 it("loads more with the next cursor", async () => {
   mockRecords
-    .mockResolvedValueOnce({ items: [record()], next_cursor: "c1" })
-    .mockResolvedValueOnce({ items: [MISSING], next_cursor: null });
+    .mockResolvedValueOnce({
+      items: [record()],
+      next_cursor: "c1",
+      timezone: TZ,
+    })
+    .mockResolvedValueOnce({
+      items: [MISSING],
+      next_cursor: null,
+      timezone: TZ,
+    });
   render(<MarginRecordsPage />);
   const more = await screen.findByRole("button", { name: "Load more" });
   await act(async () => {
