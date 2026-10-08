@@ -24,7 +24,9 @@ import {
   ToastContainer,
   useToasts,
 } from "@/components/ui";
+import { hasAnyRole } from "../../config/modules";
 import { ApiError } from "../../services/api";
+import { PORTAL_REVIEW_HOLD_REASON } from "../../services/orderHoldReasons";
 import {
   type AssignDriverPayload,
   assignDriver,
@@ -39,6 +41,7 @@ import {
   releaseHoldOrder,
   updateOrderStatus,
 } from "../../services/ordersApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import DriverPicker from "../ops/DriverPicker";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -291,6 +294,102 @@ function EventTimeline({ events }: { events: FuelOrderEvent[] }) {
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ─── Portal request confirm / decline (PD24) ─────────────────────────────────
+
+/** Shown after a 409 INVALID_STATUS_TRANSITION reload (design §10.3). */
+export const PORTAL_REQUEST_CHANGED_MESSAGE =
+  "This request changed. Reloaded the latest version.";
+
+function isStaleTransition(err: unknown): boolean {
+  const e = err as { status?: unknown; code?: unknown } | null;
+  return e?.status === 409 && e?.code === "INVALID_STATUS_TRANSITION";
+}
+
+/**
+ * Confirm (`release-hold` with `notes: "confirmed"`) or Decline (`cancel`
+ * with `reason: "declined_by_dispatcher"`) a customer-portal request that is
+ * awaiting confirmation. Admin and dispatcher only; the API re-checks.
+ */
+function PortalRequestControls({
+  order,
+  roles,
+  onChanged,
+  addToast,
+}: {
+  order: FuelOrder;
+  roles: readonly string[] | null;
+  onChanged: (notice: string | null) => void;
+  addToast: (message: string, type: "success" | "error") => void;
+}) {
+  const [working, setWorking] = useState<"confirm" | "decline" | null>(null);
+  if (
+    order.status !== "on_hold" ||
+    order.hold_reason !== PORTAL_REVIEW_HOLD_REASON ||
+    !hasAnyRole(roles, ["admin", "dispatcher"])
+  ) {
+    return null;
+  }
+
+  const run = async (action: "confirm" | "decline") => {
+    if (working) return;
+    setWorking(action);
+    try {
+      if (action === "confirm") {
+        await releaseHoldOrder(order.order_id, { notes: "confirmed" });
+        addToast("Request confirmed", "success");
+      } else {
+        await cancelOrder(order.order_id, { reason: "declined_by_dispatcher" });
+        addToast("Request declined", "success");
+      }
+      onChanged(null);
+    } catch (err) {
+      if (isStaleTransition(err)) {
+        onChanged(PORTAL_REQUEST_CHANGED_MESSAGE);
+      } else {
+        addToast(
+          err instanceof ApiError
+            ? err.message
+            : action === "confirm"
+              ? "Failed to confirm the request"
+              : "Failed to decline the request",
+          "error",
+        );
+      }
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-wrap items-center gap-3 rounded-xl border border-warning-light bg-warning-light px-4 py-3"
+      data-testid="portal-request-controls"
+    >
+      <p className="flex-1 text-sm font-medium text-warning-dark">
+        Customer portal request awaiting confirmation
+      </p>
+      <button
+        type="button"
+        onClick={() => run("confirm")}
+        disabled={working !== null}
+        className="px-3 py-1.5 text-xs font-medium text-white bg-success-dark rounded-lg hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1"
+      >
+        {working === "confirm" && <Loader2 className="w-3 h-3 animate-spin" />}
+        Confirm
+      </button>
+      <button
+        type="button"
+        onClick={() => run("decline")}
+        disabled={working !== null}
+        className="px-3 py-1.5 text-xs font-medium text-error-dark border border-error-light bg-white rounded-lg hover:bg-error-light disabled:opacity-50 inline-flex items-center gap-1"
+      >
+        {working === "decline" && <Loader2 className="w-3 h-3 animate-spin" />}
+        Decline
+      </button>
     </div>
   );
 }
@@ -700,6 +799,19 @@ export default function OrderDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { toasts, addToast, dismissToast } = useToasts();
+  // Roles gate the portal Confirm / Decline controls (presentation only).
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
+  const [changedNotice, setChangedNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCurrentUserRoles().then((r) => {
+      if (!cancelled) setRoles(r ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (!orderId) return;
@@ -808,6 +920,23 @@ export default function OrderDetailView({
             </div>
           </div>
         )}
+
+        {/* Customer-portal request: Confirm / Decline (PD24) */}
+        <p
+          role="status"
+          className={changedNotice ? "text-sm text-gray-800" : "sr-only"}
+        >
+          {changedNotice ?? ""}
+        </p>
+        <PortalRequestControls
+          order={order}
+          roles={roles}
+          onChanged={(notice) => {
+            setChangedNotice(notice);
+            fetchData();
+          }}
+          addToast={addToast}
+        />
 
         {/* Mutation Controls (Task 14.5) */}
         <MutationControls

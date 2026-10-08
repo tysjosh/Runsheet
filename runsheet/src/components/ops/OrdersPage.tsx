@@ -22,6 +22,7 @@ import {
   Table,
 } from "@/components/ui";
 import { useOrdersWebSocket } from "../../hooks/useOrdersWebSocket";
+import { PORTAL_REVIEW_HOLD_REASON } from "../../services/orderHoldReasons";
 import {
   type CallType,
   type FuelOrder,
@@ -191,6 +192,9 @@ export default function OrdersPage({
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<OrderStatus | "">("");
+  // "Awaiting confirmation" quick filter (PD24): on_hold with the portal
+  // review hold reason. Any manual status change clears it.
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
   const [callTypeFilter, setCallTypeFilter] = useState<CallType | "">("");
   const [channelFilter, setChannelFilter] = useState<IntakeChannelType | "">(
     "",
@@ -222,7 +226,8 @@ export default function OrdersPage({
 
   const filters: OrderListFilters = useMemo(
     () => ({
-      status: statusFilter || undefined,
+      status: awaitingConfirmation ? "on_hold" : statusFilter || undefined,
+      hold_reason: awaitingConfirmation ? PORTAL_REVIEW_HOLD_REASON : undefined,
       call_type: callTypeFilter || undefined,
       intake_channel: channelFilter || undefined,
       customer_id: customerIdFilter || undefined,
@@ -236,6 +241,7 @@ export default function OrdersPage({
     }),
     [
       statusFilter,
+      awaitingConfirmation,
       callTypeFilter,
       channelFilter,
       customerIdFilter,
@@ -250,7 +256,8 @@ export default function OrdersPage({
 
   // The export takes the list's filters without the paging params.
   const exportParams = useMemo(() => {
-    const { page: _page, size: _size, ...rest } = filters;
+    // The export route has no hold_reason filter, so it isn't sent there.
+    const { page: _page, size: _size, hold_reason: _hold, ...rest } = filters;
     return rest;
   }, [filters]);
 
@@ -448,6 +455,21 @@ export default function OrdersPage({
             aria-label="Search orders"
           />
         </div>
+        <div className="mb-3 flex flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant={awaitingConfirmation ? "primary" : "secondary"}
+            aria-pressed={awaitingConfirmation}
+            onClick={() => {
+              setAwaitingConfirmation((on) => !on);
+              setStatusFilter("");
+              resetPage();
+            }}
+          >
+            Awaiting confirmation
+          </Button>
+        </div>
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           <div>
             <label htmlFor="order-status-filter" className="sr-only">
@@ -455,8 +477,9 @@ export default function OrdersPage({
             </label>
             <select
               id="order-status-filter"
-              value={statusFilter}
+              value={awaitingConfirmation ? "on_hold" : statusFilter}
               onChange={(e) => {
+                setAwaitingConfirmation(false);
                 setStatusFilter(e.target.value as OrderStatus | "");
                 resetPage();
               }}

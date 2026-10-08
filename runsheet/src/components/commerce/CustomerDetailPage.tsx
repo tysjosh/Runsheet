@@ -3,11 +3,14 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, LoadErrorState } from "@/components/ui";
+import { hasAnyRole } from "../../config/modules";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   type CustomerWithProjections,
   getCustomer,
 } from "../../services/commerceApi";
+import { getCurrentUserRoles } from "../../utils/auth";
+import PortalAccessPanel from "./PortalAccessPanel";
 
 interface CustomerDetailPageProps {
   customerId: string;
@@ -46,6 +49,18 @@ export default function CustomerDetailPage({
   useEffect(() => {
     fetchCustomer();
   }, [fetchCustomer]);
+
+  // Portal access is admin-only (PD24); the API re-checks the role.
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void getCurrentUserRoles().then((r) => {
+      if (!cancelled) setRoles(r ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const getStatusVariant = (
     status: string,
@@ -205,6 +220,10 @@ export default function CustomerDetailPage({
           </div>
         </div>
       </section>
+
+      {hasAnyRole(roles, ["admin"]) && (
+        <PortalAccessPanel customerId={customer.customer_id} />
+      )}
 
       {/* Related Records */}
       <section aria-labelledby="related-heading" className="mb-8">

@@ -171,6 +171,12 @@ export interface OrderListFilters {
   start_date?: string;
   end_date?: string;
   intake_channel?: IntakeChannelType;
+  /**
+   * Exact hold reason. With `status: "on_hold"` and
+   * `PORTAL_REVIEW_HOLD_REASON` (`./orderHoldReasons`) this is the "Awaiting confirmation"
+   * queue of customer-portal requests (PD24).
+   */
+  hold_reason?: string;
   /** Free-text search over order id, customer name/id, and ship-to address. */
   q?: string;
   page?: number;

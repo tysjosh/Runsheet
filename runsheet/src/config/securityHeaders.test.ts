@@ -97,6 +97,62 @@ describe("buildContentSecurityPolicy", () => {
   });
 });
 
+describe("Stripe origins for the portal pay page (UI-5, PD25)", () => {
+  it.each([false, true])(
+    "allows Stripe.js, its frames and API (isDev=%p)",
+    (isDev) => {
+      const policy = buildContentSecurityPolicy({ isDev });
+      expect(directive(policy, "script-src")).toContain(
+        "https://js.stripe.com",
+      );
+      expect(directive(policy, "frame-src")).toEqual([
+        "https://js.stripe.com",
+        "https://hooks.stripe.com",
+        "https://*.stripe.com",
+      ]);
+      expect(directive(policy, "connect-src")).toEqual(
+        expect.arrayContaining([
+          "https://api.stripe.com",
+          "https://*.stripe.com",
+        ]),
+      );
+    },
+  );
+
+  it("adds Stripe without dropping the existing sources", () => {
+    const policy = buildContentSecurityPolicy({
+      apiUrl: "https://api.staging.example/api",
+      isDev: false,
+    });
+    expect(directive(policy, "connect-src")).toEqual(
+      expect.arrayContaining([
+        "'self'",
+        "https://api.staging.example",
+        "wss://api.staging.example",
+        "https://maps.googleapis.com",
+      ]),
+    );
+    expect(directive(policy, "script-src")).toEqual(
+      expect.arrayContaining([
+        "'self'",
+        "https://maps.googleapis.com",
+        "https://www.gstatic.com",
+      ]),
+    );
+    expect(directive(policy, "frame-ancestors")).toEqual(["'none'"]);
+  });
+
+  it("is still sent Report-Only, with the OI-10 collector", () => {
+    const byKey = Object.fromEntries(
+      buildSecurityHeaders({ isDev: false }).map((h) => [h.key, h.value]),
+    );
+    expect(byKey["Content-Security-Policy"]).toBeUndefined();
+    const policy = byKey["Content-Security-Policy-Report-Only"];
+    expect(policy).toContain("https://js.stripe.com");
+    expect(policy).toContain("report-uri /api/csp-report");
+  });
+});
+
 describe("buildSecurityHeaders", () => {
   const headers = buildSecurityHeaders({ isDev: false });
   const byKey = Object.fromEntries(headers.map((h) => [h.key, h.value]));

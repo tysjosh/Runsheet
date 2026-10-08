@@ -34,6 +34,11 @@ jest.mock("../../services/ordersApi", () => ({
   holdOrder: jest.fn(),
   releaseHoldOrder: jest.fn(),
 }));
+// Roles gate the customer-portal Confirm / Decline controls (UI-4). The
+// default (no roles) keeps every pre-existing case exactly as before.
+jest.mock("../../utils/auth", () => ({
+  getCurrentUserRoles: jest.fn().mockResolvedValue([]),
+}));
 
 jest.mock("../../services/api", () => ({
   ApiError: class ApiError extends Error {
@@ -582,5 +587,118 @@ describe("OrderDetailPage — mutation controls", () => {
     await waitFor(() => {
       expect(screen.getByText(/driver_unavailable/i)).toBeInTheDocument();
     });
+  });
+});
+
+describe("OrderDetailPage — customer-portal requests (UI-4, PD24)", () => {
+  const { getCurrentUserRoles } = jest.requireMock("../../utils/auth");
+  const portalOrder = (overrides: Partial<FuelOrder> = {}) =>
+    orderFixture({
+      status: "on_hold",
+      hold_reason: "awaiting_dispatcher_confirmation",
+      intake_channel: "web_portal",
+      ...overrides,
+    });
+
+  afterEach(() => {
+    getCurrentUserRoles.mockResolvedValue([]);
+  });
+
+  it.each([["admin"], ["dispatcher"]])(
+    "offers Confirm and Decline to %s",
+    async (role) => {
+      getCurrentUserRoles.mockResolvedValue([role]);
+      mockGetOrder.mockResolvedValue(portalOrder());
+      mockGetOrderEvents.mockResolvedValue(eventsResponse());
+      render(<OrderDetailPage />);
+      expect(
+        await screen.findByRole("button", { name: "Confirm" }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Decline" }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("hides them from other roles and for other hold reasons", async () => {
+    getCurrentUserRoles.mockResolvedValue(["driver"]);
+    mockGetOrder.mockResolvedValue(portalOrder());
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    const first = render(<OrderDetailPage />);
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+    await waitFor(() => expect(getCurrentUserRoles).toHaveBeenCalled());
+    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
+    first.unmount();
+
+    getCurrentUserRoles.mockResolvedValue(["admin"]);
+    mockGetOrder.mockResolvedValue(
+      portalOrder({ hold_reason: "credit_limit_exceeded" }),
+    );
+    render(<OrderDetailPage />);
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+    await act(async () => {});
+    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
+    // The generic release stays available, as before.
+    expect(
+      screen.getByRole("button", { name: /release hold/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("Confirm calls release-hold with notes 'confirmed' and reloads", async () => {
+    getCurrentUserRoles.mockResolvedValue(["dispatcher"]);
+    mockGetOrder
+      .mockResolvedValueOnce(portalOrder())
+      .mockResolvedValue(portalOrder({ status: "placed", hold_reason: null }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    mockReleaseHoldOrder.mockResolvedValue(portalOrder({ status: "placed" }));
+    render(<OrderDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    await waitFor(() =>
+      expect(mockReleaseHoldOrder).toHaveBeenCalledWith("ord_test123", {
+        notes: "confirmed",
+      }),
+    );
+    await waitFor(() => expect(mockGetOrder).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText(/acme fuel co/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
+  });
+
+  it("Decline cancels with reason 'declined_by_dispatcher'", async () => {
+    getCurrentUserRoles.mockResolvedValue(["admin"]);
+    mockGetOrder.mockResolvedValue(portalOrder());
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    mockCancelOrder.mockResolvedValue(portalOrder({ status: "cancelled" }));
+    render(<OrderDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Decline" }));
+    await waitFor(() =>
+      expect(mockCancelOrder).toHaveBeenCalledWith("ord_test123", {
+        reason: "declined_by_dispatcher",
+      }),
+    );
+  });
+
+  it("reloads and explains a 409 INVALID_STATUS_TRANSITION", async () => {
+    const { ApiError } = jest.requireMock("../../services/api");
+    getCurrentUserRoles.mockResolvedValue(["dispatcher"]);
+    mockGetOrder
+      .mockResolvedValueOnce(portalOrder())
+      .mockResolvedValue(
+        portalOrder({ status: "cancelled", hold_reason: null }),
+      );
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    mockReleaseHoldOrder.mockRejectedValue(
+      Object.assign(new ApiError("changed", 409), {
+        code: "INVALID_STATUS_TRANSITION",
+      }),
+    );
+    render(<OrderDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
+    expect(
+      await screen.findByText(
+        "This request changed. Reloaded the latest version.",
+      ),
+    ).toBeInTheDocument();
+    expect(mockGetOrder).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
   });
 });

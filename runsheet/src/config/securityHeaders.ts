@@ -21,6 +21,22 @@ export const CSP_REPORT_PATH = "/api/csp-report";
 /** Reporting API endpoint name used by `report-to`. */
 export const CSP_REPORT_GROUP = "csp-endpoint";
 
+/** Stripe.js v3, loaded by the portal pay page (design §10.4). */
+export const STRIPE_SCRIPT_SRC = ["https://js.stripe.com"] as const;
+
+/** Payment Element, 3DS and Financial Connections frames. */
+export const STRIPE_FRAME_SRC = [
+  "https://js.stripe.com",
+  "https://hooks.stripe.com",
+  "https://*.stripe.com",
+] as const;
+
+/** Stripe API calls made by Stripe.js. */
+export const STRIPE_CONNECT_SRC = [
+  "https://api.stripe.com",
+  "https://*.stripe.com",
+] as const;
+
 /** One year, covering subdomains. Same value the API sends. */
 export const HSTS_VALUE = "max-age=31536000; includeSubDomains";
 
@@ -69,6 +85,8 @@ function wsTwin(origin: string): string {
  * - Google Maps / Charts load from maps.googleapis.com and www.gstatic.com,
  *   fonts from fonts.googleapis.com / fonts.gstatic.com, and use blob: workers.
  * - img-src allows any https: image (map tiles, Unsplash on sign-in).
+ * - Stripe (customer portal pay page, PD25): Stripe.js from js.stripe.com,
+ *   the Payment Element and Financial Connections frames, and the Stripe API.
  */
 export function buildContentSecurityPolicy(env: SecurityHeaderEnv): string {
   const apiOrigin = originOf(env.apiUrl, originOf(DEFAULT_API_URL, ""));
@@ -84,6 +102,7 @@ export function buildContentSecurityPolicy(env: SecurityHeaderEnv): string {
       stOrigin,
       "https://maps.googleapis.com",
       "https://*.googleapis.com",
+      ...STRIPE_CONNECT_SRC,
     ]),
   );
 
@@ -93,6 +112,7 @@ export function buildContentSecurityPolicy(env: SecurityHeaderEnv): string {
     ...(env.isDev ? ["'unsafe-eval'"] : []),
     "https://maps.googleapis.com",
     "https://www.gstatic.com",
+    ...STRIPE_SCRIPT_SRC,
   ];
 
   const directives: Array<[string, string[]]> = [
@@ -110,6 +130,7 @@ export function buildContentSecurityPolicy(env: SecurityHeaderEnv): string {
     ["img-src", ["'self'", "data:", "blob:", "https:"]],
     ["font-src", ["'self'", "data:", "https://fonts.gstatic.com"]],
     ["connect-src", connectSrc],
+    ["frame-src", [...STRIPE_FRAME_SRC]],
     ["worker-src", ["'self'", "blob:"]],
     ["object-src", ["'none'"]],
     ["base-uri", ["'self'"]],

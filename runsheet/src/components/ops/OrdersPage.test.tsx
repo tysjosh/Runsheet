@@ -294,6 +294,38 @@ describe("OrdersPage — filters", () => {
       expect.objectContaining({ intake_channel: "voice" }),
     );
   });
+
+  it("'Awaiting confirmation' asks for on_hold portal requests and toggles off (PD24)", async () => {
+    mockListOrders.mockResolvedValue(paginatedResponse([orderFixture()]));
+
+    render(<OrdersPage tenantId="tenant-a" />);
+    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(1));
+
+    const quick = screen.getByRole("button", { name: "Awaiting confirmation" });
+    expect(quick).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(quick);
+
+    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(2));
+    expect(mockListOrders.mock.calls[1][0]).toEqual(
+      expect.objectContaining({
+        status: "on_hold",
+        hold_reason: "awaiting_dispatcher_confirmation",
+        page: 1,
+      }),
+    );
+    expect(quick).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByLabelText(/filter by status/i)).toHaveValue("on_hold");
+
+    // A manual status choice replaces the quick filter.
+    fireEvent.change(screen.getByLabelText(/filter by status/i), {
+      target: { value: "placed" },
+    });
+    await waitFor(() => expect(mockListOrders).toHaveBeenCalledTimes(3));
+    const last = mockListOrders.mock.calls[2][0];
+    expect(last).toEqual(expect.objectContaining({ status: "placed" }));
+    expect(last?.hold_reason).toBeUndefined();
+    expect(quick).toHaveAttribute("aria-pressed", "false");
+  });
 });
 
 describe("OrdersPage — pagination", () => {
