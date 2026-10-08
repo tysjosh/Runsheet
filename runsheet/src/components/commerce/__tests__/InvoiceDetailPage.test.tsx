@@ -292,7 +292,7 @@ describe("InvoiceDetailPage", () => {
     });
 
     // Fill reason
-    const reasonInput = screen.getByLabelText("Reason");
+    const reasonInput = screen.getByLabelText(/^Reason/);
     fireEvent.change(reasonInput, { target: { value: "Duplicate invoice" } });
 
     // Submit
@@ -355,7 +355,7 @@ describe("InvoiceDetailPage", () => {
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
     await waitFor(() => {
-      expect(screen.getByText("dead_letter")).toBeInTheDocument();
+      expect(screen.getByText("Failed")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /Retry Push/i }));
@@ -392,7 +392,7 @@ describe("InvoiceDetailPage", () => {
 
     await waitFor(() => {
       expect(mockFinalizeInvoice).toHaveBeenCalledWith("inv_001");
-      expect(screen.getByText("open")).toBeInTheDocument();
+      expect(screen.getByText("Open")).toBeInTheDocument();
     });
   });
 
@@ -418,7 +418,7 @@ describe("InvoiceDetailPage", () => {
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
-    expect(await screen.findByText("Delivery Result")).toBeInTheDocument();
+    expect(await screen.findByText("Delivery result")).toBeInTheDocument();
     expect(screen.getByText("975.25 gal")).toBeInTheDocument();
     expect(screen.getByText("Alex Receiver")).toBeInTheDocument();
     expect(screen.getByText("pod-42")).toBeInTheDocument();
@@ -548,5 +548,46 @@ describe("InvoiceDetailPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /acc_001/ }));
     expect(onViewAccount).toHaveBeenCalledWith("acc_001");
+  });
+});
+
+describe("InvoiceDetailPage — void FormDialog (task 3.4)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r2",
+    } as any);
+  });
+
+  it("requires a reason, shows API errors inline, and closes with the void state", async () => {
+    mockVoidInvoice
+      .mockRejectedValueOnce(new ApiError("Invoice is locked", 409))
+      .mockResolvedValueOnce({
+        data: invoiceFixture({ status: "void" }),
+        request_id: "r3",
+      } as any);
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Void invoice/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Confirm void" }));
+    expect(await screen.findByText("Enter a reason.")).toBeInTheDocument();
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/^Reason/), {
+      target: { value: "Duplicate" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm void" }));
+    expect(await screen.findByText("Invoice is locked")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm void" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByText("Void")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Void invoice/i }),
+    ).not.toBeInTheDocument();
   });
 });

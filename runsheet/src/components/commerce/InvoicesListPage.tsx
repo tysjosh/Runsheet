@@ -1,24 +1,53 @@
 "use client";
 
+/**
+ * Billing → Invoices (UI revamp task 3.4): no nested header (Export CSV goes
+ * to the hub's title row), one toolbar (status chips, a Filters popover with
+ * the customer, refresh), and a DataTable whose pager walks the API cursor.
+ */
+import { Eye, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Badge,
-  Button,
-  EmptyState,
+  type Column,
+  DataTable,
   ExportCsvButton,
-  FilterBar,
+  Field,
+  FilterChips,
+  FilterPopover,
+  IconButton,
   LoadErrorState,
-  PageHeader,
-  Table,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { calendarDate, money } from "../../lib/format";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
-import type {
-  CursorPaginatedResponse,
-  Invoice,
+import {
+  getInvoices,
+  type Invoice,
+  type InvoiceFilters,
+  type InvoiceStatus,
 } from "../../services/commerceApi";
-import { getInvoices, type InvoiceFilters } from "../../services/commerceApi";
 import CustomerPicker from "../ops/CustomerPicker";
+import { PageTitle } from "../ui/PageHeader";
+import {
+  INVOICE_STATUS,
+  InvoiceStatusBadge,
+  QboStateBadge,
+} from "./billingStatus";
+import { useCursorPages } from "./useCursorPages";
+
+const PAGE_SIZE = 20;
+
+const STATUS_CHIPS: { id: "" | InvoiceStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "draft", label: "Draft" },
+  { id: "open", label: "Open" },
+  { id: "partial", label: "Partial" },
+  { id: "overdue", label: "Overdue" },
+  { id: "paid", label: "Paid" },
+  { id: "void", label: "Void" },
+];
 
 interface InvoicesListPageProps {
   onSelectInvoice?: (invoiceId: string) => void;
@@ -34,245 +63,213 @@ export default function InvoicesListPage({
   const [moduleDisabled, setModuleDisabled] = useState<LoadFailure | null>(
     null,
   );
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<InvoiceStatus | "">("");
   const [customerFilter, setCustomerFilter] = useState<string>("");
+  const [reload, setReload] = useState(0);
+  const pages = useCursorPages(`${statusFilter}|${customerFilter}`);
+  const { page, cursor, received } = pages;
 
-  const fetchInvoices = useCallback(
-    async (nextCursor?: string | null) => {
-      setLoading(true);
-      setError(null);
-      setModuleDisabled(null);
-      try {
-        const filters: InvoiceFilters = { limit: 20 };
-        if (statusFilter)
-          filters.status = statusFilter as InvoiceFilters["status"];
-        if (customerFilter) filters.customer_id = customerFilter;
-        if (nextCursor) filters.cursor = nextCursor;
-
-        const response: CursorPaginatedResponse<Invoice> =
-          await getInvoices(filters);
-        setInvoices(response.data);
-        setCursor(response.cursor);
-        setHasMore(response.has_more);
-      } catch (err) {
-        const failure = classifyLoadError(err, "Failed to load invoices");
-        if (failure.kind === "module_disabled") {
-          setModuleDisabled(failure);
-        } else {
-          setError(failure.message);
-        }
-      } finally {
-        setLoading(false);
-      }
-    },
-    [statusFilter, customerFilter],
-  );
+  const fetchInvoices = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setModuleDisabled(null);
+    try {
+      const filters: InvoiceFilters = { limit: PAGE_SIZE };
+      if (statusFilter) filters.status = statusFilter;
+      if (customerFilter) filters.customer_id = customerFilter;
+      if (cursor) filters.cursor = cursor;
+      const response = await getInvoices(filters);
+      setInvoices(response.data ?? []);
+      received(page, response);
+    } catch (err) {
+      const failure = classifyLoadError(err, "Failed to load invoices");
+      if (failure.kind === "module_disabled") setModuleDisabled(failure);
+      else setError(failure.message);
+    } finally {
+      setLoading(false);
+    }
+    // `reload` forces a refetch from the Refresh button.
+  }, [statusFilter, customerFilter, cursor, page, received, reload]);
 
   useEffect(() => {
     fetchInvoices();
   }, [fetchInvoices]);
 
-  const formatCents = (cents: number) =>
-    `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  const actions = useMemo(
+    () => (
+      <ExportCsvButton
+        type="invoices"
+        params={{ status: statusFilter, customer_id: customerFilter }}
+        subject="invoices"
+        allowedRoles={["admin"]}
+      />
+    ),
+    [statusFilter, customerFilter],
+  );
+  const embedded = usePageChrome({ actions: moduleDisabled ? null : actions });
 
-  const getStatusVariant = (
-    status: string,
-  ): "success" | "info" | "warning" | "error" | "default" => {
-    switch (status) {
-      case "paid":
-        return "success";
-      case "open":
-        return "info";
-      case "partial":
-        return "warning";
-      case "overdue":
-        return "error";
-      case "void":
-        return "default";
-      case "draft":
-        return "default";
-      default:
-        return "default";
-    }
-  };
+  const open = (inv: Invoice) => onSelectInvoice?.(inv.invoice_id);
 
-  const getQboStateVariant = (
-    state: string,
-  ): "success" | "error" | "default" => {
-    if (state === "pushed") return "success";
-    if (state === "dead_letter") return "error";
-    return "default";
-  };
+  const columns: Column<Invoice>[] = [
+    {
+      key: "invoice_number",
+      header: "Invoice",
+      width: 160,
+      className: "font-mono text-xs text-text",
+      cell: (i) => i.invoice_number,
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 150,
+      cell: (i) => <InvoiceStatusBadge status={i.status} />,
+    },
+    {
+      key: "total_cents",
+      header: "Total",
+      align: "right",
+      width: 130,
+      className: "tabular-nums text-text",
+      cell: (i) => money(i.total_cents / 100),
+    },
+    {
+      key: "remaining_cents",
+      header: "Remaining",
+      align: "right",
+      width: 130,
+      className: "tabular-nums text-slate-700",
+      cell: (i) => money(i.remaining_cents / 100),
+    },
+    {
+      key: "due_date",
+      header: "Due",
+      width: 150,
+      className: "text-slate-700",
+      cell: (i) => calendarDate(i.due_date),
+    },
+    {
+      key: "qbo_push_state",
+      header: "QuickBooks",
+      width: 150,
+      cell: (i) => <QboStateBadge state={i.qbo_push_state} />,
+    },
+  ];
+
+  const titleRow = embedded ? null : (
+    <div className="flex h-11 items-center border-b border-slate-200 px-4">
+      <PageTitle className="text-base font-semibold text-text">
+        Invoices
+      </PageTitle>
+      {!moduleDisabled && <div className="ml-auto">{actions}</div>}
+    </div>
+  );
 
   if (moduleDisabled) {
     return (
-      <div className="p-6">
-        <PageHeader
-          title="Invoices"
-          subtitle="View and manage invoices across all accounts."
-        />
-        <LoadErrorState
-          failure={moduleDisabled}
-          entityLabel="Invoices"
-          onBack={() => router.push("/dashboard")}
-          backLabel="Back to Today"
-          embedded
-        />
+      <div className="flex h-full flex-col">
+        {titleRow}
+        <div className="p-4">
+          <LoadErrorState
+            failure={moduleDisabled}
+            entityLabel="Invoices"
+            onBack={() => router.push("/dashboard")}
+            backLabel="Back to Today"
+            embedded
+          />
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Invoices"
-        subtitle="View and manage invoices across all accounts."
-        actions={
-          <ExportCsvButton
-            type="invoices"
-            params={{ status: statusFilter, customer_id: customerFilter }}
-            subject="invoices"
-            allowedRoles={["admin"]}
-          />
-        }
-      />
-
-      <FilterBar
+    <div className="flex h-full flex-col bg-surface">
+      {titleRow}
+      <Toolbar
+        label="Invoices"
         filters={
           <>
-            <select
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                fetchInvoices();
-              }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Status"
+            <FilterChips
+              label="Invoice status"
+              options={STATUS_CHIPS.map((c) => ({
+                id: c.id || "all",
+                label: c.label,
+                status: c.id ? INVOICE_STATUS[c.id].status : undefined,
+              }))}
+              value={statusFilter || "all"}
+              onChange={(v) =>
+                setStatusFilter(v === "all" ? "" : (v as InvoiceStatus))
+              }
+            />
+            <FilterPopover
+              count={customerFilter ? 1 : 0}
+              label="Invoice filters"
+              onClear={() => setCustomerFilter("")}
             >
-              <option value="">All</option>
-              <option value="draft">Draft</option>
-              <option value="open">Open</option>
-              <option value="partial">Partial</option>
-              <option value="paid">Paid</option>
-              <option value="overdue">Overdue</option>
-              <option value="void">Void</option>
-            </select>
-            <div className="min-w-[220px]">
-              <CustomerPicker
-                aria-label="Customer"
-                value={customerFilter || null}
-                onChange={(value) => {
-                  setCustomerFilter(value);
-                  fetchInvoices();
-                }}
-                allowClear
-                placeholder="All customers"
-              />
-            </div>
+              <Field label="Customer" id="invoices-filter-customer">
+                <CustomerPicker
+                  id="invoices-filter-customer"
+                  aria-label="Customer"
+                  value={customerFilter || null}
+                  onChange={setCustomerFilter}
+                  allowClear
+                  placeholder="All customers"
+                />
+              </Field>
+            </FilterPopover>
           </>
         }
-      />
-
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Loading state */}
-      {loading && (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading invoices...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      )}
-
-      {/* Invoices table */}
-      {!loading &&
-        !error &&
-        (invoices.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">📄</span>}
-            title="No invoices found"
-            description="Try adjusting your filters"
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
           />
-        ) : (
-          <>
-            <Table
-              columns={[
-                {
-                  key: "invoice_number",
-                  label: "Invoice #",
-                  render: (invoice) => (
-                    <span className="font-mono text-sm">
-                      {invoice.invoice_number}
-                    </span>
-                  ),
-                },
-                {
-                  key: "status",
-                  label: "Status",
-                  render: (invoice) => (
-                    <Badge variant={getStatusVariant(invoice.status)}>
-                      {invoice.status}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "total_cents",
-                  label: "Total",
-                  render: (invoice) => formatCents(invoice.total_cents),
-                },
-                {
-                  key: "remaining_cents",
-                  label: "Remaining",
-                  render: (invoice) => formatCents(invoice.remaining_cents),
-                },
-                { key: "due_date", label: "Due Date" },
-                {
-                  key: "qbo_push_state",
-                  label: "QBO State",
-                  render: (invoice) => (
-                    <Badge variant={getQboStateVariant(invoice.qbo_push_state)}>
-                      {invoice.qbo_push_state}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "actions",
-                  label: "Actions",
-                  render: (invoice) => (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onSelectInvoice?.(invoice.invoice_id)}
-                    >
-                      View
-                    </Button>
-                  ),
-                },
-              ]}
-              data={invoices}
-              keyExtractor={(invoice) => invoice.invoice_id}
-            />
-
-            <div className="flex justify-end mt-4">
-              <Button
-                variant="secondary"
-                disabled={!hasMore}
-                onClick={() => fetchInvoices(cursor)}
-              >
-                Load More
-              </Button>
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<Invoice>
+          ariaLabel="Invoices"
+          columns={columns}
+          data={loading || error ? [] : invoices}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchInvoices } : null}
+          getRowId={(i) => i.invoice_id}
+          rowLabel={(i) => `Invoice ${i.invoice_number}`}
+          onRowClick={onSelectInvoice ? open : undefined}
+          rowMenu={
+            onSelectInvoice
+              ? (i) => [
+                  {
+                    id: "view",
+                    label: "View invoice",
+                    icon: <Eye className="h-3.5 w-3.5" />,
+                    onSelect: () => open(i),
+                  },
+                ]
+              : undefined
+          }
+          pagination={
+            pages.totalPages > 1
+              ? {
+                  page: pages.page,
+                  totalPages: pages.totalPages,
+                  onPageChange: pages.goTo,
+                }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No invoices found</p>
+              <p className="mt-1 text-xs">Try adjusting your filters</p>
             </div>
-          </>
-        ))}
+          }
+        />
+      </div>
     </div>
   );
 }

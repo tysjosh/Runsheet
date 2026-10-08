@@ -1,21 +1,39 @@
 "use client";
 
+/**
+ * Invoice detail (UI revamp task 3.4): the detail template (title row with
+ * back, status badge and actions), facts on the left and the event timeline
+ * on the right, products by name, money/gallons/dates through `lib/format`,
+ * and Void as an sm FormDialog (design.md §5).
+ */
 import { useRouter } from "next/navigation";
-import type React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  Badge,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import {
   Button,
-  EmptyState,
+  type Column,
+  DataTable,
   EntityLink,
+  Field,
+  FormDialog,
+  INPUT_CLASS,
+  InlineBanner,
   LoadErrorState,
-  StatsBar,
-  Table,
+  PageHeader,
+  ProductChip,
+  Skeleton,
 } from "@/components/ui";
+import { calendarDate, dateTime, gallons, money } from "../../lib/format";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import type {
   Invoice,
   InvoiceEvent,
+  InvoiceLineItem,
   VoidInvoicePayload,
 } from "../../services/commerceApi";
 import {
@@ -25,7 +43,7 @@ import {
   retryQboPush,
   voidInvoice,
 } from "../../services/commerceApi";
-import { PageTitle } from "../ui/PageHeader";
+import { InvoiceStatusBadge, QboStateBadge } from "./billingStatus";
 
 interface InvoiceDetailPageProps {
   invoiceId: string;
@@ -45,9 +63,6 @@ export default function InvoiceDetailPage({
   const [error, setError] = useState<string | null>(null);
   const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
   const [voidDialogOpen, setVoidDialogOpen] = useState(false);
-  const [voidReason, setVoidReason] = useState("");
-  const [voidForce, setVoidForce] = useState(false);
-  const [voiding, setVoiding] = useState(false);
   const [finalizing, setFinalizing] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -138,27 +153,22 @@ export default function InvoiceDetailPage({
     };
   }, [invoiceId]);
 
-  const handleVoid = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!voidReason.trim()) return;
-    setVoiding(true);
+  const submitVoid = async (v: VoidValues): Promise<Invoice> => {
+    const payload: VoidInvoicePayload = {
+      reason: v.reason.trim(),
+      force: v.force,
+    };
+    const res = await voidInvoice(invoiceId, payload);
+    return res.data;
+  };
+
+  const afterVoid = async (updated: Invoice) => {
+    setInvoice(updated);
     try {
-      const payload: VoidInvoicePayload = {
-        reason: voidReason,
-        force: voidForce,
-      };
-      const res = await voidInvoice(invoiceId, payload);
-      setInvoice(res.data);
-      setVoidDialogOpen(false);
-      setVoidReason("");
-      setVoidForce(false);
-      // Refresh events
       const eventsRes = await getInvoiceEvents(invoiceId);
       setEvents(eventsRes.data);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to void invoice");
-    } finally {
-      setVoiding(false);
+    } catch {
+      // The timeline also updates over the socket.
     }
   };
 
@@ -188,11 +198,12 @@ export default function InvoiceDetailPage({
     }
   };
 
+  const back = () => (onBack ? onBack() : router.back());
+
   if (loading) {
     return (
-      <div role="status" className="flex justify-center py-12">
-        <span className="sr-only">Loading invoice details...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      <div className="p-4">
+        <Skeleton rows={6} label="Loading invoice details" />
       </div>
     );
   }
@@ -203,7 +214,7 @@ export default function InvoiceDetailPage({
         failure={loadFailure}
         entityLabel="Invoice"
         entityId={invoiceId}
-        onBack={() => (onBack ? onBack() : router.back())}
+        onBack={back}
         backLabel="Back to Invoices"
         homeHref="/dashboard/billing"
         homeLabel="Go to Billing"
@@ -212,355 +223,324 @@ export default function InvoiceDetailPage({
     );
   }
 
-  if (error) {
-    return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
-      </div>
-    );
-  }
-
   if (!invoice) return null;
 
-  const formatCents = (cents: number) =>
-    `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  const lineColumns: Column<InvoiceLineItem>[] = [
+    {
+      key: "product_code",
+      header: "Product",
+      cell: (item) => <ProductChip code={item.product_code} variant="full" />,
+    },
+    {
+      key: "quantity_gallons",
+      header: "Quantity",
+      align: "right",
+      width: 140,
+      className: "tabular-nums",
+      cell: (item) =>
+        gallons(item.quantity_gallons, {
+          decimals: Number.isInteger(item.quantity_gallons) ? 0 : 2,
+        }),
+    },
+    {
+      key: "unit_price_cents",
+      header: "Unit price",
+      align: "right",
+      width: 130,
+      className: "tabular-nums",
+      cell: (item) => money(item.unit_price_cents / 100),
+    },
+    {
+      key: "subtotal_cents",
+      header: "Subtotal",
+      align: "right",
+      width: 140,
+      className: "tabular-nums font-medium",
+      cell: (item) => money(item.subtotal_cents / 100),
+    },
+  ];
 
-  const _statusColor = (status: string) => {
-    switch (status) {
-      case "paid":
-        return "bg-success-light text-success-dark";
-      case "open":
-        return "bg-info-light text-info-dark";
-      case "partial":
-        return "bg-warning-light text-warning-dark";
-      case "overdue":
-        return "bg-error-light text-error-dark";
-      case "void":
-        return "bg-gray-100 text-gray-800";
-      default:
-        return "bg-brand-secondary-soft text-brand-secondary";
-    }
-  };
+  const dr = invoice.delivery_result;
+  const canVoid = invoice.status !== "void" && invoice.status !== "paid";
 
   return (
-    <div className="p-6">
-      {/* Header */}
-      <div className="mb-6">
-        <div className="flex items-center gap-4 mb-2">
-          {onBack && (
-            <Button variant="ghost" size="sm" onClick={onBack}>
-              ← Back to Invoices
-            </Button>
-          )}
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <PageTitle className="text-2xl font-bold">
-              Invoice {invoice.invoice_number}
-            </PageTitle>
-            <p className="text-gray-600">Due: {invoice.due_date}</p>
-            {/* Navigable references to the order, account, and customer this
-                invoice belongs to (Req 12.1, 13.1). Account is an in-hub
-                destination (it lives as a tab in CommerceHub) so it navigates
-                via the onViewAccount callback rather than a standalone route;
-                customer and order have canonical routes and link via
-                <EntityLink>. */}
-            <dl className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm">
-              <div className="flex items-center gap-1.5">
-                <dt className="text-gray-500">Account:</dt>
-                <dd>
+    <div className="flex h-full flex-col">
+      <PageHeader
+        host
+        title={`Invoice ${invoice.invoice_number}`}
+        back={{ label: "Back to Invoices", onClick: back }}
+        badge={<InvoiceStatusBadge status={invoice.status} />}
+        counts={
+          <span className="whitespace-nowrap">
+            Due {calendarDate(invoice.due_date)}
+          </span>
+        }
+        actions={
+          <>
+            {invoice.status === "draft" && (
+              <Button
+                size="sm"
+                onClick={handleFinalize}
+                loading={finalizing}
+                disabled={finalizing}
+              >
+                {finalizing ? "Finalizing…" : "Approve & send to ERP"}
+              </Button>
+            )}
+            {canVoid && (
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => setVoidDialogOpen(true)}
+              >
+                Void invoice
+              </Button>
+            )}
+          </>
+        }
+      />
+      <div className="flex-1 overflow-auto p-4">
+        {error && (
+          <div role="alert" className="mb-3">
+            <InlineBanner tone="critical">{error}</InlineBanner>
+          </div>
+        )}
+        <div className="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <div className="min-w-0">
+            <section aria-labelledby="invoice-summary-heading" className="mb-6">
+              <h2 id="invoice-summary-heading" className="sr-only">
+                Invoice summary
+              </h2>
+              <dl className="grid grid-cols-2 gap-3 md:grid-cols-5">
+                <Fact
+                  label="Subtotal"
+                  value={money(invoice.subtotal_cents / 100)}
+                />
+                <Fact label="Tax" value={money(invoice.tax_cents / 100)} />
+                <Fact label="Total" value={money(invoice.total_cents / 100)} />
+                <Fact
+                  label="Paid"
+                  value={money(invoice.amount_paid_cents / 100)}
+                />
+                <Fact
+                  label="Remaining"
+                  value={money(invoice.remaining_cents / 100)}
+                />
+              </dl>
+            </section>
+
+            <section aria-labelledby="refs-heading" className="mb-6">
+              <h2
+                id="refs-heading"
+                className="mb-2 text-sm font-semibold text-text"
+              >
+                References
+              </h2>
+              {/* Account traverses in-hub when a callback is supplied;
+                  customer and order link to their canonical routes
+                  (Req 12.1, 13.1). */}
+              <dl className="grid grid-cols-1 gap-x-6 gap-y-3 rounded-lg border border-slate-200 p-4 text-sm md:grid-cols-3">
+                <Row label="Account">
                   {onViewAccount ? (
                     <button
                       type="button"
                       onClick={() => onViewAccount(invoice.account_id)}
-                      className="text-info hover:text-info-dark underline underline-offset-2"
+                      className="text-link underline underline-offset-2 hover:no-underline focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
                     >
                       {invoice.account_id}
                     </button>
                   ) : (
                     <EntityLink type="account" id={invoice.account_id} />
                   )}
-                </dd>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <dt className="text-gray-500">Customer:</dt>
-                <dd>
+                </Row>
+                <Row label="Customer">
                   <EntityLink type="customer" id={invoice.customer_id} />
-                </dd>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <dt className="text-gray-500">Order:</dt>
-                <dd>
+                </Row>
+                <Row label="Order">
                   <EntityLink type="order" id={invoice.order_id} />
-                </dd>
+                </Row>
+                <Row label="Issued">{calendarDate(invoice.issued_at)}</Row>
+                <Row label="QuickBooks">
+                  <span className="inline-flex items-center gap-2">
+                    <QboStateBadge state={invoice.qbo_push_state} />
+                    {invoice.qbo_push_state === "dead_letter" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleRetryQbo}
+                      >
+                        Retry push
+                      </Button>
+                    )}
+                  </span>
+                </Row>
+                {invoice.void_reason && (
+                  <Row label="Void reason">{invoice.void_reason}</Row>
+                )}
+              </dl>
+            </section>
+
+            {dr && (
+              <section
+                aria-labelledby="delivery-result-heading"
+                className="mb-6"
+              >
+                <h2
+                  id="delivery-result-heading"
+                  className="mb-2 text-sm font-semibold text-text"
+                >
+                  Delivery result
+                </h2>
+                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 rounded-lg border border-slate-200 p-4 text-sm md:grid-cols-3">
+                  <Row label="Actual gallons">
+                    {gallons(dr.actual_gallons, {
+                      decimals: Number.isInteger(dr.actual_gallons) ? 0 : 2,
+                    })}
+                  </Row>
+                  <Row label="Delivered">{dateTime(dr.delivered_at)}</Row>
+                  <Row label="POD">{dr.pod_id}</Row>
+                  <Row label="Received by">{dr.recipient_name}</Row>
+                  <Row label="Source ERP">
+                    {dr.source_system || "Not imported"}
+                  </Row>
+                  {dr.source_record_id && (
+                    <Row label="Source record">{dr.source_record_id}</Row>
+                  )}
+                </dl>
+              </section>
+            )}
+
+            <section aria-labelledby="line-items-heading" className="mb-6">
+              <h2
+                id="line-items-heading"
+                className="mb-2 text-sm font-semibold text-text"
+              >
+                Line items
+              </h2>
+              <div className="overflow-hidden rounded-lg border border-slate-200">
+                <DataTable<InvoiceLineItem>
+                  ariaLabel="Line items"
+                  columns={lineColumns}
+                  data={invoice.line_items}
+                  getRowId={(item) => item.line_id}
+                  emptyState={
+                    <p className="text-sm text-text-muted">No line items.</p>
+                  }
+                />
               </div>
-            </dl>
+            </section>
           </div>
-          <div className="flex items-center gap-3">
-            <Badge
-              variant={
-                invoice.status === "paid"
-                  ? "success"
-                  : invoice.status === "open"
-                    ? "info"
-                    : invoice.status === "partial"
-                      ? "warning"
-                      : invoice.status === "overdue"
-                        ? "error"
-                        : invoice.status === "void"
-                          ? "neutral"
-                          : "default"
-              }
+
+          <section aria-labelledby="timeline-heading" className="min-w-0">
+            <h2
+              id="timeline-heading"
+              className="mb-2 text-sm font-semibold text-text"
             >
-              {invoice.status}
-            </Badge>
-            {invoice.status === "draft" && (
-              <Button onClick={handleFinalize} disabled={finalizing}>
-                {finalizing ? "Finalizing…" : "Approve & Send to ERP"}
-              </Button>
+              Activity
+            </h2>
+            {events.length === 0 ? (
+              <p className="text-sm text-text-muted">No events recorded.</p>
+            ) : (
+              <ol
+                className="relative ml-2 border-l border-slate-300"
+                aria-label="Invoice events"
+              >
+                {events.map((event) => (
+                  <li key={event.event_id} className="mb-4 ml-4">
+                    <span
+                      aria-hidden="true"
+                      className="absolute -left-1.5 h-3 w-3 rounded-full border-2 border-white bg-primary"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-medium text-text">
+                        {event.event_type.replace(/_/g, " ")}
+                      </span>
+                      <span className="text-xs text-text-muted">
+                        {dateTime(event.occurred_at)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-700">
+                      by {event.actor}
+                      {event.payload &&
+                        Object.keys(event.payload).length > 0 && (
+                          <span className="ml-2 break-all text-text-muted">
+                            {JSON.stringify(event.payload)}
+                          </span>
+                        )}
+                    </p>
+                  </li>
+                ))}
+              </ol>
             )}
-            {invoice.status !== "void" && invoice.status !== "paid" && (
-              <Button variant="danger" onClick={() => setVoidDialogOpen(true)}>
-                Void Invoice
-              </Button>
-            )}
-          </div>
+          </section>
         </div>
       </div>
 
-      {/* Summary cards */}
-      <section aria-labelledby="invoice-summary-heading" className="mb-8">
-        <h2 id="invoice-summary-heading" className="sr-only">
-          Invoice Summary
-        </h2>
-        <StatsBar
-          stats={[
-            { label: "Subtotal", value: formatCents(invoice.subtotal_cents) },
-            { label: "Tax", value: formatCents(invoice.tax_cents) },
-            { label: "Total", value: formatCents(invoice.total_cents) },
-            { label: "Paid", value: formatCents(invoice.amount_paid_cents) },
-            { label: "Remaining", value: formatCents(invoice.remaining_cents) },
-          ]}
-        />
-      </section>
-
-      {invoice.delivery_result && (
-        <section aria-labelledby="delivery-result-heading" className="mb-8">
-          <h2
-            id="delivery-result-heading"
-            className="text-lg font-semibold mb-3"
-          >
-            Delivery Result
-          </h2>
-          <dl className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <div>
-              <dt className="text-xs uppercase text-gray-500">
-                Actual gallons
-              </dt>
-              <dd className="font-semibold">
-                {invoice.delivery_result.actual_gallons.toLocaleString()} gal
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase text-gray-500">Delivered</dt>
-              <dd>
-                {new Date(
-                  invoice.delivery_result.delivered_at,
-                ).toLocaleString()}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase text-gray-500">POD</dt>
-              <dd>{invoice.delivery_result.pod_id}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase text-gray-500">Received by</dt>
-              <dd>{invoice.delivery_result.recipient_name}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase text-gray-500">Source ERP</dt>
-              <dd>{invoice.delivery_result.source_system || "Not imported"}</dd>
-            </div>
-            {invoice.delivery_result.source_record_id && (
-              <div>
-                <dt className="text-xs uppercase text-gray-500">
-                  Source record
-                </dt>
-                <dd>{invoice.delivery_result.source_record_id}</dd>
-              </div>
-            )}
-          </dl>
-        </section>
-      )}
-
-      {/* Line items */}
-      <section aria-labelledby="line-items-heading" className="mb-8">
-        <h2 id="line-items-heading" className="text-lg font-semibold mb-3">
-          Line Items
-        </h2>
-        <Table
-          columns={[
-            { key: "product_code", label: "Product" },
-            { key: "quantity_gallons", label: "Quantity (gal)" },
-            {
-              key: "unit_price_cents",
-              label: "Unit Price",
-              render: (item) => formatCents(item.unit_price_cents),
-            },
-            {
-              key: "subtotal_cents",
-              label: "Subtotal",
-              render: (item) => formatCents(item.subtotal_cents),
-            },
-          ]}
-          data={invoice.line_items}
-          getRowId={(item) => item.line_id}
-        />
-      </section>
-
-      {/* QBO push state */}
-      <section aria-labelledby="qbo-heading" className="mb-8">
-        <h2 id="qbo-heading" className="text-lg font-semibold mb-3">
-          QBO Sync Status
-        </h2>
-        <div className="flex items-center gap-4">
-          <Badge
-            variant={
-              invoice.qbo_push_state === "pushed"
-                ? "success"
-                : invoice.qbo_push_state === "dead_letter"
-                  ? "error"
-                  : "neutral"
-            }
-          >
-            {invoice.qbo_push_state}
-          </Badge>
-          {invoice.qbo_push_state === "dead_letter" && (
-            <Button variant="ghost" size="sm" onClick={handleRetryQbo}>
-              Retry Push
-            </Button>
-          )}
-        </div>
-      </section>
-
-      {/* Event timeline */}
-      <section aria-labelledby="timeline-heading" className="mb-8">
-        <h2 id="timeline-heading" className="text-lg font-semibold mb-3">
-          Event Timeline
-        </h2>
-        {events.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">📋</span>}
-            title="No events"
-            description="No events recorded."
-          />
-        ) : (
-          <ol
-            className="relative border-l border-gray-300 ml-4"
-            aria-label="Invoice events"
-          >
-            {events.map((event) => (
-              <li key={event.event_id} className="mb-4 ml-6">
-                <span className="absolute -left-2 w-4 h-4 bg-primary rounded-full border-2 border-white" />
-                <div className="flex items-center gap-2">
-                  <span className="font-medium text-sm capitalize">
-                    {event.event_type.replace(/_/g, " ")}
-                  </span>
-                  <span className="text-xs text-gray-500">
-                    {new Date(event.occurred_at).toLocaleString()}
-                  </span>
-                </div>
-                <p className="text-sm text-gray-600">
-                  by {event.actor}
-                  {event.payload && Object.keys(event.payload).length > 0 && (
-                    <span className="ml-2 text-xs text-gray-500">
-                      {JSON.stringify(event.payload)}
-                    </span>
-                  )}
-                </p>
-              </li>
-            ))}
-          </ol>
-        )}
-      </section>
-
-      {/* Void dialog */}
       {voidDialogOpen && (
-        <div
-          role="dialog"
-          aria-labelledby="void-dialog-title"
-          className="fixed inset-0 z-50 flex items-center justify-center"
+        <FormDialog<VoidValues, Invoice>
+          open
+          size="sm"
+          title="Void invoice"
+          help="This can't be undone. The invoice is marked void and any applied payments are reversed."
+          submitLabel="Confirm void"
+          successMessage="Invoice voided"
+          initialValues={{ reason: "", force: false }}
+          validate={(v) => ({
+            reason: v.reason.trim() ? undefined : "Enter a reason.",
+          })}
+          onSubmit={submitVoid}
+          onSaved={(updated) => void afterVoid(updated)}
+          onClose={() => setVoidDialogOpen(false)}
         >
-          <div
-            className="absolute inset-0 bg-black/30"
-            onClick={() => setVoidDialogOpen(false)}
-            role="presentation"
-          />
-          <div className="relative bg-white rounded-lg shadow-xl p-6 w-full max-w-md">
-            <h2 id="void-dialog-title" className="text-xl font-bold mb-4">
-              Void Invoice
-            </h2>
-            <p className="text-sm text-gray-600 mb-4">
-              This action cannot be undone. The invoice will be marked as void
-              and any applied payments will be reversed.
-            </p>
-            <form onSubmit={handleVoid}>
-              <div className="mb-4">
-                <label
-                  htmlFor="void-reason"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Reason
-                </label>
+          {({ values, set, errors }) => (
+            <>
+              <Field label="Reason" required error={errors.reason}>
                 <textarea
                   id="void-reason"
-                  value={voidReason}
-                  onChange={(e) => setVoidReason(e.target.value)}
-                  required
+                  value={values.reason}
+                  onChange={(e) => set("reason", e.target.value)}
                   rows={3}
-                  className="w-full border rounded px-3 py-2"
-                  placeholder="Reason for voiding..."
+                  placeholder="Why this invoice is being voided"
+                  className={`${INPUT_CLASS} h-auto py-1.5`}
                 />
-              </div>
+              </Field>
               {invoice.amount_paid_cents > 0 && (
-                <div className="mb-4">
-                  <label className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={voidForce}
-                      onChange={(e) => setVoidForce(e.target.checked)}
-                    />
-                    <span className="text-sm">
-                      Force void (reverse{" "}
-                      {formatCents(invoice.amount_paid_cents)} in applied
-                      payments)
-                    </span>
-                  </label>
-                </div>
+                <label className="col-span-2 flex items-center gap-2 text-sm text-text">
+                  <input
+                    type="checkbox"
+                    checked={values.force}
+                    onChange={(e) => set("force", e.target.checked)}
+                  />
+                  <span>
+                    Force void (reverse {money(invoice.amount_paid_cents / 100)}{" "}
+                    in applied payments)
+                  </span>
+                </label>
               )}
-              <div className="flex gap-3">
-                <Button
-                  type="submit"
-                  variant="danger"
-                  loading={voiding}
-                  disabled={!voidReason.trim()}
-                >
-                  Confirm Void
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setVoidDialogOpen(false)}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
+            </>
+          )}
+        </FormDialog>
       )}
+    </div>
+  );
+}
+
+type VoidValues = { reason: string; force: boolean };
+
+function Fact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-slate-200 px-3 py-2">
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd className="text-lg font-semibold tabular-nums text-text">{value}</dd>
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd className="font-medium text-text">{children}</dd>
     </div>
   );
 }

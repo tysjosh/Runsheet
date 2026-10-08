@@ -10,7 +10,7 @@ import {
   Sliders,
   TrendingUp,
 } from "lucide-react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { canSee } from "../config/modules";
 import {
@@ -18,9 +18,7 @@ import {
   getOpenMarginAlertCount,
   type MarginAvailability,
 } from "../services/marginApi";
-import AccountDetailPage from "./commerce/AccountDetailPage";
 import AccountsListPage from "./commerce/AccountsListPage";
-import InvoiceDetailPage from "./commerce/InvoiceDetailPage";
 import InvoicesListPage from "./commerce/InvoicesListPage";
 import PaymentsListPage from "./commerce/PaymentsListPage";
 import PriceBookEditor from "./commerce/PriceBookEditor";
@@ -178,36 +176,13 @@ export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
         marginAvailability === "unknown"),
   });
   const rawTab = useSearchParams()?.get("tab") ?? initialTab ?? null;
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
-    null,
-  );
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(
-    null,
-  );
-  const handleSelectAccount = (accountId: string) => {
-    setSelectedAccountId(accountId);
-  };
-
-  const handleSelectInvoice = (invoiceId: string) => {
-    setSelectedInvoiceId(invoiceId);
-  };
-
-  const handleBackToAccountList = () => {
-    setSelectedAccountId(null);
-  };
-
-  const handleBackToInvoiceList = () => {
-    setSelectedInvoiceId(null);
-  };
-
-  // Invoice → Account is in-hub navigation: accounts live as a tab in this hub
-  // rather than at a standalone route, so traversing an invoice's account
-  // switches tabs and selects the account (Req 12.1).
-  const handleViewAccountFromInvoice = (accountId: string) => {
-    setSelectedInvoiceId(null);
-    setSelectedAccountId(accountId);
-    setActive("accounts");
-  };
+  // Rows open the detail routes (task 1.10): the detail template has its own
+  // title row with Back, so it doesn't sit under the hub's tabs.
+  const router = useRouter();
+  const handleSelectAccount = (accountId: string) =>
+    router.push(`/dashboard/billing/accounts/${encodeURIComponent(accountId)}`);
+  const handleSelectInvoice = (invoiceId: string) =>
+    router.push(`/dashboard/billing/invoices/${encodeURIComponent(invoiceId)}`);
 
   const marginAllowed = canSee("margin", { roles });
   useEffect(() => {
@@ -280,11 +255,7 @@ export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
           help="Accounts, invoices, pricing, and receivables"
           tabs={visibleTabs}
           tab={effectiveTab}
-          onTabChange={(tabId) => {
-            setActive(tabId);
-            setSelectedAccountId(null); // Reset account selection when changing tabs
-            setSelectedInvoiceId(null); // Reset invoice selection when changing tabs
-          }}
+          onTabChange={setActive}
           tabIdBase="billing"
         />
         <TabPanel
@@ -298,25 +269,12 @@ export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
           {(marginBlocked === "disabled" || marginBlocked === "forbidden") && (
             <MarginUnavailable reason={marginBlocked} />
           )}
-          {shows("accounts") &&
-            (selectedAccountId ? (
-              <AccountDetailPage
-                accountId={selectedAccountId}
-                onBack={handleBackToAccountList}
-              />
-            ) : (
-              <AccountsListPage onSelectAccount={handleSelectAccount} />
-            ))}
-          {shows("invoices") &&
-            (selectedInvoiceId ? (
-              <InvoiceDetailPage
-                invoiceId={selectedInvoiceId}
-                onBack={handleBackToInvoiceList}
-                onViewAccount={handleViewAccountFromInvoice}
-              />
-            ) : (
-              <InvoicesListPage onSelectInvoice={handleSelectInvoice} />
-            ))}
+          {shows("accounts") && (
+            <AccountsListPage onSelectAccount={handleSelectAccount} />
+          )}
+          {shows("invoices") && (
+            <InvoicesListPage onSelectInvoice={handleSelectInvoice} />
+          )}
           {shows("price-books") && <PriceBookEditor />}
           {shows("pricing-rules") && (
             <Suspense

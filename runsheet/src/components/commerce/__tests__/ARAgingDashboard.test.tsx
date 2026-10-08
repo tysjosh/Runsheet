@@ -117,9 +117,9 @@ describe("ARAgingDashboard", () => {
     });
 
     // Summary stats - total outstanding
-    expect(screen.getAllByText("$115,000.00").length).toBeGreaterThanOrEqual(1);
-    // Accounts with balance count
-    expect(screen.getByText("2")).toBeInTheDocument();
+    expect(screen.getByText(/\$115,000.00 outstanding/)).toBeInTheDocument();
+    // Accounts with balance count (title-row counts)
+    expect(screen.getByText(/2 accounts/)).toBeInTheDocument();
 
     // Top accounts
     expect(screen.getByText("Acme Main")).toBeInTheDocument();
@@ -231,8 +231,7 @@ describe("ARAgingDashboard", () => {
       expect(screen.getByText("Acme Main")).toBeInTheDocument();
     });
 
-    const viewButtons = screen.getAllByRole("button", { name: /View/i });
-    fireEvent.click(viewButtons[0]);
+    fireEvent.click(screen.getByText("Acme Main"));
 
     expect(onViewAccount).toHaveBeenCalledWith("acc_001");
   });
@@ -249,12 +248,13 @@ describe("ARAgingDashboard", () => {
 
     render(<ARAgingDashboard />);
 
-    await waitFor(() => {
-      expect(screen.getByText("Aging History")).toBeInTheDocument();
-    });
+    fireEvent.click(await screen.findByRole("button", { name: "History" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Aging History" }),
+    ).toBeInTheDocument();
 
-    // History dates
-    expect(screen.getByText("2024-06-14")).toBeInTheDocument();
+    // History dates (calendar days, never shifted)
+    expect(screen.getByText("Fri 14 Jun 2024")).toBeInTheDocument();
   });
 
   it("shows empty state when no accounts have balance", async () => {
