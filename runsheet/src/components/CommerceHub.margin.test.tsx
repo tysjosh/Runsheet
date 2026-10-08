@@ -1,8 +1,11 @@
 /**
- * CommerceHub Margin tab gating (margin-feed AC-32, D1): a dispatcher never
- * sees the tab and `?tab=margin` falls back to the default tab; an admin sees
- * it with the aria-labelled open-alert badge. Presentation only: the API
- * refuses non-admins on every margin route.
+ * CommerceHub Margin tab gating (margin-feed AC-32, D1, and the Phase 3
+ * owner-reported staging bug): a non-admin never sees the tab and
+ * `?tab=margin` shows the standard no-access state; an admin sees it with
+ * the open-alert badge only while the feed is on. With
+ * COMMERCE_MARGIN_FEED_ENABLED off the margin routes answer 404
+ * COMMERCE_DISABLED: the tab is hidden and `?tab=margin` says the feature
+ * isn't turned on, with no Try again.
  */
 import { act, render, screen, waitFor } from "@testing-library/react";
 
@@ -12,6 +15,7 @@ jest.mock("../utils/auth", () => ({
 }));
 jest.mock("../services/marginApi", () => ({
   getOpenMarginAlertCount: jest.fn(),
+  getMarginAvailability: jest.fn(),
 }));
 // The hub's pages are stubbed: this test is about which tab is offered.
 jest.mock("./commerce/InvoicesListPage", () => ({
@@ -31,7 +35,10 @@ jest.mock("./ops/ReconciliationPage", () => ({
   default: () => <div>Reconciliation page</div>,
 }));
 
-import { getOpenMarginAlertCount } from "../services/marginApi";
+import {
+  getMarginAvailability,
+  getOpenMarginAlertCount,
+} from "../services/marginApi";
 import { getCurrentUserRoles } from "../utils/auth";
 import CommerceHub from "./CommerceHub";
 
@@ -42,9 +49,14 @@ const mockCount = getOpenMarginAlertCount as jest.MockedFunction<
   typeof getOpenMarginAlertCount
 >;
 
+const mockAvailability = getMarginAvailability as jest.MockedFunction<
+  typeof getMarginAvailability
+>;
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockCount.mockResolvedValue(3);
+  mockAvailability.mockResolvedValue("enabled");
 });
 
 async function renderAs(roles: string[], initialTab?: string) {
@@ -66,10 +78,20 @@ it("hides the Margin tab from a dispatcher and never asks for alert counts", asy
   expect(mockCount).not.toHaveBeenCalled();
 });
 
-it("falls back to the default tab for a dispatcher deep-linked to ?tab=margin", async () => {
+it("shows the standard no-access state for a dispatcher deep-linked to ?tab=margin", async () => {
   await renderAs(["dispatcher"], "margin");
-  expect(await screen.findByText("Invoices page")).toBeInTheDocument();
+  expect(
+    await screen.findByRole("heading", {
+      name: "You don't have access to this margin page",
+    }),
+  ).toBeInTheDocument();
+  expect(
+    screen.getByText(/Ask an administrator for the admin role/),
+  ).toBeInTheDocument();
   expect(screen.queryByText("Margin hub")).not.toBeInTheDocument();
+  expect(screen.queryByText("Invoices page")).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+  expect(mockAvailability).not.toHaveBeenCalled();
 });
 
 it.each([
@@ -107,4 +129,38 @@ it("omits the badge when nothing is open", async () => {
   expect(
     screen.queryByRole("img", { name: /open margin alert/ }),
   ).not.toBeInTheDocument();
+});
+
+describe("margin feed off (404 COMMERCE_DISABLED)", () => {
+  beforeEach(() => mockAvailability.mockResolvedValue("disabled"));
+
+  it("hides the Margin tab from an admin and skips the alert badge", async () => {
+    await renderAs(["admin"]);
+    await waitFor(() => expect(mockAvailability).toHaveBeenCalled());
+    expect(
+      await screen.findByRole("tab", { name: "Invoices" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: /^Margin/ })).toBeNull();
+    expect(mockCount).not.toHaveBeenCalled();
+  });
+
+  it("says Margin isn't turned on for ?tab=margin, with no Try again", async () => {
+    await renderAs(["admin"], "margin");
+    expect(
+      await screen.findByRole("heading", {
+        name: "Margin isn't enabled for your account",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Margin hub")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Try again/ })).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Go to Invoices" }),
+    ).toHaveAttribute("href", "/dashboard/billing?tab=invoices");
+  });
+});
+
+it("keeps the tab when the probe fails for another reason (the pages show the error)", async () => {
+  mockAvailability.mockResolvedValue("unknown");
+  await renderAs(["admin"], "margin");
+  expect(await screen.findByText("Margin hub")).toBeInTheDocument();
 });
