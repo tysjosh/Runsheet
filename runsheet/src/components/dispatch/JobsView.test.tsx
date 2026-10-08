@@ -22,6 +22,7 @@ jest.mock("next/navigation", () => ({
 }));
 jest.mock("../../services/schedulingApi", () => ({
   getJobs: jest.fn(),
+  getDelayedJobs: jest.fn(),
   transitionStatus: jest.fn(),
 }));
 jest.mock("../../hooks/useSchedulingWebSocket", () => ({
@@ -32,7 +33,11 @@ jest.mock("../../utils/auth", () => ({
   getCurrentUserRoles: jest.fn(async () => ["dispatcher"]),
 }));
 
-import { getJobs, transitionStatus } from "../../services/schedulingApi";
+import {
+  getDelayedJobs,
+  getJobs,
+  transitionStatus,
+} from "../../services/schedulingApi";
 import { PageChromeProvider, PageHeader } from "../ui";
 import { GlobalToaster } from "../ui/toast/notify";
 import JobsView from "./JobsView";
@@ -60,14 +65,23 @@ const job = (
 beforeEach(() => {
   jest.clearAllMocks();
   mockParams = new URLSearchParams();
-  m(getJobs).mockResolvedValue({
-    data: [
-      job("J1", "scheduled"),
-      job("J2", "in_progress"),
-      job("J3", "in_progress", { delayed: true, delay_duration_minutes: 20 }),
-      job("J4", "failed"),
-    ],
-  });
+  const rows = [
+    job("J1", "scheduled"),
+    job("J2", "in_progress"),
+    job("J3", "in_progress", { delayed: true, delay_duration_minutes: 20 }),
+    job("J4", "failed"),
+  ];
+  // A fake of the paged endpoint: `status` filters, `size: 1` is a count read.
+  m(getJobs).mockImplementation(
+    async (f: { status?: string; size?: number } = {}) => {
+      const hit = rows.filter((r) => !f.status || r.status === f.status);
+      return {
+        data: f.size === 1 ? hit.slice(0, 1) : hit,
+        pagination: { page: 1, size: f.size ?? 20, total: hit.length },
+      };
+    },
+  );
+  m(getDelayedJobs).mockResolvedValue({ data: [rows[2]] });
 });
 
 function renderHosted() {
@@ -96,18 +110,67 @@ it("status chips carry counts and filter the list", async () => {
   renderHosted();
   await screen.findByRole("table", { name: "Job board" });
   const chips = screen.getByRole("group", { name: "Job status" });
-  expect(within(chips).getByRole("button", { name: /^All/ })).toHaveTextContent(
-    "4",
+  await waitFor(() =>
+    expect(
+      within(chips).getByRole("button", { name: /^All/ }),
+    ).toHaveTextContent("4"),
+  );
+  await waitFor(() =>
+    expect(
+      within(chips).getByRole("button", { name: /^In progress/ }),
+    ).toHaveTextContent("2"),
+  );
+  fireEvent.click(within(chips).getByRole("button", { name: /^Delayed/ }));
+  await waitFor(() => expect(getDelayedJobs).toHaveBeenCalled());
+  await waitFor(() =>
+    expect(
+      within(screen.getByRole("table", { name: "Job board" })).getAllByRole(
+        "row",
+      ),
+    ).toHaveLength(2),
   );
   expect(
-    within(chips).getByRole("button", { name: /^In progress/ }),
-  ).toHaveTextContent("2");
-  fireEvent.click(within(chips).getByRole("button", { name: /^Delayed/ }));
-  const rows = within(
-    screen.getByRole("table", { name: "Job board" }),
-  ).getAllByRole("row");
-  expect(rows).toHaveLength(2);
-  expect(rows[1]).toHaveTextContent("J3");
+    within(screen.getByRole("table", { name: "Job board" })).getAllByRole(
+      "row",
+    )[1],
+  ).toHaveTextContent("J3");
+});
+it("with more than one page, chips filter on the server, count tenant totals and page", async () => {
+  // 137 completed jobs in the tenant; the endpoint pages them.
+  const many = Array.from({ length: 50 }, (_, i) => job(`C${i}`, "completed"));
+  m(getJobs).mockImplementation(
+    async (f: { status?: string; size?: number; page?: number } = {}) => {
+      const totals: Record<string, number> = { completed: 137 };
+      const total = f.status ? (totals[f.status] ?? 0) : 160;
+      const data =
+        f.status === "completed" || !f.status ? many.slice(0, f.size) : [];
+      return { data, pagination: { page: f.page ?? 1, size: f.size, total } };
+    },
+  );
+  renderHosted();
+  await screen.findByRole("table", { name: "Job board" });
+  const chips = screen.getByRole("group", { name: "Job status" });
+  await waitFor(() =>
+    expect(
+      within(chips).getByRole("button", { name: /^Completed/ }),
+    ).toHaveTextContent("137"),
+  );
+  expect(within(chips).getByRole("button", { name: /^All/ })).toHaveTextContent(
+    "160",
+  );
+  fireEvent.click(within(chips).getByRole("button", { name: /^Completed/ }));
+  await waitFor(() =>
+    expect(getJobs).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: "completed", page: 1, size: 50 }),
+    ),
+  );
+  // 137 / 50 → three pages; the next page asks the server for page 2.
+  fireEvent.click(await screen.findByRole("button", { name: /next/i }));
+  await waitFor(() =>
+    expect(getJobs).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: "completed", page: 2, size: 50 }),
+    ),
+  );
 });
 
 it("?status=delayed (the Dashboard's link) opens on the Delayed chip", async () => {

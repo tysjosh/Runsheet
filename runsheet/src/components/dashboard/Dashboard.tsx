@@ -83,6 +83,7 @@ import {
   boardCounts,
   boardExceptions,
   boardLink,
+  exceptionsLink,
   jobCounts,
   LINKS,
   type PlanLine,
@@ -391,16 +392,18 @@ export default function Dashboard({ onCreateOrder }: DashboardProps = {}) {
       id: "delayed",
       n: counts.delayed,
       label: "delayed",
-      href: boardOn
-        ? boardLink({ date: today, status: "delayed" })
-        : LINKS.jobs("delayed"),
+      // The count is `/scheduling/jobs/delayed`; the board has no "delayed"
+      // status to filter on, so both modes open the Jobs Delayed chip.
+      href: LINKS.jobs("delayed"),
       color: "text-amber-800",
     },
     {
       id: "exceptions",
       n: counts.exceptions,
       label: counts.exceptions === 1 ? "exception" : "exceptions",
-      href: LINKS.live,
+      // The count is today's board stops in an exception status, so it opens
+      // today's board filtered to exactly those statuses.
+      href: exceptionsLink(exceptions, today),
       color: "text-red-800",
     },
     {

@@ -83,7 +83,18 @@ export function FilterChips({
     product: products.map((p) => ({ value: p, label: productName(p) })),
     priority: priorities.map((p) => ({ value: p, label: p })),
     window: FIXED.window,
-    status: FIXED.status,
+    // A deep link can filter on statuses the panel doesn't list (the
+    // Dashboard's exceptions count sends failed/rejected); show them too so
+    // the active filter is visible and can be cleared.
+    status: [
+      ...FIXED.status,
+      ...filters.status
+        .filter((v) => !FIXED.status.some((o) => o.value === v))
+        .map((v) => ({
+          value: v,
+          label: v.charAt(0).toUpperCase() + v.slice(1).replace(/_/g, " "),
+        })),
+    ],
   };
   const toggle = (key: ListKey, value: string) => {
     const current = filters[key];

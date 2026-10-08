@@ -685,7 +685,7 @@ export default function OrdersPage({
                   setStatusFilter(v as OrderStatus | "");
                   setPage(1);
                 }}
-                className="overflow-x-auto"
+                collapse
               />
               <button
                 type="button"
