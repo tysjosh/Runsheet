@@ -573,3 +573,11 @@ Findings written into the runbook:
 
 #### Open items
 - Task 41: the owner runs `staging-runbook.md`. The Phase 7 open items that depend on staging (latency numbers, the tray query on Postgres) close with it.
+
+### Final verification
+See `verification-impl.md`. In short:
+- Every CI-equivalent suite is green: backend full, Postgres (235 passed, 0 skipped), the endpoint registry, and the UI tsc, lint, unit, build and board e2e. The driver app typecheck, lint and tests pass too.
+- Task 36b (R2.8 truck type, R3.4 tanker endorsement and nearest expiry) was implemented in `31b9345`, so every plan task is ticked except task 41, which is deferred as a runbook.
+- CI blocker fixed: the N1 perf budgets failed under CI's `--cov` run (snapshot p95 3.67 s traced, 0.43 s untraced). Under coverage the budget assertion now skips. A new `backend-tests` step enforces the budgets with `--no-cov` and fails on any skip.
+- A new Postgres test runs the tray query's `must_not terms` clause on the real translator (`test_tray_excludes_drafted_orders_on_the_real_translator`), which closes that part of the Phase 7 open item. Staging latency still waits for task 41.
+- Nothing was pushed.
