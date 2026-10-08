@@ -154,7 +154,7 @@ describe("FleetTracking — ?asset= deep-link focus", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("reveals an asset hidden by the default In transit only filter", async () => {
+  it("shows every asset by default (status filter All), parked ones included", async () => {
     seedFleet([
       truckFixture({ id: "TRK-1", plateNumber: "PLATE-1", status: "on_time" }),
       truckFixture({
@@ -170,17 +170,31 @@ describe("FleetTracking — ?asset= deep-link focus", () => {
       <FleetTracking onTruckSelect={onTruckSelect} focusAssetId="TRK-PARKED" />,
     );
 
-    // Without the filter being relaxed, this row would never render.
     expect(await screen.findByText("PLATE-PARKED")).toBeInTheDocument();
     expect(rowFor("PLATE-PARKED")).toHaveClass("bg-info-light");
+    expect(rowFor("PLATE-1")).toBeInTheDocument();
     expect(onTruckSelect).toHaveBeenCalledWith(
       expect.objectContaining({ id: "TRK-PARKED" }),
     );
-    expect(
-      screen.getByLabelText<HTMLInputElement>(/in transit only/i, {
-        selector: "input",
-      }),
-    ).not.toBeChecked();
+    expect(screen.getByRole("button", { name: /All\s*2/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.queryByLabelText(/in transit only/i)).toBeNull();
+  });
+
+  it("filters by status chips with counts and badges carry a label", async () => {
+    seedFleet([
+      truckFixture({ id: "TRK-1", plateNumber: "PLATE-1", status: "on_time" }),
+      truckFixture({ id: "TRK-2", plateNumber: "PLATE-2", status: "delayed" }),
+      truckFixture({ id: "TRK-3", plateNumber: "PLATE-3", status: "delayed" }),
+    ]);
+    render(<FleetTracking />);
+    await screen.findByText("PLATE-1");
+    expect(rowFor("PLATE-2")).toHaveTextContent("Delayed");
+    fireEvent.click(screen.getByRole("button", { name: /Delayed\s*2/ }));
+    await waitFor(() => expect(screen.queryByText("PLATE-1")).toBeNull());
+    expect(screen.getByText("PLATE-3")).toBeInTheDocument();
   });
 
   it("applies focus once and does not hijack a later manual row click", async () => {
@@ -235,5 +249,101 @@ describe("FleetTracking — ?asset= deep-link focus", () => {
     expect(
       screen.queryByTestId("focus-asset-not-found"),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("FleetTracking — Add asset FormDialog and Compartments drawer", () => {
+  const mockCreate = apiService.createAsset as jest.MockedFunction<
+    typeof apiService.createAsset
+  >;
+
+  it("validates, posts the asset with its plate number and reloads", async () => {
+    seedFleet([truckFixture()]);
+    mockCreate.mockResolvedValue({
+      data: truckFixture({ id: "QA-TNK-9" }),
+      success: true,
+      timestamp: "",
+    } as never);
+    render(<FleetTracking />);
+    await screen.findByText("PLATE-1");
+    fireEvent.click(screen.getByRole("button", { name: "Add asset" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add asset" });
+    fireEvent.click(screen.getByRole("button", { name: "Create asset" }));
+    expect(await screen.findByText("Enter an asset ID.")).toBeInTheDocument();
+    expect(screen.getByText("Enter the plate number.")).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/Asset ID/), {
+      target: { value: "QA-TNK-9" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Name/), {
+      target: { value: "QA Tanker" },
+    });
+    fireEvent.change(screen.getByLabelText(/Plate number/), {
+      target: { value: "QA-123" },
+    });
+    fireEvent.change(screen.getByLabelText(/Latitude/), {
+      target: { value: "29.76043" },
+    });
+    fireEvent.change(screen.getByLabelText(/Longitude/), {
+      target: { value: "-95.3698" },
+    });
+    const loadsBefore = mockGetTrucks.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Create asset" }));
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          asset_id: "QA-TNK-9",
+          name: "QA Tanker",
+          asset_type: "vehicle",
+          asset_subtype: "fuel_truck",
+          plate_number: "QA-123",
+          current_location: expect.objectContaining({
+            coordinates: { lat: 29.76043, lon: -95.3698 },
+          }),
+        }),
+      ),
+    );
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    await waitFor(() =>
+      expect(mockGetTrucks.mock.calls.length).toBeGreaterThan(loadsBefore),
+    );
+  });
+
+  it("keeps the dialog open with the API message on failure", async () => {
+    seedFleet([truckFixture()]);
+    mockCreate.mockRejectedValue(new Error("Asset QA-TNK-9 already exists"));
+    render(<FleetTracking />);
+    await screen.findByText("PLATE-1");
+    fireEvent.click(screen.getByRole("button", { name: "Add asset" }));
+    await screen.findByRole("dialog", { name: "Add asset" });
+    fireEvent.change(screen.getByLabelText(/Asset ID/), {
+      target: { value: "QA-TNK-9" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Name/), {
+      target: { value: "QA Tanker" },
+    });
+    fireEvent.change(screen.getByLabelText(/Plate number/), {
+      target: { value: "QA-123" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create asset" }));
+    expect(
+      await screen.findByText("Asset QA-TNK-9 already exists"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("dialog", { name: "Add asset" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens Compartments in a drawer from the row menu", async () => {
+    seedFleet([truckFixture()]);
+    render(<FleetTracking />);
+    await screen.findByText("PLATE-1");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Actions for PLATE-1" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Compartments" }));
+    expect(
+      await screen.findByRole("dialog", { name: "Compartments · PLATE-1" }),
+    ).toBeInTheDocument();
   });
 });

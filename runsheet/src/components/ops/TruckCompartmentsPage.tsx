@@ -19,141 +19,91 @@
  *    the backend only persists validated ``file_ref`` references.
  *    Posts to ``POST /api/fuel/mvp/compartments/{id}/cleaning-events``.
  *
- * Styling intentionally mirrors the existing ``components/ops/``
- * surfaces (Tailwind utility classes, inline status chips, ``bg-black/30``
- * modal overlays) so this page sits alongside
- * :file:`CustomerTankPage.tsx` and :file:`SourcingPage.tsx` without
- * visual drift.
+ * UI revamp task 3.1: the configure, cleaning and eligibility flows are
+ * FormDialog / Modal (``compartmentDialogs.tsx``); capacities and dates go
+ * through ``lib/format``; products show as RP 1637 caps with names.
  *
  * Validates: Requirement 7.1.4.
  */
 
+import { Plus, RefreshCw, Search, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  AlertTriangle,
-  Check,
-  Droplets,
-  Image as ImageIcon,
-  Loader2,
-  Plus,
-  RefreshCw,
-  Search,
-  Sparkles,
-  Trash2,
-  Truck as TruckIcon,
-  Upload,
-  X,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import {
+  Button,
   type Column,
+  DataTable,
   EntityLink,
-  Table,
-  ToastContainer,
-  useToasts,
+  IconButton,
+  ProductCap,
+  ProductChip,
+  StatusBadge,
 } from "@/components/ui";
-import { ApiError } from "../../services/api";
-import {
-  type PodUploadContentType,
-  presignPodUpload,
-  putPresignedFile,
-} from "../../services/driverApi";
+import { dateTime, gallons } from "../../lib/format";
 import type {
   CleaningEvent,
-  CleaningMethod,
-  CompartmentConfigInput,
   CompartmentLifecycleState,
   CompartmentTruckSummary,
-  LoadEligibilityDecision,
-  LoadEligibilityResponse,
   TruckCompartmentState,
 } from "../../services/fuelApi";
 import {
-  checkCompartmentLoadEligibility,
-  configureCompartments,
   getTruckCompartmentCapacityGallons,
   listCompartmentTrucks,
   listTruckCompartments,
-  recordCleaningEvent,
 } from "../../services/fuelApi";
+import type { StatusKey } from "../../styles/tokens";
 import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
+import {
+  CleaningEventDialog,
+  ConfigureCompartmentsDialog,
+  LoadEligibilityDialog,
+} from "./compartmentDialogs";
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-
-const CLEANING_METHODS: { value: CleaningMethod; label: string }[] = [
-  { value: "flush", label: "Flush" },
-  { value: "purge", label: "Purge" },
-  { value: "sanitize", label: "Sanitize" },
-];
-
-/** Mirrors the backend's ``_POD_UPLOAD_ALLOWED_MIME_TYPES``. */
-const EVIDENCE_UPLOAD_TYPES: Record<string, PodUploadContentType> = {
-  "image/jpeg": "image/jpeg",
-  "image/png": "image/png",
-  "image/heic": "image/heic",
-  "application/pdf": "application/pdf",
-};
-
-const EVIDENCE_ACCEPT = Object.keys(EVIDENCE_UPLOAD_TYPES).join(",");
+// ─── State badge ─────────────────────────────────────────────────────────────
 
 /**
- * Descriptor for the state badge rendered next to each compartment.
- *
- * Exported so the unit test can assert the colour / label combinations
- * without repeating the Tailwind class strings.
+ * Compartment lifecycle state → StatusBadge style and label (icon + text,
+ * never colour alone). Exported so tests can assert the mapping.
  */
 export const STATE_BADGE_CONFIG: Record<
   CompartmentLifecycleState,
-  { label: string; color: string; bg: string; title: string }
+  { label: string; status: StatusKey; title: string }
 > = {
   clean: {
     label: "Clean",
-    color: "text-success-dark",
-    bg: "bg-success-light",
+    status: "ok",
     title: "Compartment is empty and safe to load any allowed grade.",
   },
   loaded: {
     label: "Loaded",
-    color: "text-info-dark",
-    bg: "bg-info-light",
+    status: "in_transit",
     title:
       "Compartment currently holds a product from the most recent loading plan.",
   },
   needs_cleaning: {
-    label: "Needs Cleaning",
-    color: "text-error-dark",
-    bg: "bg-error-light",
+    label: "Needs cleaning",
+    status: "critical",
     title:
-      "Cross-contamination rule triggered — record a Cleaning_Event before the next load.",
+      "Cross-contamination rule triggered: record a cleaning event before the next load.",
   },
 };
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
+/** Whole gallons through `lib/format` ("5,283 gal"), never a raw float. */
 export function formatCapacity(
   compartment: TruckCompartmentState | null | undefined,
 ): string {
   if (!compartment) return "—";
-  const gallons = getTruckCompartmentCapacityGallons(compartment);
-  if (Number.isNaN(gallons)) return "—";
-  return `${gallons.toFixed(0)} gal`;
+  const g = getTruckCompartmentCapacityGallons(compartment);
+  if (Number.isNaN(g)) return "—";
+  return gallons(g);
 }
 
+/** Date and time in the tenant time zone ("Wed 8 Oct, 08:30"). */
 export function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+  return dateTime(iso);
 }
-
-// ─── State Badge ─────────────────────────────────────────────────────────────
 
 export function CompartmentStateBadge({
   state,
@@ -162,1052 +112,20 @@ export function CompartmentStateBadge({
 }) {
   const config = STATE_BADGE_CONFIG[state] ?? STATE_BADGE_CONFIG.clean;
   return (
-    <span
-      className={`inline-flex items-center text-xs px-2 py-0.5 rounded font-medium ${config.bg} ${config.color}`}
-      title={config.title}
-      data-testid={`compartment-state-badge-${state}`}
-    >
-      {config.label}
+    <span title={config.title} data-testid={`compartment-state-badge-${state}`}>
+      <StatusBadge status={config.status} label={config.label} />
     </span>
   );
 }
 
-// ─── Cleaning Event Modal ────────────────────────────────────────────────────
-
-/** Pure validator for the cleaning-event form; exported for unit tests. */
-export interface CleaningFormValues {
-  method: CleaningMethod;
-  actor_id: string;
-  driver_id: string;
-  notes: string;
-}
-
-export interface CleaningFormErrors {
-  actor_id?: string;
-  method?: string;
-}
-
-export function validateCleaningForm(
-  values: CleaningFormValues,
-): CleaningFormErrors {
-  const errors: CleaningFormErrors = {};
-  if (!values.actor_id || !values.actor_id.trim()) {
-    errors.actor_id = "Actor ID is required.";
-  }
-  if (!CLEANING_METHODS.some((m) => m.value === values.method)) {
-    errors.method = "Method must be flush, purge, or sanitize.";
-  }
-  return errors;
-}
-
-interface EvidenceItem {
-  /** Local client id so we can list and remove before upload. */
-  id: number;
-  file: File;
-  status: "queued" | "uploading" | "uploaded" | "error";
-  /** Server-side ``file_ref`` after a successful PUT. */
-  file_ref?: string;
-  error?: string;
-}
-
-let evidenceIdCounter = 0;
-
-interface CleaningEventModalProps {
-  compartment: TruckCompartmentState;
-  onClose: () => void;
-  onSuccess: (event: CleaningEvent) => void;
-}
-
-function CleaningEventModal({
-  compartment,
-  onClose,
-  onSuccess,
-}: CleaningEventModalProps) {
-  const [form, setForm] = useState<CleaningFormValues>({
-    method: "flush",
-    actor_id: "",
-    driver_id: "",
-    notes: "",
-  });
-  const [fieldErrors, setFieldErrors] = useState<CleaningFormErrors>({});
-  const [apiError, setApiError] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [evidence, setEvidence] = useState<EvidenceItem[]>([]);
-
-  const uploadedRefs = useMemo(
-    () =>
-      evidence
-        .filter((e) => e.status === "uploaded" && e.file_ref)
-        .map((e) => e.file_ref as string),
-    [evidence],
-  );
-
-  const anyUploading = evidence.some((e) => e.status === "uploading");
-  const anyPending = evidence.some(
-    (e) => e.status === "queued" || e.status === "error",
-  );
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-  const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
-
-  function updateField<K extends keyof CleaningFormValues>(
-    key: K,
-    value: CleaningFormValues[K],
-  ) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-    if (key in fieldErrors) {
-      setFieldErrors((prev) => ({ ...prev, [key]: undefined }));
-    }
-  }
-
-  async function uploadSingle(item: EvidenceItem) {
-    const contentType: PodUploadContentType | undefined =
-      EVIDENCE_UPLOAD_TYPES[item.file.type];
-    if (!contentType) {
-      setEvidence((prev) =>
-        prev.map((e) =>
-          e.id === item.id
-            ? { ...e, status: "error", error: "Unsupported file type" }
-            : e,
-        ),
-      );
-      return;
-    }
-
-    setEvidence((prev) =>
-      prev.map((e) =>
-        e.id === item.id ? { ...e, status: "uploading", error: undefined } : e,
-      ),
-    );
-
-    try {
-      const presigned = await presignPodUpload("photo", contentType);
-      if (item.file.size > presigned.max_file_bytes) {
-        throw new Error(
-          `File exceeds tenant limit of ${Math.round(presigned.max_file_bytes / 1_000_000)} MB.`,
-        );
-      }
-      await putPresignedFile(presigned.upload_url, item.file, contentType);
-      setEvidence((prev) =>
-        prev.map((e) =>
-          e.id === item.id
-            ? { ...e, status: "uploaded", file_ref: presigned.file_ref }
-            : e,
-        ),
-      );
-    } catch (err) {
-      setEvidence((prev) =>
-        prev.map((e) =>
-          e.id === item.id
-            ? {
-                ...e,
-                status: "error",
-                error: err instanceof Error ? err.message : "Upload failed",
-              }
-            : e,
-        ),
-      );
-    }
-  }
-
-  function handleFileSelect(files: FileList | null) {
-    if (!files) return;
-    const nextItems: EvidenceItem[] = [];
-    for (const file of Array.from(files)) {
-      nextItems.push({
-        id: ++evidenceIdCounter,
-        file,
-        status: "queued",
-      });
-    }
-    setEvidence((prev) => [...prev, ...nextItems]);
-    // Kick off uploads sequentially so we don't saturate the network.
-    void (async () => {
-      for (const item of nextItems) {
-        // eslint-disable-next-line no-await-in-loop
-        await uploadSingle(item);
-      }
-    })();
-  }
-
-  function removeEvidence(id: number) {
-    setEvidence((prev) => prev.filter((e) => e.id !== id));
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const errors = validateCleaningForm(form);
-    setFieldErrors(errors);
-    if (Object.keys(errors).length > 0) return;
-
-    if (anyUploading) {
-      setApiError("Wait for evidence uploads to finish before submitting.");
-      return;
-    }
-    if (anyPending) {
-      setApiError("Retry or remove queued evidence uploads before submitting.");
-      return;
-    }
-
-    setApiError("");
-    setSubmitting(true);
-    try {
-      const event = await recordCleaningEvent(compartment.compartment_id, {
-        method: form.method,
-        actor_id: form.actor_id.trim(),
-        driver_id: form.driver_id.trim() ? form.driver_id.trim() : undefined,
-        notes: form.notes.trim() ? form.notes.trim() : undefined,
-        evidence_refs: uploadedRefs,
-      });
-      onSuccess(event);
-      onClose();
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setApiError(err.message || `Request failed (HTTP ${err.status}).`);
-      } else {
-        setApiError(
-          err instanceof Error
-            ? err.message
-            : "Failed to record cleaning event.",
-        );
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="cleaning-event-modal-title"
-    >
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-xl mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h2
-              id="cleaning-event-modal-title"
-              className="text-lg font-semibold text-primary"
-            >
-              Record cleaning event
-            </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              {compartment.truck_id} · Compartment {compartment.compartment_id}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close cleaning event form"
-          >
-            <X className="w-5 h-5" aria-hidden="true" />
-          </button>
-        </div>
-
-        <form
-          onSubmit={handleSubmit}
-          className="px-6 py-4 space-y-4"
-          data-testid="cleaning-event-form"
-        >
-          {apiError && (
-            <p
-              role="alert"
-              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-            >
-              {apiError}
-            </p>
-          )}
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ce-method"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Method
-              </label>
-              <select
-                id="ce-method"
-                className={inputClass}
-                value={form.method}
-                onChange={(e) =>
-                  updateField("method", e.target.value as CleaningMethod)
-                }
-              >
-                {CLEANING_METHODS.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="ce-actor"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Actor ID
-              </label>
-              <input
-                id="ce-actor"
-                type="text"
-                className={fieldErrors.actor_id ? errorInputClass : inputClass}
-                value={form.actor_id}
-                onChange={(e) => updateField("actor_id", e.target.value)}
-                placeholder="e.g. driver-042"
-                required
-              />
-              {fieldErrors.actor_id && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.actor_id}
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div>
-            <label
-              htmlFor="ce-notes"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Notes (optional)
-            </label>
-            <textarea
-              id="ce-notes"
-              rows={3}
-              className={inputClass}
-              value={form.notes}
-              onChange={(e) => updateField("notes", e.target.value)}
-              placeholder="Anything the next driver should know."
-            />
-          </div>
-
-          <div>
-            <label
-              htmlFor="ce-driver"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Driver (optional)
-            </label>
-            <input
-              id="ce-driver"
-              type="text"
-              className={inputClass}
-              value={form.driver_id}
-              onChange={(e) => updateField("driver_id", e.target.value)}
-              placeholder="e.g. DRV-001"
-            />
-            <p className="text-[10px] text-gray-500 mt-1">
-              Canonical driver reference linked to the Drivers module. Preferred
-              over the free-text actor id, which is retained for back-compat.
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Evidence photos (optional)
-            </label>
-            <label
-              htmlFor="ce-evidence"
-              className="flex flex-col items-center justify-center gap-2 px-4 py-6 border-2 border-dashed border-gray-200 rounded-lg cursor-pointer hover:bg-gray-50 text-sm text-gray-600"
-            >
-              <Upload className="w-5 h-5" aria-hidden="true" />
-              <span>Select photos or PDFs</span>
-              <span className="text-[10px] text-gray-500">
-                JPEG · PNG · HEIC · PDF
-              </span>
-              <input
-                id="ce-evidence"
-                type="file"
-                className="sr-only"
-                accept={EVIDENCE_ACCEPT}
-                multiple
-                data-testid="cleaning-event-evidence-input"
-                onChange={(e) => {
-                  handleFileSelect(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-            </label>
-
-            {evidence.length > 0 && (
-              <ul className="mt-2 space-y-1.5">
-                {evidence.map((item) => (
-                  <li
-                    key={item.id}
-                    className="flex items-center gap-2 px-3 py-2 rounded-md border border-gray-100 text-xs"
-                  >
-                    <ImageIcon
-                      className="w-3.5 h-3.5 text-gray-500"
-                      aria-hidden="true"
-                    />
-                    <span className="flex-1 truncate text-gray-700">
-                      {item.file.name}
-                    </span>
-                    {item.status === "uploading" && (
-                      <span className="inline-flex items-center gap-1 text-info-dark">
-                        <Loader2
-                          className="w-3 h-3 animate-spin"
-                          aria-hidden="true"
-                        />
-                        Uploading
-                      </span>
-                    )}
-                    {item.status === "uploaded" && (
-                      <span className="inline-flex items-center gap-1 text-success-dark">
-                        <Check className="w-3 h-3" aria-hidden="true" />
-                        Uploaded
-                      </span>
-                    )}
-                    {item.status === "error" && (
-                      <span className="inline-flex items-center gap-1 text-error-dark">
-                        <AlertTriangle className="w-3 h-3" aria-hidden="true" />
-                        {item.error || "Failed"}
-                      </span>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => removeEvidence(item.id)}
-                      className="p-0.5 text-gray-500 hover:text-gray-600"
-                      aria-label={`Remove ${item.file.name}`}
-                    >
-                      <X className="w-3 h-3" aria-hidden="true" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-2 border-t border-gray-100">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting || anyUploading}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
-            >
-              {submitting ? (
-                <>
-                  <Loader2
-                    className="w-3.5 h-3.5 animate-spin"
-                    aria-hidden="true"
-                  />
-                  Saving...
-                </>
-              ) : (
-                <>
-                  <Sparkles className="w-3.5 h-3.5" aria-hidden="true" />
-                  Record cleaning
-                </>
-              )}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ─── Load Eligibility Modal ──────────────────────────────────────────────────
-
-/**
- * Badge styling for each possible load-eligibility decision. Exported
- * so unit tests can assert the colour / label combinations without
- * repeating the Tailwind class strings.
- */
-export const ELIGIBILITY_DECISION_CONFIG: Record<
-  LoadEligibilityDecision,
-  { label: string; color: string; bg: string }
-> = {
-  allowed: {
-    label: "Allowed",
-    color: "text-success-dark",
-    bg: "bg-success-light",
-  },
-  blocked: {
-    label: "Blocked",
-    color: "text-error-dark",
-    bg: "bg-error-light",
-  },
-  requires_cleaning: {
-    label: "Requires cleaning",
-    color: "text-warning-dark",
-    bg: "bg-warning-light",
-  },
-};
-
-interface LoadEligibilityModalProps {
-  compartment: TruckCompartmentState;
-  onClose: () => void;
-}
-
-function LoadEligibilityModal({
-  compartment,
-  onClose,
-}: LoadEligibilityModalProps) {
-  const [productCode, setProductCode] = useState("");
-  const [result, setResult] = useState<LoadEligibilityResponse | null>(null);
-  const [apiError, setApiError] = useState("");
-  const [checking, setChecking] = useState(false);
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white uppercase";
-
-  async function handleCheck(e: React.FormEvent) {
-    e.preventDefault();
-    const trimmed = productCode.trim().toUpperCase();
-    if (!trimmed) {
-      setApiError("Product code is required.");
-      return;
-    }
-    setApiError("");
-    setChecking(true);
-    try {
-      const resp = await checkCompartmentLoadEligibility(
-        compartment.compartment_id,
-        trimmed,
-      );
-      setResult(resp);
-    } catch (err) {
-      setResult(null);
-      if (err instanceof ApiError) {
-        setApiError(err.message || `Request failed (HTTP ${err.status}).`);
-      } else {
-        setApiError(
-          err instanceof Error ? err.message : "Failed to check eligibility.",
-        );
-      }
-    } finally {
-      setChecking(false);
-    }
-  }
-
-  const decisionConfig = result
-    ? (ELIGIBILITY_DECISION_CONFIG[result.decision] ??
-      ELIGIBILITY_DECISION_CONFIG.allowed)
-    : null;
-  const governingConfig = result
-    ? (ELIGIBILITY_DECISION_CONFIG[result.governing_rule] ??
-      ELIGIBILITY_DECISION_CONFIG.allowed)
-    : null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="load-eligibility-modal-title"
-    >
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-xl mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h2
-              id="load-eligibility-modal-title"
-              className="text-lg font-semibold text-primary"
-            >
-              Check load eligibility
-            </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              Compartment {compartment.compartment_id} · Last loaded{" "}
-              <span className="font-medium text-primary">
-                {compartment.last_loaded_product ?? "none"}
-              </span>
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close load eligibility form"
-          >
-            <X className="w-5 h-5" aria-hidden="true" />
-          </button>
-        </div>
-
-        <form
-          onSubmit={handleCheck}
-          className="px-6 py-4 space-y-4"
-          data-testid="load-eligibility-form"
-        >
-          {apiError && (
-            <p
-              role="alert"
-              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-            >
-              {apiError}
-            </p>
-          )}
-
-          <div>
-            <label
-              htmlFor="le-product-code"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Proposed product code
-            </label>
-            <input
-              id="le-product-code"
-              type="text"
-              className={inputClass}
-              value={productCode}
-              onChange={(e) => setProductCode(e.target.value.toUpperCase())}
-              placeholder="e.g. DIESEL_2"
-              required
-            />
-            <p className="text-[10px] text-gray-500 mt-1">
-              Enter the canonical product code used by the compatibility matrix.
-            </p>
-          </div>
-
-          <div className="flex items-center justify-end gap-2 pt-2">
-            <button
-              type="submit"
-              disabled={checking}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
-            >
-              {checking ? (
-                <>
-                  <Loader2
-                    className="w-3.5 h-3.5 animate-spin"
-                    aria-hidden="true"
-                  />
-                  Checking...
-                </>
-              ) : (
-                <>
-                  <Search className="w-3.5 h-3.5" aria-hidden="true" />
-                  Check
-                </>
-              )}
-            </button>
-          </div>
-        </form>
-
-        {result && decisionConfig && governingConfig && (
-          <div className="px-6 pb-6" data-testid="load-eligibility-result">
-            <div className="border border-gray-200 rounded-lg p-4 space-y-3">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wide text-gray-500">
-                  Decision
-                </span>
-                <span
-                  className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded font-medium ${decisionConfig.bg} ${decisionConfig.color}`}
-                  data-testid={`load-eligibility-decision-${result.decision}`}
-                >
-                  {result.decision === "allowed" ? (
-                    <Check className="w-3 h-3" aria-hidden="true" />
-                  ) : (
-                    <AlertTriangle className="w-3 h-3" aria-hidden="true" />
-                  )}
-                  {decisionConfig.label}
-                </span>
-              </div>
-
-              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
-                <div>
-                  <dt className="text-[10px] uppercase tracking-wide text-gray-500">
-                    Proposed product
-                  </dt>
-                  <dd className="font-mono text-gray-900">
-                    {result.proposed_product}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-[10px] uppercase tracking-wide text-gray-500">
-                    Previous product
-                  </dt>
-                  <dd className="font-mono text-gray-900">
-                    {result.previous_product ?? "—"}
-                  </dd>
-                </div>
-                <div>
-                  <dt className="text-[10px] uppercase tracking-wide text-gray-500">
-                    Governing rule
-                  </dt>
-                  <dd>
-                    <span
-                      className={`inline-flex items-center text-[11px] px-1.5 py-0.5 rounded font-medium ${governingConfig.bg} ${governingConfig.color}`}
-                      data-testid={`load-eligibility-governing-${result.governing_rule}`}
-                    >
-                      {governingConfig.label}
-                    </span>
-                  </dd>
-                </div>
-                {result.reason && (
-                  <div className="sm:col-span-2">
-                    <dt className="text-[10px] uppercase tracking-wide text-gray-500">
-                      Reason
-                    </dt>
-                    <dd
-                      className="text-gray-700"
-                      data-testid="load-eligibility-reason"
-                    >
-                      {result.reason}
-                    </dd>
-                  </div>
-                )}
-              </dl>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Configure compartments modal ────────────────────────────────────────────
-
-/** Canonical US fuel product codes offered as quick-add chips. Mirrors
- * ``fuel.services.fuel_product_catalog.FUEL_PRODUCT_CATALOG`` — the backend
- * canonicalizes every allowed_grade on write and rejects unknown codes with a
- * 400, so picking from this list avoids typos and legacy aliases. */
-const COMMON_GRADES = [
-  "DIESEL_2",
-  "OFF_ROAD_DIESEL",
-  "HEATING_OIL",
-  "GASOLINE_REG",
-  "GASOLINE_PREM",
-  "PROPANE",
-  "KEROSENE",
-  "DEF",
-  "ETHANOL_E85",
-];
-
-interface CompartmentRow {
-  compartment_id: string;
-  capacity_gallons: string;
-  allowed_grades: string;
-  position_index: number;
-}
-
-function emptyRow(position: number): CompartmentRow {
-  return {
-    compartment_id: "",
-    capacity_gallons: "",
-    allowed_grades: "",
-    position_index: position,
-  };
-}
-
-/**
- * Form to define (or replace) a tanker's compartments via
- * ``PUT /api/fuel/mvp/compartments/{truck_id}``. Capacity is entered, held,
- * and submitted in gallons; ``configureCompartments`` performs the
- * liters conversion the legacy endpoint still requires at the wire boundary.
- * On success the truck is also registered in the fleet index server-side.
- */
-function ConfigureCompartmentsModal({
-  initialTruckId,
-  lockTruckId,
-  initialCompartments,
-  onClose,
-  onSuccess,
-}: {
-  initialTruckId?: string;
-  lockTruckId?: boolean;
-  initialCompartments?: TruckCompartmentState[];
-  onClose: () => void;
-  onSuccess: (truckId: string, count: number) => void;
-}) {
-  const [truckId, setTruckId] = useState(initialTruckId ?? "");
-  const [rows, setRows] = useState<CompartmentRow[]>(() => {
-    if (initialCompartments && initialCompartments.length > 0) {
-      return initialCompartments.map((c, i) => ({
-        compartment_id: c.compartment_id,
-        capacity_gallons: String(
-          Math.round(getTruckCompartmentCapacityGallons(c)),
-        ),
-        allowed_grades: c.allowed_grades.join(", "),
-        position_index: c.position_index ?? i,
-      }));
-    }
-    return [emptyRow(0)];
-  });
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-
-  const updateRow = (idx: number, patch: Partial<CompartmentRow>) => {
-    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-  };
-
-  const addRow = () => setRows((prev) => [...prev, emptyRow(prev.length)]);
-
-  const removeRow = (idx: number) =>
-    setRows((prev) => prev.filter((_, i) => i !== idx));
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const trimmedTruck = truckId.trim();
-    if (!trimmedTruck) {
-      setError("Truck ID is required.");
-      return;
-    }
-    const compartments: CompartmentConfigInput[] = [];
-    for (const [i, r] of rows.entries()) {
-      const id = r.compartment_id.trim();
-      const gallons = Number(r.capacity_gallons);
-      const grades = r.allowed_grades
-        .split(",")
-        .map((g) => g.trim())
-        .filter(Boolean);
-      if (!id) {
-        setError(`Compartment ${i + 1}: ID is required.`);
-        return;
-      }
-      if (!Number.isFinite(gallons) || gallons <= 0) {
-        setError(`Compartment ${i + 1}: capacity must be greater than 0.`);
-        return;
-      }
-      if (grades.length === 0) {
-        setError(`Compartment ${i + 1}: at least one allowed grade required.`);
-        return;
-      }
-      compartments.push({
-        compartment_id: id,
-        capacity_gallons: gallons,
-        allowed_grades: grades,
-        position_index: r.position_index,
-      });
-    }
-
-    setSubmitting(true);
-    setError("");
-    try {
-      const resp = await configureCompartments(trimmedTruck, compartments);
-      onSuccess(resp.truck_id, resp.compartments_configured);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 400) {
-        // Backend rejects unknown fuel grades with a 400; its message names
-        // the offending value. Add a hint about accepted codes.
-        setError(
-          `${err.message}. Use canonical product codes such as DIESEL_2, GASOLINE_REG, HEATING_OIL, PROPANE, or KEROSENE.`,
-        );
-      } else {
-        setError(
-          err instanceof Error ? err.message : "Failed to save compartments.",
-        );
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Configure compartments"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-          <h2 className="text-lg font-semibold text-primary flex items-center gap-2">
-            <TruckIcon className="w-5 h-5" aria-hidden="true" />
-            Configure compartments
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1 text-gray-500 hover:text-gray-700"
-            aria-label="Close"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
-          <div>
-            <label
-              htmlFor="config-truck-id"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Truck ID
-            </label>
-            <input
-              id="config-truck-id"
-              type="text"
-              value={truckId}
-              onChange={(e) => setTruckId(e.target.value)}
-              disabled={lockTruckId}
-              placeholder="e.g. TNK-001"
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white disabled:bg-gray-50 disabled:text-gray-500"
-              required
-            />
-            <p className="text-[11px] text-gray-500 mt-1">
-              A new truck ID is also registered in the fleet automatically.
-            </p>
-          </div>
-
-          <div className="space-y-3">
-            {rows.map((row, idx) => (
-              <div
-                key={idx}
-                className="border border-gray-200 rounded-lg p-3 space-y-2"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-medium text-gray-500">
-                    Compartment {idx + 1}
-                  </span>
-                  {rows.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => removeRow(idx)}
-                      className="text-gray-400 hover:text-error p-1"
-                      aria-label={`Remove compartment ${idx + 1}`}
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  )}
-                </div>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <div>
-                    <label className="block text-[11px] text-gray-500 mb-0.5">
-                      Compartment ID
-                    </label>
-                    <input
-                      type="text"
-                      value={row.compartment_id}
-                      onChange={(e) =>
-                        updateRow(idx, { compartment_id: e.target.value })
-                      }
-                      placeholder="C1"
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-gray-500 mb-0.5">
-                      Capacity (gal)
-                    </label>
-                    <input
-                      type="number"
-                      min="1"
-                      step="any"
-                      value={row.capacity_gallons}
-                      onChange={(e) =>
-                        updateRow(idx, { capacity_gallons: e.target.value })
-                      }
-                      placeholder="3000"
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-gray-500 mb-0.5">
-                      Position
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      value={row.position_index}
-                      onChange={(e) =>
-                        updateRow(idx, {
-                          position_index: Number(e.target.value),
-                        })
-                      }
-                      className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[11px] text-gray-500 mb-0.5">
-                    Allowed grades (comma-separated)
-                  </label>
-                  <input
-                    type="text"
-                    value={row.allowed_grades}
-                    onChange={(e) =>
-                      updateRow(idx, { allowed_grades: e.target.value })
-                    }
-                    placeholder="DIESEL_2, GASOLINE_REG"
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-md bg-white"
-                    required
-                  />
-                  <div className="flex flex-wrap gap-1 mt-1">
-                    {COMMON_GRADES.map((g) => (
-                      <button
-                        key={g}
-                        type="button"
-                        onClick={() => {
-                          const existing = row.allowed_grades
-                            .split(",")
-                            .map((x) => x.trim())
-                            .filter(Boolean);
-                          if (existing.includes(g)) return;
-                          updateRow(idx, {
-                            allowed_grades: [...existing, g].join(", "),
-                          });
-                        }}
-                        className="px-1.5 py-0.5 text-[10px] font-mono rounded border border-gray-200 text-gray-600 hover:bg-gray-50"
-                      >
-                        + {g}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <button
-            type="button"
-            onClick={addRow}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-primary rounded-md border border-gray-200 hover:bg-gray-50"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            Add compartment
-          </button>
-
-          {error && (
-            <p
-              role="alert"
-              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-            >
-              {error}
-            </p>
-          )}
-
-          <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-50 border border-gray-200"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
-            >
-              {submitting ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              ) : (
-                <Check className="w-3.5 h-3.5" />
-              )}
-              Save compartments
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
+export type {
+  CleaningFormErrors,
+  CleaningFormValues,
+} from "./compartmentDialogs";
+export {
+  ELIGIBILITY_DECISION_CONFIG,
+  validateCleaningForm,
+} from "./compartmentDialogs";
 
 // ─── Page ────────────────────────────────────────────────────────────────────
 
@@ -1240,7 +158,6 @@ export default function TruckCompartmentsPage({
     lock: boolean;
     items?: TruckCompartmentState[];
   } | null>(null);
-  const { toasts, addToast, dismissToast } = useToasts();
 
   const fetchCompartments = useCallback(async (id: string) => {
     setLoading(true);
@@ -1305,19 +222,19 @@ export default function TruckCompartmentsPage({
   };
 
   const handleCleaningSuccess = (event: CleaningEvent) => {
-    addToast(
-      `Cleaning event recorded (${event.method}) for ${event.compartment_id}.`,
-      "success",
-    );
+    notify({
+      type: "success",
+      message: `Cleaning event recorded (${event.method}) for ${event.compartment_id}.`,
+    });
     if (activeTruckId) void fetchCompartments(activeTruckId);
   };
 
   const handleConfigureSuccess = (savedTruckId: string, count: number) => {
     setConfigureState(null);
-    addToast(
-      `Saved ${count} compartment${count === 1 ? "" : "s"} for ${savedTruckId}.`,
-      "success",
-    );
+    notify({
+      type: "success",
+      message: `Saved ${count} compartment${count === 1 ? "" : "s"} for ${savedTruckId}.`,
+    });
     setTruckIdInput(savedTruckId);
     void fetchCompartments(savedTruckId);
     // Refresh the tanker picker so a newly-defined truck appears in the list.
@@ -1328,22 +245,13 @@ export default function TruckCompartmentsPage({
     }
   };
 
-  // Keep page scroll locked when modal is open.
-  useEffect(() => {
-    if (!modalCompartment && !eligibilityCompartment && !configureState) return;
-    const previous = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    return () => {
-      document.body.style.overflow = previous;
-    };
-  }, [modalCompartment, eligibilityCompartment, configureState]);
-
   const compartmentColumns: Column<TruckCompartmentState>[] = [
     {
       key: "position",
-      label: "Position",
-      className: "text-gray-600 font-mono text-xs",
-      render: (c) => (
+      header: "#",
+      width: 40,
+      className: "tabular-nums text-slate-700",
+      cell: (c) => (
         <span data-testid={`compartment-row-${c.compartment_id}`}>
           {c.position_index}
         </span>
@@ -1351,32 +259,32 @@ export default function TruckCompartmentsPage({
     },
     {
       key: "compartment",
-      label: "Compartment",
-      className: "text-primary font-medium font-mono text-xs",
-      render: (c) => c.compartment_id,
+      header: "Compartment",
+      className: "font-mono text-xs font-medium text-text",
+      cell: (c) => c.compartment_id,
     },
     {
       key: "state",
-      label: "State",
-      render: (c) => <CompartmentStateBadge state={c.state} />,
+      header: "State",
+      width: 140,
+      cell: (c) => <CompartmentStateBadge state={c.state} />,
     },
     {
       key: "capacity",
-      label: "Capacity",
-      className: "text-gray-600 text-xs",
-      render: (c) => formatCapacity(c),
+      header: "Capacity",
+      align: "right",
+      width: 100,
+      className: "tabular-nums text-slate-700",
+      cell: (c) => formatCapacity(c),
     },
     {
       key: "last_loaded",
-      label: "Last loaded",
-      className: "text-gray-600 text-xs",
-      render: (c) =>
+      header: "Last loaded",
+      cell: (c) =>
         c.last_loaded_product ? (
-          <span>
-            <span className="font-medium text-primary">
-              {c.last_loaded_product}
-            </span>
-            <span className="block text-[10px] text-gray-500">
+          <span className="block">
+            <ProductChip code={c.last_loaded_product} variant="chip" />
+            <span className="block text-xs text-text-muted">
               {formatTimestamp(c.last_loaded_at)}
             </span>
           </span>
@@ -1386,94 +294,98 @@ export default function TruckCompartmentsPage({
     },
     {
       key: "last_cleaned",
-      label: "Last cleaned",
-      className: "text-gray-600 text-xs",
-      render: (c) => formatTimestamp(c.last_cleaned_at),
+      header: "Last cleaned",
+      className: "text-xs text-slate-700 whitespace-nowrap",
+      cell: (c) => formatTimestamp(c.last_cleaned_at),
     },
     {
       key: "allowed_grades",
-      label: "Allowed grades",
-      className: "text-gray-600 text-xs",
-      render: (c) =>
-        c.allowed_grades.length > 0 ? c.allowed_grades.join(", ") : "—",
+      header: "Allowed",
+      cell: (c) =>
+        c.allowed_grades.length > 0 ? (
+          <span className="flex flex-wrap gap-0.5">
+            {c.allowed_grades.map((g) => (
+              <ProductCap key={g} code={g} />
+            ))}
+          </span>
+        ) : (
+          "—"
+        ),
     },
     {
       key: "actions",
-      label: "Actions",
+      header: <span className="sr-only">Actions</span>,
       align: "right",
-      render: (c) => (
-        <div className="inline-flex items-center gap-1.5 justify-end">
-          <button
-            type="button"
+      cell: (c) => (
+        <div className="inline-flex items-center justify-end gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
             onClick={() => setEligibilityCompartment(c)}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-primary rounded-md bg-white border border-gray-200 hover:bg-gray-50"
             data-testid={`check-eligibility-${c.compartment_id}`}
+            icon={<Search className="h-3 w-3" aria-hidden="true" />}
           >
-            <Search className="w-3 h-3" aria-hidden="true" />
-            Check eligibility
-          </button>
-          <button
-            type="button"
+            Check
+          </Button>
+          <Button
+            variant={c.state === "needs_cleaning" ? "primary" : "secondary"}
+            size="sm"
             onClick={() => setModalCompartment(c)}
-            className="inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white rounded-md bg-primary hover:bg-primary-hover"
             data-testid={`record-cleaning-${c.compartment_id}`}
+            icon={<Sparkles className="h-3 w-3" aria-hidden="true" />}
           >
-            <Sparkles className="w-3 h-3" aria-hidden="true" />
             Record cleaning
-          </button>
+          </Button>
         </div>
       ),
     },
   ];
 
+  const configureLabel =
+    activeTruckId && items.length > 0
+      ? "Edit compartments"
+      : "Configure compartments";
+
   return (
     <div
       className={
-        embedded
-          ? "flex flex-col"
-          : "flex-1 flex flex-col p-6 bg-gray-50 overflow-auto"
+        embedded ? "flex flex-col" : "flex flex-1 flex-col overflow-auto"
       }
     >
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      <div
-        className={
-          embedded
-            ? "w-full"
-            : "bg-white rounded-xl border border-gray-200 p-6 max-w-6xl w-full mx-auto"
-        }
-      >
-        <div className="flex items-start justify-between gap-4 mb-6">
-          <div>
-            <PageTitle className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
-              <TruckIcon className="w-5 h-5" aria-hidden="true" />
-              Truck compartments
-            </PageTitle>
-            <p className="text-sm text-gray-500">
-              Review compartment state and record a cleaning event when the
-              cross-contamination guard flags a compartment as{" "}
-              <span className="font-medium text-error-dark">
-                needs_cleaning
-              </span>
-              .
+      {!embedded && (
+        <div className="flex h-11 shrink-0 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Truck compartments
+          </PageTitle>
+        </div>
+      )}
+      <div className={embedded ? "w-full" : "w-full p-4"}>
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          {activeTruckId && (
+            <p
+              className="flex items-center gap-1.5 text-xs text-text-muted"
+              data-testid="truck-fleet-link"
+            >
+              Fleet asset:{" "}
+              <EntityLink type="asset" id={activeTruckId} className="text-xs" />
             </p>
+          )}
+          <div className="ml-auto flex items-center gap-1.5">
             {activeTruckId && (
-              <p
-                className="text-xs text-gray-500 mt-2 flex items-center gap-1.5"
-                data-testid="truck-fleet-link"
-              >
-                <TruckIcon className="w-3.5 h-3.5" aria-hidden="true" />
-                Fleet asset:{" "}
-                <EntityLink
-                  type="asset"
-                  id={activeTruckId}
-                  className="text-xs"
-                />
-              </p>
+              <IconButton
+                label="Refresh compartments"
+                size="sm"
+                onClick={handleRefresh}
+                disabled={loading}
+                icon={
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+                  />
+                }
+              />
             )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
+            <Button
+              size="sm"
               onClick={() =>
                 setConfigureState(
                   activeTruckId
@@ -1481,112 +393,81 @@ export default function TruckCompartmentsPage({
                     : { lock: false },
                 )
               }
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
               data-testid="configure-compartments-btn"
+              icon={<Plus className="h-3.5 w-3.5" aria-hidden="true" />}
             >
-              <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-              {activeTruckId && items.length > 0
-                ? "Edit compartments"
-                : "Configure compartments"}
-            </button>
-            {activeTruckId && (
-              <button
-                type="button"
-                onClick={handleRefresh}
-                disabled={loading}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200 disabled:opacity-50"
-                aria-label="Refresh compartments"
-              >
-                <RefreshCw
-                  className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
-                  aria-hidden="true"
-                />
-                Refresh
-              </button>
-            )}
+              {configureLabel}
+            </Button>
           </div>
         </div>
 
         {!truckId && (
           <form
-            className="flex items-end gap-3 mb-6"
+            className="mb-3 flex items-end gap-2"
             onSubmit={handleLookup}
             data-testid="truck-lookup-form"
           >
             <div className="flex-1">
               <label
                 htmlFor="truck-id-input"
-                className="block text-xs font-medium text-gray-600 mb-1"
+                className="mb-1 block text-xs font-medium text-slate-700"
               >
                 Truck ID
               </label>
-              <div className="relative">
-                <Search
-                  className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
-                  aria-hidden="true"
-                />
-                <input
-                  id="truck-id-input"
-                  type="text"
-                  list="compartment-truck-options"
-                  className="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
-                  value={truckIdInput}
-                  onChange={(e) => setTruckIdInput(e.target.value)}
-                  placeholder={
-                    truckOptions.length > 0
-                      ? `e.g. ${truckOptions[0].truck_id}`
-                      : "e.g. TNK-001"
-                  }
-                  required
-                />
-                <datalist id="compartment-truck-options">
-                  {truckOptions.map((t) => (
-                    <option key={t.truck_id} value={t.truck_id}>
-                      {t.truck_id} ({t.compartment_count} compartments)
-                    </option>
-                  ))}
-                </datalist>
-              </div>
+              <input
+                id="truck-id-input"
+                type="text"
+                list="compartment-truck-options"
+                className="h-8 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-sm text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+                value={truckIdInput}
+                onChange={(e) => setTruckIdInput(e.target.value)}
+                placeholder={
+                  truckOptions.length > 0
+                    ? `e.g. ${truckOptions[0].truck_id}`
+                    : "e.g. TNK-001"
+                }
+              />
+              <datalist id="compartment-truck-options">
+                {truckOptions.map((t) => (
+                  <option key={t.truck_id} value={t.truck_id}>
+                    {t.truck_id} ({t.compartment_count} compartments)
+                  </option>
+                ))}
+              </datalist>
             </div>
-            <button
+            <Button
               type="submit"
-              disabled={loading}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
+              loading={loading}
+              icon={<Search className="h-3.5 w-3.5" aria-hidden="true" />}
             >
-              {loading ? (
-                <Loader2
-                  className="w-3.5 h-3.5 animate-spin"
-                  aria-hidden="true"
-                />
-              ) : (
-                <Search className="w-3.5 h-3.5" aria-hidden="true" />
-              )}
               Load compartments
-            </button>
+            </Button>
           </form>
         )}
 
         {truckOptions.length > 0 && !truckId && (
-          <div className="flex flex-wrap items-center gap-2 mb-6 -mt-2">
-            <span className="text-xs text-gray-500">Tankers:</span>
+          <div
+            role="group"
+            aria-label="Tankers"
+            className="mb-3 flex flex-wrap items-center gap-1.5"
+          >
             {truckOptions.map((t) => (
               <button
                 key={t.truck_id}
                 type="button"
+                aria-pressed={activeTruckId === t.truck_id}
                 onClick={() => {
                   setTruckIdInput(t.truck_id);
                   void fetchCompartments(t.truck_id);
                 }}
-                className={`px-2.5 py-1 text-xs font-mono rounded-full border transition-colors ${
+                className={`h-7 rounded-full border px-2.5 font-mono text-xs focus:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
                   activeTruckId === t.truck_id
-                    ? "bg-primary text-white border-primary"
-                    : "bg-white text-gray-700 border-gray-200 hover:bg-gray-50"
+                    ? "border-primary bg-primary-soft text-brand-800"
+                    : "border-slate-300 bg-surface text-slate-700 hover:bg-slate-50"
                 }`}
               >
                 {t.truck_id}
-                <span
-                  className={`ml-1 ${activeTruckId === t.truck_id ? "text-white/80" : "text-gray-500"}`}
-                >
+                <span className="ml-1 text-slate-600">
                   · {t.compartment_count}
                 </span>
               </button>
@@ -1597,90 +478,63 @@ export default function TruckCompartmentsPage({
         {error && (
           <p
             role="alert"
-            className="text-sm text-error bg-error-light px-3 py-2 rounded-lg mb-4"
+            className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800"
           >
             {error}
           </p>
         )}
 
         {!activeTruckId && !error && !loading && !truckId && (
-          <div className="text-center py-16 text-gray-500 text-sm">
+          <div className="py-12 text-center text-sm text-text-muted">
             {!truckOptionsLoaded ? (
-              <span className="inline-flex items-center gap-2">
-                <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-                Loading tankers…
-              </span>
+              "Loading tankers…"
             ) : truckOptions.length === 0 ? (
-              <div className="flex flex-col items-center gap-3">
-                <span>No trucks have compartments configured yet.</span>
-                <button
-                  type="button"
-                  onClick={() => setConfigureState({ lock: false })}
-                  className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
-                >
-                  <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-                  Configure a tanker
-                </button>
-              </div>
+              <span>No trucks have compartments configured yet.</span>
             ) : (
               "Select a tanker above to see its compartments."
             )}
           </div>
         )}
 
-        {activeTruckId && !loading && items.length === 0 && (
-          <div className="text-center py-16 border border-dashed border-gray-200 rounded-lg">
-            <Droplets
-              className="w-10 h-10 mx-auto text-gray-300 mb-2"
-              aria-hidden="true"
-            />
-            <p className="text-sm font-medium text-gray-700">
+        {activeTruckId && !loading && items.length === 0 && !error && (
+          <div className="rounded-lg border border-dashed border-slate-300 py-10 text-center">
+            <p className="text-sm font-medium text-slate-800">
               No compartments configured for{" "}
               <span className="font-mono">{activeTruckId}</span>
             </p>
-            <p className="text-xs text-gray-500 mt-1 mb-3">
+            <p className="mt-1 text-xs text-text-muted">
               Define this tanker's compartments to enable load planning.
             </p>
-            <button
-              type="button"
-              onClick={() =>
-                setConfigureState({ truckId: activeTruckId, lock: true })
-              }
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover"
-            >
-              <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-              Configure compartments
-            </button>
           </div>
         )}
 
-        {items.length > 0 && (
-          <Table<TruckCompartmentState>
+        {(items.length > 0 || (loading && !!activeTruckId)) && (
+          <DataTable<TruckCompartmentState>
             ariaLabel="Truck compartments"
-            variant="compact"
-            className="border border-gray-100 rounded-lg"
+            rowHeight="compact"
             columns={compartmentColumns}
-            data={items}
+            data={loading ? [] : items}
+            loading={loading}
             getRowId={(c) => c.compartment_id}
           />
         )}
       </div>
 
       {modalCompartment && (
-        <CleaningEventModal
+        <CleaningEventDialog
           compartment={modalCompartment}
           onClose={() => setModalCompartment(null)}
           onSuccess={handleCleaningSuccess}
         />
       )}
       {eligibilityCompartment && (
-        <LoadEligibilityModal
+        <LoadEligibilityDialog
           compartment={eligibilityCompartment}
           onClose={() => setEligibilityCompartment(null)}
         />
       )}
       {configureState && (
-        <ConfigureCompartmentsModal
+        <ConfigureCompartmentsDialog
           initialTruckId={configureState.truckId}
           lockTruckId={configureState.lock}
           initialCompartments={configureState.items}

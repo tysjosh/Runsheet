@@ -31,7 +31,10 @@ interface FleetDashboardProps {
    * actually selected.
    */
   focusAssetId?: string | null;
-  /** Navigate to a top-level dashboard module (e.g. "compliance"). */
+  /**
+   * Navigate to a top-level dashboard module. Kept for callers; the expiry
+   * chip now links to Compliance directly.
+   */
   onNavigate?: (item: string) => void;
 }
 
@@ -58,7 +61,6 @@ export default function FleetDashboard({
   onTruckSelect,
   mapView,
   focusAssetId,
-  onNavigate,
 }: FleetDashboardProps) {
   const { tabs, active, setActive, shows } = useHubTabs(TABS, {
     aliases: { assets: "trucks" },
@@ -66,7 +68,7 @@ export default function FleetDashboard({
   });
   return (
     <PageChromeProvider>
-      <div className="flex-1 flex flex-col h-full bg-gray-50">
+      <div className="flex-1 flex flex-col h-full bg-surface">
         <PageHeader
           host
           title="Fleet"
@@ -74,6 +76,13 @@ export default function FleetDashboard({
           tab={active}
           onTabChange={setActive}
           tabIdBase="fleet"
+          counts={
+            // Compliance expiry as one title-row chip linking to Compliance
+            // (design §6 rule 4); hidden when everything is current.
+            <ErrorBoundary componentName="Expiry Alerts">
+              <ExpiryAlertWidget />
+            </ErrorBoundary>
+          }
         />
         <TabPanel
           idBase="fleet"
@@ -81,33 +90,19 @@ export default function FleetDashboard({
           className="flex-1 min-h-0 overflow-hidden"
         >
           {shows("trucks") && (
-            <div className="flex flex-col gap-4 h-full p-4 overflow-auto">
-              <ErrorBoundary componentName="Expiry Alerts">
-                <ExpiryAlertWidget
-                  onViewCertifications={
-                    onNavigate ? () => onNavigate("compliance") : undefined
-                  }
-                  onViewDrivers={
-                    onNavigate ? () => setActive("drivers") : undefined
-                  }
-                />
-              </ErrorBoundary>
-              <div className="flex flex-col lg:flex-row gap-4 flex-1 min-h-0">
-                <div className="w-full lg:w-1/2 min-h-[360px] lg:min-h-0 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  <ErrorBoundary componentName="Fleet Tracking">
-                    <Suspense
-                      fallback={<LoadingSpinner message="Loading..." />}
-                    >
-                      <FleetTracking
-                        onTruckSelect={onTruckSelect}
-                        focusAssetId={focusAssetId}
-                      />
-                    </Suspense>
-                  </ErrorBoundary>
-                </div>
-                <div className="w-full lg:w-1/2 min-h-[360px] lg:min-h-0 bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-                  {mapView}
-                </div>
+            <div className="flex h-full min-h-0 flex-col lg:flex-row">
+              <div className="min-h-[360px] w-full overflow-hidden border-slate-200 bg-surface lg:min-h-0 lg:w-3/5 lg:border-r">
+                <ErrorBoundary componentName="Fleet Tracking">
+                  <Suspense fallback={<LoadingSpinner message="Loading..." />}>
+                    <FleetTracking
+                      onTruckSelect={onTruckSelect}
+                      focusAssetId={focusAssetId}
+                    />
+                  </Suspense>
+                </ErrorBoundary>
+              </div>
+              <div className="min-h-[360px] w-full overflow-hidden bg-surface lg:min-h-0 lg:w-2/5">
+                {mapView}
               </div>
             </div>
           )}

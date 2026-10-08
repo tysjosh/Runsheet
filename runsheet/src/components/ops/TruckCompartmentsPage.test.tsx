@@ -224,25 +224,25 @@ describe("STATE_BADGE_CONFIG", () => {
 // ─── Badge component ─────────────────────────────────────────────────────────
 
 describe("CompartmentStateBadge", () => {
-  it("renders the needs_cleaning label with red styling", () => {
+  it("renders the needs_cleaning label in the critical style", () => {
     render(<CompartmentStateBadge state="needs_cleaning" />);
     const badge = screen.getByTestId("compartment-state-badge-needs_cleaning");
     expect(badge).toHaveTextContent(/needs cleaning/i);
-    expect(badge.className).toMatch(/bg-error-light/);
+    expect(badge.querySelector("[data-status='critical']")).not.toBeNull();
   });
 
-  it("renders the clean label with green styling", () => {
+  it("renders the clean label in the ok style", () => {
     render(<CompartmentStateBadge state="clean" />);
     const badge = screen.getByTestId("compartment-state-badge-clean");
     expect(badge).toHaveTextContent(/clean/i);
-    expect(badge.className).toMatch(/bg-success-light/);
+    expect(badge.querySelector("[data-status='ok']")).not.toBeNull();
   });
 
-  it("renders the loaded label with blue styling", () => {
+  it("renders the loaded label in the in-transit style", () => {
     render(<CompartmentStateBadge state="loaded" />);
     const badge = screen.getByTestId("compartment-state-badge-loaded");
     expect(badge).toHaveTextContent(/loaded/i);
-    expect(badge.className).toMatch(/bg-info-light/);
+    expect(badge.querySelector("[data-status='in_transit']")).not.toBeNull();
   });
 });
 
@@ -415,7 +415,11 @@ describe("TruckCompartmentsPage", () => {
       target: { value: "driver-042" },
     });
     await act(async () => {
-      fireEvent.submit(screen.getByTestId("cleaning-event-form"));
+      fireEvent.click(
+        within(
+          screen.getByRole("dialog", { name: "Record cleaning event" }),
+        ).getByRole("button", { name: "Record cleaning" }),
+      );
     });
 
     await waitFor(() => {
@@ -452,7 +456,11 @@ describe("TruckCompartmentsPage", () => {
     fireEvent.click(screen.getByTestId("record-cleaning-TRUCK-1_c1"));
     // Leave actor_id blank.
     await act(async () => {
-      fireEvent.submit(screen.getByTestId("cleaning-event-form"));
+      fireEvent.click(
+        within(
+          screen.getByRole("dialog", { name: "Record cleaning event" }),
+        ).getByRole("button", { name: "Record cleaning" }),
+      );
     });
 
     expect(mockRecord).not.toHaveBeenCalled();
@@ -506,7 +514,11 @@ describe("TruckCompartmentsPage", () => {
       target: { value: "driver-042" },
     });
     await act(async () => {
-      fireEvent.submit(screen.getByTestId("cleaning-event-form"));
+      fireEvent.click(
+        within(
+          screen.getByRole("dialog", { name: "Record cleaning event" }),
+        ).getByRole("button", { name: "Record cleaning" }),
+      );
     });
 
     await waitFor(() => {
@@ -571,9 +583,12 @@ describe("TruckCompartmentsPage", () => {
     });
     fireEvent.click(screen.getByTestId("check-eligibility-TRUCK-1_c1"));
 
-    fireEvent.change(screen.getByLabelText(/Proposed product code/i), {
-      target: { value: "diesel_2" },
-    });
+    fireEvent.click(screen.getByRole("combobox", { name: /Proposed product/ }));
+    fireEvent.click(
+      within(screen.getByRole("listbox")).getByRole("option", {
+        name: /Diesel #2/,
+      }),
+    );
     await act(async () => {
       fireEvent.submit(screen.getByTestId("load-eligibility-form"));
     });
@@ -644,25 +659,86 @@ describe("ConfigureCompartmentsModal", () => {
     return screen.getByRole("dialog", { name: /Configure compartments/i });
   }
 
-  it("offers canonical US product codes and no legacy NG aliases", async () => {
+  it("offers every catalog product by name and no legacy NG aliases", async () => {
     const dialog = await openModal();
-
-    // Canonical catalog codes are offered as quick-add chips.
-    for (const code of ["DIESEL_2", "GASOLINE_REG", "HEATING_OIL", "PROPANE"]) {
-      expect(
-        within(dialog).getByRole("button", { name: `+ ${code}` }),
-      ).toBeInTheDocument();
+    const group = within(dialog).getByRole("group", {
+      name: "Allowed products",
+    });
+    for (const name of [
+      /Diesel #2/,
+      /Regular unleaded/,
+      /Heating oil/i,
+      /Propane/,
+    ]) {
+      expect(within(group).getByRole("button", { name })).toHaveAttribute(
+        "aria-pressed",
+        "false",
+      );
     }
-    // The retired Nigerian grades are gone from the UI.
-    for (const alias of ["AGO", "PMS", "ATK", "LPG"]) {
+    // The retired Nigerian grades are gone from the UI, and no raw codes
+    // are the visible labels.
+    for (const alias of ["AGO", "PMS", "ATK", "LPG", "DIESEL_2"]) {
       expect(
-        within(dialog).queryByRole("button", { name: `+ ${alias}` }),
+        within(group).queryByRole("button", { name: alias }),
       ).not.toBeInTheDocument();
     }
-    // ...including the free-text hint.
+  });
+
+  it("shows a stored fractional capacity as whole gallons and sends it back unchanged", async () => {
+    mockConfigure.mockResolvedValue({
+      truck_id: "TRUCK-1",
+      compartments_configured: 1,
+      status: "ok",
+    });
+    mockList.mockResolvedValue(
+      listResponseFixture([
+        compartmentFixture({
+          capacity_gallons: 5283.441047162968,
+          allowed_grades: ["DIESEL_2"],
+        } as never),
+      ]),
+    );
+    render(<TruckCompartmentsPage truckId="TRUCK-1" embedded />);
+    await screen.findByTestId("compartment-row-TRUCK-1_c1");
+    expect(screen.getByText("5,283 gal")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("configure-compartments-btn"));
+    const dialog = screen.getByRole("dialog", { name: /Edit compartments/i });
+    const cap = within(dialog).getByLabelText(/^Capacity/) as HTMLInputElement;
+    expect(cap.value).toBe("5,283");
+    expect(cap.type).toBe("text");
+    // Change an unrelated field so the form is dirty.
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: /Regular unleaded/ }),
+    );
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: /Save compartments/i }),
+      );
+    });
+    expect(mockConfigure).toHaveBeenCalledWith("TRUCK-1", [
+      expect.objectContaining({
+        capacity_gallons: 5283.441047162968,
+        allowed_grades: ["DIESEL_2", "GASOLINE_REG"],
+      }),
+    ]);
+  });
+
+  it("shows inline row errors and does not submit an incomplete compartment", async () => {
+    const dialog = await openModal();
+    await act(async () => {
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: /Save compartments/i }),
+      );
+    });
+    expect(within(dialog).getByText("Enter the truck ID.")).toBeInTheDocument();
+    expect(within(dialog).getByText("Enter an ID.")).toBeInTheDocument();
     expect(
-      within(dialog).getByPlaceholderText("DIESEL_2, GASOLINE_REG"),
+      within(dialog).getByText("Capacity must be above 0."),
     ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Pick at least one product."),
+    ).toBeInTheDocument();
+    expect(mockConfigure).not.toHaveBeenCalled();
   });
 
   it("submits capacity in gallons — liters conversion stays at the API boundary", async () => {
@@ -680,10 +756,10 @@ describe("ConfigureCompartmentsModal", () => {
     fireEvent.change(within(dialog).getByPlaceholderText("C1"), {
       target: { value: "C1" },
     });
-    fireEvent.change(within(dialog).getByPlaceholderText("3000"), {
-      target: { value: "3000" },
+    fireEvent.change(within(dialog).getByPlaceholderText("3,000"), {
+      target: { value: "3,000" },
     });
-    fireEvent.click(within(dialog).getByRole("button", { name: "+ DIESEL_2" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /Diesel #2/ }));
 
     await act(async () => {
       fireEvent.click(

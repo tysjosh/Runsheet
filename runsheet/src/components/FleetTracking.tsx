@@ -1,37 +1,49 @@
-import { Boxes, FileText, Plus, RefreshCw, X } from "lucide-react";
+"use client";
+
+/**
+ * Fleet → Trucks tracking table (UI revamp task 3.1): one toolbar (search,
+ * status chips with counts, a Filters popover for asset type), a DataTable
+ * with status and compliance badges, Compartments in a drawer from the row
+ * menu, and "Add asset" in Fleet's title row (FormDialog). The default view
+ * shows every asset ("All"); the old "In transit only" default hid parked
+ * and loading trucks.
+ */
+import { Boxes, Plus, RefreshCw, X } from "lucide-react";
 import {
   lazy,
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
 import { type LocationUpdateData, useFleetWebSocket } from "../hooks";
-import { useDialogA11y } from "../hooks/useDialogA11y";
-import type {
-  AssetComplianceSummary,
-  CreateAssetPayload,
-} from "../services/api";
-import { ApiError, apiService } from "../services/api";
+import { humanize, number, relative } from "../lib/format";
+import type { AssetComplianceSummary } from "../services/api";
+import { apiService } from "../services/api";
+import type { StatusKey } from "../styles/tokens";
 import type {
   AssetSubtype,
   AssetSummary,
   AssetType,
   Truck,
 } from "../types/api";
+import AddAssetDialog, { subtypeLabel } from "./fleet/AddAssetDialog";
 import LoadingSpinner from "./LoadingSpinner";
 import {
-  Badge,
-  type BadgeVariant,
   Button,
   type Column,
-  EmptyState,
-  FilterBar,
-  PageHeader,
-  Pagination,
-  StatsBar,
-  Table,
+  DataTable,
+  Drawer,
+  Field,
+  FilterChips,
+  FilterPopover,
+  IconButton,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "./ui";
 import { WebSocketStatusBadge } from "./WebSocketStatus";
 
@@ -42,25 +54,28 @@ const TruckCompartmentsPage = lazy(() => import("./ops/TruckCompartmentsPage"));
 /** Rows per page in the tracking table. */
 const PAGE_SIZE = 20;
 
-/** Statuses kept by the default "In transit only" filter. */
-const IN_TRANSIT_STATUSES = ["on_time", "delayed"];
+/** Truck status → badge style and label (icon + text, never colour alone). */
+export const TRUCK_STATUS: Record<
+  string,
+  { status: StatusKey; label: string }
+> = {
+  on_time: { status: "ok", label: "On time" },
+  delayed: { status: "delayed", label: "Delayed" },
+  stopped: { status: "warning", label: "Stopped" },
+  loading: { status: "dispatched", label: "Loading" },
+  unloading: { status: "in_transit", label: "Unloading" },
+  maintenance: { status: "draft", label: "Maintenance" },
+};
+const STATUS_ORDER = Object.keys(TRUCK_STATUS);
 
 /** Filter options for the asset type dropdown */
 const ASSET_TYPE_OPTIONS: { label: string; value: AssetType | "all" }[] = [
-  { label: "All", value: "all" },
+  { label: "All types", value: "all" },
   { label: "Vehicles", value: "vehicle" },
   { label: "Vessels", value: "vessel" },
   { label: "Equipment", value: "equipment" },
   { label: "Containers", value: "container" },
 ];
-
-/** Display labels for asset types in the summary bar */
-const ASSET_TYPE_LABELS: Record<AssetType, { label: string; icon: string }> = {
-  vehicle: { label: "Vehicles", icon: "🚛" },
-  vessel: { label: "Vessels", icon: "🚢" },
-  equipment: { label: "Equipment", icon: "🏗️" },
-  container: { label: "Containers", icon: "📦" },
-};
 
 /**
  * Chip styling for the per-asset compliance signal sourced from
@@ -70,316 +85,12 @@ const ASSET_TYPE_LABELS: Record<AssetType, { label: string; icon: string }> = {
  */
 const COMPLIANCE_CHIP: Record<
   Exclude<AssetComplianceSummary["overall_status"], "unknown">,
-  { variant: BadgeVariant; label: string }
+  { status: StatusKey; label: string }
 > = {
-  expired: { variant: "error", label: "Expired" },
-  expiring: { variant: "warning", label: "Expiring" },
-  valid: { variant: "success", label: "Valid" },
+  expired: { status: "critical", label: "Expired" },
+  expiring: { status: "warning", label: "Expiring" },
+  valid: { status: "ok", label: "Valid" },
 };
-
-/** Asset subtype options grouped by the parent asset type. */
-const SUBTYPE_OPTIONS: Record<AssetType, AssetSubtype[]> = {
-  vehicle: ["truck", "fuel_truck", "personnel_vehicle"],
-  vessel: ["boat", "barge"],
-  equipment: ["crane", "forklift"],
-  container: ["cargo_container", "ISO_tank"],
-};
-
-function labelize(value: string): string {
-  return value.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
-}
-
-/**
- * Create a fleet asset (truck/tanker/vessel/…) via POST /fleet/assets.
- * The operator can add a tanker here; its compartments are then defined
- * from the row's Compartments slide-over (or auto-registered when
- * compartments are configured).
- */
-function AddAssetModal({
-  onClose,
-  onCreated,
-}: {
-  onClose: () => void;
-  onCreated: () => void;
-}) {
-  const [assetId, setAssetId] = useState("");
-  const [name, setName] = useState("");
-  const [assetType, setAssetType] = useState<AssetType>("vehicle");
-  const [assetSubtype, setAssetSubtype] = useState<AssetSubtype>("fuel_truck");
-  // Type-specific identifier the backend requires (plate/vessel/container).
-  const [identifier, setIdentifier] = useState("");
-  const [address, setAddress] = useState("");
-  const [lat, setLat] = useState("0");
-  const [lon, setLon] = useState("0");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-
-  // Which type-specific identifier is required for the selected type.
-  const identifierField =
-    assetType === "vehicle"
-      ? { key: "plate_number" as const, label: "Plate number" }
-      : assetType === "vessel"
-        ? { key: "vessel_name" as const, label: "Vessel name" }
-        : assetType === "container"
-          ? { key: "container_number" as const, label: "Container number" }
-          : null; // equipment needs no extra identifier
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const id = assetId.trim();
-    if (!id || !name.trim()) {
-      setError("Asset ID and name are required.");
-      return;
-    }
-    if (identifierField && !identifier.trim()) {
-      setError(
-        `${identifierField.label} is required for ${labelize(assetType)} assets.`,
-      );
-      return;
-    }
-    const latNum = Number(lat);
-    const lonNum = Number(lon);
-    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) {
-      setError("Latitude and longitude must be numbers.");
-      return;
-    }
-    const trimmedAddress = address.trim() || "Unspecified";
-    const payload: CreateAssetPayload = {
-      asset_id: id,
-      asset_type: assetType,
-      asset_subtype: assetSubtype,
-      name: name.trim(),
-      status: "active",
-      current_location: {
-        id: `loc-${id}`,
-        name: trimmedAddress,
-        type: "site",
-        coordinates: { lat: latNum, lon: lonNum },
-        address: trimmedAddress,
-      },
-      ...(identifierField ? { [identifierField.key]: identifier.trim() } : {}),
-    };
-    setSubmitting(true);
-    setError("");
-    try {
-      await apiService.createAsset(payload);
-      onCreated();
-    } catch (err) {
-      setError(
-        err instanceof ApiError
-          ? err.message
-          : err instanceof Error
-            ? err.message
-            : "Failed to create asset.",
-      );
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <div
-      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30 p-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Add asset"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white rounded-xl shadow-xl w-full max-w-lg max-h-[90vh] overflow-y-auto"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-          <h2 className="text-lg font-semibold text-primary">Add asset</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded p-1 text-gray-500 hover:text-gray-700"
-            aria-label="Close"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label
-                htmlFor="asset-id"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Asset ID
-              </label>
-              <input
-                id="asset-id"
-                type="text"
-                value={assetId}
-                onChange={(e) => setAssetId(e.target.value)}
-                placeholder="TNK-001"
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-                required
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="asset-name"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Name
-              </label>
-              <input
-                id="asset-name"
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Tanker 1"
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-                required
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="asset-type"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Type
-              </label>
-              <select
-                id="asset-type"
-                value={assetType}
-                onChange={(e) => {
-                  const t = e.target.value as AssetType;
-                  setAssetType(t);
-                  setAssetSubtype(SUBTYPE_OPTIONS[t][0]);
-                  setIdentifier("");
-                }}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-              >
-                {(Object.keys(SUBTYPE_OPTIONS) as AssetType[]).map((t) => (
-                  <option key={t} value={t}>
-                    {labelize(t)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label
-                htmlFor="asset-subtype"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Subtype
-              </label>
-              <select
-                id="asset-subtype"
-                value={assetSubtype}
-                onChange={(e) =>
-                  setAssetSubtype(e.target.value as AssetSubtype)
-                }
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-              >
-                {SUBTYPE_OPTIONS[assetType].map((s) => (
-                  <option key={s} value={s}>
-                    {labelize(s)}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          {identifierField && (
-            <div>
-              <label
-                htmlFor="asset-identifier"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                {identifierField.label}
-              </label>
-              <input
-                id="asset-identifier"
-                type="text"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                placeholder={
-                  assetType === "vehicle" ? "ABC-1234" : identifierField.label
-                }
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-                required
-              />
-            </div>
-          )}
-          <div>
-            <label
-              htmlFor="asset-address"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Location / address
-            </label>
-            <input
-              id="asset-address"
-              type="text"
-              value={address}
-              onChange={(e) => setAddress(e.target.value)}
-              placeholder="Main depot"
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label
-                htmlFor="asset-lat"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Latitude
-              </label>
-              <input
-                id="asset-lat"
-                type="number"
-                step="any"
-                value={lat}
-                onChange={(e) => setLat(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="asset-lon"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Longitude
-              </label>
-              <input
-                id="asset-lon"
-                type="number"
-                step="any"
-                value={lon}
-                onChange={(e) => setLon(e.target.value)}
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white"
-              />
-            </div>
-          </div>
-          {error && (
-            <p
-              role="alert"
-              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-            >
-              {error}
-            </p>
-          )}
-          <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-4">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 rounded-lg hover:bg-gray-50 border border-gray-200"
-            >
-              Cancel
-            </button>
-            <Button type="submit" disabled={submitting}>
-              {submitting ? "Creating…" : "Create asset"}
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
 
 interface FleetTrackingProps {
   onTruckSelect?: (truck: Truck) => void;
@@ -401,19 +112,15 @@ export default function FleetTracking({
   const [trucks, setTrucks] = useState<Truck[]>([]);
   const [fleetSummary, setFleetSummary] = useState<AssetSummary | null>(null);
   const [loading, setLoading] = useState(true);
-  const [showInTransit, setShowInTransit] = useState(true);
+  /** Status chip ("all" or a truck status); the default is every asset. */
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [selectedTruck, setSelectedTruck] = useState<string | null>(null);
   // Truck whose compartments are shown in the slide-over (click-through from
   // the row), replacing the former top-level "Compartments" tab.
   const [compartmentsTruck, setCompartmentsTruck] = useState<Truck | null>(
     null,
-  );
-  const compartmentsPanelRef = useRef<HTMLDivElement>(null);
-  const closeCompartments = useCallback(() => setCompartmentsTruck(null), []);
-  useDialogA11y(
-    compartmentsTruck !== null,
-    compartmentsPanelRef,
-    closeCompartments,
   );
   const [assetTypeFilter, setAssetTypeFilter] = useState<AssetType | "all">(
     "all",
@@ -540,6 +247,7 @@ export default function FleetTracking({
 
       setTrucks(trucksResponse.data);
       setFleetSummary(summaryResponse.data);
+      setLastUpdated(new Date());
     } catch (err) {
       console.error("Failed to load fleet data:", err);
       setError(
@@ -592,62 +300,21 @@ export default function FleetTracking({
     }
     setFocusNotFound(null);
 
-    const inTransit = IN_TRANSIT_STATUSES.includes(truck.status);
-    if (!inTransit) setShowInTransit(false);
-
-    // The list the row will live in once the filter above is applied.
-    const visible =
-      showInTransit && inTransit
-        ? trucks.filter((candidate) =>
-            IN_TRANSIT_STATUSES.includes(candidate.status),
-          )
-        : trucks;
-    const index = visible.findIndex(
+    // Clear filters that would hide the row, then page to it.
+    setStatusFilter("all");
+    setSearch("");
+    const index = trucks.findIndex(
       (candidate) => candidate.id === focusAssetId,
     );
     setPage(index >= 0 ? Math.floor(index / PAGE_SIZE) + 1 : 1);
 
     setSelectedTruck(truck.id);
     onTruckSelect?.(truck);
-  }, [focusAssetId, loading, trucks, showInTransit, onTruckSelect]);
+  }, [focusAssetId, loading, trucks, onTruckSelect]);
 
   const handleTruckClick = (truck: Truck) => {
     setSelectedTruck(truck.id);
     onTruckSelect?.(truck);
-  };
-
-  const getStatusVariant = (status: string): BadgeVariant => {
-    switch (status) {
-      case "on_time":
-        return "success";
-      case "delayed":
-        return "error";
-      case "stopped":
-        return "warning";
-      default:
-        return "neutral";
-    }
-  };
-
-  const getStatusDot = (status: string) => {
-    switch (status) {
-      case "on_time":
-        return "bg-success";
-      case "delayed":
-        return "bg-error";
-      case "stopped":
-        return "bg-warning";
-      default:
-        return "bg-gray-500";
-    }
-  };
-
-  const formatStatus = (status: string) => {
-    return status.replace("_", " ").replace(/\b\w/g, (l) => l.toUpperCase());
-  };
-
-  const formatAssetLabel = (value: string) => {
-    return value.replace(/_/g, " ").replace(/\b\w/g, (l) => l.toUpperCase());
   };
 
   const calculateTimeToArrival = (estimatedArrival: string) => {
@@ -663,9 +330,20 @@ export default function FleetTracking({
     return `${diffHours}h ${diffMinutes}m`;
   };
 
-  const filteredTrucks = showInTransit
-    ? trucks.filter((truck) => IN_TRANSIT_STATUSES.includes(truck.status))
-    : trucks;
+  const statusCounts = useMemo(() => {
+    const counts: Record<string, number> = { all: trucks.length };
+    for (const t of trucks) counts[t.status] = (counts[t.status] ?? 0) + 1;
+    return counts;
+  }, [trucks]);
+  const q = search.trim().toLowerCase();
+  const filteredTrucks = trucks.filter(
+    (t) =>
+      (statusFilter === "all" || t.status === statusFilter) &&
+      (!q ||
+        [t.plateNumber, t.name, t.id, t.driverName]
+          .filter(Boolean)
+          .some((v) => String(v).toLowerCase().includes(q))),
+  );
 
   const totalPages = Math.max(1, Math.ceil(filteredTrucks.length / PAGE_SIZE));
   const paginatedTrucks = filteredTrucks.slice(
@@ -709,59 +387,44 @@ export default function FleetTracking({
   const fleetColumns: Column<Truck>[] = [
     {
       key: "asset",
-      label: "Asset",
-      render: (truck) => (
-        <div className="flex items-center gap-2">
-          <div
-            className={`w-2 h-2 rounded-full ${getStatusDot(truck.status)}`}
-          />
-          <span className="font-medium text-gray-900 text-sm">
-            {truck.plateNumber || truck.name}
-          </span>
-        </div>
-      ),
+      header: "Asset",
+      truncate: true,
+      title: (t) => t.plateNumber || t.name,
+      className: "font-medium text-text",
+      cell: (t) => t.plateNumber || t.name,
     },
     {
       key: "type",
-      label: "Type",
-      render: (truck) => (
-        <div className="text-xs">
-          <span className="text-gray-900">
-            {formatAssetLabel(truck.assetType ?? "vehicle")}
-          </span>
-          <span className="text-gray-500 ml-1">
-            / {formatAssetLabel(truck.assetSubtype ?? "truck")}
-          </span>
-        </div>
-      ),
-    },
-    {
-      key: "route",
-      label: "Route",
-      render: (truck) => (
-        <div className="text-xs text-gray-600">
-          {truck.route?.origin?.name} → {truck.route?.destination?.name}
-        </div>
-      ),
+      header: "Type",
+      truncate: true,
+      title: (t) =>
+        `${humanize(t.assetType ?? "vehicle")} · ${subtypeLabel(t.assetSubtype ?? "truck")}`,
+      className: "text-slate-700",
+      cell: (t) => subtypeLabel(t.assetSubtype ?? "truck"),
     },
     {
       key: "status",
-      label: "Status",
-      render: (truck) => (
-        <Badge variant={getStatusVariant(truck.status)} size="sm">
-          {formatStatus(truck.status)}
-        </Badge>
-      ),
+      header: "Status",
+      width: 120,
+      cell: (t) => {
+        const cfg = TRUCK_STATUS[t.status];
+        return cfg ? (
+          <StatusBadge status={cfg.status} label={cfg.label} />
+        ) : (
+          <span className="text-xs text-text-muted">{humanize(t.status)}</span>
+        );
+      },
     },
     {
       key: "compliance",
-      label: "Compliance",
-      render: (truck) => {
-        const status = compliance[truck.id];
+      header: "Compliance",
+      width: 110,
+      cell: (t) => {
+        const status = compliance[t.id];
         if (!status || status === "unknown") {
           return (
             <span
-              className="text-xs text-gray-500"
+              className="text-xs text-text-muted"
               title="No compliance records"
             >
               Unlinked
@@ -769,71 +432,74 @@ export default function FleetTracking({
           );
         }
         const chip = COMPLIANCE_CHIP[status];
-        return (
-          <Badge variant={chip.variant} size="sm">
-            {chip.label}
-          </Badge>
-        );
+        return <StatusBadge status={chip.status} label={chip.label} />;
       },
     },
     {
-      key: "eta",
-      label: "ETA",
-      render: (truck) => (
-        <span className="text-xs text-gray-900">
-          {truck.estimatedArrival
-            ? calculateTimeToArrival(truck.estimatedArrival)
-            : "—"}
-        </span>
-      ),
-    },
-    {
       key: "destination",
-      label: "Destination",
-      render: (truck) => (
-        <div className="text-xs">
-          <div className="font-medium text-gray-900">
-            {truck.destination?.name ?? "—"}
-          </div>
-          <div className="text-gray-500 text-xs">
-            {truck.destination?.type ?? ""}
-          </div>
-        </div>
-      ),
+      header: "Destination",
+      truncate: true,
+      title: (t) =>
+        t.route?.origin?.name && t.route?.destination?.name
+          ? `${t.route.origin.name} → ${t.route.destination.name}`
+          : (t.destination?.name ?? undefined),
+      className: "text-slate-700",
+      cell: (t) => t.destination?.name ?? "—",
     },
     {
-      key: "compartments",
-      label: "",
+      key: "eta",
+      header: "ETA",
+      width: 90,
       align: "right",
-      render: (truck) =>
-        (truck.assetType ?? "vehicle") === "vehicle" ? (
-          <button
-            type="button"
-            onClick={(e) => {
-              // Don't trigger the row's map-selection click.
-              e.stopPropagation();
-              setCompartmentsTruck(truck);
-            }}
-            className="inline-flex items-center gap-1 rounded-md border border-gray-200 px-2 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50"
-            aria-label={`View compartments for ${truck.plateNumber || truck.name}`}
-          >
-            <Boxes className="h-3 w-3" />
-            Compartments
-          </button>
-        ) : null,
+      className: "tabular-nums text-slate-700 whitespace-nowrap",
+      cell: (t) =>
+        t.estimatedArrival ? calculateTimeToArrival(t.estimatedArrival) : "—",
     },
   ];
 
-  if (loading) {
-    return <LoadingSpinner message="Loading fleet data..." />;
-  }
+  const actions = useMemo(
+    () => (
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => setShowAddAsset(true)}
+        icon={<Plus className="h-3.5 w-3.5" />}
+      >
+        Add asset
+      </Button>
+    ),
+    [],
+  );
+  const counts = useMemo(
+    () =>
+      fleetSummary ? (
+        <span className="whitespace-nowrap text-xs text-text-muted">
+          {number(fleetSummary.totalTrucks)} assets ·{" "}
+          {number(fleetSummary.onTimeTrucks)} on time ·{" "}
+          {number(fleetSummary.delayedTrucks)} delayed
+        </span>
+      ) : null,
+    [fleetSummary],
+  );
+  // Inside Fleet the hub title row shows them; standalone, the toolbar does.
+  const embedded = usePageChrome({ actions, counts });
+
+  const statusOptions = [
+    { id: "all", label: "All", count: statusCounts.all },
+    ...STATUS_ORDER.filter((id) => statusCounts[id]).map((id) => ({
+      id,
+      label: TRUCK_STATUS[id].label,
+      count: statusCounts[id],
+      status: TRUCK_STATUS[id].status,
+    })),
+  ];
 
   if (error) {
     return (
-      <div className="h-full flex items-center justify-center">
-        <div className="text-center max-w-md">
-          <p className="text-error font-medium mb-2">Connection Error</p>
-          <p className="text-gray-500 text-sm mb-4">{error}</p>
+      <div className="flex h-full items-center justify-center p-4">
+        <div className="max-w-md text-center">
+          <p className="mb-2 font-medium text-red-700">Connection error</p>
+          <p className="mb-4 text-sm text-text-muted">{error}</p>
           <Button onClick={loadFleetData}>Retry</Button>
         </div>
       </div>
@@ -841,105 +507,81 @@ export default function FleetTracking({
   }
 
   return (
-    <div className="h-full flex flex-col">
-      {/* Header with WebSocket Status */}
-      <PageHeader
-        title="Fleet Tracking"
-        badge={
-          <WebSocketStatusBadge
-            state={wsState}
-            reconnectAttempt={reconnectAttempt}
+    <div className="flex h-full flex-col">
+      <Toolbar
+        label="Trucks"
+        search={
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(1);
+            }}
+            placeholder="Search plate, name or driver"
+            aria-label="Search assets"
+            className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
           />
         }
-        actions={
-          <div className="flex items-center gap-2">
-            <Button
-              type="button"
-              size="sm"
-              onClick={() => setShowAddAsset(true)}
-              icon={<Plus className="w-4 h-4" />}
-            >
-              Add asset
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={loadFleetData}
-              icon={<RefreshCw className="w-4 h-4" />}
-              title="Refresh"
-              aria-label="Refresh fleet data"
-            />
-          </div>
-        }
-      />
-
-      {/* Filters */}
-      <FilterBar
         filters={
           <>
-            <select
-              value={assetTypeFilter}
-              onChange={(e) => {
-                setAssetTypeFilter(e.target.value as AssetType | "all");
+            <FilterChips
+              label="Asset status"
+              collapse
+              options={loading ? [{ id: "all", label: "All" }] : statusOptions}
+              value={statusFilter}
+              onChange={(v) => {
+                setStatusFilter(v as string);
                 setPage(1);
               }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Asset type"
+            />
+            <FilterPopover
+              count={assetTypeFilter === "all" ? 0 : 1}
+              label="Asset filters"
+              onClear={() => {
+                setAssetTypeFilter("all");
+                setPage(1);
+              }}
             >
-              {ASSET_TYPE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <label className="flex items-center gap-2 px-4 py-3 text-sm border border-gray-200 rounded-xl bg-white cursor-pointer hover:bg-gray-50">
-              <input
-                type="checkbox"
-                checked={showInTransit}
-                onChange={(e) => {
-                  setShowInTransit(e.target.checked);
-                  setPage(1);
-                }}
-                className="rounded border-gray-300"
-              />
-              <span>In transit only</span>
-            </label>
+              <Field label="Asset type" id="fleet-asset-type">
+                <Select
+                  id="fleet-asset-type"
+                  value={assetTypeFilter}
+                  onChange={(v) => {
+                    setAssetTypeFilter(v as AssetType | "all");
+                    setPage(1);
+                  }}
+                  options={ASSET_TYPE_OPTIONS}
+                />
+              </Field>
+            </FilterPopover>
+          </>
+        }
+        end={
+          <>
+            <WebSocketStatusBadge
+              state={wsState}
+              reconnectAttempt={reconnectAttempt}
+            />
+            {lastUpdated && (
+              <span className="whitespace-nowrap text-xs text-text-muted">
+                Updated {relative(lastUpdated)}
+              </span>
+            )}
+            <IconButton
+              label="Refresh fleet data"
+              size="sm"
+              onClick={loadFleetData}
+              icon={
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+                />
+              }
+            />
+            {!embedded && actions}
           </>
         }
       />
-
-      {/* Fleet Summary */}
-      {fleetSummary && (
-        <StatsBar
-          variant="inline"
-          stats={[
-            { label: "Total", value: fleetSummary.totalTrucks },
-            {
-              label: "On Time",
-              value: fleetSummary.onTimeTrucks,
-              color: "success",
-            },
-            {
-              label: "Delayed",
-              value: fleetSummary.delayedTrucks,
-              color: "error",
-            },
-            { label: "Active", value: fleetSummary.activeTrucks },
-            ...(fleetSummary.byType &&
-            Object.keys(fleetSummary.byType).length > 0
-              ? Object.entries(fleetSummary.byType).map(([type, count]) => {
-                  const meta = ASSET_TYPE_LABELS[type as AssetType];
-                  return {
-                    label: meta?.label ?? type,
-                    value: count,
-                    icon: meta?.icon,
-                  };
-                })
-              : []),
-          ]}
-        />
-      )}
 
       {/* Deep-link (`?asset=`) that matched no loaded asset — say so rather
           than leaving the operator on an unchanged table. */}
@@ -947,17 +589,17 @@ export default function FleetTracking({
         <div
           role="status"
           data-testid="focus-asset-not-found"
-          className="mx-4 mb-2 flex items-start justify-between gap-3 rounded-lg border border-warning-light bg-warning-light px-3 py-2 text-xs text-warning-dark"
+          className="flex items-start justify-between gap-3 border-b border-amber-300 bg-amber-50 px-4 py-2 text-xs text-amber-900"
         >
           <span>
             Asset <span className="font-medium">{focusNotFound}</span> was not
-            found in this view. It may be a different asset type — try the Asset
-            type filter — or it may no longer be tracked.
+            found in this view. It may be a different asset type (try the asset
+            type filter) or it may no longer be tracked.
           </span>
           <button
             type="button"
             onClick={() => setFocusNotFound(null)}
-            className="rounded p-0.5 text-warning-dark hover:text-gray-700"
+            className="rounded p-0.5 text-amber-900 hover:bg-amber-100"
             aria-label="Dismiss asset not found notice"
           >
             <X className="h-3.5 w-3.5" />
@@ -965,79 +607,67 @@ export default function FleetTracking({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto min-h-0">
-        <Table
-          variant="compact"
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<Truck>
+          ariaLabel="Fleet assets"
+          rowHeight="compact"
           columns={fleetColumns}
-          data={paginatedTrucks}
-          getRowId={(truck) => truck.id}
+          data={loading ? [] : paginatedTrucks}
+          loading={loading}
+          getRowId={(t) => t.id}
           selectedId={selectedTruck ?? undefined}
           onRowClick={handleTruckClick}
-          emptyState={
-            <EmptyState
-              icon={<FileText />}
-              title={`No ${assetTypeFilter === "all" ? "assets" : `${assetTypeFilter}s`} found`}
-            />
+          rowLabel={(t) => t.plateNumber || t.name}
+          rowMenu={(t) =>
+            (t.assetType ?? "vehicle") === "vehicle"
+              ? [
+                  {
+                    id: "compartments",
+                    label: "Compartments",
+                    icon: <Boxes className="h-3.5 w-3.5" />,
+                    onSelect: () => setCompartmentsTruck(t),
+                  },
+                ]
+              : []
           }
-        />
-        <Pagination
-          currentPage={page}
-          totalPages={totalPages}
-          totalItems={filteredTrucks.length}
-          onPageChange={setPage}
-          className="px-4"
+          pagination={
+            totalPages > 1
+              ? {
+                  page,
+                  totalPages,
+                  totalItems: filteredTrucks.length,
+                  onPageChange: setPage,
+                }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No assets found</p>
+              <p className="mt-1 text-xs">Try adjusting your filters</p>
+            </div>
+          }
         />
       </div>
 
-      {/* Compartments slide-over — reached by clicking a truck's Compartments
-          button (replaces the former Fuel Ops > Compartments tab). */}
-      {compartmentsTruck && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/30"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Truck compartments"
-          onClick={() => setCompartmentsTruck(null)}
-        >
-          <div
-            ref={compartmentsPanelRef}
-            tabIndex={-1}
-            className="h-full w-full max-w-3xl overflow-y-auto bg-white shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-              <div>
-                <h2 className="text-lg font-semibold text-primary">
-                  Compartments
-                </h2>
-                <p className="text-xs text-gray-500">
-                  {compartmentsTruck.plateNumber || compartmentsTruck.name} ·{" "}
-                  {compartmentsTruck.id}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setCompartmentsTruck(null)}
-                className="rounded p-1 text-gray-500 hover:text-gray-600"
-                aria-label="Close compartments"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-            <div className="p-6">
-              <Suspense fallback={<LoadingSpinner message="Loading…" />}>
-                <TruckCompartmentsPage
-                  truckId={compartmentsTruck.id}
-                  embedded
-                />
-              </Suspense>
-            </div>
-          </div>
-        </div>
-      )}
+      <Drawer
+        open={compartmentsTruck !== null}
+        onClose={() => setCompartmentsTruck(null)}
+        title={
+          compartmentsTruck
+            ? `Compartments · ${compartmentsTruck.plateNumber || compartmentsTruck.name}`
+            : "Compartments"
+        }
+        width={760}
+      >
+        {compartmentsTruck && (
+          <Suspense fallback={<LoadingSpinner message="Loading…" />}>
+            <TruckCompartmentsPage truckId={compartmentsTruck.id} embedded />
+          </Suspense>
+        )}
+      </Drawer>
 
       {showAddAsset && (
-        <AddAssetModal
+        <AddAssetDialog
           onClose={() => setShowAddAsset(false)}
           onCreated={() => {
             setShowAddAsset(false);
