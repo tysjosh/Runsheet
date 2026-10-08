@@ -776,11 +776,15 @@ async def initialize(app, container: ServiceContainer) -> None:
 
         # ── Margin feed (margin-feed FR3) ──────────────────────────────
         # MarginService, the invoice margin hook and the order-event
-        # subscriber. The margin API router is configured next to this
-        # wiring (FEAT-005).
+        # subscriber, and the admin margin API (margin_endpoints).
         try:
-            wire_margin_feed(container, elasticsearch_service)
-            logger.info("Margin feed services wired")
+            from commerce.api.margin_endpoints import configure_margin_api
+            _margin_svc_for_api = wire_margin_feed(container, elasticsearch_service)
+            configure_margin_api(
+                margin_service=_margin_svc_for_api,
+                cost_entry_service=container.margin_cost_entry_service,
+            )
+            logger.info("Margin feed services and API wired")
         except Exception as exc:
             logger.warning("Margin feed wiring failed: %s", exc)
 

@@ -298,6 +298,12 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["admin", "dispatcher"],
     note: "Capability 7 — gallon variance. Admin + dispatcher only (OI-19).",
   },
+  {
+    id: "margin",
+    tier: 2,
+    requiredRoles: ["admin"],
+    note: "Cost and margin; tenant admin only (margin-feed D1).",
+  },
 
   // ── ComplianceHub tabs — all legally required ─────────────────────────────
   { id: "certifications", tier: 3, note: "DOT asset certifications." },

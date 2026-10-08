@@ -18,7 +18,8 @@ export type ExportType =
   | "jobs"
   | "reconciliation"
   | "invoices"
-  | "driver_qualifications";
+  | "driver_qualifications"
+  | "margin";
 
 export type ExportParams = Record<
   string,
@@ -33,6 +34,8 @@ export const EXPORT_PATHS: Record<ExportType, string> = {
   invoices: "/commerce/invoices/export",
   // OI-57. The driver hours export has no admin page, so no entry here.
   driver_qualifications: "/compliance/drivers/export",
+  // margin-feed FR7: tenant admin only.
+  margin: "/commerce/margin/records/export",
 };
 
 /** Large exports stream for a while; the timeout bounds time-to-headers. */

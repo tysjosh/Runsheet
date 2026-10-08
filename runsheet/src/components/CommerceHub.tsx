@@ -11,8 +11,9 @@ import {
   Sliders,
   TrendingUp,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { canSee, visibleByCanSee } from "../config/modules";
+import { getOpenMarginAlertCount } from "../services/marginApi";
 import { getCurrentUserRoles } from "../utils/auth";
 import AccountDetailPage from "./commerce/AccountDetailPage";
 import AccountsListPage from "./commerce/AccountsListPage";
@@ -37,6 +38,11 @@ const PricingRulesPage = lazy(() => import("./compliance/PricingRulesPage"));
 // it lives in the Commerce hub beside AR Aging rather than as its own
 // top-level sidebar destination.
 const ReconciliationPage = lazy(() => import("./ops/ReconciliationPage"));
+// Cost and margin (margin-feed): tenant admin only, gated by canSee("margin").
+const MarginHub = lazy(() => import("./commerce/margin/MarginHub"));
+
+/** The open-alert badge refreshes this often while the page is visible. */
+export const MARGIN_BADGE_REFRESH_MS = 5 * 60 * 1000;
 
 // Exported for the registry drift guard in `config/modules.test.ts`.
 export const TABS: Tab[] = [
@@ -76,12 +82,36 @@ export const TABS: Tab[] = [
     label: "Reconciliation",
     icon: <ListChecks className="w-4 h-4" />,
   },
+  {
+    id: "margin",
+    label: "Margin",
+    icon: <TrendingUp className="w-4 h-4" />,
+  },
 ];
+
+function MarginAlertBadge({ count }: { count: number }) {
+  const label = `${count} open margin alert${count === 1 ? "" : "s"}`;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className="ml-1 rounded-full bg-red-100 px-1.5 text-xs font-semibold text-red-800"
+    >
+      {count}
+    </span>
+  );
+}
+
+export interface CommerceHubProps {
+  /** Deep-linked tab (`?tab=`); falls back to the first visible tab. */
+  initialTab?: string;
+}
 
 type TabId = string;
 
-export default function CommerceHub() {
-  const [activeTab, setActiveTab] = useState<TabId>("accounts");
+export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
+  const [activeTab, setActiveTab] = useState<TabId>(initialTab ?? "accounts");
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
     null,
   );
@@ -127,7 +157,35 @@ export default function CommerceHub() {
     setActiveTab("accounts");
   };
 
-  const visibleTabs = visibleByCanSee(TABS, { roles });
+  const marginVisible = canSee("margin", { roles });
+  const [openMarginAlerts, setOpenMarginAlerts] = useState(0);
+  const refreshMarginAlerts = useCallback(async () => {
+    try {
+      setOpenMarginAlerts(await getOpenMarginAlertCount());
+    } catch {
+      // The badge is a convenience; the Alerts sub-tab reports errors.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!marginVisible) return;
+    void refreshMarginAlerts();
+    const id = setInterval(() => {
+      if (
+        typeof document === "undefined" ||
+        document.visibilityState === "visible"
+      ) {
+        void refreshMarginAlerts();
+      }
+    }, MARGIN_BADGE_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [marginVisible, refreshMarginAlerts]);
+
+  const visibleTabs = visibleByCanSee(TABS, { roles }).map((tab) =>
+    tab.id === "margin" && openMarginAlerts > 0
+      ? { ...tab, badge: <MarginAlertBadge count={openMarginAlerts} /> }
+      : tab,
+  );
   // Accounts is Tier 4, so it can be hidden while the hub itself stays visible
   // for Invoices and Reconciliation. Fall back to the first visible tab rather
   // than rendering an empty pane under a tab bar that no longer offers it.
@@ -199,6 +257,11 @@ export default function CommerceHub() {
             fallback={<LoadingSpinner message="Loading reconciliation..." />}
           >
             <ReconciliationPage />
+          </Suspense>
+        )}
+        {shows("margin") && (
+          <Suspense fallback={<LoadingSpinner message="Loading margin..." />}>
+            <MarginHub onAlertsChanged={refreshMarginAlerts} />
           </Suspense>
         )}
       </div>

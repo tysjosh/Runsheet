@@ -55,6 +55,8 @@ ExportType = Literal[
     "ifta", "orders", "jobs", "reconciliation", "invoices",
     # OI-20 / OI-57 (owner decision 2026-10-07), admin only.
     "driver_hours", "driver_qualifications",
+    # margin-feed FR7, tenant admin only.
+    "margin",
 ]
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")

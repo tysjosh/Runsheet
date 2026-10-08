@@ -462,6 +462,21 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         path_params={"price_book_id": "pb_001"},
     ),
     "GET /api/commerce/pricing-rules": RouteFixture(),
+    # Margin feed (admin only; 404 while COMMERCE_MARGIN_FEED_ENABLED is off).
+    "GET /api/commerce/margin/alerts": RouteFixture(),
+    "GET /api/commerce/margin/cost-basis": RouteFixture(params={"product_code": "DIESEL_2"}),
+    "GET /api/commerce/margin/cost-entries": RouteFixture(),
+    "GET /api/commerce/margin/records": RouteFixture(),
+    "GET /api/commerce/margin/records/export": RouteFixture(),
+    "GET /api/commerce/margin/records/{record_id}": RouteFixture(
+        path_params={"record_id": "mr_001"},
+    ),
+    "GET /api/commerce/margin/recompute/{run_id}": RouteFixture(
+        path_params={"run_id": "run_001"},
+    ),
+    "GET /api/commerce/margin/reports": RouteFixture(),
+    "GET /api/commerce/margin/settings": RouteFixture(),
+    "GET /api/commerce/margin/summary": RouteFixture(),
     "GET /api/compliance/asset-certifications": RouteFixture(),
     "GET /api/compliance/asset-certifications/dashboard": RouteFixture(),
     "GET /api/compliance/asset-certifications/{cert_id}": RouteFixture(

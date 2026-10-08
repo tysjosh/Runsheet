@@ -1279,6 +1279,61 @@ class MarginService:
         split = market_gallons is not None and market_gallons > 0
         return int(effective), split
 
+    # -- cost basis (admin diagnostic) ----------------------------------------
+
+    async def cost_basis(
+        self,
+        tenant_id: str,
+        *,
+        product_code: str,
+        terminal_id: Optional[str] = None,
+        as_of: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        """``GET /cost-basis``: the resolver output for one product, fresh reads.
+
+        422 on an unknown product or terminal; a reader failure is 503
+        ``ELASTICSEARCH_UNAVAILABLE`` and logged at ERROR (design FR2).
+        """
+
+        errors: List[Dict[str, Any]] = []
+        product: Optional[str] = None
+        try:
+            product = canonicalize(str(product_code).strip())
+        except (UnknownFuelProductError, TypeError):
+            errors.append({"loc": ["product_code"], "msg": "unknown product", "type": "unknown_product"})
+        terminal = _clean(terminal_id)
+        if terminal is not None and self._terminals is not None:
+            if await self._terminals.get(tenant_id, terminal) is None:
+                errors.append({"loc": ["terminal_id"], "msg": "unknown terminal", "type": "unknown_terminal"})
+        if errors:
+            raise AppException(
+                ErrorCode.VALIDATION_ERROR,
+                "Cost basis request is invalid",
+                status_code=422,
+                details={"errors": errors},
+            )
+        assert product is not None
+        instant = (as_of or self._clock()).astimezone(timezone.utc)
+        try:
+            settings = await self._repo.get_settings(tenant_id)
+            basis = await CostBasisResolver(self._readers, settings).resolve(
+                tenant_id, product, terminal, instant
+            )
+        except Exception as exc:
+            logger.error(
+                "margin cost-basis read failed tenant=%s product=%s terminal=%s: %s",
+                tenant_id,
+                product,
+                terminal or "*",
+                type(exc).__name__,
+            )
+            raise AppException(
+                ErrorCode.ELASTICSEARCH_UNAVAILABLE,
+                "The cost basis could not be read. Try again.",
+                status_code=503,
+            ) from None
+        return basis.to_snapshot()
+
     # -- summary ------------------------------------------------------------
 
     async def summary(

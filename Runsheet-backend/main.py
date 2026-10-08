@@ -88,6 +88,9 @@ from commerce.api.price_protection_endpoints import (
 from commerce.api.pricing_endpoints import (
     router as commerce_pricing_rules_router,
 )
+from commerce.api.margin_endpoints import (
+    router as commerce_margin_router,
+)
 from Agents.support.mvp_endpoints import router as mvp_fuel_router
 from fuel.api.fuel_ops_endpoints import (
     router as fuel_ops_router,
@@ -249,6 +252,9 @@ try:
         # return 404". They now honour it like the rest.
         app.include_router(commerce_price_protection_router)
         app.include_router(commerce_pricing_rules_router)
+        # Margin feed (admin only; 404 per request while
+        # commerce_margin_feed_enabled is off).
+        app.include_router(commerce_margin_router)
 except Exception:
     # Settings may not load cleanly at import time in test environments;
     # the router will be registered during lifespan if needed.
