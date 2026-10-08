@@ -10,32 +10,38 @@ import { REDIRECTS } from "../../src/config/redirects";
 import { installShellFake, MISSING_ID, signIn } from "./shellFake";
 
 /** Expected heading per destination (h1 for hubs, detail state otherwise). */
-const EXPECT: Record<number, { h1?: string; heading?: RegExp; tab?: string }> =
-  {
-    0: { h1: "Today" },
-    1: { h1: "Dispatch", tab: "Jobs" },
-    2: { heading: /job/i },
-    3: { heading: /job|cargo/i },
-    4: { h1: "Live" },
-    6: { h1: "Fuel", tab: "Stations" },
-    7: { heading: /depot/i },
-    8: { heading: /tank/i },
-    9: { h1: "Fleet", tab: "Inventory" },
-    10: { h1: "Billing" },
-    11: { h1: "Customers", tab: "Customers" },
-    12: { heading: /customer/i },
-    13: { heading: /invoice/i },
-    14: { heading: /account/i },
-    15: { h1: "Billing", tab: "AR Aging" },
-    16: { heading: /order/i },
-    17: { heading: /terminal/i },
-    18: { h1: "Settings" },
-    19: { h1: "Settings" },
-    20: { h1: "Fleet", tab: "Drivers" },
-    21: { h1: "Customers", tab: "Communications" },
-    22: { h1: "Settings" },
-    23: { h1: "Settings" },
-  };
+/**
+ * `api` names the detail read the destination must issue (for detail pages
+ * whose not-found state has no heading of its own), `text` a visible marker.
+ */
+const EXPECT: Record<
+  number,
+  { h1?: string; heading?: RegExp; tab?: string; api?: string; text?: RegExp }
+> = {
+  0: { h1: "Today" },
+  1: { h1: "Dispatch", tab: "Jobs" },
+  2: { text: /Back to Jobs/, api: `/scheduling/jobs/${MISSING_ID}` },
+  3: { heading: /job|cargo/i },
+  4: { h1: "Live" },
+  6: { h1: "Fuel", tab: "Stations" },
+  7: { heading: /depot/i },
+  8: { heading: /tank/i },
+  9: { h1: "Fleet", tab: "Inventory" },
+  10: { h1: "Billing" },
+  11: { h1: "Customers", tab: "Customers" },
+  12: { heading: /customer/i },
+  13: { heading: /invoice/i },
+  14: { heading: /account/i },
+  15: { h1: "Billing", tab: "AR Aging" },
+  16: { text: /Not found/, api: `/orders/${MISSING_ID}` },
+  17: { heading: /terminal/i },
+  18: { h1: "Settings" },
+  19: { h1: "Settings" },
+  20: { h1: "Fleet", tab: "Drivers" },
+  21: { h1: "Customers", tab: "Communications" },
+  22: { h1: "Settings" },
+  23: { h1: "Settings" },
+};
 
 const concrete = (p: string) => p.replace(/:[a-zA-Z]+/g, MISSING_ID);
 
@@ -50,6 +56,12 @@ for (const r of REDIRECTS) {
     const from = `${concrete(r.source)}?qa=1`;
     const res = await page.request.get(from, { maxRedirects: 0 });
     expect(res.status()).toBe(308);
+    const e = EXPECT[r.row];
+    const apiSeen = e.api
+      ? page.waitForRequest((q) =>
+          new URL(q.url()).pathname.endsWith(e.api as string),
+        )
+      : null;
     await page.goto(from);
     const want = new URL(concrete(r.destination), "http://x");
     await expect.poll(() => new URL(page.url()).pathname).toBe(want.pathname);
@@ -57,7 +69,8 @@ for (const r of REDIRECTS) {
     for (const [k, v] of want.searchParams)
       expect(got.searchParams.get(k)).toBe(v);
     expect(got.searchParams.get("qa")).toBe("1");
-    const e = EXPECT[r.row];
+    if (apiSeen) await apiSeen;
+    if (e.text) await expect(page.getByText(e.text).first()).toBeVisible();
     if (e.h1) await expect(page.locator("h1")).toHaveText(e.h1);
     if (e.heading)
       await expect(
