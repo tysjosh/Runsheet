@@ -580,4 +580,29 @@ See `verification-impl.md`. In short:
 - Task 36b (R2.8 truck type, R3.4 tanker endorsement and nearest expiry) was implemented in `31b9345`, so every plan task is ticked except task 41, which is deferred as a runbook.
 - CI blocker fixed: the N1 perf budgets failed under CI's `--cov` run (snapshot p95 3.67 s traced, 0.43 s untraced). Under coverage the budget assertion now skips. A new `backend-tests` step enforces the budgets with `--no-cov` and fails on any skip.
 - A new Postgres test runs the tray query's `must_not terms` clause on the real translator (`test_tray_excludes_drafted_orders_on_the_real_translator`), which closes that part of the Phase 7 open item. Staging latency still waits for task 41.
-- Nothing was pushed.
+- Nothing was pushed at that point.
+
+### Merge and staging deploy (2026-10-08, owner: "merge and deploy")
+- **Merge.** `feature/dispatch-board` was merged into `production-readiness/go-live-blockers`, which was then at `df2b09e`, 80 commits past the branch base. The merge commit is `7889840`, made in a detached worktree so the main checkout was untouched, and it was pushed as a fast-forward that updates PR #14. Conflicts:
+  - `driver/api/transition_endpoints.py`: upstream OI-41 had also guarded the driver write, adding one in-request re-read retry. The resolution keeps that retry, re-reads with `get_current` (P1-5), and **re-runs the gate stack on the fresh read**, so a relink between attempts can't skip gate 0 (R13.11). Upstream's `transition_order_guarded` doesn't re-run gates, so it is no longer used here. Tests in `test_driver_transition_guards.py` were updated:
+    - a relink to another driver now returns 403 on the re-read instead of 409;
+    - one concurrent write is retried inside the request;
+    - two concurrent writes give a 409 that isn't stored, and the same key runs again;
+    - new: the retry after a relink onto a `draft` board run returns 409 `BOARD_ROUTE_UPDATING`.
+  - `errors/codes.py`: `ORDER_CHANGED_CONCURRENTLY` had been added on both sides. One copy is kept.
+  - Two test files and the `FuelDistributionPage` imports: the union of both sides.
+- **The first CI run on `7889840` failed**, and the deploy was held:
+  - Six board UI tests failed only on CI. The first fetch used the browser zone's today, and between 00:00 and 05:00 UTC on a UTC runner that is a different day from Chicago's. Fixed by pinning the stored tenant zone in the tests. Reproduced and verified with `TZ=UTC`: 279/279.
+  - Smoke fixture coverage was 180/361, just under 50%. Fixed by adding fixtures for the 10 board HTTP routes.
+  - Found locally behind CI's `-x`:
+    - `main.py` was 353 lines against the 350 cap; the router list was trimmed.
+    - The MVP replan pre-read passed `str(e)` to `internal_error`, which breaks OI-36; it now uses a fixed message.
+  - The fixes are in `a4d31a4`, and CI on `a4d31a4` passed all 8 jobs, including `dispatch-board-e2e`, `migration-check` and `endpoint-registry`.
+- **Deploy**, from the pinned worktree `.worktrees/board-deploy` at `a4d31a4`, with `BUILD_MODE=codebuild` (the default; the CodeBuild branch is already on the base) and `DOMAIN=staging.runsheetops.com`:
+  - `migrate`: applied.
+  - `deploy`: `runsheet-staging-backend:a4d31a4`, task definition `runsheet-staging-api:38`, stable. The previous revision was `:36`.
+  - `verify`: TLS, `/health/ready` 200, auth enforced, Postgres document store, ElastiCache over TLS, and the UI all ok.
+  - UI ancestor check: the live UI was `df2b09e`, an ancestor of the deploy commit. `deploy-ui` then deployed `runsheet-staging-ui:a4d31a4`, task definition `runsheet-staging-ui:22`, stable. The previous revision was `:21`.
+  - Rollback: re-point each service at its previous revision (`api:36`, `ui:21`).
+- **Flags, read-only** (one-shot task on `api:38`, Redis): `dispatch_board`, `overlay.compartment_loading` and `overlay.route_planning` are all **unset** (TTL -2) for `demo-tenant`. The board is therefore inert on staging. Nothing was flipped.
+- Not done: the task 41 functional rollout (QA fixtures, shadow and `active_gated` checks, driver app manifest, latency, cleanup). It needs a flag flip and QA data, and it is the next step in `staging-runbook.md`, from step 3 on.
