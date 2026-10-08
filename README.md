@@ -829,6 +829,19 @@ graph LR
     E --> Q[get_all_locations]
 ```
 
+### Dispatch Board
+
+The Dispatch Board is a drag-and-drop planner for one service day. It is the "Board" tab of the Dispatch page (`/dashboard/dispatch?tab=board`), before Scheduling and Fuel Distribution, and is shown to `admin` and `dispatcher` users when the tenant's `dispatch_board` flag is not `disabled`.
+
+- Each row is a truck lane. Drag orders from the Orders tray onto a lane, and drag a driver from the Drivers tray onto the lane header to pair them. Stops can be reordered on a lane or moved to another lane; drop targets show whether a drop is allowed before you let go.
+- Every lane is checked live: compartment capacity and product compatibility, driver qualification and hours of service, truck certification, and delivery windows. Blocking problems must be fixed (or overridden with a reason, where allowed) before the lane can be published.
+- Publish sends ready lanes to their drivers through the driver app. Changing a published lane marks it Modified; re-publishing tells each affected driver what changed, and revokes stops a driver lost. Started stops stay pinned.
+- Undo and redo cover board edits. Agent suggestions appear when the compartment-loading or route-planning agent runs in an active mode, and can be accepted, partly accepted or rejected.
+- Everything has a non-drag path: card menus ("Assign to truck…", "Move to…"), Place mode with Enter, and shortcuts listed in the "?" dialog (`/` search, `A` assign, `M` move, `P` pair driver, `U` unassign, `[`/`]` previous/next day, `T` timeline/sequence, `Cmd/Ctrl+Z` undo, `Shift+Cmd/Ctrl+Z` redo, `Esc` cancel). Single-key shortcuts can be turned off in that dialog.
+- Plans published from the board are managed on the board only. They are hidden from the Fuel Distribution plan list, and approve, reject and replan there refuse them.
+
+Flag states (`dispatch_board`, per tenant, default `disabled`): `disabled` hides the tab and every board endpoint returns 404; `shadow` shows a read-only board ("Preview mode, changes are not saved"); `active_gated` and `active_auto` both enable editing and make the board the default Dispatch tab. The board never publishes without a dispatcher action. Turning the flag off leaves drafts and published plans as they are.
+
 ## Data Models
 
 ### Elasticsearch Indices
@@ -953,6 +966,8 @@ GET  /api/ops/monitoring/poison-queue           # Poison queue metrics
 POST /api/ops/admin/feature-flags/{tenant_id}/enable    # Enable ops for tenant
 POST /api/ops/admin/feature-flags/{tenant_id}/disable   # Disable ops for tenant
 POST /api/ops/admin/feature-flags/{tenant_id}/rollback  # Rollback feature flag
+GET  /api/ops/admin/feature-flags/{tenant_id}/dispatch-board              # dispatch_board flag state (unset reads as disabled)
+POST /api/ops/admin/feature-flags/{tenant_id}/dispatch-board/{new_state}  # Set it: disabled | shadow | active_gated | active_auto (admin)
 POST /api/ops/replay/trigger                    # Trigger event replay
 GET  /api/ops/replay/status/{job_id}            # Replay job status
 POST /api/ops/drift/run                         # Run configuration drift detection
@@ -983,6 +998,22 @@ GET  /api/fuel/mvp/plan/{plan_id}               # Get a distribution plan
 POST /api/fuel/mvp/plan/{plan_id}/replan        # Replan with exception handling
 GET  /api/fuel/mvp/forecasts                    # Get tank level forecasts
 GET  /api/fuel/mvp/priorities                   # Get delivery priorities
+```
+
+#### Dispatch Board (`/api/fuel/board/*` — `fuel/api/dispatch_board_endpoints.py`)
+
+Gated by the per-tenant `dispatch_board` flag: 404 `DISPATCH_BOARD_DISABLED` when `disabled`; commands and publish return 409 `DISPATCH_BOARD_READ_ONLY` in `shadow`. `admin` and `dispatcher` only.
+
+```
+GET  /api/fuel/board/status                                        # Flag mode for the caller's tenant (UI polls this)
+GET  /api/fuel/board/{service_date}                                # Board snapshot: lanes, trays, checks
+POST /api/fuel/board/{service_date}/validate                       # Validation preview (batch or position)
+POST /api/fuel/board/{service_date}/commands                       # Apply a board command (assign, move, pair, revert/reapply, ...)
+GET  /api/fuel/board/{service_date}/history                        # Command and publish history
+POST /api/fuel/board/{service_date}/publish                        # Publish ready lanes (202 + publish id); dry_run gives the review preview
+GET  /api/fuel/board/{service_date}/publish/{publish_id}           # Publish progress per lane
+POST /api/fuel/board/{service_date}/suggestions/{plan_id}/reject   # Reject an agent suggestion
+WS   /ws/dispatch-board                                            # Live board updates and presence
 ```
 
 #### Compliance & Commerce Backbone (`/api/compliance/*`, `/api/commerce/*`)

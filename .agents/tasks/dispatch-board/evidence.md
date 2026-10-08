@@ -537,5 +537,39 @@ Before the `useDeferredValue` change, the same fixture gave p95 33.4–34.1 ms (
 - First CI run of the new `dispatch-board-e2e` job (after the branch is pushed).
 - Task 36b (truck type, tanker endorsement, nearest expiry) is still open from Phase 5.
 
-### Phase 8: Staging rollout
-Not started.
+### Phase 8: Staging rollout and docs
+Status: task 42 done. Task 41 is deferred (runbook only). The owner deferred the staging rollout for this workflow, so no staging, AWS, deploy, CodeBuild, staging-data or flag action was taken. No push.
+
+#### Task 41: deferred, written as a runbook
+The procedure is in `staging-runbook.md`, in run order:
+
+1. Preconditions: CI green on the exact commit, a pinned worktree, the CodeBuild merge rule, disk space, and a QA day with no `QA-SWEEP-*` lanes.
+2. Flag baselines: raw Redis value or unset, plus TTL, for `dispatch_board`, `overlay.compartment_loading` and `overlay.route_planning`.
+3. Deploy: migrate, then backend, then the UI after the ancestor check. Includes rollback.
+4. `QA-BOARD-*` fixtures.
+5. Shadow checks.
+6. `active_gated` publish, then the driver app manifest and `/api/driver/work` coordinate, arrival and gallons checks.
+7. Fuel Distribution hiding and `BOARD_OWNED_PLAN`.
+8. Published-stop move: revocation and new assignment.
+9. Latency against N1.
+10. QA cleanup, dry run first.
+11. Restore flags to baseline.
+
+Findings written into the runbook:
+
+- (1) `set_overlay_state` writes `overlay_ff:<key>:<tenant>` with a 90-day TTL. "Unset" and "`disabled`" are different baselines, so restoring an unset flag means deleting the key, not setting `disabled`. The admin GET reports unset as `disabled`, so the baseline is read from Redis by a one-shot task.
+- (2) `TelemetryService.record_metric` logs at DEBUG, so the `board.*.ms` metrics may not be in staging logs. The runbook measures client-side timings with `curl -w` and treats the metrics as a bonus.
+- (3) The draft is per tenant per day and `QA-SWEEP-*` work shares `demo-tenant`, so the runbook picks a QA day with no QA-SWEEP lanes. It deletes a draft only if that draft holds QA lanes only.
+- (4) The overlay agent flags are recorded and restored, but they are not raised for the test, because that would change agent behaviour tenant-wide.
+
+#### Task 42: docs
+- `docs/endpoint-registry.md` was regenerated (cwd `.worktrees/dispatch-board/Runsheet-backend`, `REDIS_URL=redis://localhost:6379 JWT_SECRET=ci-test-jwt-secret JWT_ALGORITHM=HS256 ENVIRONMENT=test $PY scripts/generate_endpoint_registry.py`, the CI job's env). Result: 354 entries. `git diff --exit-code docs/endpoint-registry.md` exited 0, so the file was already current. It includes the 8 `/api/fuel/board/*` routes, the two `dispatch-board` admin flag routes and `/ws/dispatch-board`. Without the CI env the script fails at SuperTokens init, as expected.
+- Root `README.md` gained three things:
+  - A "Dispatch Board" section under Usage, in dispatcher terms: where the tab is, lanes and trays, live checks, publish and re-publish, undo, suggestions, non-drag paths and shortcuts (taken from `ShortcutHelpDialog.tsx`), board-owned plans, and flag states.
+  - A `/api/fuel/board/*` block under API Endpoints, next to Fuel Distribution MVP.
+  - The `dispatch_board` GET/POST admin flag endpoints, added to the Ops admin feature-flag list. That list is the only admin flag doc in the repo.
+- `runsheet/README.md` is the stock Next.js README with no module descriptions, so it is unchanged.
+- Docs-only change, so no build or test run was needed. The registry check above is the only generated artefact.
+
+#### Open items
+- Task 41: the owner runs `staging-runbook.md`. The Phase 7 open items that depend on staging (latency numbers, the tray query on Postgres) close with it.
