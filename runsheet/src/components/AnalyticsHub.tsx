@@ -1,6 +1,7 @@
 "use client";
 import { Activity, BarChart3, Gauge, TrendingUp } from "lucide-react";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { getCurrentUserRoles } from "../utils/auth";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
 import { PageHeader, type Tab, TabNavigation } from "./ui";
@@ -34,23 +35,41 @@ const TABS: Tab[] = [
     label: "Fleet Efficiency",
     icon: <Gauge className="w-4 h-4" />,
   },
-  {
-    id: "ops-monitoring",
-    label: "Ops Monitoring",
-    icon: <Activity className="w-4 h-4" />,
-  },
 ];
+
+// The poison queue is platform-wide and `/ops/monitoring/poison-queue` is
+// `platform_admin` only, so tenant users don't get the tab at all.
+const OPS_MONITORING_TAB: Tab = {
+  id: "ops-monitoring",
+  label: "Ops Monitoring",
+  icon: <Activity className="w-4 h-4" />,
+};
 
 type TabId = string;
 
 export default function AnalyticsHub() {
   const [activeTab, setActiveTab] = useState<TabId>("overview");
+  // Hidden until the session's roles resolve.
+  const [isPlatformAdmin, setIsPlatformAdmin] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const roles = await getCurrentUserRoles();
+      if (!cancelled) setIsPlatformAdmin(roles.includes("platform_admin"));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const tabs = isPlatformAdmin ? [...TABS, OPS_MONITORING_TAB] : TABS;
 
   return (
     <div className="flex flex-col h-full">
       <PageHeader title="Analytics & Monitoring" />
       <TabNavigation
-        tabs={TABS}
+        tabs={tabs}
         activeTab={activeTab}
         onChange={setActiveTab}
       />
@@ -82,7 +101,7 @@ export default function AnalyticsHub() {
               </div>
             </ErrorBoundary>
           )}
-          {activeTab === "ops-monitoring" && (
+          {activeTab === "ops-monitoring" && isPlatformAdmin && (
             <ErrorBoundary componentName="Ops Monitoring">
               <OpsMonitoringDashboard />
             </ErrorBoundary>

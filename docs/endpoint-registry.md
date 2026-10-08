@@ -304,8 +304,6 @@
 | GET | `/api/ops/metrics/riders` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/metrics/shipments` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/metrics/sla` | /api/ops | session_required | — | — | — |
-| GET | `/api/ops/monitoring/indexing` | /api/ops | session_required | — | — | — |
-| GET | `/api/ops/monitoring/ingestion` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/monitoring/poison-queue` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/replay/status/{job_id}` | /api/ops | session_required | — | — | dict |
 | POST | `/api/ops/replay/trigger` | /api/ops | session_required | — | ReplayTriggerRequest | dict |

@@ -44,7 +44,7 @@ What was actually broken, in order of consequence:
 ``register_at_import`` is called from ``main.py`` immediately before the CORS
 registration, so the resulting stack is, outermost first::
 
-    CORS -> SecurityHeaders -> RequestID -> auth gate -> route
+    CORS -> UnhandledError -> SecurityHeaders -> RequestID -> auth gate -> route
 
 CORS stays outermost so its headers are attached to the 401s the auth gate returns
 and to the 429s the limiter returns. RequestID sits outside the auth gate so
@@ -103,9 +103,18 @@ def register_at_import(app, settings) -> None:
         app, strict_transport_security=HSTS_VALUE if remote else None
     )
 
+    # Added last, so it is the layer immediately inside CORS: an unexpected
+    # 500 is rendered here and still gets CORS headers. The Exception handler
+    # in errors/handlers.py runs in ServerErrorMiddleware, outside CORS
+    # (UI revamp audit §(i-b)). Lives here, not in main.py, because main.py is
+    # at its 350-line budget; main.py calls this right before adding CORS.
+    from middleware.unhandled_errors import UnhandledErrorMiddleware
+
+    app.add_middleware(UnhandledErrorMiddleware)
+
     logger.info(
         "Middleware registered at import time "
-        "(RequestID, rate limiting %s/min, security headers)",
+        "(RequestID, rate limiting %s/min, security headers, unhandled errors)",
         settings.rate_limit_requests_per_minute,
     )
 

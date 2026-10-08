@@ -159,8 +159,6 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
     "GET /api/ops/metrics/riders": RouteFixture(),
     "GET /api/ops/metrics/failures": RouteFixture(),
     "GET /api/ops/metrics/prometheus": RouteFixture(),
-    "GET /api/ops/monitoring/ingestion": RouteFixture(),
-    "GET /api/ops/monitoring/indexing": RouteFixture(),
     "GET /api/ops/monitoring/poison-queue": RouteFixture(),
     "GET /api/ops/replay/status/{job_id}": RouteFixture(
         path_params={"job_id": "JOB-001"},

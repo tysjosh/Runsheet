@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from config.legacy_flags import is_legacy_ng_delivery_enabled
 from config.settings import get_settings
+from auth.authorization import require_role
 from auth.tenant_scope import require_tenant_scope
 from errors.codes import ErrorCode
 from errors.exceptions import (
@@ -90,7 +91,7 @@ async def require_ops_enabled(
        (``shipments_current`` / ``riders_current`` / Dinee replay + drift).
        When the flag is off the whole surface 404s with
        ``LEGACY_NG_DELIVERY_DISABLED``. Ops platform monitoring
-       (``/monitoring/*``, ``/metrics/prometheus``) and the per-tenant
+       (``/monitoring/poison-queue``, ``/metrics/prometheus``) and the per-tenant
        feature-flag admin routes deliberately do NOT depend on this, so
        operators can still observe and manage a disabled surface.
        Audit reference: product-owner-audit-2026-05-08 recommendation #1.
@@ -1340,186 +1341,29 @@ async def get_prometheus_metrics(request: Request):
 
 # ---------------------------------------------------------------------------
 # Monitoring Endpoints
-# Validates: Requirements 23.1-23.3
+# Validates: Requirement 23.3
 # These return simple dicts (not paginated) since they're operational metrics.
+#
+# /monitoring/ingestion and /monitoring/indexing were deleted (UI revamp task
+# 0.2): they queried Elasticsearch indices dropped by migration 0007, so
+# ingestion 500'd with UnsupportedAggregationError and indexing reported a fake
+# 100% success rate.
 # ---------------------------------------------------------------------------
-
-@router.get("/monitoring/ingestion")
-@limiter.limit(_ops_rate)
-async def get_ingestion_metrics(
-    request: Request,
-    window: str = Query("5m", description="Time window for metrics (e.g. 5m, 1h, 24h)"),
-):
-    """
-    Ingestion health: events received, processed, failed, avg latency.
-    Validates: Req 23.1
-    """
-    es = _get_es()
-
-    # Parse window into an ES range value (e.g. "5m" -> "now-5m")
-    range_value = f"now-{window}"
-
-    # Count events ingested in the window across shipment_events
-    events_query = {
-        "query": {"range": {"ingested_at": {"gte": range_value}}},
-        "size": 0,
-        "aggs": {
-            "avg_latency": {
-                "avg": {
-                    "script": {
-                        "source": (
-                            "if (doc['ingested_at'].size() > 0 && doc['event_timestamp'].size() > 0) {"
-                            "  return doc['ingested_at'].value.toInstant().toEpochMilli() "
-                            "    - doc['event_timestamp'].value.toInstant().toEpochMilli();"
-                            "} return 0;"
-                        ),
-                        "lang": "painless",
-                    }
-                }
-            },
-        },
-    }
-
-    events_result = await es.search_documents(
-        OpsElasticsearchService.SHIPMENT_EVENTS,
-        events_query,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-    )
-
-    total_events = events_result["hits"]["total"]["value"]
-    avg_latency_ms = events_result.get("aggregations", {}).get("avg_latency", {}).get("value")
-
-    # Count poison queue entries in the window (failed events)
-    poison_query = {
-        "query": {"range": {"created_at": {"gte": range_value}}},
-        "size": 0,
-    }
-    poison_result = await es.search_documents(
-        OpsElasticsearchService.POISON_QUEUE,
-        poison_query,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-    )
-    failed_events = poison_result["hits"]["total"]["value"]
-
-    return {
-        "data": {
-            "window": window,
-            "events_received": total_events + failed_events,
-            "events_processed": total_events,
-            "events_failed": failed_events,
-            "avg_processing_latency_ms": round(avg_latency_ms, 2) if avg_latency_ms is not None else None,
-        },
-        "request_id": _get_request_id(request),
-    }
-
-
-@router.get("/monitoring/indexing")
-@limiter.limit(_ops_rate)
-async def get_indexing_metrics(
-    request: Request,
-    window: str = Query("5m", description="Time window for metrics (e.g. 5m, 1h, 24h)"),
-):
-    """
-    Indexing health: documents indexed, errors, bulk success rate, avg latency.
-    Validates: Req 23.2
-    """
-    es = _get_es()
-
-    range_value = f"now-{window}"
-
-    # Count documents indexed across all ops indices in the window
-    indices = [
-        OpsElasticsearchService.SHIPMENTS_CURRENT,
-        OpsElasticsearchService.SHIPMENT_EVENTS,
-        OpsElasticsearchService.RIDERS_CURRENT,
-    ]
-
-    total_indexed = 0
-    per_index: dict = {}
-    for index_name in indices:
-        count_query = {
-            "query": {"range": {"ingested_at": {"gte": range_value}}},
-            "size": 0,
-            "aggs": {
-                "avg_latency": {
-                    "avg": {
-                        "script": {
-                            "source": (
-                                "if (doc['ingested_at'].size() > 0 && doc['last_event_timestamp'].size() > 0) {"
-                                "  return doc['ingested_at'].value.toInstant().toEpochMilli() "
-                                "    - doc['last_event_timestamp'].value.toInstant().toEpochMilli();"
-                                "} return 0;"
-                            ),
-                            "lang": "painless",
-                        }
-                    }
-                },
-            },
-        }
-        try:
-            result = await es.search_documents(
-                index_name,
-                count_query,
-                request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-            )
-            count = result["hits"]["total"]["value"]
-            avg_lat = result.get("aggregations", {}).get("avg_latency", {}).get("value")
-            total_indexed += count
-            per_index[index_name] = {
-                "documents_indexed": count,
-                "avg_indexing_latency_ms": round(avg_lat, 2) if avg_lat is not None else None,
-            }
-        except Exception as exc:
-            logger.warning("Failed to query index %s for monitoring: %s", index_name, exc)
-            per_index[index_name] = {"documents_indexed": 0, "error": str(exc)}
-
-    # Count indexing errors from poison queue
-    poison_query = {
-        "query": {
-            "bool": {
-                "must": [
-                    {"range": {"created_at": {"gte": range_value}}},
-                    {"term": {"error_type": "indexing_error"}},
-                ]
-            }
-        },
-        "size": 0,
-    }
-    try:
-        poison_result = await es.search_documents(
-            OpsElasticsearchService.POISON_QUEUE,
-            poison_query,
-            request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-        )
-        indexing_errors = poison_result["hits"]["total"]["value"]
-    except Exception as exc:
-        logger.warning("Failed to query poison queue for indexing errors: %s", exc)
-        indexing_errors = 0
-
-    total_attempted = total_indexed + indexing_errors
-    success_rate = round((total_indexed / total_attempted) * 100, 2) if total_attempted > 0 else 100.0
-
-    return {
-        "data": {
-            "window": window,
-            "total_documents_indexed": total_indexed,
-            "indexing_errors": indexing_errors,
-            "bulk_success_rate_pct": success_rate,
-            "per_index": per_index,
-        },
-        "request_id": _get_request_id(request),
-    }
-
 
 @router.get("/monitoring/poison-queue")
 @limiter.limit(_ops_rate)
 async def get_poison_queue_metrics(
     request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Poison queue health: depth, oldest event age, retry stats.
+
+    The queue is platform-wide (not tenant-filtered), so only Runsheet staff
+    (``platform_admin``) may read it.
     Validates: Req 23.3
     """
+    require_role(tenant, "platform_admin")
     es = _get_es()
 
     # Total queue depth (pending + retrying)

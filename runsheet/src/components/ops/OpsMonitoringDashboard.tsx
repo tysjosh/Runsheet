@@ -1,52 +1,36 @@
 "use client";
 
 /**
- * Ops Monitoring Dashboard — Ingestion, Indexing & Poison Queue health.
+ * Ops Monitoring Dashboard — poison queue health.
  *
- * Three-card grid layout displaying pipeline health metrics with color-coded
- * values (green/yellow/red) and auto-refresh every 30 seconds.
+ * Shown only to `platform_admin` (see `AnalyticsHub.tsx`): the poison queue is
+ * platform-wide and `/ops/monitoring/poison-queue` is `platform_admin` only.
+ * Full relegation to Settings → System health is UI revamp task 3.9.
  *
- * Scope note: this dashboard deliberately survives the legacy-NG teardown.
- * `require_ops_enabled` in `ops/api/endpoints.py` gates the rider/shipment
- * read model, but `/ops/monitoring/*` and `/ops/metrics/prometheus` are
- * exempt by design so operators can still observe a disabled surface
- * (audit reference: product-owner-audit-2026-05-08 recommendation #1).
+ * The Ingestion and Indexing cards were removed with their endpoints (UI revamp
+ * task 0.2): both queried Elasticsearch indices dropped by migration 0007, so
+ * ingestion always 500'd and indexing reported a fake 100% success rate.
  *
- * The former "Shipment Metrics" and "SLA Compliance" sections were removed:
- * they read `/ops/metrics/shipments` and `/ops/metrics/sla`, which ARE behind
- * that gate, so with `LEGACY_NG_DELIVERY_ENABLED=false` they could only ever
- * render an error panel.
+ * Cards load with `Promise.allSettled` and keep their own error, so one failing
+ * card never blanks the others.
  *
  * Validates:
- * - Requirement 6.1: Display ingestion metrics via getIngestionMonitoring
- * - Requirement 6.2: Display indexing metrics via getIndexingMonitoring
  * - Requirement 6.3: Display poison queue metrics via getPoisonQueueMonitoring
  * - Requirement 6.4: Color-code metric values green/yellow/red based on thresholds
  * - Requirement 6.5: Visual alert indicator next to metrics exceeding critical thresholds
  * - Requirement 6.6: Auto-refresh every 30 seconds with polling interval
- * - Requirement 8.7: Retain existing pipeline health monitoring
  */
 
 import {
   Activity,
   AlertTriangle,
-  Database,
   Loader2,
   RefreshCw,
   Skull,
-  Zap,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type {
-  IndexingMetrics,
-  IngestionMetrics,
-  PoisonQueueMetrics,
-} from "../../services/opsApi";
-import {
-  getIndexingMonitoring,
-  getIngestionMonitoring,
-  getPoisonQueueMonitoring,
-} from "../../services/opsApi";
+import type { PoisonQueueMetrics } from "../../services/opsApi";
+import { getPoisonQueueMonitoring } from "../../services/opsApi";
 
 // ─── Metric Status Types & Helper ────────────────────────────────────────────
 
@@ -86,14 +70,6 @@ export function getMetricStatus(
 }
 
 // ─── Threshold Configurations ────────────────────────────────────────────────
-
-const INGESTION_THRESHOLDS: Record<string, ThresholdConfig> = {
-  events_failed: { direction: "above", warning: 50, critical: 100 },
-};
-
-const INDEXING_THRESHOLDS: Record<string, ThresholdConfig> = {
-  bulk_success_rate: { direction: "below", warning: 0.99, critical: 0.95 },
-};
 
 const POISON_QUEUE_THRESHOLDS: Record<string, ThresholdConfig> = {
   queue_depth: { direction: "above", warning: 50, critical: 100 },
@@ -148,9 +124,17 @@ interface MetricCardProps {
   icon: React.ReactNode;
   children: React.ReactNode;
   loading: boolean;
+  /** This card's own load error; other cards are unaffected. */
+  error?: string;
 }
 
-function MetricCard({ title, icon, children, loading }: MetricCardProps) {
+function MetricCard({
+  title,
+  icon,
+  children,
+  loading,
+  error,
+}: MetricCardProps) {
   return (
     <div className="bg-white border border-gray-200 rounded-lg">
       <div className="flex items-center gap-2 px-5 py-4 border-b border-gray-100">
@@ -160,6 +144,14 @@ function MetricCard({ title, icon, children, loading }: MetricCardProps) {
         <h3 className="text-sm font-semibold text-primary">{title}</h3>
       </div>
       <div className="px-5 py-4">
+        {error && (
+          <p
+            role="alert"
+            className="text-sm text-error bg-error-light px-3 py-2 rounded mb-2"
+          >
+            {error}
+          </p>
+        )}
         {loading ? (
           <div className="flex items-center justify-center py-8">
             <Loader2 className="w-5 h-5 text-gray-500 animate-spin" />
@@ -172,16 +164,23 @@ function MetricCard({ title, icon, children, loading }: MetricCardProps) {
   );
 }
 
+/** Message for a failed card; a network failure gets plain copy. */
+function cardErrorMessage(reason: unknown, title: string): string {
+  const message = reason instanceof Error ? reason.message : "";
+  if (!message || message === "Failed to fetch") {
+    return `Couldn't load ${title.toLowerCase()} metrics. Retrying in 30 seconds.`;
+  }
+  return message;
+}
+
 // ─── Main Dashboard Component ────────────────────────────────────────────────
 
 export default function OpsMonitoringDashboard() {
-  const [ingestion, setIngestion] = useState<IngestionMetrics | null>(null);
-  const [indexing, setIndexing] = useState<IndexingMetrics | null>(null);
   const [poisonQueue, setPoisonQueue] = useState<PoisonQueueMetrics | null>(
     null,
   );
+  const [poisonQueueError, setPoisonQueueError] = useState("");
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
   const lastUpdatedRef = useRef<Date | null>(null);
@@ -189,28 +188,26 @@ export default function OpsMonitoringDashboard() {
   // ─── Pipeline Health Fetch ─────────────────────────────────────────────
 
   const fetchMetrics = useCallback(async () => {
-    try {
-      const [ingestionData, indexingData, poisonData] = await Promise.all([
-        getIngestionMonitoring(),
-        getIndexingMonitoring(),
-        getPoisonQueueMonitoring(),
-      ]);
+    // allSettled so each card succeeds or fails on its own (more cards may
+    // join this list when the page moves to Settings → System health).
+    const [poisonResult] = await Promise.allSettled([
+      getPoisonQueueMonitoring(),
+    ]);
+    if (poisonResult.status === "fulfilled") {
       // API returns { data: {...}, request_id: "..." } — extract the data field
-      setIngestion((ingestionData as any).data ?? ingestionData);
-      setIndexing((indexingData as any).data ?? indexingData);
+      const poisonData = poisonResult.value;
       setPoisonQueue((poisonData as any).data ?? poisonData);
-      setError("");
+      setPoisonQueueError("");
       const now = new Date();
       setLastUpdated(now);
       lastUpdatedRef.current = now;
-    } catch (err) {
+    } else {
       // On polling failure, keep stale data and show "last updated" indicator
-      setError(
-        err instanceof Error ? err.message : "Failed to fetch monitoring data",
+      setPoisonQueueError(
+        cardErrorMessage(poisonResult.reason, "Poison Queue"),
       );
-    } finally {
-      setLoading(false);
     }
+    setLoading(false);
   }, []);
 
   // ─── Initial fetch + auto-refresh every 30 seconds ─────────────────────
@@ -235,16 +232,6 @@ export default function OpsMonitoringDashboard() {
 
   // ─── Helpers for metric status ───────────────────────────────────────────
 
-  function ingestionStatus(key: string, value: number): MetricStatus {
-    const config = INGESTION_THRESHOLDS[key];
-    return config ? getMetricStatus(value, config) : "healthy";
-  }
-
-  function indexingStatus(key: string, value: number): MetricStatus {
-    const config = INDEXING_THRESHOLDS[key];
-    return config ? getMetricStatus(value, config) : "healthy";
-  }
-
   function poisonStatus(key: string, value: number): MetricStatus {
     const config = POISON_QUEUE_THRESHOLDS[key];
     return config ? getMetricStatus(value, config) : "healthy";
@@ -264,12 +251,12 @@ export default function OpsMonitoringDashboard() {
                 Ops Monitoring
               </h2>
               <p className="text-xs text-gray-500">
-                Pipeline health — ingestion, indexing & poison queue
+                Pipeline health — poison queue
               </p>
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {error && lastUpdated && (
+            {poisonQueueError && lastUpdated && (
               <span className="text-xs text-warning bg-warning-light px-2 py-1 rounded">
                 Last updated {secondsAgo}s ago
               </span>
@@ -279,6 +266,7 @@ export default function OpsMonitoringDashboard() {
               disabled={loading}
               className="p-2 rounded-lg text-gray-500 hover:text-primary hover:bg-gray-100 transition-colors disabled:opacity-50"
               title="Refresh metrics"
+              aria-label="Refresh metrics"
             >
               <RefreshCw
                 className={`w-4 h-4 ${loading ? "animate-spin" : ""}`}
@@ -288,124 +276,15 @@ export default function OpsMonitoringDashboard() {
         </div>
       </div>
 
-      {/* Error banner (only on initial load failure with no data) */}
-      {error && !ingestion && !indexing && !poisonQueue && (
-        <div className="mx-6 mb-4">
-          <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
-            {error}
-          </p>
-        </div>
-      )}
-
       {/* Metric Cards Grid */}
       <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Ingestion Card */}
-          <MetricCard
-            title="Ingestion Pipeline"
-            icon={<Zap className="w-4 h-4 text-white" />}
-            loading={loading}
-          >
-            {ingestion && (
-              <>
-                <MetricItem
-                  label="Events Received"
-                  value={(ingestion as any).events_received ?? 0}
-                  status={ingestionStatus(
-                    "events_received",
-                    (ingestion as any).events_received ?? 0,
-                  )}
-                />
-                <MetricItem
-                  label="Events Processed"
-                  value={(ingestion as any).events_processed ?? 0}
-                  status={ingestionStatus(
-                    "events_processed",
-                    (ingestion as any).events_processed ?? 0,
-                  )}
-                />
-                <MetricItem
-                  label="Events Failed"
-                  value={(ingestion as any).events_failed ?? 0}
-                  status={ingestionStatus(
-                    "events_failed",
-                    (ingestion as any).events_failed ?? 0,
-                  )}
-                />
-                <MetricItem
-                  label="Avg Latency"
-                  value={`${((ingestion as any).avg_latency_ms ?? (ingestion as any).avg_processing_latency_ms ?? 0).toFixed(1)} ms`}
-                  status={ingestionStatus(
-                    "avg_latency_ms",
-                    (ingestion as any).avg_latency_ms ??
-                      (ingestion as any).avg_processing_latency_ms ??
-                      0,
-                  )}
-                />
-              </>
-            )}
-          </MetricCard>
-
-          {/* Indexing Card */}
-          <MetricCard
-            title="Indexing Health"
-            icon={<Database className="w-4 h-4 text-white" />}
-            loading={loading}
-          >
-            {indexing && (
-              <>
-                <MetricItem
-                  label="Documents Indexed"
-                  value={
-                    (indexing as any).documents_indexed ??
-                    (indexing as any).total_documents_indexed ??
-                    0
-                  }
-                  status={indexingStatus(
-                    "documents_indexed",
-                    (indexing as any).documents_indexed ??
-                      (indexing as any).total_documents_indexed ??
-                      0,
-                  )}
-                />
-                <MetricItem
-                  label="Indexing Errors"
-                  value={(indexing as any).indexing_errors ?? 0}
-                  status={indexingStatus(
-                    "indexing_errors",
-                    (indexing as any).indexing_errors ?? 0,
-                  )}
-                />
-                <MetricItem
-                  label="Bulk Success Rate"
-                  value={`${(((indexing as any).bulk_success_rate ?? ((indexing as any).bulk_success_rate_pct != null ? (indexing as any).bulk_success_rate_pct / 100 : 1)) * 100).toFixed(1)}%`}
-                  status={indexingStatus(
-                    "bulk_success_rate",
-                    (indexing as any).bulk_success_rate ??
-                      ((indexing as any).bulk_success_rate_pct != null
-                        ? (indexing as any).bulk_success_rate_pct / 100
-                        : 1),
-                  )}
-                />
-                <MetricItem
-                  label="Avg Latency"
-                  value={`${((indexing as any).avg_latency_ms ?? (indexing as any).avg_indexing_latency_ms ?? 0).toFixed(1)} ms`}
-                  status={indexingStatus(
-                    "avg_latency_ms",
-                    (indexing as any).avg_latency_ms ??
-                      (indexing as any).avg_indexing_latency_ms ??
-                      0,
-                  )}
-                />
-              </>
-            )}
-          </MetricCard>
-
           {/* Poison Queue Card */}
           <MetricCard
             title="Poison Queue"
             icon={<Skull className="w-4 h-4 text-white" />}
             loading={loading}
+            error={poisonQueueError}
           >
             {poisonQueue && (
               <>

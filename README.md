@@ -960,9 +960,7 @@ GET  /api/ops/metrics/sla                       # SLA compliance metrics
 GET  /api/ops/metrics/riders                    # Rider performance metrics
 GET  /api/ops/metrics/failures                  # Failure rate metrics
 GET  /api/ops/metrics/prometheus                # Prometheus-format metrics export
-GET  /api/ops/monitoring/ingestion              # Ingestion pipeline metrics
-GET  /api/ops/monitoring/indexing               # Indexing throughput metrics
-GET  /api/ops/monitoring/poison-queue           # Poison queue metrics
+GET  /api/ops/monitoring/poison-queue           # Poison queue metrics (platform_admin)
 POST /api/ops/admin/feature-flags/{tenant_id}/enable    # Enable ops for tenant
 POST /api/ops/admin/feature-flags/{tenant_id}/disable   # Disable ops for tenant
 POST /api/ops/admin/feature-flags/{tenant_id}/rollback  # Rollback feature flag

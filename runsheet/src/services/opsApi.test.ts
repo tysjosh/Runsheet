@@ -3,7 +3,7 @@
  *
  * Covers:
  *
- *  • ``GET /ops/monitoring/{ingestion,indexing,poison-queue}``
+ *  • ``GET /ops/monitoring/poison-queue``
  *  • ``GET /ops/metrics/prometheus`` (text, not JSON)
  *  • feature-flag enable / disable / rollback
  *
@@ -24,8 +24,6 @@ import { ApiError } from "./api";
 import {
   disableOpsFeatureFlag,
   enableOpsFeatureFlag,
-  getIndexingMonitoring,
-  getIngestionMonitoring,
   getPoisonQueueMonitoring,
   getPrometheusMetrics,
   rollbackOpsFeatureFlag,
@@ -55,29 +53,6 @@ afterEach(() => {
 // ─── Monitoring ──────────────────────────────────────────────────────────────
 
 describe("monitoring endpoints", () => {
-  it("getIngestionMonitoring GETs the ingestion path", async () => {
-    mockFetchOnce({ ok: true, body: { events_received: 5, request_id: "r" } });
-
-    const result = await getIngestionMonitoring();
-
-    expect(result.events_received).toBe(5);
-    const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/monitoring/ingestion`);
-  });
-
-  it("getIndexingMonitoring GETs the indexing path", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: { documents_indexed: 12, request_id: "r" },
-    });
-
-    const result = await getIndexingMonitoring();
-
-    expect(result.documents_indexed).toBe(12);
-    const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/monitoring/indexing`);
-  });
-
   it("getPoisonQueueMonitoring GETs the poison-queue path", async () => {
     mockFetchOnce({ ok: true, body: { queue_depth: 0, request_id: "r" } });
 
@@ -91,7 +66,7 @@ describe("monitoring endpoints", () => {
   it("surfaces a non-2xx monitoring response as ApiError", async () => {
     mockFetchOnce({ ok: false, status: 503, body: { message: "down" } });
 
-    await expect(getIngestionMonitoring()).rejects.toThrow(ApiError);
+    await expect(getPoisonQueueMonitoring()).rejects.toThrow(ApiError);
   });
 });
 

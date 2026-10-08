@@ -58,9 +58,16 @@ class TestRegisterAtImport:
              patch("middleware.security_headers.setup_security_headers") as mock_security:
             register_at_import(mock_app, settings)
 
-        from middleware.request_id import RequestIDMiddleware
+        from unittest.mock import call
 
-        mock_app.add_middleware.assert_called_once_with(RequestIDMiddleware)
+        from middleware.request_id import RequestIDMiddleware
+        from middleware.unhandled_errors import UnhandledErrorMiddleware
+
+        # UnhandledErrorMiddleware is added last so it sits just inside CORS.
+        assert mock_app.add_middleware.call_args_list == [
+            call(RequestIDMiddleware),
+            call(UnhandledErrorMiddleware),
+        ]
         # MagicMock settings are treated as local: no HSTS.
         mock_security.assert_called_once_with(
             mock_app, strict_transport_security=None

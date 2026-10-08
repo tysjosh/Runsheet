@@ -13,8 +13,12 @@
  * exempt from that gate, so operators can observe and manage a disabled
  * surface (audit reference: product-owner-audit-2026-05-08 recommendation #1):
  *
- * - `GET  /ops/monitoring/{ingestion,indexing,poison-queue}`
+ * - `GET  /ops/monitoring/poison-queue` (`platform_admin` only)
  * - `GET  /ops/metrics/prometheus`
+ *
+ * `/ops/monitoring/{ingestion,indexing}` were deleted on the backend (they
+ * queried Elasticsearch indices dropped by migration 0007), and so were
+ * their wrappers here.
  * - `POST /ops/admin/feature-flags/:tenantId/{enable,disable,rollback}`
  */
 
@@ -28,22 +32,6 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080/api";
 
 // ─── Monitoring Types ────────────────────────────────────────────────────────
-
-export interface IngestionMetrics {
-  events_received: number;
-  events_processed: number;
-  events_failed: number;
-  avg_latency_ms: number;
-  request_id: string;
-}
-
-export interface IndexingMetrics {
-  documents_indexed: number;
-  indexing_errors: number;
-  bulk_success_rate: number;
-  avg_latency_ms: number;
-  request_id: string;
-}
 
 export interface PoisonQueueMetrics {
   queue_depth: number;
@@ -92,17 +80,7 @@ async function opsRequest<T>(
 
 // ─── Monitoring Endpoints ────────────────────────────────────────────────────
 
-/** GET /ops/monitoring/ingestion — ingestion pipeline health */
-export async function getIngestionMonitoring(): Promise<IngestionMetrics> {
-  return opsRequest<IngestionMetrics>("/ops/monitoring/ingestion");
-}
-
-/** GET /ops/monitoring/indexing — ES indexing health */
-export async function getIndexingMonitoring(): Promise<IndexingMetrics> {
-  return opsRequest<IndexingMetrics>("/ops/monitoring/indexing");
-}
-
-/** GET /ops/monitoring/poison-queue — poison queue stats */
+/** GET /ops/monitoring/poison-queue — poison queue stats (platform_admin) */
 export async function getPoisonQueueMonitoring(): Promise<PoisonQueueMetrics> {
   return opsRequest<PoisonQueueMetrics>("/ops/monitoring/poison-queue");
 }
