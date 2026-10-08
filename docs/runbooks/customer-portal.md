@@ -9,6 +9,18 @@ Design: `.kiro/specs/customer-portal/design.md`. Backend code lives in `Runsheet
 - Invoices and payments also need `COMMERCE_INVOICING_ENABLED=true`. With invoicing off, the invoice and payment routes answer 404 `INVOICING_DISABLED`, and `/api/portal/me` reports `invoices_available=false` and `payments_available=false`.
 - Staging sets `CUSTOMER_PORTAL_ENABLED=true` in `Runsheet-backend/scripts/staging_aws.sh`. `.env.example` keeps it `false`.
 
+## Deploy checklist: supplier display name
+
+Customers see the tenant's display name ("supplier name") on Home, Account, the invoice PDF "From" line and the invite email. It's held only in Redis, at `tenant:{tenant_id}:display_name`, with no TTL. A new environment, a Redis rebuild or a cache flush loses it, and customer text silently falls back to the tenant id (for example `demo-tenant`).
+
+After every deploy to a new or rebuilt environment, and after any Redis replacement:
+
+1. Check it, as a one-shot ECS task on the API task definition: `python -m scripts.set_tenant_display_name --tenant <tenant_id> --show`.
+2. If it's empty, set it: `python -m scripts.set_tenant_display_name --tenant <tenant_id> --name "<Supplier name>"` (whitespace is collapsed, 120 characters at most). `--clear` removes it, for example when a tenant is deleted.
+3. Confirm with `GET /api/portal/me` as a portal user: `supplier_name` should be the name, not the tenant id.
+
+The script exits 2 when `REDIS_URL` isn't set, so a misconfigured task fails loudly.
+
 ## Inviting and revoking portal users
 
 Only `admin` sessions can use these routes. They live under the customer's commerce record:
