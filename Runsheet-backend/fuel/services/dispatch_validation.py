@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from fuel.services.fuel_product_catalog import UnknownFuelProductError, canonicalize
 
 # Board imports. The engine and models import nothing from this module, so
@@ -232,6 +234,10 @@ _SUPPLIER_CONTRACTS_INDEX = "supplier_contracts"
 _FUEL_STATIONS_INDEX = "fuel_stations"
 _TRUCK_TELEMETRY_INDEX = "truck_telemetry"
 _DRAFTS_INDEX = "dispatch_board_drafts"
+#: Compliance driver-qualification (DQ) records (``compliance_es_mappings.DRIVERS_INDEX``).
+_DQ_DRIVERS_INDEX = "drivers"
+#: Qualification block when the ops driver has no DQ record in the tenant.
+NO_QUALIFICATION_RECORD = "no_qualification_record"
 
 
 class TTLCache:
@@ -817,11 +823,40 @@ class DispatchValidationService:
 
         async def one(driver_id: str) -> None:
             async def fetch() -> Any:
-                return _dump(await svc.is_dispatch_eligible(ctx.tenant_id, driver_id, requirements))
+                # Board lanes hold ops driver ids (``drivers_current``); DQ
+                # records have their own ``driver_<uuid>`` ids and name the ops
+                # driver in ``external_refs.ops_driver_id`` (B10). Ask with the
+                # id as given first (a DQ id, or an ops id equal to one), then
+                # through the link. No record at all is a block with its own
+                # reason, not "could not run" (it won't fix itself on retry).
+                try:
+                    return _dump(await svc.is_dispatch_eligible(ctx.tenant_id, driver_id, requirements))
+                except AppException as exc:
+                    if exc.error_code != ErrorCode.RESOURCE_NOT_FOUND:
+                        raise
+                dq_id = await self._dq_id_for_ops_driver(ctx.tenant_id, driver_id)
+                if dq_id is None:
+                    return {"driver_id": driver_id, "eligible": False, "reasons": [NO_QUALIFICATION_RECORD]}
+                return _dump(await svc.is_dispatch_eligible(ctx.tenant_id, dq_id, requirements))
 
             ctx.qualification[driver_id] = await self._cached(ctx, ("qualification", driver_id, req_key), fetch)
 
         await asyncio.gather(*(one(d) for d in ctx.drivers))
+
+    async def _dq_id_for_ops_driver(self, tenant_id: str, ops_driver_id: str) -> Optional[str]:
+        """The DQ record linked to an ops driver by ``external_refs.ops_driver_id``, if any."""
+        query = {
+            "query": {"bool": {"filter": [
+                {"term": {"tenant_id": tenant_id}},
+                {"term": {"external_refs.ops_driver_id": ops_driver_id}},
+            ]}},
+            "_source": ["driver_id", "tenant_id"],
+            "size": 1,
+        }
+        for source in _hits(await self._es.search_documents(_DQ_DRIVERS_INDEX, query, 1)):
+            if source.get("tenant_id") == tenant_id and source.get("driver_id"):
+                return str(source["driver_id"])
+        return None
 
     async def _fetch_hos(self, ctx: ValidationContext) -> None:
         """Today only (K3.2): the gate verdict and the advisory figures."""
@@ -1234,7 +1269,12 @@ def _qualification_checks(ctx: ValidationContext, lane: Lane) -> List[Check]:
     if not result.get("eligible", False):
         for reason in result.get("reasons") or ["driver_ineligible"]:
             code = str(reason).split(":")[0].strip().lower().replace(" ", "_")[:64] or "driver_ineligible"
-            out.append(_mk("driver_qualification", "block", code, f"The driver can't be dispatched ({code}).", source, scope, fix_link=fix))
+            message = (
+                "The driver has no qualification record on file."
+                if code == NO_QUALIFICATION_RECORD
+                else f"The driver can't be dispatched ({code})."
+            )
+            out.append(_mk("driver_qualification", "block", code, message, source, scope, fix_link=fix))
     driver = ctx.drivers.get(lane.driver_id) or {}
     expiry = _parse_dt(driver.get("medical_card_expiry"))
     if expiry is not None and ctx.now <= expiry <= ctx.now + timedelta(days=EXPIRY_INFO_DAYS):
