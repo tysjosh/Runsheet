@@ -15,6 +15,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { dateLong, dateTime, number, pct } from "../../lib/format";
 import type {
   KFactorEntry,
   KFactorVarianceHistoryItem,
@@ -28,54 +29,37 @@ const MAX_ROWS = 20;
 
 function fmtHours(h: number | null | undefined): string {
   if (h === null || h === undefined) return "—";
-  if (h >= 24) return `${(h / 24).toFixed(1)} d`;
-  return `${h.toFixed(1)} h`;
+  if (h >= 24) return `${number(h / 24, { decimals: 1 })} d`;
+  return `${number(h, { decimals: 1 })} h`;
 }
 
 function fmtPct(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
-  return `${(v * 100).toFixed(0)}%`;
+  return pct(v, { fraction: true });
 }
 
 function fmtTime(iso: string | null | undefined): string {
   if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString([], {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+  return dateTime(iso);
 }
 
 function fmtDay(iso: string | null | undefined): string {
   if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleDateString([], {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-  } catch {
-    return iso;
-  }
+  return dateLong(iso);
 }
 
 function fmtK(v: number | null | undefined): string {
-  return v === null || v === undefined ? "—" : v.toFixed(4);
+  return v === null || v === undefined ? "—" : number(v, { decimals: 4 });
 }
 
 function fmtGal(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
-  return v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return number(v);
 }
 
 function fmtVariance(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
-  return `${v >= 0 ? "+" : ""}${v.toFixed(1)}%`;
+  return `${v >= 0 ? "+" : ""}${pct(v, { decimals: 1 })}`;
 }
 
 export default function TankConsumptionDrillIn({
@@ -164,7 +148,7 @@ export default function TankConsumptionDrillIn({
             value={
               entry.variance_percent === null
                 ? "—"
-                : `${entry.variance_percent >= 0 ? "+" : ""}${entry.variance_percent.toFixed(1)}%`
+                : fmtVariance(entry.variance_percent)
             }
           />
           <Stat label="Deliveries" value={String(entry.delivery_count)} />

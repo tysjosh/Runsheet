@@ -294,27 +294,30 @@ describe("SourcingPage", () => {
   });
 
   async function submitQuery() {
-    fireEvent.change(screen.getByLabelText(/Product code/i), {
-      target: { value: "DIESEL_2" },
-    });
-    fireEvent.change(screen.getByLabelText(/Volume \(gallons\)/i), {
+    // The query is a FormDialog opened from the toolbar (design.md §5).
+    fireEvent.click(screen.getByRole("button", { name: "Rank terminals" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByLabelText(/^Product/));
+    fireEvent.click(screen.getByRole("option", { name: /Diesel #2/ }));
+    fireEvent.change(within(dialog).getByLabelText(/^Volume/), {
       target: { value: "8000" },
     });
-    fireEvent.change(screen.getByLabelText(/Origin latitude/i), {
+    fireEvent.change(within(dialog).getByLabelText(/^Origin latitude/), {
       target: { value: "40.7128" },
     });
-    fireEvent.change(screen.getByLabelText(/Origin longitude/i), {
+    fireEvent.change(within(dialog).getByLabelText(/^Origin longitude/), {
       target: { value: "-74.006" },
     });
     await act(async () => {
-      fireEvent.submit(screen.getByTestId("sourcing-query-form"));
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Rank terminals" }),
+      );
     });
   }
-
   it("renders empty state before any query is submitted", () => {
     render(<SourcingPage />);
     expect(
-      screen.getByText(/Enter a product, volume, and origin above/i),
+      screen.getByText(/enter a product, volume, and origin/i),
     ).toBeInTheDocument();
   });
 

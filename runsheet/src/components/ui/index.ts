@@ -56,7 +56,13 @@ export { Modal, ModalFooter } from "./Modal";
 export type { NumberFieldProps, NumberRules } from "./NumberField";
 export { NumberField, validateNumber } from "./NumberField";
 export type { ChromeContribution, PageHeaderProps } from "./PageHeader";
-export { PageChromeProvider, PageHeader, usePageChrome } from "./PageHeader";
+export {
+  PageChromeProvider,
+  PageHeader,
+  PageTitle,
+  useInPageChrome,
+  usePageChrome,
+} from "./PageHeader";
 export type { PaginationProps } from "./Pagination";
 export { Pagination } from "./Pagination";
 export type { ProductChipProps } from "./ProductChip";

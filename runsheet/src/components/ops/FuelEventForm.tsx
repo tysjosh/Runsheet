@@ -1,7 +1,8 @@
 "use client";
 
-import { ArrowDown, ArrowUp, Loader2, X } from "lucide-react";
-import { useCallback, useState } from "react";
+import { ArrowDown, ArrowUp } from "lucide-react";
+import { useState } from "react";
+import { gallons } from "../../lib/format";
 import type { FuelStation } from "../../services/fuelApi";
 import {
   getFuelStationCapacityGallons,
@@ -9,6 +10,14 @@ import {
   recordConsumption,
   recordRefill,
 } from "../../services/fuelApi";
+import {
+  Button,
+  Field,
+  FormGrid,
+  INPUT_CLASS,
+  InlineBanner,
+  NumberField,
+} from "../ui";
 
 type EventMode = "consumption" | "refill";
 
@@ -19,17 +28,10 @@ interface FuelEventFormProps {
   onSuccess: () => void;
 }
 
-function getCapacityGallons(station: FuelStation): number {
-  return getFuelStationCapacityGallons(station);
-}
-
-function getCurrentStockGallons(station: FuelStation): number {
-  return getFuelStationCurrentStockGallons(station);
-}
-
 /**
- * Inline form for recording a fuel consumption (dispensing) or refill
- * (delivery) event against a specific station.
+ * Inline form, inside the station drawer, for recording a fuel consumption
+ * (dispensing) or refill (delivery) event against the station. Gallons use
+ * `NumberField` (locale-aware, one decimal, max = stock or free capacity).
  *
  * On success, calls onSuccess so the parent can refresh station detail.
  */
@@ -39,247 +41,173 @@ export default function FuelEventForm({
   onClose,
   onSuccess,
 }: FuelEventFormProps) {
-  const [quantity, setQuantity] = useState("");
+  const [quantity, setQuantity] = useState<number | null>(null);
   const [assetId, setAssetId] = useState("");
   const [operatorId, setOperatorId] = useState("");
-  const [odometer, setOdometer] = useState("");
+  const [odometer, setOdometer] = useState<number | null>(null);
   const [supplier, setSupplier] = useState("");
   const [deliveryRef, setDeliveryRef] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isConsumption = mode === "consumption";
-  const maxQuantity = isConsumption
-    ? getCurrentStockGallons(station)
-    : getCapacityGallons(station) - getCurrentStockGallons(station);
+  const stock = getFuelStationCurrentStockGallons(station);
+  const maxQuantity = Math.max(
+    0,
+    Math.floor(
+      isConsumption ? stock : getFuelStationCapacityGallons(station) - stock,
+    ),
+  );
 
   const canSubmit =
-    Number(quantity) > 0 &&
+    quantity !== null &&
+    !Number.isNaN(quantity) &&
+    quantity > 0 &&
     operatorId.trim() !== "" &&
     (isConsumption ? assetId.trim() !== "" : supplier.trim() !== "");
 
-  const handleSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-      if (!canSubmit) return;
-
-      setSubmitting(true);
-      setError(null);
-
-      try {
-        if (isConsumption) {
-          await recordConsumption({
-            station_id: station.station_id,
-            fuel_type: station.fuel_type,
-            quantity_gallons: Number(quantity),
-            asset_id: assetId.trim(),
-            operator_id: operatorId.trim(),
-            odometer_reading: odometer ? Number(odometer) : undefined,
-          });
-        } else {
-          await recordRefill({
-            station_id: station.station_id,
-            fuel_type: station.fuel_type,
-            quantity_gallons: Number(quantity),
-            supplier: supplier.trim(),
-            operator_id: operatorId.trim(),
-            delivery_reference: deliveryRef.trim() || undefined,
-          });
-        }
-        onSuccess();
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to record event");
-      } finally {
-        setSubmitting(false);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canSubmit || quantity === null) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      if (isConsumption) {
+        await recordConsumption({
+          station_id: station.station_id,
+          fuel_type: station.fuel_type,
+          quantity_gallons: quantity,
+          asset_id: assetId.trim(),
+          operator_id: operatorId.trim(),
+          odometer_reading:
+            odometer !== null && !Number.isNaN(odometer) ? odometer : undefined,
+        });
+      } else {
+        await recordRefill({
+          station_id: station.station_id,
+          fuel_type: station.fuel_type,
+          quantity_gallons: quantity,
+          supplier: supplier.trim(),
+          operator_id: operatorId.trim(),
+          delivery_reference: deliveryRef.trim() || undefined,
+        });
       }
-    },
-    [
-      canSubmit,
-      isConsumption,
-      station,
-      quantity,
-      assetId,
-      operatorId,
-      odometer,
-      supplier,
-      deliveryRef,
-      onSuccess,
-    ],
-  );
+      onSuccess();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to record event");
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
+  const title = isConsumption ? "Record consumption" : "Record refill";
   return (
     <form
       onSubmit={handleSubmit}
-      className="border border-gray-200 rounded-lg bg-gray-50 p-4"
+      aria-label={title}
+      className="rounded-lg border border-slate-200 bg-slate-50 p-3"
     >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
-          {isConsumption ? (
-            <ArrowDown className="w-4 h-4 text-error" aria-hidden="true" />
-          ) : (
-            <ArrowUp className="w-4 h-4 text-success" aria-hidden="true" />
-          )}
-          <h4 className="text-sm font-semibold text-primary">
-            {isConsumption ? "Record Consumption" : "Record Refill"}
-          </h4>
-        </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="p-1 rounded hover:bg-gray-200 text-gray-500 hover:text-gray-600 transition-colors"
-          aria-label="Cancel"
+      <h4 className="mb-3 flex items-center gap-2 text-sm font-semibold text-text">
+        {isConsumption ? (
+          <ArrowDown className="h-4 w-4 text-orange-700" aria-hidden="true" />
+        ) : (
+          <ArrowUp className="h-4 w-4 text-brand-700" aria-hidden="true" />
+        )}
+        {title}
+      </h4>
+      <FormGrid>
+        <Field
+          label="Quantity"
+          required
+          help={`Up to ${gallons(maxQuantity)}`}
+          id="fuel-qty"
+          span={1}
         >
-          <X className="w-4 h-4" />
-        </button>
-      </div>
-
-      <div className="space-y-3">
-        {/* Quantity */}
-        <div>
-          <label
-            htmlFor="fuel-qty"
-            className="block text-xs font-medium text-gray-600 mb-1"
-          >
-            Quantity (gallons) *
-          </label>
-          <input
+          <NumberField
             id="fuel-qty"
-            type="number"
-            min="1"
+            unit="gal"
+            decimals={1}
+            min={0.1}
             max={maxQuantity > 0 ? maxQuantity : undefined}
-            step="0.1"
             value={quantity}
-            onChange={(e) => setQuantity(e.target.value)}
-            placeholder={`Max ${maxQuantity.toLocaleString()} gal`}
-            className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-            required
+            onChange={setQuantity}
           />
-        </div>
-
-        {/* Consumption-specific fields */}
-        {isConsumption && (
+        </Field>
+        {isConsumption ? (
           <>
-            <div>
-              <label
-                htmlFor="fuel-asset"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Asset / Truck ID *
-              </label>
+            <Field label="Asset / truck ID" required span={1}>
               <input
                 id="fuel-asset"
                 type="text"
                 value={assetId}
                 onChange={(e) => setAssetId(e.target.value)}
                 placeholder="e.g. TRK-042"
-                className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-                required
+                className={INPUT_CLASS}
               />
-            </div>
-            <div>
-              <label
-                htmlFor="fuel-odometer"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Odometer (km)
-              </label>
-              <input
+            </Field>
+            <Field label="Odometer" id="fuel-odometer" span={1}>
+              <NumberField
                 id="fuel-odometer"
-                type="number"
-                min="0"
-                step="1"
+                unit="km"
+                min={0}
                 value={odometer}
-                onChange={(e) => setOdometer(e.target.value)}
+                onChange={setOdometer}
                 placeholder="Optional"
-                className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
               />
-            </div>
+            </Field>
           </>
-        )}
-
-        {/* Refill-specific fields */}
-        {!isConsumption && (
+        ) : (
           <>
-            <div>
-              <label
-                htmlFor="fuel-supplier"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Supplier *
-              </label>
+            <Field label="Supplier" required span={1}>
               <input
                 id="fuel-supplier"
                 type="text"
                 value={supplier}
                 onChange={(e) => setSupplier(e.target.value)}
                 placeholder="e.g. PetroCorp"
-                className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-                required
+                className={INPUT_CLASS}
               />
-            </div>
-            <div>
-              <label
-                htmlFor="fuel-ref"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Delivery Reference
-              </label>
+            </Field>
+            <Field label="Delivery reference" span={1}>
               <input
                 id="fuel-ref"
                 type="text"
                 value={deliveryRef}
                 onChange={(e) => setDeliveryRef(e.target.value)}
                 placeholder="Optional"
-                className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
+                className={INPUT_CLASS}
               />
-            </div>
+            </Field>
           </>
         )}
-
-        {/* Operator */}
-        <div>
-          <label
-            htmlFor="fuel-operator"
-            className="block text-xs font-medium text-gray-600 mb-1"
-          >
-            Operator ID *
-          </label>
+        <Field label="Operator ID" required span={1}>
           <input
             id="fuel-operator"
             type="text"
             value={operatorId}
             onChange={(e) => setOperatorId(e.target.value)}
             placeholder="e.g. OP-001"
-            className="w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-            required
+            className={INPUT_CLASS}
           />
-        </div>
-
-        {/* Error */}
-        {error && (
-          <p className="text-xs text-error" role="alert">
-            {error}
-          </p>
-        )}
-
-        {/* Submit */}
-        <button
+        </Field>
+      </FormGrid>
+      {error && (
+        <InlineBanner tone="critical" className="mt-3">
+          {error}
+        </InlineBanner>
+      )}
+      <div className="mt-3 flex justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button
           type="submit"
-          disabled={!canSubmit || submitting}
-          className={`w-full flex items-center justify-center gap-2 px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-            isConsumption
-              ? "bg-error hover:bg-error-dark text-white"
-              : "bg-success hover:bg-success-dark text-white"
-          } disabled:opacity-50 disabled:cursor-not-allowed`}
+          size="sm"
+          disabled={!canSubmit}
+          loading={submitting}
         >
-          {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
-          {submitting
-            ? "Recording..."
-            : isConsumption
-              ? "Record Consumption"
-              : "Record Refill"}
-        </button>
+          {title}
+        </Button>
       </div>
     </form>
   );

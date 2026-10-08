@@ -1,31 +1,30 @@
 "use client";
 
 import { TrendingDown, TrendingUp } from "lucide-react";
-import type { ConsumptionMetric, FuelType } from "../../services/fuelApi";
+import { date as formatDate, number, pct, productName } from "../../lib/format";
+import type { ConsumptionMetric } from "../../services/fuelApi";
 import { LITERS_PER_GALLON } from "../../services/fuelApi";
+import { productToken } from "../ui";
 
 interface FuelConsumptionChartProps {
   /** Daily consumption metrics, may include multiple fuel types */
   data: ConsumptionMetric[];
 }
 
-const FUEL_TYPE_COLORS: Record<FuelType, { bar: string; label: string }> = {
-  DIESEL_2: { bar: "bg-info", label: "Diesel #2" },
-  GASOLINE_REG: { bar: "bg-warning", label: "Regular Unleaded" },
-  GASOLINE_PREM: { bar: "bg-error", label: "Premium Unleaded" },
-  HEATING_OIL: { bar: "bg-warning", label: "Heating Oil" },
-  PROPANE: { bar: "bg-success", label: "Propane" },
-  KEROSENE: { bar: "bg-brand-secondary", label: "Kerosene" },
-  OFF_ROAD_DIESEL: { bar: "bg-slate-500", label: "Off-Road Diesel" },
-  DEF: { bar: "bg-info", label: "DEF" },
-};
-
-const DEFAULT_COLOR = { bar: "bg-gray-400", label: "Other" };
-
-function fuelConfig(ft: string) {
-  return FUEL_TYPE_COLORS[ft as FuelType] ?? DEFAULT_COLOR;
+/**
+ * Each product keeps its RP 1637 colour (the cap drivers know) and its
+ * readable name; the border keeps white (Regular) bars visible.
+ */
+function fuelConfig(ft: string): { style: React.CSSProperties; label: string } {
+  const token = productToken(ft);
+  return {
+    style: {
+      backgroundColor: token.bg,
+      boxShadow: `inset 0 0 0 1px ${token.border}`,
+    },
+    label: productName(ft),
+  };
 }
-
 interface DayBucket {
   date: string;
   byFuelType: Record<string, number>;
@@ -66,12 +65,12 @@ function groupByDay(data: ConsumptionMetric[]): DayBucket[] {
 function formatDateLabel(dateStr: string): string {
   const date = new Date(dateStr);
   if (Number.isNaN(date.getTime())) return dateStr;
-  return date.toLocaleDateString([], { month: "short", day: "numeric" });
+  return formatDate(date);
 }
 
 function formatGallons(gallons: number): string {
-  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K`;
-  return Math.round(gallons).toLocaleString();
+  if (gallons >= 1_000) return `${number(gallons / 1_000, { decimals: 1 })}K`;
+  return number(gallons);
 }
 
 /** Average of the most-recent half vs the earlier half, as a % delta. */
@@ -186,7 +185,7 @@ export default function FuelConsumptionChart({
                 <TrendingDown className="h-3.5 w-3.5" aria-hidden="true" />
               )}
               {trend >= 0 ? "+" : ""}
-              {trend.toFixed(0)}% vs earlier
+              {pct(trend)} vs earlier
             </span>
           </div>
         )}
@@ -202,7 +201,8 @@ export default function FuelConsumptionChart({
               className="flex items-center gap-1.5 text-xs text-gray-600"
             >
               <span
-                className={`h-3 w-3 rounded-sm ${cfg.bar}`}
+                className="h-3 w-3 rounded-sm"
+                style={cfg.style}
                 aria-hidden="true"
               />
               {cfg.label}
@@ -267,7 +267,7 @@ export default function FuelConsumptionChart({
                       </p>
                       <p className="mb-1.5 text-[11px] text-gray-500">
                         {formatGallons(bucket.total)} gal ·{" "}
-                        {bucket.events.toLocaleString()} event
+                        {number(bucket.events)} event
                         {bucket.events === 1 ? "" : "s"}
                       </p>
                       <div className="space-y-0.5">
@@ -281,7 +281,8 @@ export default function FuelConsumptionChart({
                                 className="flex items-center gap-1.5 text-[11px] text-gray-600"
                               >
                                 <span
-                                  className={`h-2 w-2 rounded-sm ${cfg.bar}`}
+                                  className="h-2 w-2 rounded-sm"
+                                  style={cfg.style}
                                   aria-hidden="true"
                                 />
                                 <span className="flex-1">{cfg.label}</span>
@@ -309,8 +310,8 @@ export default function FuelConsumptionChart({
                         return (
                           <div
                             key={ft}
-                            className={`w-full ${cfg.bar}`}
-                            style={{ height: `${segPct}%` }}
+                            className="w-full"
+                            style={{ ...cfg.style, height: `${segPct}%` }}
                           />
                         );
                       })}

@@ -1,12 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { type Column, EntityLink, PageHeader, Table } from "@/components/ui";
+import {
+  type Column,
+  DataTable,
+  EntityLink,
+  FilterChips,
+  FormDialog,
+  StatusBadge,
+  Toolbar,
+} from "@/components/ui";
+import { number, pct } from "../../lib/format";
 import {
   approveKFactorAdjustment,
   getKFactorDashboard,
   type KFactorEntry,
 } from "../../services/complianceApi";
+import type { StatusKey } from "../../styles/tokens";
 import TankConsumptionDrillIn from "./TankConsumptionDrillIn";
 
 // ─── Derived status ──────────────────────────────────────────────────────────
@@ -24,38 +34,26 @@ function deriveStatus(entry: KFactorEntry): KFactorStatus {
   return "ok";
 }
 
-// ─── Status badge helper ─────────────────────────────────────────────────────
+// ─── Status display ──────────────────────────────────────────────────────────
 
-function statusBadge(status: KFactorStatus): {
-  label: string;
-  className: string;
-} {
-  switch (status) {
-    case "ok":
-      return { label: "OK", className: "bg-success-light text-success-dark" };
-    case "review_needed":
-      return {
-        label: "Review Needed",
-        className: "bg-warning-light text-warning-dark",
-      };
-    case "insufficient_data":
-      return {
-        label: "Insufficient Data",
-        className: "bg-gray-100 text-gray-800",
-      };
-    default:
-      return { label: status, className: "bg-gray-100 text-gray-800" };
-  }
-}
+/** Display status (hue + icon + label) for each derived k-factor status. */
+const STATUS_DISPLAY: Record<
+  KFactorStatus,
+  { status: StatusKey; label: string }
+> = {
+  ok: { status: "ok", label: "OK" },
+  review_needed: { status: "warning", label: "Review Needed" },
+  insufficient_data: { status: "draft", label: "Insufficient Data" },
+};
 
 function formatPercent(value: number | null): string {
   if (value === null) return "—";
-  return `${value >= 0 ? "+" : ""}${value.toFixed(1)}%`;
+  return `${value >= 0 ? "+" : ""}${pct(value, { decimals: 1 })}`;
 }
 
 function formatKFactor(value: number | null): string {
   if (value === null) return "—";
-  return value.toFixed(4);
+  return number(value, { decimals: 4 });
 }
 
 // ─── Table columns ───────────────────────────────────────────────────────────
@@ -110,8 +108,8 @@ function getKFactorColumns(
           <span
             className={
               variance !== null && Math.abs(variance) > 15
-                ? "text-error font-medium"
-                : "text-gray-700"
+                ? "font-semibold text-red-800"
+                : "text-slate-700"
             }
           >
             {formatPercent(variance)}
@@ -122,16 +120,12 @@ function getKFactorColumns(
     {
       key: "status",
       label: "Status",
-      render: ({ status }) => {
-        const badge = statusBadge(status);
-        return (
-          <span
-            className={`inline-block px-2 py-1 rounded text-xs font-medium ${badge.className}`}
-          >
-            {badge.label}
-          </span>
-        );
-      },
+      render: ({ status }) => (
+        <StatusBadge
+          status={STATUS_DISPLAY[status].status}
+          label={STATUS_DISPLAY[status].label}
+        />
+      ),
     },
     {
       key: "actions",
@@ -141,7 +135,7 @@ function getKFactorColumns(
           <button
             type="button"
             onClick={() => onViewConsumption(entry)}
-            className="text-primary text-sm underline hover:opacity-80"
+            className="text-sm font-medium text-link underline hover:opacity-80"
           >
             Consumption
           </button>
@@ -149,7 +143,7 @@ function getKFactorColumns(
             <button
               type="button"
               onClick={() => onApprove(entry)}
-              className="bg-primary text-white px-3 py-1 rounded text-sm hover:bg-primary-hover"
+              className="h-7 rounded-lg bg-primary px-3 text-xs font-semibold text-white hover:bg-primary-hover"
             >
               Approve
             </button>
@@ -171,8 +165,7 @@ export default function KFactorCalibrationPage() {
   const [approvalTarget, setApprovalTarget] = useState<KFactorEntry | null>(
     null,
   );
-  const [approving, setApproving] = useState(false);
-  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [chip, setChip] = useState<"all" | KFactorStatus>("all");
 
   // Per-tank consumption drill-in state
   const [consumptionTarget, setConsumptionTarget] =
@@ -203,38 +196,12 @@ export default function KFactorCalibrationPage() {
 
   // ─── Approval workflow ─────────────────────────────────────────────────────
 
-  function handleApproveClick(entry: KFactorEntry) {
-    setApprovalTarget(entry);
-    setApprovalError(null);
-  }
-
-  function handleCancelApproval() {
-    setApprovalTarget(null);
-    setApprovalError(null);
-  }
-
-  async function handleConfirmApproval() {
-    if (!approvalTarget || approvalTarget.suggested_kfactor === null) return;
-
-    setApproving(true);
-    setApprovalError(null);
-    try {
-      await approveKFactorAdjustment(approvalTarget.tank_id, {
-        new_kfactor: approvalTarget.suggested_kfactor,
-        operator_id: "current_user", // In production, this would come from auth context
-      });
-      setApprovalTarget(null);
-      // Refresh dashboard after approval
-      await fetchDashboard();
-    } catch (err) {
-      setApprovalError(
-        err instanceof Error
-          ? err.message
-          : "Failed to approve K-factor adjustment",
-      );
-    } finally {
-      setApproving(false);
-    }
+  async function confirmApproval(target: KFactorEntry) {
+    if (target.suggested_kfactor === null) return;
+    await approveKFactorAdjustment(target.tank_id, {
+      new_kfactor: target.suggested_kfactor,
+      operator_id: "current_user", // In production, this would come from auth context
+    });
   }
 
   // ─── Derive view model from the flat entry list ────────────────────────────
@@ -259,163 +226,108 @@ export default function KFactorCalibrationPage() {
     (d) => d.status === "insufficient_data",
   ).length;
 
+  const visible =
+    chip === "all"
+      ? sortedEntries
+      : sortedEntries.filter((d) => d.status === chip);
+
   // ─── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="K-Factor Calibration"
-        subtitle="Monitor tank K-factor variance and approve recalibration adjustments for auto-fill forecasting accuracy.
-        "
-      />
-
-      {/* Loading state */}
-      {loading && (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading K-factor dashboard...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      )}
-
-      {/* Error state */}
-      {!loading && error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Dashboard content */}
-      {!loading && !error && (
-        <>
-          {/* Summary cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
-            <div className="bg-warning-light border border-warning-light rounded-lg p-4">
-              <div className="text-sm text-warning-dark font-medium">
-                Review Needed
-              </div>
-              <div className="text-2xl font-bold text-warning-dark mt-1">
-                {totalReviewNeeded}
-              </div>
-              <div className="text-xs text-warning mt-1">
-                Tanks with variance exceeding threshold
-              </div>
-            </div>
-            <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-              <div className="text-sm text-gray-700 font-medium">
-                Insufficient Data
-              </div>
-              <div className="text-2xl font-bold text-gray-800 mt-1">
-                {totalInsufficientData}
-              </div>
-              <div className="text-xs text-gray-600 mt-1">
-                Tanks with fewer than 3 deliveries
-              </div>
-            </div>
-          </div>
-
-          {/* Dashboard table */}
-          <Table<DecoratedKFactorEntry>
-            ariaLabel="K-factor calibration dashboard"
-            variant="compact"
-            columns={getKFactorColumns(
-              handleApproveClick,
-              setConsumptionTarget,
-            )}
-            data={sortedEntries}
-            getRowId={({ entry }) => entry.tank_id}
-            emptyState={
-              <span className="text-gray-500">
-                No K-factor calibration data available.
-              </span>
-            }
+    <div className="flex h-full flex-col bg-surface">
+      <Toolbar
+        label="K-factor"
+        filters={
+          <FilterChips
+            label="K-factor status"
+            options={[
+              {
+                id: "all",
+                label: "All",
+                count: loading ? undefined : entries.length,
+              },
+              {
+                id: "review_needed",
+                label: "Review Needed",
+                count: loading ? undefined : totalReviewNeeded,
+                status: "warning",
+              },
+              {
+                id: "insufficient_data",
+                label: "Insufficient Data",
+                count: loading ? undefined : totalInsufficientData,
+                status: "draft",
+              },
+              {
+                id: "ok",
+                label: "OK",
+                count: loading
+                  ? undefined
+                  : entries.length - totalReviewNeeded - totalInsufficientData,
+                status: "ok",
+              },
+            ]}
+            value={chip}
+            onChange={(v) => setChip(v as "all" | KFactorStatus)}
+            collapse
           />
-        </>
-      )}
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<DecoratedKFactorEntry>
+          ariaLabel="K-factor calibration dashboard"
+          columns={getKFactorColumns(setApprovalTarget, setConsumptionTarget)}
+          data={visible}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchDashboard } : null}
+          getRowId={({ entry }) => entry.tank_id}
+          emptyState={
+            <span className="text-sm text-text-muted">
+              No K-factor calibration data available.
+            </span>
+          }
+        />
+      </div>
 
-      {/* Approval confirmation dialog */}
+      {/* Approval confirmation (design.md §5 "K-factor calibration": md) */}
       {approvalTarget && (
-        <div
-          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="approval-dialog-title"
+        <FormDialog
+          open
+          size="md"
+          title="Confirm K-factor adjustment"
+          help="This updates the tank's K-factor and notifies the tank forecasting agent. The change is logged for audit."
+          submitLabel="Confirm approval"
+          successMessage="K-factor updated"
+          initialValues={{}}
+          onSubmit={() => confirmApproval(approvalTarget)}
+          onSaved={() => void fetchDashboard()}
+          onClose={() => setApprovalTarget(null)}
         >
-          <div className="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
-            <h2 id="approval-dialog-title" className="text-lg font-bold mb-4">
-              Confirm K-Factor Adjustment
-            </h2>
-
-            <div className="space-y-3 mb-6">
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Tank ID:</span>
-                <span className="font-medium">
-                  <EntityLink type="tank" id={approvalTarget.tank_id} />
-                </span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Customer:</span>
-                <span className="font-medium">
-                  <EntityLink type="customer" id={approvalTarget.customer_id} />
-                </span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Current K-Factor:</span>
-                <span className="font-mono">
-                  {formatKFactor(approvalTarget.current_kfactor)}
-                </span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">New K-Factor:</span>
-                <span className="font-mono font-bold text-info-dark">
-                  {formatKFactor(approvalTarget.suggested_kfactor)}
-                </span>
-              </div>
-              <div className="flex justify-between text-sm">
-                <span className="text-gray-600">Cumulative Variance:</span>
-                <span className="font-medium">
-                  {formatPercent(approvalTarget.variance_percent)}
-                </span>
-              </div>
-            </div>
-
-            <p className="text-sm text-gray-600 mb-4">
-              This will update the tank&apos;s K-factor and notify the tank
-              forecasting agent. This action is logged for audit purposes.
-            </p>
-
-            {/* Approval error */}
-            {approvalError && (
-              <div
-                role="alert"
-                className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
-              >
-                {approvalError}
-              </div>
-            )}
-
-            <div className="flex gap-3 justify-end">
-              <button
-                type="button"
-                onClick={handleCancelApproval}
-                disabled={approving}
-                className="px-4 py-2 border rounded hover:bg-gray-50 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmApproval}
-                disabled={approving}
-                className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
-              >
-                {approving ? "Approving..." : "Confirm Approval"}
-              </button>
-            </div>
-          </div>
-        </div>
+          {() => (
+            <dl className="col-span-2 grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+              <dt className="text-text-muted">Tank</dt>
+              <dd className="font-medium">
+                <EntityLink type="tank" id={approvalTarget.tank_id} />
+              </dd>
+              <dt className="text-text-muted">Customer</dt>
+              <dd className="font-medium">
+                <EntityLink type="customer" id={approvalTarget.customer_id} />
+              </dd>
+              <dt className="text-text-muted">Current K-factor</dt>
+              <dd className="tabular-nums">
+                {formatKFactor(approvalTarget.current_kfactor)}
+              </dd>
+              <dt className="text-text-muted">New K-factor</dt>
+              <dd className="font-semibold tabular-nums text-brand-800">
+                {formatKFactor(approvalTarget.suggested_kfactor)}
+              </dd>
+              <dt className="text-text-muted">Cumulative variance</dt>
+              <dd className="tabular-nums">
+                {formatPercent(approvalTarget.variance_percent)}
+              </dd>
+            </dl>
+          )}
+        </FormDialog>
       )}
       {/* Per-tank consumption / forecast drill-in */}
       {consumptionTarget && (
