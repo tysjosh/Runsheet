@@ -138,6 +138,22 @@ describe("dates in the tenant time zone", () => {
   });
 });
 
+describe("duration", () => {
+  it("renders a short span with at most two units", () => {
+    expect(format.duration(45)).toBe("45 s");
+    expect(format.duration(720)).toBe("12 min");
+    expect(format.duration(3599)).toBe("1 h");
+    expect(format.duration(12_000)).toBe("3 h 20 min");
+    expect(format.duration(86_400)).toBe("1 d");
+    expect(format.duration(187_200)).toBe("2 d 4 h");
+  });
+  it("renders the empty dash for missing or negative values", () => {
+    expect(format.duration(null)).toBe("—");
+    expect(format.duration(-5)).toBe("—");
+    expect(format.duration(Number.NaN)).toBe("—");
+  });
+});
+
 describe("product names", () => {
   it("uses the token name for catalog codes", () => {
     expect(productName("GASOLINE_REG")).toBe("Regular unleaded");

@@ -259,6 +259,29 @@ export function relative(
   return date(v, opts);
 }
 
+/**
+ * An elapsed span in seconds as a short human duration, two units at most:
+ * "45 s", "12 min", "3 h 20 min", "1 d", "2 d 4 h". Negative or missing
+ * values render the empty dash.
+ */
+export function duration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return EMPTY;
+  const s = Math.round(seconds);
+  if (s < 60) return `${s} s`;
+  const mins = Math.round(s / 60);
+  if (mins < 60) return `${mins} min`;
+  const totalMin = Math.round(s / 60);
+  const h = Math.floor(totalMin / 60);
+  if (h < 24) {
+    const m = totalMin % 60;
+    return m ? `${h} h ${m} min` : `${h} h`;
+  }
+  const totalH = Math.round(s / 3600);
+  const d = Math.floor(totalH / 24);
+  const rh = totalH % 24;
+  return rh ? `${number(d)} d ${rh} h` : `${number(d)} d`;
+}
+
 // ── products ─────────────────────────────────────────────────────────────
 
 /** "JET_A" → "Jet a"; "kerosene_k1" → "Kerosene k1". */
@@ -288,6 +311,7 @@ export const format = {
   dateTime,
   window,
   relative,
+  duration,
   productName,
   humanize,
 };

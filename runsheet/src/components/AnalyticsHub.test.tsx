@@ -9,6 +9,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 jest.mock("../utils/auth", () => ({
   getCurrentUserRoles: jest.fn(),
 }));
+const mockReplace = jest.fn();
+let mockSearch = "";
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: mockReplace, push: jest.fn() }),
+  usePathname: () => "/dashboard/analytics",
+  useSearchParams: () => new URLSearchParams(mockSearch),
+}));
 // The tab panels are lazy; none of them is opened by these tests.
 jest.mock("./Analytics", () => ({ __esModule: true, default: () => null }));
 
@@ -21,6 +28,7 @@ const rolesMock = getCurrentUserRoles as jest.MockedFunction<
 
 afterEach(() => {
   jest.clearAllMocks();
+  mockSearch = "";
 });
 
 describe("AnalyticsHub", () => {
@@ -61,4 +69,30 @@ describe("AnalyticsHub", () => {
     ).toBeNull();
     expect(screen.queryByText(/Last 7 days|Last 30 days/i)).toBeNull();
   });
+
+  it("sends an old ?tab=ops-monitoring bookmark to System health for platform_admin", async () => {
+    mockSearch = "tab=ops-monitoring";
+    rolesMock.mockResolvedValue(["platform_admin", "admin"]);
+    render(<AnalyticsHub />);
+    await waitFor(() =>
+      expect(mockReplace).toHaveBeenCalledWith(
+        "/dashboard/settings?tab=system",
+      ),
+    );
+  });
+
+  it.each([[["admin"]], [["dispatcher"]]])(
+    "keeps %j on Overview for an old ?tab=ops-monitoring bookmark",
+    async (roles) => {
+      mockSearch = "tab=ops-monitoring";
+      rolesMock.mockResolvedValue(roles);
+      render(<AnalyticsHub />);
+      expect(
+        await screen.findByRole("tab", { name: /Overview/, selected: true }),
+      ).toBeInTheDocument();
+      expect(mockReplace).not.toHaveBeenCalledWith(
+        "/dashboard/settings?tab=system",
+      );
+    },
+  );
 });

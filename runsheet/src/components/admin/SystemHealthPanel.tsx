@@ -14,7 +14,7 @@
  */
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { number, relative } from "../../lib/format";
+import { duration, EMPTY, number, relative } from "../../lib/format";
 import { classifyLoadError } from "../../services/apiErrors";
 import type { PoisonQueueMetrics } from "../../services/opsApi";
 import { getPoisonQueueMonitoring } from "../../services/opsApi";
@@ -113,7 +113,11 @@ export default function SystemHealthPanel() {
 
   const rows: { label: string; value: string }[] = [
     { label: "Queue depth", value: number(depth) },
-    { label: "Oldest event age", value: `${number(age)} s` },
+    {
+      label: "Oldest event age",
+      // An empty queue has no oldest event.
+      value: depth > 0 ? duration(age) : EMPTY,
+    },
     { label: "Pending", value: number(pending) },
     { label: "Permanently failed", value: number(failed) },
   ];

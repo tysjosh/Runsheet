@@ -21,7 +21,7 @@ describe("SystemHealthPanel", () => {
     mockGet.mockResolvedValue({
       data: {
         queue_depth: 1200,
-        oldest_event_age_seconds: 3600,
+        oldest_event_age_seconds: 12_000,
         pending_count: 4,
         permanently_failed_count: 2,
       },
@@ -29,7 +29,7 @@ describe("SystemHealthPanel", () => {
     });
     render(<SystemHealthPanel />);
     expect(await screen.findByText("1,200")).toBeInTheDocument();
-    expect(screen.getByText("3,600 s")).toBeInTheDocument();
+    expect(screen.getByText("3 h 20 min")).toBeInTheDocument();
     expect(screen.getByText("Critical")).toBeInTheDocument();
     expect(screen.queryByText(/ingestion|indexing/i)).toBeNull();
   });
