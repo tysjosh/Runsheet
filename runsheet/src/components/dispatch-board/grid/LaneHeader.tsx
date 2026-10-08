@@ -201,7 +201,11 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
 
   return (
     <div
-      className={`sticky left-0 z-10 flex shrink-0 flex-col gap-1 border-r border-gray-200 bg-white px-2 py-1 ${matchClass(lookup)}`}
+      className={`sticky left-0 z-10 flex shrink-0 flex-col border-r border-gray-200 bg-white px-2 ${
+        // Compact (72 px): 24 px truck and driver rows plus the gauge fit
+        // without clipping the driver slot (R4.3, N5).
+        compact ? "gap-0.5 py-0.5" : "gap-1 py-1"
+      } ${matchClass(lookup)}`}
       style={{ width: HEADER_WIDTH }}
     >
       <div className="flex items-center gap-1">
@@ -213,7 +217,7 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
             aria-haspopup={placeLabel ? undefined : "menu"}
             aria-label={placeLabel ?? `Truck ${lane.truck_id} actions`}
             onClick={onTruck}
-            className={`min-h-7 rounded-md px-1 text-left text-sm font-semibold text-gray-900 outline-none hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-primary ${
+            className={`${compact ? "min-h-6" : "min-h-7"} rounded-md px-1 text-left text-sm font-semibold text-gray-900 outline-none hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-primary ${
               overLane || placeLabel ? "ring-2 ring-primary" : ""
             }`}
           >
@@ -241,7 +245,7 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
       <div
         role="gridcell"
         tabIndex={-1}
-        className="flex min-w-0 items-center gap-1 overflow-hidden whitespace-nowrap"
+        className="flex min-w-0 shrink-0 items-center gap-1 overflow-hidden whitespace-nowrap"
       >
         <button
           ref={driverRef}
@@ -296,12 +300,15 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
         )}
       </div>
       {(gaugeLoad || preview) && (
-        <CompartmentGauge
-          compartments={lane.compartments}
-          allocations={gaugeLoad?.allocations ?? []}
-          preview={preview}
-          compact={compact}
-        />
+        // A row may only own cells (axe aria-required-children).
+        <div role="gridcell" tabIndex={-1}>
+          <CompartmentGauge
+            compartments={lane.compartments}
+            allocations={gaugeLoad?.allocations ?? []}
+            preview={preview}
+            compact={compact}
+          />
+        </div>
       )}
     </div>
   );

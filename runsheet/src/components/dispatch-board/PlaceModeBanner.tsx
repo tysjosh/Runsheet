@@ -24,7 +24,11 @@ export function placingText(item: BoardItem): string {
   }
 }
 
-export function PlaceModeBanner() {
+export interface PlaceModeBannerProps {
+  /** Stacked layout (< 1024 px): pinned to the bottom edge (design K14.8). */
+  pinned?: boolean;
+}
+export function PlaceModeBanner({ pinned = false }: PlaceModeBannerProps) {
   const api = useBoard();
   const actionsRef = useRef<HTMLButtonElement>(null);
   const item = api.placeItem;
@@ -50,7 +54,12 @@ export function PlaceModeBanner() {
   };
 
   return (
-    <div className="flex items-center gap-3 border-b border-primary bg-primary-soft px-4 py-2 text-sm text-gray-900">
+    <div
+      data-testid="place-mode-banner"
+      className={`flex items-center gap-3 border-primary bg-primary-soft px-4 py-2 text-sm text-gray-900 ${
+        pinned ? "fixed inset-x-0 bottom-0 z-30 border-t shadow-lg" : "border-b"
+      }`}
+    >
       <p role="status" className="flex-1">
         {placingText(item)}
       </p>

@@ -74,6 +74,8 @@ import { PlaceModeBanner } from "./PlaceModeBanner";
 import { PublishBanners } from "./publish/PublishBanners";
 import { PublishDialog } from "./publish/PublishDialog";
 import { looksReady, retryGroup, trucksText } from "./publish/publishText";
+import { BottomSheet } from "./responsive/BottomSheet";
+import { useStackedLayout } from "./responsive/useStackedLayout";
 import {
   announceBlocked,
   announceCommitted,
@@ -93,6 +95,7 @@ import {
 } from "./state/useBoardCommands";
 import { SuggestionsDialog } from "./suggestions/SuggestionsDialog";
 import { TrayPanel } from "./trays/TrayPanel";
+import { RETURNS_ORDERS_TO_TRAY, trayOrders } from "./trays/trayOrders";
 import { useBoardController } from "./useBoardController";
 import {
   addDays,
@@ -240,7 +243,17 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   const [now, setNow] = useState(() => Date.now());
   const [singleKey, setSingleKey] = useState(() => readSingleKeyEnabled());
   const rootRef = useRef<HTMLDivElement>(null);
-
+  // Below 1024 px: stacked layout, Sequence forced, trays in a bottom sheet,
+  // drawer full screen, Place mode banner pinned (design K14.8, R20.2).
+  const stacked = useStackedLayout();
+  const [traysOpen, setTraysOpen] = useState(false);
+  const shownView = useMemo<BoardView>(
+    () =>
+      stacked && view.zoom !== "sequence"
+        ? { ...view, zoom: "sequence" }
+        : view,
+    [stacked, view],
+  );
   const snapshot = state.snapshot;
   const [storedZone] = useState(() => readStoredZone(storage()));
   const timezone = snapshot?.timezone ?? storedZone;
@@ -422,6 +435,9 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
           actor: e.actor,
           selfUserId: selfUserId.current,
         });
+        // Orders taken off the board come back to the tray via a snapshot.
+        if (RETURNS_ORDERS_TO_TRAY.has(e.command_type))
+          void loadRef.current({ background: true });
       },
       onLaneStale: (e) => void loadLanes(e.truck_ids),
       onPresence: setPresence,
@@ -453,6 +469,8 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       switch (o.kind) {
         case "committed":
           announce(announceCommitted(o.command, o.response.lanes));
+          if (RETURNS_ORDERS_TO_TRAY.has(o.command.type))
+            void loadRef.current({ background: true });
           break;
         case "conflict": {
           // Name the lane whose version moved, not just the first returned.
@@ -718,7 +736,7 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     snapshot:
       snapshot && snapshot.service_date === serviceDate ? snapshot : null,
     commands,
-    view,
+    view: shownView,
     serviceDate,
     timezone: timezone ?? "UTC",
     today,
@@ -766,9 +784,18 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
     });
   };
 
+  // The sheet closes once a card is picked, so the dispatcher can choose a truck.
+  const placing = state.placeMode !== null;
+  useEffect(() => {
+    if (placing || !stacked) setTraysOpen(false);
+  }, [placing, stacked]);
+  // A full-screen drawer is modal: the board behind it is inert.
+  const behind = stacked && drawer !== null;
+
   const toolbar = (
     <BoardToolbar
-      view={view}
+      view={shownView}
+      zoomLocked={stacked}
       serviceDate={serviceDate}
       today={today}
       zone={timezone ? zoneAbbreviation(timezone) : ""}
@@ -838,6 +865,67 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
         }}
       />
     );
+  } else if (stacked) {
+    body = (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          inert={behind}
+          className={`flex min-h-0 min-w-0 flex-1 flex-col ${placing ? "pb-16" : ""}`}
+        >
+          <BoardGrid
+            lanes={lanes}
+            zone={timezone ? zoneAbbreviation(timezone) : ""}
+            focusTruckId={view.truck}
+            registerEnsureVisible={registerEnsureVisible}
+            onVisibleChange={onVisibleChange}
+          />
+          {splitMap && (
+            <LaneRouteMap
+              lanes={lanes.filter((l) => visibleLanes.includes(l.truck_id))}
+              selectedOrderIds={selectedStops}
+              onSelectStop={(orderId) => api.selectStops([orderId])}
+              positions={positions}
+              terminals={terminals.coords}
+              label="Routes of the trucks on screen"
+              className="h-72 shrink-0 border-t border-gray-200"
+            />
+          )}
+          <div className="shrink-0 border-t border-gray-200 bg-white p-2">
+            <button
+              type="button"
+              aria-haspopup="dialog"
+              onClick={() => setTraysOpen(true)}
+              className="min-h-11 w-full rounded-md border border-gray-300 bg-white px-3 text-sm font-medium text-gray-800 hover:bg-gray-50"
+            >
+              {`Orders, drivers and trucks (${
+                trayOrders(snapshot.trays.orders, state.lanesById).length
+              } orders)`}
+            </button>
+          </div>
+        </div>
+        <BottomSheet
+          isOpen={traysOpen}
+          onClose={() => setTraysOpen(false)}
+          title="Orders, drivers and trucks"
+        >
+          <TrayPanel
+            variant="sheet"
+            plannedCount={stopCount(lanes)}
+            onGoToOrders={() => router.push("/dashboard/orders")}
+          />
+        </BottomSheet>
+        {drawer && (
+          <DetailDrawer
+            fullScreen
+            target={drawer}
+            onTab={(tab) => setDrawer((d) => (d ? { ...d, tab } : d))}
+            onClose={() => setDrawer(null)}
+            terminals={terminals}
+            positions={positions}
+          />
+        )}
+      </div>
+    );
   } else {
     body = (
       <div className="flex min-h-0 flex-1">
@@ -883,20 +971,23 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
       ref={rootRef}
       className="flex h-full min-h-0 flex-col"
       data-density={view.density}
-      data-zoom={view.zoom}
+      data-zoom={shownView.zoom}
+      data-layout={stacked ? "stacked" : "panels"}
       onKeyDown={onKeyDown}
     >
-      {toolbar}
-      {snapshot && currentDay && (
-        <BoardBanners
-          readOnlyReason={readOnly ? readOnlyReason : null}
-          paused={socket.paused}
-          degradedSources={snapshot.degraded_sources}
-          truncated={false}
-        />
-      )}
-      {api && currentDay && <PublishBanners lanes={lanes} />}
-      {api && currentDay && <PlaceModeBanner />}
+      <div inert={behind}>
+        {toolbar}
+        {snapshot && currentDay && (
+          <BoardBanners
+            readOnlyReason={readOnly ? readOnlyReason : null}
+            paused={socket.paused}
+            degradedSources={snapshot.degraded_sources}
+            truncated={false}
+          />
+        )}
+        {api && currentDay && <PublishBanners lanes={lanes} />}
+      </div>
+      {api && currentDay && <PlaceModeBanner pinned={stacked} />}
       {body}
       <CardMenu request={controller.menu} onClose={controller.closeMenu} />
       {api && controller.assign && (

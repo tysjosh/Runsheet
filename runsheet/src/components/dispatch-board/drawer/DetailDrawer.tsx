@@ -29,6 +29,11 @@ export interface DetailDrawerProps {
   onClose: () => void;
   terminals: TerminalIndex;
   positions: Record<string, TruckPosition>;
+  /**
+   * Stacked layout (< 1024 px, R20.2): a full-screen modal sheet. The board
+   * behind it is made inert by the container.
+   */
+  fullScreen?: boolean;
 }
 
 export function DetailDrawer({
@@ -37,6 +42,7 @@ export function DetailDrawer({
   onClose,
   terminals,
   positions,
+  fullScreen = false,
 }: DetailDrawerProps) {
   const api = useBoard();
   const titleId = useId();
@@ -93,11 +99,19 @@ export function DetailDrawer({
   const publishable =
     lane && (lane.state === "draft" || lane.state === "modified");
 
+  // A dialog role isn't allowed on <aside>, so the full-screen sheet is a div.
+  const Panel = fullScreen ? "div" : "aside";
   return (
-    <aside
+    <Panel
       aria-labelledby={titleId}
       onKeyDown={onKeyDown}
-      className="flex w-[26rem] max-w-full shrink-0 flex-col border-l border-gray-200 bg-white"
+      {...(fullScreen ? { role: "dialog", "aria-modal": true } : {})}
+      data-testid="detail-drawer"
+      className={
+        fullScreen
+          ? "fixed inset-0 z-40 flex w-full flex-col bg-white"
+          : "flex w-[26rem] max-w-full shrink-0 flex-col border-l border-gray-200 bg-white"
+      }
     >
       <div className="flex items-start gap-2 border-b border-gray-200 px-3 py-2">
         <div className="min-w-0 flex-1">
@@ -212,7 +226,7 @@ export function DetailDrawer({
           </div>
         </>
       )}
-    </aside>
+    </Panel>
   );
 }
 

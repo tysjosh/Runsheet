@@ -8,6 +8,7 @@ import { useBoard } from "../BoardContext";
 import { DriverTray } from "./DriverTray";
 import { OrderTray } from "./OrderTray";
 import { TruckTray } from "./TruckTray";
+import { trayOrders } from "./trayOrders";
 
 type TrayTab = "orders" | "drivers" | "trucks";
 const TABS: TrayTab[] = ["orders", "drivers", "trucks"];
@@ -15,9 +16,15 @@ const TABS: TrayTab[] = ["orders", "drivers", "trucks"];
 export interface TrayPanelProps {
   plannedCount: number;
   onGoToOrders: () => void;
+  /** `sheet`: inside the stacked layout's bottom sheet (R20.2), full width. */
+  variant?: "panel" | "sheet";
 }
 
-export function TrayPanel({ plannedCount, onGoToOrders }: TrayPanelProps) {
+export function TrayPanel({
+  plannedCount,
+  onGoToOrders,
+  variant = "panel",
+}: TrayPanelProps) {
   const api = useBoard();
   const [tab, setTab] = useState<TrayTab>("orders");
   const refs = useRef<Record<TrayTab, HTMLButtonElement | null>>({
@@ -27,7 +34,7 @@ export function TrayPanel({ plannedCount, onGoToOrders }: TrayPanelProps) {
   });
   const { trays } = api.snapshot;
   const label: Record<TrayTab, string> = {
-    orders: `Orders (${trays.orders.length})`,
+    orders: `Orders (${trayOrders(trays.orders, api.lanesById).length})`,
     drivers: `Drivers (${trays.drivers.length})`,
     trucks: `Trucks (${trays.trucks.length})`,
   };
@@ -49,7 +56,11 @@ export function TrayPanel({ plannedCount, onGoToOrders }: TrayPanelProps) {
   return (
     <section
       aria-label="Trays"
-      className="flex w-80 shrink-0 flex-col border-r border-gray-200 bg-white"
+      className={
+        variant === "sheet"
+          ? "flex min-h-[50vh] flex-1 flex-col bg-white"
+          : "flex w-80 shrink-0 flex-col border-r border-gray-200 bg-white"
+      }
     >
       <div
         role="tablist"

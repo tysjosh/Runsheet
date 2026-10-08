@@ -13,6 +13,7 @@ import { useBoard } from "../BoardContext";
 import { useDropTarget } from "../dnd/adapter";
 import { listKeyDown, RovingContext, useRovingState } from "../keyboard/roving";
 import { OrderCard } from "./OrderCard";
+import { trayOrders } from "./trayOrders";
 
 export type TraySort = "priority" | "window" | "customer" | "product";
 
@@ -81,7 +82,11 @@ export function OrderTray({ plannedCount, onGoToOrders }: OrderTrayProps) {
     enabled: true,
     readOnly: api.readOnly,
   });
-  const { orders, orders_truncated } = api.snapshot.trays;
+  const { orders_truncated } = api.snapshot.trays;
+  const orders = useMemo(
+    () => trayOrders(api.snapshot.trays.orders, api.lanesById),
+    [api.snapshot.trays.orders, api.lanesById],
+  );
 
   // Orders being assigned are drawn on their lane while the command is pending.
   const moving = useMemo(() => {

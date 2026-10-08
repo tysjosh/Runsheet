@@ -2,11 +2,12 @@
  * Time helpers for the board (R2.4–R2.7, R2.9). All wall-clock maths runs in
  * the tenant time zone from the snapshot, never the browser's.
  */
+
 import type { BoardShift } from "../../services/dispatchBoardApi";
+import { LITERS_PER_GALLON } from "../../services/fuelApi";
 import type { ShiftView } from "./viewState";
 
 export const HOUR_MS = 3_600_000;
-const LITERS_PER_GALLON = 3.78541;
 
 interface ZonedParts {
   year: number;

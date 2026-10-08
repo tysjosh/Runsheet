@@ -62,6 +62,8 @@ export interface BoardToolbarProps {
   /** `null` = enabled; otherwise why Publish all ready is unavailable. */
   publishDisabledReason: string | null;
   onPublishAll: () => void;
+  /** Stacked layout (< 1024 px): Sequence is forced (design K14.8). */
+  zoomLocked?: boolean;
 }
 
 const segment = (active: boolean) =>
@@ -100,6 +102,7 @@ export function BoardToolbar({
   onToggleMap,
   publishDisabledReason,
   onPublishAll,
+  zoomLocked = false,
 }: BoardToolbarProps) {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const min = addDays(today, -DAYS_BACK);
@@ -172,7 +175,9 @@ export function BoardToolbar({
           <button
             type="button"
             aria-pressed={view.zoom === "timeline"}
-            className={segment(view.zoom === "timeline")}
+            className={`${segment(view.zoom === "timeline")} disabled:cursor-not-allowed disabled:text-gray-400`}
+            disabled={zoomLocked}
+            aria-describedby={zoomLocked ? "board-zoom-locked" : undefined}
             onClick={() => onViewChange({ zoom: "timeline" })}
           >
             Timeline
@@ -185,6 +190,11 @@ export function BoardToolbar({
           >
             Sequence
           </button>
+          {zoomLocked && (
+            <span id="board-zoom-locked" className="sr-only">
+              Timeline needs a screen at least 1,024 pixels wide.
+            </span>
+          )}
         </fieldset>
 
         <fieldset className="flex overflow-hidden rounded-md border border-gray-300">

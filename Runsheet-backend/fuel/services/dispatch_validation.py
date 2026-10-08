@@ -1481,6 +1481,22 @@ def _probe_command(draft: BoardDraft, item: DragItem, truck_id: str, position: O
     return None
 
 
+def _probe_sources(draft: BoardDraft, item: DragItem) -> set:
+    """Lanes a probe of ``item`` can change besides its candidate lane.
+
+    The probe commands only change the candidate lane and the item's source
+    lanes: the lanes holding the orders or the load, or (driver) the lanes the
+    driver is paired to, which a double booking unpairs (R6.2).
+    """
+    if item.kind in ("order", "stop"):
+        return {draft.order_index[o] for o in item.ids if o in draft.order_index}
+    if item.kind == "load":
+        return {t for t, lane in draft.lanes.items() if any(l.load_id in item.ids for l in lane.loads)}
+    if item.kind == "driver":
+        return {t for t, lane in draft.lanes.items() if lane.driver_id in item.ids}
+    return set()
+
+
 def candidate_results(
     ctx: ValidationContext,
     draft: BoardDraft,
@@ -1489,6 +1505,11 @@ def candidate_results(
     position: Optional[Target] = None,
 ) -> Dict[str, CandidateResult]:
     results: Dict[str, CandidateResult] = {}
+    # One deep copy per call instead of one per candidate (K15, N1 batch
+    # validate budget): each probe copies only the lanes it can touch and
+    # shares the rest with the scratch copy, never with ``draft``.
+    scratch = draft.model_copy(deep=True)
+    sources = _probe_sources(draft, item)
     for truck_id in truck_ids:
         lane = draft.lanes.get(truck_id)
         if lane is None:
@@ -1498,8 +1519,17 @@ def candidate_results(
         if command is None:
             results[truck_id] = CandidateResult(outcome="block", reason="unsupported_item")
             continue
+        scope = sources | {truck_id}
+        probe = scratch.model_copy(
+            update={"lanes": {t: (l.model_copy(deep=True) if t in scope else l) for t, l in scratch.lanes.items()}}
+        )
         try:
-            applied = engine.apply(draft, command, ctx)
+            applied = engine.apply(probe, command, ctx, in_place=True)
+            if not set(applied.touched) <= scope:
+                # A lane outside the scope may have changed in the scratch
+                # copy: re-copy it and probe this candidate on a full copy.
+                scratch = draft.model_copy(deep=True)
+                applied = engine.apply(draft, command, ctx)
         except engine.EngineError as exc:
             results[truck_id] = CandidateResult(outcome="block", reason=exc.reason)
             continue

@@ -131,7 +131,7 @@ export function CompartmentGauge({
       )}
       <ul
         aria-label={`${label ? `${label} ` : ""}compartments${preview ? " after this change" : ""}`}
-        className={`flex w-full gap-0.5 ${compact ? "h-5" : "h-7"}`}
+        className={`flex w-full gap-0.5 ${compact ? "h-4" : "h-7"}`}
       >
         {segments.map((s) => (
           <li

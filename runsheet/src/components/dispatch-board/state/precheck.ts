@@ -10,19 +10,18 @@
  * It returns `likely_block` or `unknown`, never a pass: only the server can
  * say a drop is fine.
  */
+
 import type {
   BoardSnapshot,
   DriverSummary,
   LaneView,
   TrayOrder,
 } from "../../../services/dispatchBoardApi";
+import { LITERS_PER_GALLON } from "../../../services/fuelApi";
 
 export type PrecheckResult =
   | { kind: "likely_block"; reason: string }
   | { kind: "unknown" };
-
-/** The same factor `services/fuelApi.ts` uses (`litersToGallons`). */
-const LITERS_PER_GALLON = 3.78541;
 
 const UNKNOWN: PrecheckResult = { kind: "unknown" };
 

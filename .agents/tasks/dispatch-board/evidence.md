@@ -421,7 +421,76 @@ Shared changes: `BoardContext.tsx` (`DrawerTarget`, `BoardUiActions`, `command`,
 - The Playwright publish flow and drags are task 37.
 
 ### Phase 7: Responsive, performance, accessibility, E2E
-Not started.
+Status: tasks 37–40 done for everything that can be automated. No `phase7-review.json` existed, so this was implemented from scratch. Commit: see the next docs commit. No staging, AWS, deploy or CodeBuild action. The board stays behind the flag: the new `/e2e/dispatch-board` harness route only exists when the dev server runs with `NEXT_PUBLIC_E2E_HARNESS=1` (`pageExtensions` in `next.config.ts`). A normal `npm run build` passed and has no `e2e` route in `.next/server/app`. Every e2e API call and socket is answered in-process by `e2e/dispatchBoardFake.ts`, so nothing reaches a backend. One dev dependency was added (medium risk): `@axe-core/playwright` **4.13.0**, exact pin. It pulls in `axe-core` 4.13.x, and the lockfile adds only those two.
+
+#### What landed
+| Task | Change | Tests |
+|---|---|---|
+| 37 (R5.1, R6.1, R7.1, R7.2, R14.2, R20.1, R20.2, R12.2) | `e2e/dispatch-board.spec.ts` with real pointer (native HTML5) drags against the real board. It covers tray → lane at the pointer's gap (`index: 2`), reorder, cross-lane best fit, driver → driver slot, load → load, and auto-scroll near the lane list's edge. The second-dispatcher conflict runs in two browser contexts on one fake. Ben's commit reaches Ana's socket only while her own stale command is in flight. Her drop is refused and the toast reads "Truck T01 was changed by ben. Your change was not applied.". Her order goes back to her tray and Ben's shows on her board. The publish flow goes Publish all ready → review dry run → Publish → mocked progress polls (publishing → published) → "Publish finished" → polite "Truck T01 published." → lane badge Published. The iPad Pro 11 profile (WebKit, touch) shows the stacked layout, a coarse pointer, grips with `touch-action: none` at ≥ 44×44, the bottom sheet, tap a card → pinned Place banner → tap a truck → `assign_orders` with `input_modality: "place"`, plus a pointer-driven grip drag. `e2e/dispatchBoardFake.ts`: an in-process API + socket fake (versions, 409 conflicts, broadcast to other contexts, scripted publish). `playwright.dispatch-board.config.ts`: own dev server on :3124 with the harness env; `PW_BOARD_PROD=1` builds and serves a production bundle instead. `src/app/e2e/dispatch-board/page.e2e.tsx`: the harness route. The default `playwright.config.ts` ignores this spec. | 25 passed (chromium 16, webkit 7, ipad-webkit 2), 29 skipped by project |
+| 38 (R20.1–R20.3, R4.3, N5) | `responsive/useStackedLayout.ts` (`(max-width: 1023.98px)` via `useSyncExternalStore`) and `responsive/BottomSheet.tsx` (the Modal pattern on the bottom edge with `useDialogA11y`). Below 1024 px, `DispatchBoard` uses the stacked layout. Sequence is forced without overwriting the saved zoom, and Timeline is disabled with "Timeline needs a screen at least 1,024 pixels wide.". The trays open from an "Orders, drivers and trucks (n orders)" bar into a bottom sheet that closes once a card is picked. The drawer is a full-screen `role="dialog"` `aria-modal`, and the toolbar, banners and grid are `inert` behind it while the live regions stay outside. The Place mode banner is pinned to the bottom. Coarse-pointer grips were already `pointer-coarse:min-h-11 min-w-11` from Phase 5. **Audit fix:** in Compact the lane header's driver slot was clipped to 7 px by the 72 px row. The header now uses `gap-0.5 py-0.5`, a 24 px truck button, a non-shrinking driver row and a 16 px compact gauge. | `responsive/responsive.test.tsx` (7). E2E: 24 px audit in both densities (visible box clipped by `overflow: hidden` ancestors) → 0 offenders. Viewport tests at 900 px (stacked, full-screen drawer box 0,0,900×900, back to panels at 1280) and 640 px |
+| 39 (N1, K15) | `tests/unit/test_dispatch_board_perf.py`: the real board service over the fake store at N1 size. The fixture is 60 lanes × 8 stops plus 120 tray orders (600 that day), a tomorrow draft with 50 orders (cross-day lookup, K5.1), and 60 drivers assigned to trucks with half paired (suggested-driver searches, K5.2). The test asserts the N1 p95 budgets. **Fix:** batch validate missed its budget (p95 1,139 ms) because `candidate_results` deep-copied the whole 60-lane draft once per candidate (`engine.apply`, ~18 ms each). It now makes one scratch copy per call. Each probe copies only the candidate lane and the item's source lanes (`_probe_sources`: the order/stop lanes, the load's lane, the driver's paired lanes) and shares the rest with the scratch copy, never with the input draft. `engine.apply(..., in_place=True)` runs on that scratch copy. If a probe touches a lane outside its scope, the scratch is re-copied and that candidate re-probed on a full copy. Commands still deep-copy as before. Playwright frame time at N1 (`performance (N1, K15)`): rAF deltas while a tray card is dragged across the lanes and auto-scrolls the list. | Equivalence test: scoped probes equal one-full-copy-per-candidate probes for order, stop, load and driver items, and the input draft is unchanged (4 cases). Budgets: 4 tests |
+| 40 (N5, R18.1–R18.6, R19.1–R19.4) | Aria snapshots (`toMatchAriaSnapshot`) of the toolbar group, the trays region, a lane row, the card menu and the drawer. `@axe-core/playwright` scans (WCAG 2.0/2.1/2.2 A+AA tags) on the board, Place mode, the card menu, the publish review, the drawer, the stacked sheet, a 640 px viewport (200 % zoom stand-in) and forced colours (High Contrast stand-in). Keyboard: arrow navigation along and across lanes. **Fix:** axe `aria-required-children` (critical) on every lane row. The compartment gauge `<ul>` sat directly in the `row`, so it is now wrapped in a `gridcell`. | 5 a11y tests, 0 violations after the fix |
+
+**Bug found by the e2e run and fixed (R3.1):** an order assigned to a truck stayed in the order tray after the command committed (it was only hidden while pending). The tray comes from the snapshot, and only a reload changed it. `trays/trayOrders.ts` now derives the tray as the snapshot's orders minus every order on a lane or shelf. The tab count and the stacked bar use the same list. Commands that can return orders to the tray (`unassign_orders`, `remove_lane`, `discard_lane_changes`, `revert`, `reapply`) reload the snapshot in the background after they commit, here or from another dispatcher's `board_lanes_updated`. Tests: `trays/trayOrders.test.tsx` (4).
+
+**Pre-existing CI failure fixed:** the backend suite's `test_volume_factor_single_source.py` failed on this branch (since Phases 4–6). `boardTime.ts` and `state/precheck.ts` each declared their own `3.78541` gallon factor. Both now import `LITERS_PER_GALLON` from `services/fuelApi.ts` (3.785411784).
+
+#### Performance numbers (N1 target size)
+Backend (`$PY -m pytest tests/unit/test_dispatch_board_perf.py -s`, in-memory store, so service CPU cost only, no network or database; staging numbers are task 41):
+
+| Operation | Budget (p95) | Before fix | After fix (median / p95 / max) |
+|---|---|---|---|
+| Snapshot (60 lanes, 480 stops, 120 tray, cross-day + suggested-driver) | 2,000 ms | 48 / 73 ms | 49 / 113 / 113 ms |
+| Batch validate (1 order × 60 lanes) | 500 ms | 1,059 / **1,139** ms | 117 / 150 / 161 ms |
+| Position validate (1 order, 1 lane, index) | 300 ms | 27 / 61 ms | 23 / 55 / 56 ms |
+| Command commit (`move_stops` reorder, 60-lane draft) | 600 ms | 81 / 89 ms | 90 / 97 / 127 ms |
+
+Frontend, Chromium on this Mac (2020-class or newer laptop), 60-lane / 600-order fixture, drag across lanes plus auto-scroll:
+
+| Bundle | Frames | Median | p95 (budget 20 ms) | Max | Lane rows in DOM | Lanes visible after navigation |
+|---|---|---|---|---|---|---|
+| Production (`PW_BOARD_PROD=1`), run 1 | 247 | 16.7 ms | **17.6 ms** | 49.2 ms | 11 of 60 | 1,012 ms (cold) |
+| Production, run 2 | 215 | 16.7 ms | **17.6 ms** | 32.5 ms | 11 | 578 ms |
+| Production, run 3 | 185 | 16.7 ms | **18.5 ms** | 50.0 ms | 11 | 614 ms |
+| Dev server (recorded only), 2 runs | 340 | 16.7–16.9 ms | 50.4–66.4 ms | 117–150 ms | 11 | 834–893 ms |
+
+The 20 ms p95 is enforced only for a local production-bundle run. A dev-server run and CI only record it, because dev React is several times slower (K15: advisory on CI). "Lanes visible after navigation" is a stand-in for the N1 3.0 s first meaningful paint, measured against the in-process fake rather than a real snapshot. One drag-start batch validate ran per drag (`validate_calls: 1`).
+
+#### Accessibility findings
+- Fixed: lane rows owned a non-cell child (the gauge list), which was axe `aria-required-children` (critical).
+- Fixed: in Compact the driver slot was clipped to 7 px (SC 2.5.8, R4.3).
+- After both fixes there are 0 axe violations on every scanned state, including forced colours, and no pointer target under 24×24 in either density. On a coarse pointer the grips are ≥ 44×44 and load chips are 72 px × lane height.
+- Not automated, open for the owner or an accessibility expert: VoiceOver + Safari (macOS and iPadOS), NVDA + Firefox, a full keyboard-only pass of every dialog, real 200 % browser zoom, and Windows High Contrast. The automated scans are stand-ins (a 640 px viewport, `forcedColors: "active"`). **Full WCAG 2.2 AA conformance needs that manual assistive-technology testing and expert review; the automated checks here are not sufficient (N5).**
+
+#### Owner manual check (carried forward, phase0-review.md issue 2; prerequisite of task 37 / R20.1)
+- [ ] **iPad long-press drag on a real device.** Playwright can't synthesize iOS's native long-press drag. The automated part passes: the iPad Pro 11 profile has a coarse pointer, `touch-action: none` and 44 px grips, tap-to-place works, and a grip drag works. Steps: on an iPad with Safari, open the board (flag `shadow` or `active_gated` on a QA tenant), long-press a stop's grip (~300 ms), drag it to another truck, and release. Expected: the drag starts only from the grip, a tap selects (Place mode), and scrolling the lane list never starts a drag. Record the result here. This does not block the workflow.
+
+#### Commands and results
+cwd `.worktrees/dispatch-board/runsheet` unless named.
+- `npx playwright install chromium webkit` → ok (the browser cache had been cleared).
+- `npm install --save-dev --save-exact @axe-core/playwright@4.13.0` → ok.
+- `npx tsc --noEmit` → exit 0.
+- `npm run lint` → 468 files, 0 errors, 1 warning (the existing `noConfusingVoidType` in `DispatchBoard.tsx`).
+- `npm test -- --ci` → **104 suites passed, 1224 passed, 1 skipped, 0 failed** (was 102 / 1213).
+- `npx playwright test -c playwright.dispatch-board.config.ts` (dev server) → **25 passed**, 29 skipped by project design (each test runs only on the projects it targets).
+- `PW_BOARD_PROD=1 npx playwright test -c playwright.dispatch-board.config.ts --project=chromium -g performance` ×3 → passed (numbers above); `.next` deleted afterwards.
+- `npx playwright test --list` (default config) → 60 tests in 4 files, none from `dispatch-board.spec.ts`.
+- `npm run build` (no harness env) → ok, no `e2e` route; `.next` deleted.
+- Backend, cwd `Runsheet-backend`, `PY=…/Runsheet-backend/venv/bin/python`: `tests/unit/test_dispatch_board_*.py tests/unit/test_dispatch_validation*.py tests/unit/test_board*.py` → 429 passed. Full suite, CI env → **13185 passed, 238 skipped, 0 failed**. The first full run stopped on the pre-existing volume-factor test, which is fixed above.
+- Disk: 6.1 GB free at the start, 4.6 GB after the browsers, 6.6 GB at the end. No Docker build, no volume prune.
+
+#### Decisions and reasons
+- **Harness route rather than a faked SuperTokens session.** The dashboard's auth gate can't be satisfied without a real session. The board is the same component either way. Gating the route by `pageExtensions` keeps it out of every normal build, not just hidden behind a runtime check.
+- **The probe scope is derived, not trusted.** The scope is the set of lanes each probe command can change (the same lanes the engine reports in `touched`). An out-of-scope touch triggers a full re-copy, so a future engine rule that widens a probe can't corrupt later candidates. It can only make them slower.
+- **The frame-time budget is enforced only on a production bundle.** A dev-mode p95 of ~50 ms is React's development build, not the board: the same drag is 17.6–18.5 ms in production.
+- **iPad drags are pointer-driven in WebKit's touch profile.** This is the same limit the T1 spike recorded. The long press itself is the owner check above.
+- No review loop ran in this step, so no freeze decision was needed.
+
+#### Open items (not blocking Phase 7)
+- Owner iPad long-press check (above).
+- Manual assistive-technology passes and expert WCAG review (above).
+- Staging latency numbers (task 41).
+- Task 36b (truck type, tanker endorsement, nearest expiry) is still open from Phase 5.
 
 ### Phase 8: Staging rollout
 Not started.

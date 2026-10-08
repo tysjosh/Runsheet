@@ -665,9 +665,13 @@ def _require_expected(command: Any, touched: Iterable[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def apply(draft: BoardDraft, command: Any, ctx: Any) -> ApplyResult:
-    """Apply one command to a copy of ``draft``. The input draft is never mutated."""
-    work = draft.model_copy(deep=True)
+def apply(draft: BoardDraft, command: Any, ctx: Any, *, in_place: bool = False) -> ApplyResult:
+    """Apply one command to a copy of ``draft``. The input draft is never mutated.
+
+    ``in_place=True`` skips the copy and works on ``draft`` itself; only for a
+    caller that passes a scratch draft it owns (validation probes, K15).
+    """
+    work = draft if in_place else draft.model_copy(deep=True)
     rebuild_index(work)
     handler = _HANDLERS.get(type(command))
     if handler is None:
