@@ -421,7 +421,7 @@ Shared changes: `BoardContext.tsx` (`DrawerTarget`, `BoardUiActions`, `command`,
 - The Playwright publish flow and drags are task 37.
 
 ### Phase 7: Responsive, performance, accessibility, E2E
-Status: tasks 37–40 done for everything that can be automated. No `phase7-review.json` existed, so this was implemented from scratch. Commit: see the next docs commit. No staging, AWS, deploy or CodeBuild action. The board stays behind the flag: the new `/e2e/dispatch-board` harness route only exists when the dev server runs with `NEXT_PUBLIC_E2E_HARNESS=1` (`pageExtensions` in `next.config.ts`). A normal `npm run build` passed and has no `e2e` route in `.next/server/app`. Every e2e API call and socket is answered in-process by `e2e/dispatchBoardFake.ts`, so nothing reaches a backend. One dev dependency was added (medium risk): `@axe-core/playwright` **4.13.0**, exact pin. It pulls in `axe-core` 4.13.x, and the lockfile adds only those two.
+Status: tasks 37–40 done for everything that can be automated. No `phase7-review.json` existed, so this was implemented from scratch. Commit `af36210` on `feature/dispatch-board`. No staging, AWS, deploy or CodeBuild action. The board stays behind the flag: the new `/e2e/dispatch-board` harness route only exists when the dev server runs with `NEXT_PUBLIC_E2E_HARNESS=1` (`pageExtensions` in `next.config.ts`). A normal `npm run build` passed and has no `e2e` route in `.next/server/app`. Every e2e API call and socket is answered in-process by `e2e/dispatchBoardFake.ts`, so nothing reaches a backend. One dev dependency was added (medium risk): `@axe-core/playwright` **4.13.0**, exact pin. It pulls in `axe-core` 4.13.x, and the lockfile adds only those two.
 
 #### What landed
 | Task | Change | Tests |
