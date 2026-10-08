@@ -70,6 +70,60 @@ function paginated<T>(rows: T[]) {
   };
 }
 
+const CUSTOMER_ROWS = Array.from({ length: 22 }, (_, i) => ({
+  customer_id: `QA-CUST-${String(200 + i)}`,
+  tenant_id: TENANT,
+  display_name: `QA Customer ${200 + i}`,
+  legal_name: `QA Customer ${200 + i} LLC`,
+  primary_email: `qa-${200 + i}@example.com`,
+  tax_id: null,
+  status: i % 6 === 5 ? "archived" : "active",
+  account_count: (i % 3) + 1,
+  open_balance_cents: 125_000 + i * 3_517,
+  created_at: iso(5, i),
+  updated_at: iso(6, i),
+  external_refs: {},
+  metadata: {},
+}));
+const DELIVERY = ["delivered", "sent", "failed", "pending", "delivered"];
+const NOTIFICATIONS = Array.from({ length: 22 }, (_, i) => ({
+  notification_id: `QA-NOTIF-${String(300 + i)}`,
+  notification_type: ["delay_alert", "eta_change", "delivery_confirmation"][
+    i % 3
+  ],
+  channel: ["sms", "email", "whatsapp"][i % 3],
+  recipient_name: `QA Customer ${200 + (i % 10)}`,
+  recipient_reference: `+1555010${String(i).padStart(2, "0")}`,
+  subject: `QA delivery update ${i}`,
+  message_body: "QA fixture message.",
+  delivery_status: DELIVERY[i % DELIVERY.length],
+  failure_reason:
+    DELIVERY[i % DELIVERY.length] === "failed" ? "QA bounce" : null,
+  related_entity_id: `QA-ORD-${i}`,
+  related_entity_type: "order",
+  retry_count: 0,
+  tenant_id: TENANT,
+  created_at: iso(8, i),
+  updated_at: iso(8, i),
+  sent_at: null,
+  delivered_at: null,
+  failed_at: null,
+}));
+
+function sized<T>(rows: T[], url: URL) {
+  const size = Number(url.searchParams.get("size") ?? rows.length);
+  const page = Number(url.searchParams.get("page") ?? 1);
+  return {
+    ...paginated(rows.slice((page - 1) * size, page * size)),
+    pagination: {
+      page,
+      size,
+      total: rows.length,
+      total_pages: Math.max(1, Math.ceil(rows.length / size)),
+    },
+  };
+}
+
 /** Body for a Phase 3 GET, or undefined when this fake doesn't own it. */
 export function phase3Response(path: string, url: URL): unknown | undefined {
   if (path === "/fuel/stations") {
@@ -77,6 +131,33 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
     return paginated(
       status ? STATIONS.filter((s) => s.status === status) : STATIONS,
     );
+  }
+  if (path === "/commerce/customers") {
+    const status = url.searchParams.get("status");
+    return sized(
+      status ? CUSTOMER_ROWS.filter((c) => c.status === status) : CUSTOMER_ROWS,
+      url,
+    );
+  }
+  if (path === "/notifications") {
+    const status = url.searchParams.get("delivery_status");
+    return sized(
+      status
+        ? NOTIFICATIONS.filter((n) => n.delivery_status === status)
+        : NOTIFICATIONS,
+      url,
+    );
+  }
+  if (path === "/notifications/summary") {
+    const by_status: Record<string, number> = {};
+    for (const n of NOTIFICATIONS)
+      by_status[n.delivery_status] = (by_status[n.delivery_status] ?? 0) + 1;
+    return {
+      total: NOTIFICATIONS.length,
+      by_status,
+      by_type: {},
+      by_channel: {},
+    };
   }
   if (path === "/fuel/metrics/summary")
     return { data: STATION_SUMMARY, request_id: "e2e" };

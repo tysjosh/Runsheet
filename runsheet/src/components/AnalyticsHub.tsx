@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { lazy, Suspense, useEffect } from "react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
-import { sectionVisible, SETTINGS_SECTIONS } from "./settings/SettingsPage";
+import { SETTINGS_SECTIONS, sectionVisible } from "./settings/SettingsPage";
 import { useHubTabs } from "./shell/useHubTabs";
 import { PageChromeProvider, PageHeader, type Tab, TabPanel } from "./ui";
 
@@ -59,7 +59,8 @@ export default function AnalyticsHub() {
   const raw = useSearchParams()?.get("tab") ?? null;
   useEffect(() => {
     if (raw !== RETIRED_OPS_TAB || roles === null || !SYSTEM_SECTION) return;
-    if (sectionVisible(SYSTEM_SECTION, roles)) router.replace(SYSTEM_HEALTH_HREF);
+    if (sectionVisible(SYSTEM_SECTION, roles))
+      router.replace(SYSTEM_HEALTH_HREF);
   }, [raw, roles, router]);
   return (
     <PageChromeProvider>

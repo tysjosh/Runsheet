@@ -51,7 +51,11 @@ export interface PageHeaderProps {
   counts?: ReactNode;
   /** At most two primary actions. */
   actions?: ReactNode;
-  back?: { href: string; label: string };
+  /**
+   * Back affordance before the title: a link (`href`) or, for in-place
+   * detail views, a button (`onClick`, takes precedence).
+   */
+  back?: { href?: string; label: string; onClick?: () => void };
   badge?: ReactNode;
   className?: string;
   /** This header hosts contributions from embedded content (see above). */
@@ -204,6 +208,9 @@ function EmbeddedHeader({ actions, counts, badge, context }: PageHeaderProps) {
   return null;
 }
 
+const BACK_CLASS =
+  "inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-link hover:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus";
+
 function HeaderRow({
   title,
   help,
@@ -229,15 +236,18 @@ function HeaderRow({
       data-chrome="titlerow"
       className={`flex h-11 shrink-0 items-center gap-3 border-b border-slate-200 bg-surface px-4 ${className}`}
     >
-      {back && (
-        <Link
-          href={back.href}
-          className="inline-flex h-7 shrink-0 items-center gap-1 rounded-lg px-1.5 text-xs font-medium text-link hover:bg-slate-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
-        >
-          <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
-          {back.label}
-        </Link>
-      )}
+      {back &&
+        (back.onClick || !back.href ? (
+          <button type="button" onClick={back.onClick} className={BACK_CLASS}>
+            <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+            {back.label}
+          </button>
+        ) : (
+          <Link href={back.href} className={BACK_CLASS}>
+            <ArrowLeft aria-hidden="true" className="h-3.5 w-3.5" />
+            {back.label}
+          </Link>
+        ))}
       <div className="flex min-w-0 shrink-0 items-center gap-1.5">
         <h1 className="truncate text-base font-semibold text-text">{title}</h1>
         {helpText && (

@@ -121,7 +121,7 @@ const USE_CASES: { value: CustomerTankUseCase; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-const STATUS_BADGE_CONFIG: Record<
+export const STATUS_BADGE_CONFIG: Record<
   CustomerTankStatus,
   { status: StatusKey; label: string }
 > = {

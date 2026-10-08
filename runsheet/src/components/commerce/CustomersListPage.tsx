@@ -1,26 +1,33 @@
 "use client";
 
-import { Gauge, X } from "lucide-react";
+/**
+ * Customers list (UI revamp task 3.3): one toolbar (search + status chips
+ * with counts), a DataTable, "New customer" in the title row (FormDialog),
+ * and a customer's tanks in a Drawer.
+ */
+import { Eye, Gauge, Plus, RefreshCw } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   lazy,
   Suspense,
   useCallback,
   useEffect,
-  useRef,
+  useMemo,
   useState,
 } from "react";
 import {
-  Badge,
   Button,
-  EmptyState,
-  FilterBar,
+  type Column,
+  DataTable,
+  Drawer,
+  FilterChips,
+  IconButton,
   LoadErrorState,
-  PageHeader,
-  Pagination,
-  Table,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
-import { useDialogA11y } from "../../hooks/useDialogA11y";
+import { money, number } from "../../lib/format";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   type Customer,
@@ -29,17 +36,36 @@ import {
   getCustomers,
 } from "../../services/commerceApi";
 import LoadingSpinner from "../LoadingSpinner";
+import { PageTitle } from "../ui/PageHeader";
+import CustomerFormDialog from "./CustomerFormDialog";
+import { CUSTOMER_STATUS } from "./customerStatus";
 
-// Customer tanks are a property of a customer, reached by clicking the
-// customer rather than living as a separate Fuel Ops tab. Lazy-loaded into a
-// slide-over.
+// Customer tanks are a property of a customer, reached from the customer's
+// row (not a separate Fuel tab). Lazy-loaded into a drawer.
 const CustomerTankPage = lazy(() => import("../ops/CustomerTankPage"));
-// Customer detail is rendered in-shell (consistent with the rest of the
-// dashboard) rather than route-navigating away to /commerce/customers/[id].
+// Customer detail renders in place when no `onSelectCustomer` is wired.
 const CustomerDetailPage = lazy(() => import("./CustomerDetailPage"));
+
+const PAGE_SIZE = 20;
+
+const STATUS_CHIPS: { id: "" | CustomerStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "active", label: "Active" },
+  { id: "archived", label: "Archived" },
+];
 
 interface CustomersListPageProps {
   onSelectCustomer?: (customerId: string) => void;
+}
+
+type Counts = Partial<Record<"" | CustomerStatus, number>>;
+
+function totalOf(response: unknown): number | undefined {
+  const r = response as {
+    pagination?: { total?: number };
+    total?: number;
+  };
+  return r.pagination?.total ?? r.total;
 }
 
 export default function CustomersListPage({
@@ -56,13 +82,10 @@ export default function CustomersListPage({
   const [totalPages, setTotalPages] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<CustomerStatus | "">("");
-  // Customer whose tanks are shown in the slide-over (click-through), replacing
-  // the former Fuel Ops > Customer Tanks tab.
+  const [counts, setCounts] = useState<Counts>({});
+  const [creating, setCreating] = useState(false);
+  const [reload, setReload] = useState(0);
   const [tanksCustomer, setTanksCustomer] = useState<Customer | null>(null);
-  const tanksPanelRef = useRef<HTMLDivElement>(null);
-  const closeTanks = useCallback(() => setTanksCustomer(null), []);
-  useDialogA11y(tanksCustomer !== null, tanksPanelRef, closeTanks);
-  // Selected customer for in-shell detail (when no onSelectCustomer override).
   const [selectedCustomerId, setSelectedCustomerId] = useState<string | null>(
     null,
   );
@@ -72,10 +95,9 @@ export default function CustomersListPage({
     setError(null);
     setModuleDisabled(null);
     try {
-      const filters: CustomerFilters = { page, size: 20 };
+      const filters: CustomerFilters = { page, size: PAGE_SIZE };
       if (searchQuery) filters.search = searchQuery;
       if (statusFilter) filters.status = statusFilter;
-
       const response = await getCustomers(filters);
       setCustomers(response.data ?? []);
       const pagination = (response as { pagination?: { total_pages?: number } })
@@ -86,31 +108,106 @@ export default function CustomersListPage({
       );
     } catch (err) {
       const failure = classifyLoadError(err, "Failed to load customers");
-      if (failure.kind === "module_disabled") {
-        setModuleDisabled(failure);
-      } else {
-        setError(failure.message);
-      }
+      if (failure.kind === "module_disabled") setModuleDisabled(failure);
+      else setError(failure.message);
     } finally {
       setLoading(false);
     }
-  }, [page, searchQuery, statusFilter]);
+    // `reload` forces a refetch after a create.
+  }, [page, searchQuery, statusFilter, reload]);
 
   useEffect(() => {
     fetchCustomers();
   }, [fetchCustomers]);
 
-  const getStatusVariant = (
-    status: string,
-  ): "success" | "warning" | "default" => {
-    if (status === "active") return "success";
-    if (status === "suspended") return "warning";
-    return "default";
-  };
+  // Chip counts: one `size: 1` read per status (no aggregate endpoint),
+  // scoped to the current search. A failed count leaves the chip without one.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const next: Counts = {};
+      await Promise.allSettled(
+        STATUS_CHIPS.map(async (c) => {
+          const f: CustomerFilters = { page: 1, size: 1 };
+          if (searchQuery) f.search = searchQuery;
+          if (c.id) f.status = c.id;
+          next[c.id] = totalOf(await getCustomers(f));
+        }),
+      );
+      if (!cancelled) setCounts(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [searchQuery, reload]);
 
-  // In-shell customer detail: when a customer is selected (and no external
-  // override is wired), render the detail in place instead of leaving the
-  // dashboard shell for the /commerce/customers/[id] route.
+  const openCustomer = useCallback(
+    (c: Customer) => {
+      if (onSelectCustomer) onSelectCustomer(c.customer_id);
+      else setSelectedCustomerId(c.customer_id);
+    },
+    [onSelectCustomer],
+  );
+
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setCreating(true)}
+      >
+        New customer
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions: moduleDisabled ? null : actions });
+
+  const columns: Column<Customer>[] = [
+    {
+      key: "display_name",
+      header: "Name",
+      truncate: true,
+      title: (c) => c.display_name,
+      className: "font-medium text-text",
+      cell: (c) => c.display_name,
+    },
+    {
+      key: "email",
+      header: "Email",
+      truncate: true,
+      title: (c) => c.primary_email ?? undefined,
+      className: "text-slate-700",
+      cell: (c) => c.primary_email || "—",
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 120,
+      cell: (c) => {
+        const cfg = CUSTOMER_STATUS[c.status] ?? CUSTOMER_STATUS.active;
+        return <StatusBadge status={cfg.status} label={cfg.label} />;
+      },
+    },
+    {
+      key: "account_count",
+      header: "Accounts",
+      align: "right",
+      width: 100,
+      className: "tabular-nums text-slate-700",
+      cell: (c) => number(c.account_count),
+    },
+    {
+      key: "open_balance_cents",
+      header: "Open balance",
+      align: "right",
+      width: 140,
+      className: "tabular-nums text-slate-700",
+      cell: (c) =>
+        c.open_balance_cents == null ? "—" : money(c.open_balance_cents / 100),
+    },
+  ];
+
   if (selectedCustomerId) {
     return (
       <Suspense fallback={<LoadingSpinner message="Loading…" />}>
@@ -122,189 +219,140 @@ export default function CustomersListPage({
     );
   }
 
+  const titleRow = embedded ? null : (
+    <div className="flex h-11 items-center border-b border-slate-200 px-4">
+      <PageTitle className="text-base font-semibold text-text">
+        Customers
+      </PageTitle>
+      {!moduleDisabled && <div className="ml-auto">{actions}</div>}
+    </div>
+  );
+
   if (moduleDisabled) {
     return (
-      <div className="p-6">
-        <PageHeader
-          title="Customers"
-          subtitle="Manage customer records and view account projections."
-        />
-        <LoadErrorState
-          failure={moduleDisabled}
-          entityLabel="Customers"
-          onBack={() => router.push("/dashboard")}
-          backLabel="Back to Today"
-          embedded
-        />
+      <div className="flex h-full flex-col">
+        {titleRow}
+        <div className="p-4">
+          <LoadErrorState
+            failure={moduleDisabled}
+            entityLabel="Customers"
+            onBack={() => router.push("/dashboard")}
+            backLabel="Back to Today"
+            embedded
+          />
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Customers"
-        subtitle="Manage customer records and view account projections."
-      />
-
-      <FilterBar
-        searchPlaceholder="Search by name or email..."
-        searchValue={searchQuery}
-        onSearchChange={setSearchQuery}
-        filters={
-          <select
-            value={statusFilter}
+    <div className="flex h-full flex-col bg-surface">
+      {titleRow}
+      <Toolbar
+        label="Customers"
+        search={
+          <input
+            type="search"
+            value={searchQuery}
             onChange={(e) => {
-              setStatusFilter(e.target.value as CustomerStatus | "");
+              setSearchQuery(e.target.value);
               setPage(1);
             }}
-            className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-            aria-label="Status"
-          >
-            <option value="">All</option>
-            <option value="active">Active</option>
-            <option value="archived">Archived</option>
-          </select>
+            placeholder="Search name or email"
+            aria-label="Search"
+            className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+          />
+        }
+        filters={
+          <FilterChips
+            label="Customer status"
+            options={STATUS_CHIPS.map((c) => ({
+              id: c.id || "all",
+              label: c.label,
+              count: counts[c.id],
+              status: c.id ? CUSTOMER_STATUS[c.id].status : undefined,
+            }))}
+            value={statusFilter || "all"}
+            onChange={(v) => {
+              setStatusFilter(v === "all" ? "" : (v as CustomerStatus));
+              setPage(1);
+            }}
+          />
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
         }
       />
-
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Loading state */}
-      {loading && (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading customers...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      )}
-
-      {/* Customer table */}
-      {!loading &&
-        !error &&
-        (customers.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">👥</span>}
-            title="No customers found"
-            description="Try adjusting your filters"
-          />
-        ) : (
-          <>
-            <Table
-              columns={[
-                { key: "display_name", label: "Name" },
-                {
-                  key: "email",
-                  label: "Email",
-                  render: (customer) => customer.primary_email || "—",
-                },
-                {
-                  key: "status",
-                  label: "Status",
-                  render: (customer) => (
-                    <Badge variant={getStatusVariant(customer.status)}>
-                      {customer.status}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "account_ids",
-                  label: "Accounts",
-                  render: (customer) => customer.account_count ?? "—",
-                },
-                {
-                  key: "actions",
-                  label: "Actions",
-                  render: (customer) => (
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        icon={<Gauge className="w-3.5 h-3.5" />}
-                        onClick={() => setTanksCustomer(customer)}
-                        aria-label={`View tanks for ${customer.display_name}`}
-                      >
-                        Tanks
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => {
-                          if (onSelectCustomer) {
-                            onSelectCustomer(customer.customer_id);
-                          } else {
-                            setSelectedCustomerId(customer.customer_id);
-                          }
-                        }}
-                      >
-                        View Details
-                      </Button>
-                    </div>
-                  ),
-                },
-              ]}
-              data={customers}
-              keyExtractor={(customer) => customer.customer_id}
-            />
-
-            <Pagination
-              currentPage={page}
-              totalPages={totalPages}
-              onPageChange={setPage}
-            />
-          </>
-        ))}
-
-      {/* Customer tanks slide-over — reached by clicking a customer's Tanks
-          button (replaces the former Fuel Ops > Customer Tanks tab). */}
-      {tanksCustomer && (
-        <div
-          className="fixed inset-0 z-50 flex justify-end bg-black/30"
-          role="dialog"
-          aria-modal="true"
-          aria-label="Customer tanks"
-          onClick={() => setTanksCustomer(null)}
-        >
-          <div
-            ref={tanksPanelRef}
-            tabIndex={-1}
-            className="h-full w-full max-w-4xl overflow-y-auto bg-white shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-              <div>
-                <h2 className="text-lg font-semibold text-primary">Tanks</h2>
-                <p className="text-xs text-gray-500">
-                  {tanksCustomer.display_name} · {tanksCustomer.customer_id}
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setTanksCustomer(null)}
-                className="rounded p-1 text-gray-500 hover:text-gray-600"
-                aria-label="Close tanks"
-              >
-                <X className="h-5 w-5" />
-              </button>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<Customer>
+          ariaLabel="Customers"
+          columns={columns}
+          data={loading || error ? [] : customers}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchCustomers } : null}
+          getRowId={(c) => c.customer_id}
+          rowLabel={(c) => c.display_name}
+          onRowClick={openCustomer}
+          rowMenu={(c) => [
+            {
+              id: "details",
+              label: "View details",
+              icon: <Eye className="h-3.5 w-3.5" />,
+              onSelect: () => openCustomer(c),
+            },
+            {
+              id: "tanks",
+              label: "View tanks",
+              icon: <Gauge className="h-3.5 w-3.5" />,
+              onSelect: () => setTanksCustomer(c),
+            },
+          ]}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No customers found</p>
+              <p className="mt-1 text-xs">Try adjusting your filters</p>
             </div>
-            <div className="p-6">
-              <Suspense fallback={<LoadingSpinner message="Loading…" />}>
-                <CustomerTankPage
-                  customerId={tanksCustomer.customer_id}
-                  embedded
-                />
-              </Suspense>
-            </div>
-          </div>
-        </div>
-      )}
+          }
+        />
+      </div>
+
+      <Drawer
+        open={tanksCustomer !== null}
+        onClose={() => setTanksCustomer(null)}
+        title={
+          tanksCustomer ? `Tanks · ${tanksCustomer.display_name}` : "Tanks"
+        }
+        width={880}
+      >
+        {tanksCustomer && (
+          <Suspense fallback={<LoadingSpinner message="Loading…" />}>
+            <CustomerTankPage customerId={tanksCustomer.customer_id} embedded />
+          </Suspense>
+        )}
+      </Drawer>
+
+      <CustomerFormDialog
+        open={creating}
+        onClose={() => setCreating(false)}
+        onSaved={() => {
+          setPage(1);
+          setReload((n) => n + 1);
+        }}
+      />
     </div>
   );
 }

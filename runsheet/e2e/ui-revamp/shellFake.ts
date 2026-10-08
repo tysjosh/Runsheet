@@ -206,6 +206,9 @@ export async function installShellFake(
         },
         request_id: "e2e",
       });
+    // Phase 3 fixtures win over the generic Phase 1 lists below.
+    const phase3 = phase3Response(path, url);
+    if (phase3 !== undefined) return json(200, phase3);
     if (path === "/commerce/invoices") return json(200, paginated(INVOICES));
     if (path === "/commerce/customers") return json(200, paginated(CUSTOMERS));
     if (path === "/notifications/summary")
@@ -217,9 +220,6 @@ export async function installShellFake(
       });
     if (path === "/search/universal")
       return json(200, { orders: [], customers: [], assets: [] });
-
-    const phase3 = phase3Response(path, url);
-    if (phase3 !== undefined) return json(200, phase3);
 
     unmatched.add(`${req.method()} ${path}`);
     return json(200, EMPTY_LIST);
