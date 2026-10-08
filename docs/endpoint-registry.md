@@ -300,12 +300,14 @@
 | GET | `/api/portal/invoices` | — | session_required | — | — | PortalInvoiceListEnvelope |
 | GET | `/api/portal/invoices/export` | — | session_required | — | — | — |
 | GET | `/api/portal/invoices/{invoice_id}` | — | session_required | — | — | PortalInvoiceEnvelope |
+| POST | `/api/portal/invoices/{invoice_id}/payments` | — | session_required | — | — | PortalPaymentCreatedEnvelope |
 | GET | `/api/portal/invoices/{invoice_id}/pdf` | — | session_required | — | — | — |
 | GET | `/api/portal/me` | — | session_required | — | — | PortalMeEnvelope |
 | GET | `/api/portal/orders` | — | session_required | — | — | PortalOrderListEnvelope |
 | POST | `/api/portal/orders` | — | session_required | — | — | PortalOrderEnvelope |
 | GET | `/api/portal/orders/{order_id}` | — | session_required | — | — | PortalOrderEnvelope |
 | POST | `/api/portal/orders/{order_id}/cancel` | — | session_required | — | — | PortalOrderEnvelope |
+| GET | `/api/portal/payment-attempts/{payment_attempt_id}` | — | session_required | — | — | PortalPaymentAttemptEnvelope |
 | GET | `/api/portal/tanks` | — | session_required | — | — | PortalTankListEnvelope |
 | GET | `/api/portal/tanks/{customer_tank_id}` | — | session_required | — | — | PortalTankEnvelope |
 | GET | `/api/portal/tanks/{customer_tank_id}/deliveries` | — | session_required | — | — | PortalTankDeliveryListEnvelope |

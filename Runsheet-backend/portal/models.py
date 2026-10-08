@@ -16,6 +16,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictInt,
     field_validator,
     model_validator,
 )
@@ -338,7 +339,7 @@ class PortalInvoiceDelivery(_PortalModel):
 
 
 class PortalInvoicePaymentAttempt(_PortalModel):
-    """The newest portal payment attempt (detail only; wired in FEAT-005)."""
+    """The newest portal payment attempt (detail only; R6.13 labels)."""
 
     payment_attempt_id: str
     status_code: str
@@ -379,7 +380,56 @@ class PortalInvoiceListEnvelope(_PortalModel):
     request_id: str
 
 
+# ---------------------------------------------------------------------------
+# Payments (design §6.2)
+# ---------------------------------------------------------------------------
+
+
+class PortalPaymentRequest(_PortalModel):
+    """``POST /invoices/{id}/payments`` body. The range check (100 cents to
+    ``remaining_cents``) runs in the service, so it can answer 422
+    ``PAYMENT_AMOUNT_INVALID`` with ``details.max_cents``."""
+
+    amount_cents: Optional[StrictInt] = None
+
+
+class PortalPaymentCreated(_PortalModel):
+    payment_attempt_id: str
+    status_code: str
+    amount_cents: int
+    client_secret: Optional[str] = None
+    publishable_key: Optional[str] = None
+
+
+class PortalPaymentCreatedEnvelope(_PortalModel):
+    data: PortalPaymentCreated
+    request_id: str
+
+
+class PortalPaymentAttempt(_PortalModel):
+    """``GET /payment-attempts/{id}``: status for polling after confirm."""
+
+    payment_attempt_id: str
+    invoice_id: str
+    status_code: str
+    status_label: str
+    amount_cents: int
+    created_at: Optional[datetime] = None
+    client_secret: Optional[str] = None
+    publishable_key: Optional[str] = None
+
+
+class PortalPaymentAttemptEnvelope(_PortalModel):
+    data: PortalPaymentAttempt
+    request_id: str
+
+
 __all__ = [
+    "PortalPaymentAttempt",
+    "PortalPaymentAttemptEnvelope",
+    "PortalPaymentCreated",
+    "PortalPaymentCreatedEnvelope",
+    "PortalPaymentRequest",
     "PATH_ID_PATTERN",
     "PortalInvoice",
     "PortalInvoiceDelivery",

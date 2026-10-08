@@ -23,11 +23,12 @@ from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from portal.models import PortalInvoice
 from portal.services.invoice_pdf import render_invoice_pdf
-from portal.services.portal_payment_service import portal_connector
+from portal.services.portal_payment_service import latest_payment_attempt, portal_connector
 from portal.services.projection import (
     account_display_names,
     invoice_total_gallons,
     project_invoice,
+    project_payment_attempt,
 )
 from portal.services.scoped_readers import PortalInvoiceReader
 from services.csv_export import (
@@ -125,11 +126,23 @@ class PortalInvoiceService:
         project = await self._projector(scope)
         return [project(doc) for doc in page.items], page.next_cursor
 
+    @property
+    def reader(self) -> PortalInvoiceReader:
+        """The scoped invoice reader (payment create reads the invoice fresh)."""
+        return self._reader
+
     async def detail(self, scope: Any, invoice_id: str) -> PortalInvoice:
         doc = await self._reader.get(scope, invoice_id)
-        project = await self._projector(scope)
-        # payment_attempt is wired to PortalPaymentAttemptStore in FEAT-005.
-        return project(doc)
+        names = await account_display_names(self._accounts, scope)
+        payments = await self._payments_available(scope)
+        # The newest attempt from PortalPaymentAttemptStore (§5, R6.13).
+        attempt = await latest_payment_attempt(scope, str(doc.get("invoice_id") or invoice_id))
+        return project_invoice(
+            doc,
+            account_names=names,
+            payments_available=payments,
+            payment_attempt=project_payment_attempt(attempt) if attempt else None,
+        )
 
     async def _customer_display_name(self, scope: Any) -> str:
         if self._customers is None:

@@ -225,6 +225,61 @@ async def _seed_fuel_ops_feature_flag_defaults(
         )
 
 
+def _make_stripe_connector_factory(
+    *, repository, vault, build_connector, enabled_only: bool
+):
+    """Build an ``async (tenant_id) -> StripeConnector | None`` factory.
+
+    ``enabled_only=False`` is the webhook / admin factory: it prefers an
+    enabled instance and falls back to the first record, so a disabled
+    integration still verifies webhooks. ``enabled_only=True`` is the
+    customer-portal factory (design §3.1): only an enabled instance counts,
+    so "may the portal take payments" is answered by ``None``.
+
+    Both return ``None`` when the repository or vault is missing, there is
+    no matching instance, or the repository lookup raises (logged WARN).
+    ``build_connector(tenant_id, instance)`` constructs the connector.
+    """
+
+    async def _factory(tenant_id: str):
+        if repository is None or vault is None:
+            return None
+        try:
+            instances = await repository.list_for_tenant(
+                tenant_id=tenant_id,
+                provider_name="stripe",
+                enabled=None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "%s: repository lookup failed tenant=%s: %s",
+                "Portal Stripe connector factory"
+                if enabled_only
+                else "Stripe connector factory",
+                tenant_id,
+                exc,
+            )
+            return None
+
+        if not instances:
+            return None
+        if enabled_only:
+            instance = next((i for i in instances if i.enabled), None)
+            if instance is None:
+                return None
+        else:
+            # Prefer an enabled instance; fall back to the first record
+            # so a disabled integration still serves webhooks (Stripe
+            # will keep delivering events until the operator removes
+            # the endpoint from their dashboard).
+            instance = next(
+                (i for i in instances if i.enabled), instances[0]
+            )
+        return build_connector(tenant_id, instance)
+
+    return _factory
+
+
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
@@ -1903,41 +1958,7 @@ async def initialize(app, container: ServiceContainer) -> None:
             else None
         )
 
-        async def _stripe_connector_factory(tenant_id: str):
-            """Resolve the Stripe connector for ``tenant_id``.
-
-            Returns ``None`` when the tenant has no active Stripe
-            integration instance so the endpoints surface HTTP 404
-            ``stripe_integration_not_configured`` uniformly.
-            """
-
-            if _stripe_repository is None or credentials_vault is None:
-                return None
-            try:
-                instances = await _stripe_repository.list_for_tenant(
-                    tenant_id=tenant_id,
-                    provider_name=StripeConnector.provider_name,
-                    enabled=None,
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "Stripe connector factory: repository lookup failed "
-                    "tenant=%s: %s",
-                    tenant_id,
-                    exc,
-                )
-                return None
-
-            if not instances:
-                return None
-            # Prefer an enabled instance; fall back to the first record
-            # so a disabled integration still serves webhooks (Stripe
-            # will keep delivering events until the operator removes
-            # the endpoint from their dashboard).
-            instance = next(
-                (i for i in instances if i.enabled), instances[0]
-            )
-
+        def _build_stripe_connector(tenant_id: str, instance):
             return StripeConnector(
                 tenant_id=tenant_id,
                 instance_id=instance.instance_id,
@@ -1949,6 +1970,25 @@ async def initialize(app, container: ServiceContainer) -> None:
                 redis_client=_agent_redis_client,
                 es_service=es_service,
             )
+
+        # Resolve the Stripe connector for ``tenant_id``; ``None`` when the
+        # tenant has no Stripe integration instance so the endpoints surface
+        # HTTP 404 ``stripe_integration_not_configured`` uniformly.
+        _stripe_connector_factory = _make_stripe_connector_factory(
+            repository=_stripe_repository,
+            vault=credentials_vault,
+            build_connector=_build_stripe_connector,
+            enabled_only=False,
+        )
+        # Customer portal (design §3.1): enabled instances only, so ``None``
+        # means "the portal can't take payments". Webhooks keep the factory
+        # above, so events for a since-disabled instance still verify.
+        _portal_stripe_connector_factory = _make_stripe_connector_factory(
+            repository=_stripe_repository,
+            vault=credentials_vault,
+            build_connector=_build_stripe_connector,
+            enabled_only=True,
+        )
 
         async def _stripe_payment_mapper(tenant_id: str, external_ids):
             """Map external Stripe charge ids → canonical commerce payments.
@@ -1972,13 +2012,48 @@ async def initialize(app, container: ServiceContainer) -> None:
                 external_ids=list(external_ids),
             )
 
+        # Customer-portal ACH payments (design §3.1, §6.3): the portal
+        # factory and commerce PaymentService for payment create, and the
+        # reconciler that routes portal PaymentIntent webhooks.
+        from portal.services.portal_payment_reconciler import (
+            PortalPaymentReconciler,
+        )
+        from portal.services.portal_payment_service import (
+            PortalPaymentAttemptStore,
+            configure_portal_payments,
+        )
+
+        _portal_pay_svc = (
+            container.commerce_payment_service
+            if container.has("commerce_payment_service")
+            else None
+        )
+        _portal_inv_svc = (
+            container.commerce_invoice_service
+            if container.has("commerce_invoice_service")
+            else None
+        )
+        configure_portal_payments(
+            connector_factory=_portal_stripe_connector_factory,
+            payment_service=_portal_pay_svc,
+        )
+        _portal_payment_handler = None
+        if _portal_pay_svc is not None and _portal_inv_svc is not None:
+            _portal_payment_handler = PortalPaymentReconciler(
+                store=PortalPaymentAttemptStore(),
+                payment_service=_portal_pay_svc,
+                invoice_service=_portal_inv_svc,
+            ).handle
+
         configure_stripe_endpoints(
             connector_factory=_stripe_connector_factory,
             payment_mapper=_stripe_payment_mapper,
+            portal_payment_handler=_portal_payment_handler,
         )
         logger.info(
             "Stripe REST endpoints + webhook router configured "
-            "(connector factory ready)"
+            "(connector factory ready; portal payments %s)",
+            "on" if _portal_payment_handler is not None else "off",
         )
     except Exception as exc:
         logger.warning(

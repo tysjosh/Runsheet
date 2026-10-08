@@ -252,3 +252,80 @@ def test_invoice_tenant_boundary(client, portal_on, portal_fakes, cA, cC):
     assert listed == {inv["C"][s] for s in _VISIBLE}
     assert csv_numbers == {f"INV-{inv['C'][s]}" for s in _VISIBLE}
     _assert_invoice_like_unknown(client, cC, inv["A"]["open"], pdf=True)
+
+
+# ---------------------------------------------------------------------------
+# Payments (FEAT-005): ISO-C-1 (payment create, attempt read), ISO-T-3
+# ---------------------------------------------------------------------------
+
+import logging  # noqa: E402
+
+from tests.portal._payment_fakes import intent_event  # noqa: E402
+from tests.portal.conftest import CUSTOMER_B, CUSTOMER_C, T2  # noqa: E402
+
+
+def _seed_attempt(payments, *, attempt_id, tenant_id, customer_id, invoice_id, status="created"):
+    return payments.db.add(
+        payment_attempt_id=attempt_id, tenant_id=tenant_id, customer_id=customer_id,
+        invoice_id=invoice_id, actor_user_id="st-other-user", idempotency_key=f"qa-{attempt_id}",
+        amount_cents=30660, status=status, stripe_payment_intent_id=f"pi_{attempt_id}",
+        created_at=payments.clock[0],
+    )
+
+
+def test_customer_a_cannot_pay_or_read_b(client, portal_on, payments, cA):
+    """ISO-C-1 (payment part): payment create on B's invoice and B's attempt
+    answer exactly like unknown ids; nothing is created or called."""
+    inv = seed_invoice_isolation(payments.invoices)
+    _seed_attempt(payments, attempt_id="ppa_b_1", tenant_id=T1, customer_id=CUSTOMER_B,
+                  invoice_id=inv["B"]["open"])
+    _seed_attempt(payments, attempt_id="ppa_c_1", tenant_id=T2, customer_id=CUSTOMER_C,
+                  invoice_id=inv["C"]["open"])
+    before = dict(payments.db.rows)
+
+    unknown_inv = "QA-INV-UNKNOWN-1"
+    miss = payments.create(client, cA, unknown_inv, key="qa-iso-key-miss1")
+    for foreign in (inv["B"]["open"], inv["B"]["draft"], inv["C"]["open"]):
+        hit = payments.create(client, cA, foreign, key=f"qa-iso-key-{foreign[-6:]}")
+        assert miss.status_code == 404 and hit.status_code == 404, (foreign, hit.text)
+        assert _normalized(hit, foreign) == _normalized(miss, unknown_inv), foreign
+
+    unknown_pa = "ppa_unknown_1"
+    for suffix in ("", "?include_client_secret=true"):
+        miss = call(client, "GET", f"/api/portal/payment-attempts/{unknown_pa}{suffix}", cA)
+        assert miss.status_code == 404 and miss.json()["error_code"] == "RESOURCE_NOT_FOUND"
+        for foreign in ("ppa_b_1", "ppa_c_1"):
+            hit = call(client, "GET", f"/api/portal/payment-attempts/{foreign}{suffix}", cA)
+            assert hit.status_code == 404
+            assert _normalized(hit, foreign) == _normalized(miss, unknown_pa), (foreign, suffix)
+
+    assert payments.db.rows == before
+    assert payments.connector.calls == []
+    # Every store read carried A's scope.
+    scoped = [kw for name, kw in payments.db.ops if "customer_id" in kw]
+    assert scoped and all(kw["customer_id"] == CUSTOMER_A and kw["tenant_id"] == T1 for kw in scoped)
+
+
+def test_webhook_tenant_mismatch(client, portal_on, payments, caplog):
+    """ISO-T-3: a webhook on /webhooks/stripe/T2 naming a T1 attempt is 200,
+    handled=false, changes nothing, and writes one WARN audit line."""
+    payments.invoice()
+    row = _seed_attempt(payments, attempt_id="ppa_t1_1", tenant_id=T1, customer_id=CUSTOMER_A,
+                        invoice_id="QA-PAY-INV-1")
+    before = payments.db.get("ppa_t1_1")
+    caplog.set_level(logging.WARNING)
+    for meta in ({}, {"tenant_id": T2}):
+        event = intent_event("payment_intent.succeeded", row, meta=meta)
+        resp = payments.webhook(client, event, tenant_id=T2)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["handled"] is False
+    # Path T1 but metadata naming T2: also a mismatch.
+    resp = payments.webhook(client, intent_event("payment_intent.succeeded", row, meta={"tenant_id": T2}))
+    assert resp.status_code == 200 and resp.json()["handled"] is False
+
+    assert payments.db.get("ppa_t1_1") == before
+    assert payments.payments() == []
+    lines = [r for r in caplog.records
+             if r.name == "portal_audit" and r.extra_data.get("outcome") == "webhook_mismatch"]
+    assert len(lines) == 3 and all(r.levelno == logging.WARNING for r in lines)
+    assert lines[0].extra_data["tenant_id"] == T2

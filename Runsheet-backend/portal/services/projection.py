@@ -355,7 +355,37 @@ def invoice_total_gallons(invoice: PortalInvoice) -> Optional[float]:
     return sum(quantities) if quantities else None
 
 
+#: Payment attempt status → what the customer sees (R6.13).
+PAYMENT_ATTEMPT_LABELS: Dict[str, str] = {
+    "creating": "Payment processing",
+    "created": "Payment processing",
+    "pending": "Payment processing",
+    "succeeded": "Paid",
+    "failed": "Payment failed, try again",
+    "canceled": "Payment failed, try again",
+}
+
+
+def payment_attempt_label(status: str) -> str:
+    return PAYMENT_ATTEMPT_LABELS.get(status, "Payment processing")
+
+
+def project_payment_attempt(row: Mapping[str, Any]) -> PortalInvoicePaymentAttempt:
+    """The invoice detail's ``payment_attempt`` (ids, status, amount only)."""
+    status = str(row.get("status") or "")
+    return PortalInvoicePaymentAttempt(
+        payment_attempt_id=str(row.get("payment_attempt_id")),
+        status_code=status,
+        status_label=payment_attempt_label(status),
+        amount_cents=_int(row.get("amount_cents")),
+        created_at=_parse_ts(row.get("created_at")),
+    )
+
+
 __all__ = [
+    "PAYMENT_ATTEMPT_LABELS",
+    "payment_attempt_label",
+    "project_payment_attempt",
     "ACCOUNT_NAME_CAP",
     "DEFAULT_ACCOUNT_NAME",
     "INVOICE_STATUS_LABELS",

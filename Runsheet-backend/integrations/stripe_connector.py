@@ -928,6 +928,92 @@ class StripeConnector(IntegrationConnector):
             )
         return publishable_key
 
+    # ------------------------------------------------------------------
+    # Customer-portal ACH (design §6.2, FREEZE F7)
+    #
+    # These three methods pass the tenant's secret key per request
+    # (``api_key=``) inside the worker thread and never assign the
+    # process-global ``stripe_sdk.api_key``, so concurrent tenants can't
+    # cross keys. The methods above keep their global assignment (B6).
+    # ------------------------------------------------------------------
+
+    async def _portal_sdk_and_key(self) -> "tuple[Any, str]":
+        stripe_sdk = await self._get_stripe_module()
+        envelope = await self._load_envelope()
+        secret_key = envelope.get("secret_key")
+        if not isinstance(secret_key, str) or not secret_key:
+            raise RuntimeError(
+                "StripeConnector: credential envelope is missing secret_key"
+            )
+        return stripe_sdk, secret_key
+
+    async def create_portal_ach_intent(
+        self,
+        amount_cents: int,
+        *,
+        idempotency_key: str,
+        metadata: Mapping[str, Any],
+        description: str,
+    ) -> Dict[str, Any]:
+        """Create a customer-initiated ``us_bank_account`` PaymentIntent.
+
+        Bypasses auto-charge and the ceiling: the customer starts this
+        payment. Returns ``{id, client_secret, status}``.
+        """
+
+        if not isinstance(amount_cents, int) or isinstance(amount_cents, bool) or amount_cents <= 0:
+            raise ValueError("amount_cents must be a positive int")
+        stripe_sdk, secret_key = await self._portal_sdk_and_key()
+        body: Dict[str, Any] = {
+            "amount": amount_cents,
+            "currency": DEFAULT_CURRENCY,
+            "payment_method_types": ["us_bank_account"],
+            "payment_method_options": {
+                "us_bank_account": {"verification_method": "automatic"}
+            },
+            "metadata": {str(k): str(v) for k, v in dict(metadata).items()},
+            "description": str(description),
+        }
+        intent = await asyncio.to_thread(
+            lambda: stripe_sdk.PaymentIntent.create(
+                **body, api_key=secret_key, idempotency_key=idempotency_key
+            )
+        )
+        raw = _as_dict(intent)
+        return {
+            "id": raw.get("id"),
+            "client_secret": raw.get("client_secret"),
+            "status": raw.get("status"),
+        }
+
+    async def cancel_intent(self, payment_intent_id: str) -> Dict[str, Any]:
+        """Cancel a PaymentIntent. Returns ``{id, status}``."""
+
+        stripe_sdk, secret_key = await self._portal_sdk_and_key()
+        intent = await asyncio.to_thread(
+            lambda: stripe_sdk.PaymentIntent.cancel(
+                payment_intent_id, api_key=secret_key
+            )
+        )
+        raw = _as_dict(intent)
+        return {"id": raw.get("id"), "status": raw.get("status")}
+
+    async def retrieve_intent(self, payment_intent_id: str) -> Dict[str, Any]:
+        """Read a PaymentIntent. Returns ``{id, client_secret, status}``."""
+
+        stripe_sdk, secret_key = await self._portal_sdk_and_key()
+        intent = await asyncio.to_thread(
+            lambda: stripe_sdk.PaymentIntent.retrieve(
+                payment_intent_id, api_key=secret_key
+            )
+        )
+        raw = _as_dict(intent)
+        return {
+            "id": raw.get("id"),
+            "client_secret": raw.get("client_secret"),
+            "status": raw.get("status"),
+        }
+
     async def verify_webhook_signature(
         self,
         payload_bytes: bytes,

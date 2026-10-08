@@ -751,6 +751,7 @@ def portal_fakes(monkeypatch) -> Iterator[PortalFakes]:
     saved_checker = principal.get_principal_checker()
     saved_me = dict(me._services)
     saved_pay = (pay._connector_factory, pay._payment_service)
+    saved_pay_service = pay.get_configured_portal_payment_service()
     principal.configure_portal_principal(checker)
     me.configure_portal_me(
         customer_service=customers,
@@ -758,6 +759,14 @@ def portal_fakes(monkeypatch) -> Iterator[PortalFakes]:
         order_intake_pipeline=pipeline,
     )
     pay.configure_portal_payments(connector_factory=None, payment_service=None)
+    # FEAT-005: an empty in-memory attempt store, so the payment routes
+    # answer 404/409 (not 503) for the generic route-inventory suites.
+    from tests.portal._payment_fakes import FakeAttemptDB
+
+    pay.configure_portal_payment_service(
+        pay.PortalPaymentService(store=FakeAttemptDB().store(),
+                                 invoice_reader=invoices.portal.reader)
+    )
 
     async def _email(_user_id: str) -> str:
         return TEST_EMAIL
@@ -776,6 +785,7 @@ def portal_fakes(monkeypatch) -> Iterator[PortalFakes]:
         me._services.clear()
         me._services.update(saved_me)
         pay.configure_portal_payments(*saved_pay)
+        pay.configure_portal_payment_service(saved_pay_service)
 
 
 @pytest.fixture
@@ -1214,3 +1224,138 @@ def seed_invoice_isolation(h: InvoiceHarness) -> Dict[str, Dict[str, str]]:
                           created_at=h.now - timedelta(days=1 + i, minutes=n))
             out[letter][status] = invoice_id
     return out
+
+
+# ---------------------------------------------------------------------------
+# Payments (FEAT-005)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PaymentHarness:
+    """Portal payments over in-memory fakes (``tests/portal/_payment_fakes.py``).
+
+    * ``db``: :class:`FakeAttemptDB` (the attempt store of ``service`` and
+      ``reconciler``); ``connector``: :class:`FakePortalConnector`, returned
+      by the portal factory while ``connected`` is true and by the webhook
+      factory for ``webhook_tenants``.
+    * ``service``: the real ``PortalPaymentService`` (clock ``clock[0]``,
+      Stripe bound ``timeout``); ``reconciler``: the real
+      ``PortalPaymentReconciler`` over the real commerce ``PaymentService``
+      and the invoice harness's ``InvoiceService`` (one document store).
+    """
+
+    db: Any
+    connector: Any
+    service: Any
+    reconciler: Any
+    payment_service: Any
+    idempotency: Any
+    invoices: InvoiceHarness
+    clock: List[datetime]
+    connected: bool = True
+    webhook_tenants: Tuple[str, ...] = (T1, T2)
+
+    async def factory(self, tenant_id: str):
+        return self.connector if self.connected else None
+
+    async def webhook_factory(self, tenant_id: str):
+        return self.connector if tenant_id in self.webhook_tenants else None
+
+    def advance(self, seconds: float) -> None:
+        self.clock[0] = self.clock[0] + timedelta(seconds=seconds)
+
+    def invoice(self, invoice_id: str = "QA-PAY-INV-1", *, tenant_id: str = T1,
+                customer_id: str = CUSTOMER_A, status: str = "open", **kw: Any) -> Dict[str, Any]:
+        """An invoice (total 30660 cents, nothing paid) for the customer."""
+        kw.setdefault("account_id", f"QA-ACCT-{customer_id[-1]}")
+        return self.invoices.add_invoice(tenant_id, customer_id, invoice_id, status=status, **kw)
+
+    def invoice_doc(self, invoice_id: str) -> Dict[str, Any]:
+        from commerce.services.invoice_service import INVOICES_CURRENT_INDEX
+
+        return self.invoices.store.doc(INVOICES_CURRENT_INDEX, invoice_id)
+
+    def create(self, client, session, invoice_id: str = "QA-PAY-INV-1", *,
+               key: Optional[str] = None, amount: Optional[int] = None, headers=None):
+        body = {} if amount is None else {"amount_cents": amount}
+        hdrs = dict(headers or {})
+        hdrs["Idempotency-Key"] = key or f"qa-key-{uuid.uuid4().hex}"
+        return call(client, "POST", f"/api/portal/invoices/{invoice_id}/payments", session,
+                    json=body, headers=hdrs)
+
+    def webhook(self, client, event: Dict[str, Any], *, tenant_id: str = T1):
+        import json as _json
+
+        return client.post(
+            f"/webhooks/stripe/{tenant_id}",
+            content=_json.dumps(event).encode("utf-8"),
+            headers={"stripe-signature": "t=1,v1=fake", "content-type": "application/json"},
+        )
+
+    def payments(self) -> List[Dict[str, Any]]:
+        from commerce.services.commerce_es_mappings import PAYMENTS_CURRENT_INDEX
+
+        return list(self.invoices.store.docs[PAYMENTS_CURRENT_INDEX].values())
+
+    def applied_events(self, invoice_id: str, payment_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        from commerce.services.commerce_es_mappings import INVOICE_EVENTS_INDEX
+
+        return [
+            e for e in self.invoices.store.docs[INVOICE_EVENTS_INDEX].values()
+            if e.get("invoice_id") == invoice_id
+            and str(getattr(e.get("event_type"), "value", e.get("event_type"))) == "payment_applied"
+            and (payment_id is None or (e.get("payload") or {}).get("payment_id") == payment_id)
+        ]
+
+
+def build_payment_harness(invoices: InvoiceHarness, *, timeout: float = 0.5) -> PaymentHarness:
+    from commerce.services.payment_service import PaymentService
+    from portal.services.portal_payment_reconciler import PortalPaymentReconciler
+    from portal.services.portal_payment_service import PortalPaymentService
+    from tests.portal._payment_fakes import (
+        FakeAttemptDB,
+        FakePaymentIdempotency,
+        FakePortalConnector,
+    )
+
+    db = FakeAttemptDB()
+    connector = FakePortalConnector()
+    clock = [datetime.now(timezone.utc)]
+    idempotency = FakePaymentIdempotency()
+    payment_service = PaymentService(
+        es_service=invoices.store, idempotency_service=idempotency,
+        invoice_service=invoices.service,
+    )
+    service = PortalPaymentService(
+        store=db.store(), invoice_reader=invoices.portal.reader,
+        clock=lambda: clock[0], stripe_timeout_seconds=timeout,
+    )
+    reconciler = PortalPaymentReconciler(
+        store=db.store(), payment_service=payment_service,
+        invoice_service=invoices.service, clock=lambda: clock[0],
+    )
+    return PaymentHarness(db=db, connector=connector, service=service, reconciler=reconciler,
+                          payment_service=payment_service, idempotency=idempotency,
+                          invoices=invoices, clock=clock)
+
+
+@pytest.fixture
+def payments(portal_fakes) -> Iterator[PaymentHarness]:
+    """Wire :class:`PaymentHarness` as the portal payment service, the portal
+    connector factory, and the Stripe webhook's connector factory + portal
+    handler; restore the Stripe endpoint wiring afterwards."""
+    from integrations.api import stripe_endpoints as se
+    from portal.services import portal_payment_service as pay
+
+    h = build_payment_harness(portal_fakes.invoices)
+    saved_se = (se._connector_factory, se._payment_mapper, se._portal_payment_handler)
+    pay.configure_portal_payments(connector_factory=h.factory, payment_service=h.payment_service)
+    pay.configure_portal_payment_service(h.service)
+    se.configure_stripe_endpoints(
+        connector_factory=h.webhook_factory, portal_payment_handler=h.reconciler.handle
+    )
+    try:
+        yield h
+    finally:
+        se._connector_factory, se._payment_mapper, se._portal_payment_handler = saved_se

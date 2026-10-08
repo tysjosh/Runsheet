@@ -100,18 +100,32 @@ ConnectorFactory = Callable[[str], Awaitable[Optional[StripeConnector]]]
 PaymentMapper = Callable[[str, List[str]], Awaitable[Dict[str, Dict[str, Any]]]]
 
 
+#: ``async (path_tenant_id, event) -> {portal, handled, reason}``: the
+#: customer-portal reconciler (``PortalPaymentReconciler.handle``, design
+#: §6.3). ``portal`` is false when a ``charge.*`` event names no portal
+#: attempt, so the endpoint falls through to the existing handling.
+PortalPaymentHandler = Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
+
+#: ``charge.*`` events the portal handler sees first (R6.15).
+PORTAL_CHARGE_EVENT_TYPES = frozenset({"charge.refunded", "charge.dispute.created"})
+#: ``metadata.source`` stamped on every portal PaymentIntent.
+PORTAL_PAYMENT_SOURCE = "runsheet_portal"
+
+
 # ---------------------------------------------------------------------------
 # Module-level wiring (same pattern as integrations_endpoints.py)
 # ---------------------------------------------------------------------------
 
 _connector_factory: Optional[ConnectorFactory] = None
 _payment_mapper: Optional[PaymentMapper] = None
+_portal_payment_handler: Optional[PortalPaymentHandler] = None
 
 
 def configure_stripe_endpoints(
     *,
     connector_factory: ConnectorFactory,
     payment_mapper: Optional[PaymentMapper] = None,
+    portal_payment_handler: Optional[PortalPaymentHandler] = None,
 ) -> None:
     """Wire the Stripe connector factory into the REST routers.
 
@@ -131,13 +145,18 @@ def configure_stripe_endpoints(
             commerce ``payment_id`` or flag it ``unmapped`` (Req 12.3).
             When omitted, payments are returned without canonical mapping
             (all ``unmapped``).
+        portal_payment_handler: optional customer-portal reconciler
+            (design §6.3). When ``None``, portal events fall through to
+            the existing path, which ignores them as
+            ``missing_reconciliation_id``.
     """
 
-    global _connector_factory, _payment_mapper
+    global _connector_factory, _payment_mapper, _portal_payment_handler
     if connector_factory is None:
         raise ValueError("connector_factory must not be None")
     _connector_factory = connector_factory
     _payment_mapper = payment_mapper
+    _portal_payment_handler = portal_payment_handler
 
 
 def _get_connector_factory() -> ConnectorFactory:
@@ -483,6 +502,44 @@ async def _apply_canonical_mapping(
 # ---------------------------------------------------------------------------
 
 
+async def _route_portal_event(
+    tenant_id: str, event: Any
+) -> Optional[StripeWebhookResponse]:
+    """Hand a verified portal event to the portal handler (design §6.3).
+
+    Returns the response when the portal handled the event, else ``None``
+    so the caller continues into the existing ``handle_webhook_event``
+    path unchanged (R6.12). The event is a plain dict: every read is
+    null-safe.
+    """
+
+    handler = _portal_payment_handler
+    if handler is None or not isinstance(event, dict):
+        return None
+    etype = event.get("type") or ""
+    data = event.get("data") or {}
+    obj = (data.get("object") if isinstance(data, dict) else None) or {}
+    meta = (obj.get("metadata") if isinstance(obj, dict) else None) or {}
+    is_portal_intent = (
+        isinstance(etype, str)
+        and etype.startswith("payment_intent.")
+        and isinstance(meta, dict)
+        and meta.get("source") == PORTAL_PAYMENT_SOURCE
+    )
+    if not is_portal_intent and etype not in PORTAL_CHARGE_EVENT_TYPES:
+        return None
+    summary = await handler(tenant_id, event) or {}
+    if not is_portal_intent and not summary.get("portal"):
+        # A charge.* event for a non-portal payment: existing path.
+        return None
+    return StripeWebhookResponse(
+        received=True,
+        handled=bool(summary.get("handled")),
+        event_type=str(etype),
+        reason=summary.get("reason"),
+    )
+
+
 @webhook_router.post(
     "/webhooks/stripe/{tenant_id}",
     response_model=StripeWebhookResponse,
@@ -558,6 +615,13 @@ async def receive_stripe_webhook(
             status_code=status.HTTP_400_BAD_REQUEST,
         )
 
+    # Customer-portal routing (design §6.3). Deliberately outside the
+    # try/except below: a portal handler error is a real 500, so Stripe
+    # retries instead of the event being swallowed as ``handler_error``.
+    portal_response = await _route_portal_event(tenant_id, event)
+    if portal_response is not None:
+        return portal_response
+
     summary: Dict[str, Any] = {}
     try:
         summary = await connector.handle_webhook_event(event)
@@ -592,6 +656,9 @@ async def receive_stripe_webhook(
 
 __all__ = [
     "ConnectorFactory",
+    "PORTAL_CHARGE_EVENT_TYPES",
+    "PORTAL_PAYMENT_SOURCE",
+    "PortalPaymentHandler",
     "StripePaymentItem",
     "StripePaymentsListResponse",
     "StripePublicConfigResponse",
