@@ -13,6 +13,7 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import EmailPassword from "supertokens-auth-react/recipe/emailpassword";
+import { PASSWORD_RULE } from "./copy";
 import ResetPasswordPage from "./page";
 
 jest.mock("supertokens-auth-react/recipe/emailpassword", () => ({
@@ -63,7 +64,9 @@ describe("ResetPasswordPage", () => {
     fillPasswords("Demo1234!", "Demo1234!");
     fireEvent.click(screen.getByRole("button", { name: /set password/i }));
 
-    expect(await screen.findByText(/password updated/i)).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Password set" }),
+    ).toBeInTheDocument();
     expect(submitMock).toHaveBeenCalledWith({
       formFields: [{ id: "password", value: "Demo1234!" }],
     });
@@ -77,6 +80,36 @@ describe("ResetPasswordPage", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent(/do not match/i);
     expect(submitMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the password rule before the first attempt and links errors to fields", async () => {
+    setUrl("?token=abc");
+    render(<ResetPasswordPage />);
+    expect(
+      screen.getByRole("heading", { name: "Set your password" }),
+    ).toBeInTheDocument();
+    const pw = screen.getByLabelText(/new password/i);
+    const rule = document.getElementById(
+      (pw.getAttribute("aria-describedby") ?? "").split(" ")[0],
+    );
+    expect(rule).toHaveTextContent(PASSWORD_RULE);
+    fillPasswords("Demo1234!", "Different1!");
+    fireEvent.click(screen.getByRole("button", { name: /set password/i }));
+    const alert = await screen.findByRole("alert");
+    const confirm = screen.getByLabelText(/confirm password/i);
+    expect(confirm).toHaveAttribute("aria-invalid", "true");
+    expect(confirm.getAttribute("aria-describedby")).toContain(
+      alert.querySelector("p")?.id,
+    );
+  });
+
+  it("welcomes an invited user (PE5 invite=1)", () => {
+    setUrl("?token=abc&invite=1");
+    render(<ResetPasswordPage />);
+    expect(
+      screen.getByRole("heading", { name: "Set your password" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/Welcome\. Choose a password/)).toBeInTheDocument();
   });
 
   it("surfaces an invalid-token error and falls back to the hint", async () => {

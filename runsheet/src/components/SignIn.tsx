@@ -1,13 +1,32 @@
 "use client";
 
-import { ArrowLeft, ArrowRight, Eye, EyeOff } from "lucide-react";
+/**
+ * Sign-in for every Runsheet user, staff and customers alike (PD20 keeps one
+ * `/signin`; D33, R14.17).
+ *
+ * - A real `<form>` with a submit button, so Enter submits from any field.
+ * - Tab order: Email → Password → Show password → Sign in → Forgot password?
+ *   ("Forgot password?" sits below the form; it used to sit between Email and
+ *   Password, finding V1).
+ * - Audience-neutral copy; light tokens on the form side with AA contrast and
+ *   targets ≥ 24 px. The dark marketing art panel stays on ≥ 1024 px only.
+ *
+ * Behaviour is unchanged: the same client-side checks and messages, and
+ * `onSignIn` (the SuperTokens call and the staff/customer routing) lives in
+ * `app/signin/page.tsx`.
+ */
+import { Eye, EyeOff } from "lucide-react";
 import Link from "next/link";
-import type React from "react";
 import { useState } from "react";
 
 interface SignInProps {
   onSignIn?: (email: string, password: string) => Promise<void>;
 }
+
+const focusRing =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus focus-visible:ring-offset-2";
+const fieldClass = `block h-11 w-full rounded-[10px] border border-slate-400 bg-surface px-3 text-base text-text placeholder:text-slate-500 aria-[invalid=true]:border-red-700 ${focusRing}`;
+const labelClass = "mb-1.5 block text-sm font-semibold text-text";
 
 export default function SignIn({ onSignIn }: SignInProps) {
   const [email, setEmail] = useState("");
@@ -16,7 +35,9 @@ export default function SignIn({ onSignIn }: SignInProps) {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (e?: React.FormEvent) => {
+    e?.preventDefault();
+    if (isLoading) return;
     setError("");
     setIsLoading(true);
 
@@ -47,24 +68,14 @@ export default function SignIn({ onSignIn }: SignInProps) {
     }
   };
 
-  const handleKeyPress = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      handleSubmit();
-    }
-  };
-
-  const fieldClass =
-    "w-full rounded-lg border bg-[#0a0a0b] px-4 py-3 text-sm text-[#f5f4ef] placeholder:text-[#f5f4ef]/30 transition-colors focus:outline-none focus:ring-2 focus:ring-[#16b88c]/50";
-  const labelClass =
-    "mb-2 block font-mono text-[10px] uppercase tracking-[0.2em] text-[#f5f4ef]/50";
-
   return (
-    <div className="flex min-h-screen bg-[#0a0a0b] text-[#f5f4ef] antialiased">
-      {/* ─── LEFT — branded photo panel (hidden on small) ─── */}
-      <div className="relative hidden w-1/2 overflow-hidden border-r border-[#f5f4ef]/10 lg:flex">
-        {/* grid backdrop */}
+    <div className="flex min-h-screen bg-canvas text-text antialiased">
+      {/* Art panel (≥ 1024 px): the marketing look, decorative. */}
+      <div
+        aria-hidden="true"
+        className="relative hidden w-1/2 overflow-hidden bg-[#0a0a0b] text-[#f5f4ef] lg:flex"
+      >
         <div
-          aria-hidden
           className="pointer-events-none absolute inset-0 opacity-[0.12]"
           style={{
             backgroundImage:
@@ -72,115 +83,54 @@ export default function SignIn({ onSignIn }: SignInProps) {
             backgroundSize: "56px 56px",
           }}
         />
-        {/* accent glow */}
         <div
-          aria-hidden
           className="pointer-events-none absolute -left-24 top-1/3 h-[420px] w-[420px] rounded-full blur-[150px]"
           style={{
             background:
               "radial-gradient(circle, rgba(22,184,140,0.22), transparent 70%)",
           }}
         />
-
-        {/* logo */}
-        <Link
-          href="/"
-          className="absolute left-8 top-7 z-20 flex items-baseline gap-px"
-        >
-          <span className="text-lg font-black uppercase tracking-tight">
-            RUN<span className="text-[#16b88c]">/</span>SHEET
-          </span>
-          <span className="ml-1.5 font-mono text-[9px] uppercase tracking-[0.3em] text-[#f5f4ef]/40">
-            beta
-          </span>
-        </Link>
-
         <div className="relative z-10 flex w-full flex-col justify-center px-12 xl:px-16">
-          {/* framed image (console style) */}
-          <div className="overflow-hidden rounded-2xl border border-[#f5f4ef]/12 bg-[#101012]">
-            <div className="flex items-center gap-2 border-b border-[#f5f4ef]/10 px-4 py-2.5">
-              <span className="flex gap-1.5">
-                <span className="h-2 w-2 rounded-full bg-[#ef4444]" />
-                <span className="h-2 w-2 rounded-full bg-[#f59e0b]" />
-                <span className="h-2 w-2 rounded-full bg-[#16b88c]" />
-              </span>
-              <span className="ml-2 font-mono text-[10px] uppercase tracking-[0.2em] text-[#f5f4ef]/45">
-                fleet.live
-              </span>
-            </div>
+          <div className="overflow-hidden rounded-2xl border border-[#f5f4ef]/15 bg-[#101012]">
             <div className="relative aspect-[4/3] overflow-hidden">
               <img
                 src="https://images.unsplash.com/photo-1601584115197-04ecc0da31d7?w=1200&auto=format&fit=crop"
-                alt="Fuel distribution fleet"
+                alt=""
                 className="h-full w-full object-cover"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-[#0a0a0b] via-transparent to-transparent" />
             </div>
           </div>
-
-          {/* tagline */}
-          <div className="mt-10 max-w-md">
-            <div className="mb-4 flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.3em] text-[#16b88c]">
-              <span className="h-px w-8 bg-[#16b88c]" />
-              Dispatch Console
-            </div>
-            <p className="text-2xl font-bold leading-snug tracking-tight">
-              Forecast the runout. Optimize the load. Replan in seconds.
-            </p>
-            <p className="mt-4 font-mono text-[11px] uppercase tracking-[0.2em] text-[#f5f4ef]/45">
-              Runsheet — autonomous fuel operations
-            </p>
-          </div>
+          <p className="mt-10 max-w-md text-2xl font-bold leading-snug tracking-tight">
+            Fuel deliveries, planned and tracked in one place.
+          </p>
         </div>
       </div>
 
-      {/* ─── RIGHT — sign-in form ─── */}
-      <div className="relative flex w-full items-center justify-center px-6 py-12 lg:w-1/2 lg:px-16">
-        {/* mobile grid backdrop */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute inset-0 opacity-[0.08] lg:hidden"
-          style={{
-            backgroundImage:
-              "linear-gradient(#f5f4ef 1px, transparent 1px), linear-gradient(90deg, #f5f4ef 1px, transparent 1px)",
-            backgroundSize: "48px 48px",
-          }}
-        />
-
-        <div className="relative w-full max-w-sm">
-          {/* mobile logo + back */}
-          <div className="mb-10 flex items-center justify-between lg:hidden">
-            <Link href="/" className="flex items-baseline gap-px">
-              <span className="text-lg font-black uppercase tracking-tight">
-                RUN<span className="text-[#16b88c]">/</span>SHEET
-              </span>
-            </Link>
-            <Link
-              href="/"
-              className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[0.2em] text-[#f5f4ef]/50 transition-colors hover:text-[#f5f4ef]"
+      {/* Form side: light tokens. */}
+      <main className="flex w-full items-center justify-center px-4 py-12 lg:w-1/2">
+        <div className="w-full max-w-[400px] rounded-2xl border border-border bg-surface p-6 shadow-sm sm:p-8">
+          <Link
+            href="/"
+            className={`inline-flex min-h-6 items-center gap-2 rounded-md ${focusRing}`}
+          >
+            <span
+              aria-hidden="true"
+              className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-brand-600 text-[13px] font-extrabold text-white"
             >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              Home
-            </Link>
-          </div>
+              R
+            </span>
+            <span className="text-[15px] font-bold text-text">Runsheet</span>
+          </Link>
 
-          {/* header */}
-          <div className="mb-8">
-            <div className="mb-5 flex items-center gap-3 font-mono text-[11px] uppercase tracking-[0.3em] text-[#16b88c]">
-              <span className="h-px w-8 bg-[#16b88c]" />
-              Operator Access
-            </div>
-            <h1 className="text-[clamp(2rem,5vw,3rem)] font-black uppercase leading-[0.92] tracking-[-0.02em]">
-              Sign in.
-            </h1>
-            <p className="mt-3 text-sm text-[#f5f4ef]/55">
-              Welcome back — enter your credentials to reach the dispatch
-              console.
-            </p>
-          </div>
+          <h1 className="mt-6 text-2xl font-bold text-text">
+            Sign in to Runsheet
+          </h1>
+          <p className="mt-1 text-[15px] text-text-muted">
+            Use the email and password for your Runsheet account.
+          </p>
 
-          {/* form */}
-          <div className="space-y-5">
+          <form noValidate onSubmit={handleSubmit} className="mt-6 space-y-4">
             <div>
               <label htmlFor="email" className={labelClass}>
                 Email address
@@ -193,26 +143,17 @@ export default function SignIn({ onSignIn }: SignInProps) {
                 required
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                onKeyPress={handleKeyPress}
+                aria-invalid={error ? true : undefined}
                 aria-describedby={error ? "signin-error" : undefined}
                 className={fieldClass}
-                style={{ borderColor: "rgba(245,244,239,0.15)" }}
-                placeholder="you@distributor.com"
+                placeholder="you@company.com"
               />
             </div>
 
             <div>
-              <div className="mb-2 flex items-center justify-between">
-                <label htmlFor="password" className={`${labelClass} mb-0`}>
-                  Password
-                </label>
-                <a
-                  href="/auth/forgot-password"
-                  className="font-mono text-[10px] uppercase tracking-[0.15em] text-[#f5f4ef]/45 transition-colors hover:text-[#16b88c]"
-                >
-                  Forgot?
-                </a>
-              </div>
+              <label htmlFor="password" className={labelClass}>
+                Password
+              </label>
               <div className="relative">
                 <input
                   id="password"
@@ -222,21 +163,21 @@ export default function SignIn({ onSignIn }: SignInProps) {
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  onKeyPress={handleKeyPress}
+                  aria-invalid={error ? true : undefined}
+                  aria-describedby={error ? "signin-error" : undefined}
                   className={`${fieldClass} pr-12`}
-                  style={{ borderColor: "rgba(245,244,239,0.15)" }}
-                  placeholder="Enter your password"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword(!showPassword)}
                   aria-label={showPassword ? "Hide password" : "Show password"}
-                  className="absolute inset-y-0 right-0 flex items-center pr-4 text-[#f5f4ef]/40 transition-colors hover:text-[#f5f4ef]"
+                  aria-pressed={showPassword}
+                  className={`absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-[10px] text-slate-600 hover:text-text ${focusRing}`}
                 >
                   {showPassword ? (
-                    <EyeOff className="h-5 w-5" />
+                    <EyeOff aria-hidden="true" className="h-5 w-5" />
                   ) : (
-                    <Eye className="h-5 w-5" />
+                    <Eye aria-hidden="true" className="h-5 w-5" />
                   )}
                 </button>
               </div>
@@ -244,47 +185,57 @@ export default function SignIn({ onSignIn }: SignInProps) {
 
             {error && (
               <div
-                className="rounded-lg border border-[#ef4444]/40 bg-[#ef4444]/10 p-3"
+                className="rounded-lg border border-red-300 bg-red-50 px-3 py-2"
                 role="alert"
               >
-                <p id="signin-error" className="text-sm text-[#ef4444]">
+                <p
+                  id="signin-error"
+                  className="text-sm font-medium text-red-800"
+                >
                   {error}
                 </p>
               </div>
             )}
 
             <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={isLoading}
-              className="group inline-flex w-full items-center justify-center gap-2 rounded-full bg-[#16b88c] px-7 py-3.5 text-sm font-bold uppercase tracking-[0.12em] text-[#06231b] transition-all hover:bg-[#1ed3a0] disabled:cursor-not-allowed disabled:opacity-60"
+              type="submit"
+              aria-disabled={isLoading || undefined}
+              className={`inline-flex h-11 w-full items-center justify-center gap-2 rounded-[10px] bg-primary px-4 text-[15px] font-semibold text-on-primary hover:bg-primary-hover aria-disabled:cursor-not-allowed aria-disabled:opacity-70 ${focusRing}`}
             >
               {isLoading ? (
                 <>
-                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-[#06231b] border-t-transparent" />
+                  <span
+                    aria-hidden="true"
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"
+                  />
                   Signing in…
                 </>
               ) : (
-                <>
-                  Sign In
-                  <ArrowRight className="h-4 w-4 transition-transform group-hover:translate-x-1" />
-                </>
+                "Sign in"
               )}
             </button>
-          </div>
+          </form>
 
-          {/* footer — prospect path */}
-          <p className="mt-8 text-center font-mono text-[11px] uppercase tracking-[0.15em] text-[#f5f4ef]/40">
-            No account yet?{" "}
+          <p className="mt-4 text-center">
+            <a
+              href="/auth/forgot-password"
+              className={`inline-flex min-h-6 items-center rounded-md px-1 text-sm font-semibold text-link underline-offset-2 hover:underline ${focusRing}`}
+            >
+              Forgot password?
+            </a>
+          </p>
+
+          <p className="mt-6 border-t border-border pt-4 text-center text-sm text-text-muted">
+            New to Runsheet?{" "}
             <Link
               href="/request-pilot"
-              className="text-[#16b88c] hover:underline"
+              className={`inline-flex min-h-6 items-center rounded-md px-1 font-semibold text-link underline-offset-2 hover:underline ${focusRing}`}
             >
-              Request a Pilot
+              Request a pilot
             </Link>
           </p>
         </div>
-      </div>
+      </main>
     </div>
   );
 }
