@@ -15,8 +15,9 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
 
+import { ChoiceOption } from '@/components/ChoiceOption';
 import { PermissionBanner } from '@/components/PermissionBanner';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -97,12 +98,10 @@ export default function ExceptionReportScreen() {
         contentContainerClassName="gap-5 p-5 pb-12"
         keyboardShouldPersistTaps="handled"
       >
-        <View className="gap-1">
-          <Text className="text-2xl font-bold">Report a problem</Text>
-          <Text className="text-muted-foreground">
-            Dispatch sees this against the order you are working.
-          </Text>
-        </View>
+        {/* The stack header carries the title (UI revamp task 4.2). */}
+        <Text className="text-muted-foreground">
+          Dispatch sees this against the order you are working.
+        </Text>
 
         {locationDenied && <PermissionBanner permissions={{ location: 'denied' }} />}
 
@@ -110,26 +109,21 @@ export default function ExceptionReportScreen() {
           <CardHeader>
             <CardTitle>What happened</CardTitle>
           </CardHeader>
-          <CardContent className="gap-2">
-            {EXCEPTION_TYPES.map((option) => {
-              const active = option.value === exceptionType;
-              return (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: active }}
-                  disabled={submitting}
-                  onPress={() => setExceptionType(option.value)}
-                  className={
-                    active
-                      ? 'rounded-xl border-2 border-primary p-3'
-                      : 'rounded-xl border border-input p-3'
-                  }
-                >
-                  <Text>{option.label}</Text>
-                </Pressable>
-              );
-            })}
+          <CardContent
+            accessibilityRole="radiogroup"
+            accessibilityLabel="What happened"
+            className="flex-row flex-wrap gap-2"
+          >
+            {EXCEPTION_TYPES.map((option) => (
+              <ChoiceOption
+                key={option.value}
+                variant="chip"
+                label={option.label}
+                checked={option.value === exceptionType}
+                disabled={submitting}
+                onPress={() => setExceptionType(option.value)}
+              />
+            ))}
           </CardContent>
         </Card>
 
@@ -140,35 +134,28 @@ export default function ExceptionReportScreen() {
               High and critical reach dispatch immediately.
             </CardDescription>
           </CardHeader>
-          <CardContent className="gap-2">
-            {EXCEPTION_SEVERITIES.map((option) => {
-              const active = option.value === severity;
-              return (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: active }}
-                  disabled={submitting}
-                  onPress={() => setSeverity(option.value)}
-                  className={
-                    active
-                      ? 'rounded-xl border-2 border-primary p-3'
-                      : 'rounded-xl border border-input p-3'
-                  }
-                >
-                  <Text className="font-semibold">{option.label}</Text>
-                  <Text className="text-sm text-muted-foreground">
-                    {option.effect}
-                  </Text>
-                </Pressable>
-              );
-            })}
+          <CardContent
+            accessibilityRole="radiogroup"
+            accessibilityLabel="How urgent"
+            className="gap-2"
+          >
+            {EXCEPTION_SEVERITIES.map((option) => (
+              <ChoiceOption
+                key={option.value}
+                label={option.label}
+                description={option.effect}
+                checked={option.value === severity}
+                disabled={submitting}
+                onPress={() => setSeverity(option.value)}
+              />
+            ))}
           </CardContent>
         </Card>
 
         <View className="gap-2">
           <Text className="font-medium">Details</Text>
           <Input
+            aria-label="Details"
             value={note}
             onChangeText={setNote}
             placeholder="What dispatch needs to know"

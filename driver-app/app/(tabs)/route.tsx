@@ -26,11 +26,14 @@
 
 import { useNetInfo } from '@react-native-community/netinfo';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useRouter } from 'expo-router';
-import { useEffect, useMemo, useState } from 'react';
-import { Pressable, RefreshControl, ScrollView, View } from 'react-native';
+import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { RefreshControl, ScrollView, View } from 'react-native';
 
+import { ChoiceOption } from '@/components/ChoiceOption';
+import { ContaminationWarning } from '@/components/ContaminationWarning';
 import { PendingQueueChip } from '@/components/PendingQueueChip';
+import { ProductChip } from '@/components/ProductChip';
 import { PermissionBanner } from '@/components/PermissionBanner';
 import { PromptDialog } from '@/components/PromptDialog';
 import { Button } from '@/components/ui/button';
@@ -60,12 +63,12 @@ import {
   waitMinutesBetween,
   type CleaningMethod,
 } from '@/lib/ops-api';
+import { dateTime, productName } from '@/lib/format';
 import { queryKeys, WORK_SCOPE } from '@/lib/query-keys';
 import {
   acknowledgeCompartment,
   acknowledgedCompartments,
   buildCompartmentLedger,
-  crossContaminationMessage,
   evaluateCheckinGate,
   queueStopCheckin,
   type CompartmentLedgerRow,
@@ -83,13 +86,19 @@ function localTime(value: string | null | undefined): string {
   if (!value) {
     return 'Not available';
   }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? new Date(parsed).toLocaleString() : value;
+  return Number.isFinite(Date.parse(value)) ? dateTime(value) : value;
 }
 
 export default function RouteScreen() {
   const queryClient = useQueryClient();
   const router = useRouter();
+  // Work's Arrive button lands here with the order and the stop to check in at.
+  // `t` is a per-tap nonce so a second Arrive for the same stop (after a
+  // cancelled check-in) still reopens it; Route stays mounted as a tab.
+  const params = useLocalSearchParams<{ orderId?: string; checkin?: string; t?: string }>();
+  const paramOrderId = Array.isArray(params.orderId) ? params.orderId[0] : params.orderId;
+  const paramCheckin = Array.isArray(params.checkin) ? params.checkin[0] : params.checkin;
+  const paramNonce = Array.isArray(params.t) ? params.t[0] : params.t;
   const driverId = currentSessionIdentity()?.driverId ?? '';
 
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
@@ -179,6 +188,40 @@ export default function RouteScreen() {
     () => [...(order?.stops ?? [])].sort((a, b) => a.sequence - b.sequence),
     [order],
   );
+
+  // Arrive from Work: select the order, then open the existing check-in for
+  // the requested stop once. Nothing is submitted until the driver confirms.
+  const handledArrival = useRef<string | null>(null);
+  useEffect(() => {
+    if (!paramOrderId) {
+      return;
+    }
+    const key = `${paramOrderId}:${paramCheckin ?? ''}:${paramNonce ?? ''}`;
+    if (handledArrival.current === key) {
+      return;
+    }
+    if (!orders.some((entry) => entry.order_id === paramOrderId)) {
+      return;
+    }
+    if (selectedOrderId !== paramOrderId) {
+      setSelectedOrderId(paramOrderId);
+      return;
+    }
+    if (paramCheckin === undefined) {
+      handledArrival.current = key;
+      return;
+    }
+    if (order?.order_id !== paramOrderId) {
+      return;
+    }
+    handledArrival.current = key;
+    const stop = stops.find(
+      (candidate) => String(candidate.sequence) === paramCheckin,
+    );
+    if (stop && stop.status !== 'completed') {
+      openCheckin(stop);
+    }
+  }, [paramOrderId, paramCheckin, paramNonce, orders, selectedOrderId, order, stops]);
 
   const acknowledge = (row: CompartmentLedgerRow) => {
     acknowledgeCompartment(row.compartmentId);
@@ -372,56 +415,106 @@ export default function RouteScreen() {
         />
       }
     >
-      <View className="flex-row items-start justify-between gap-3">
-        <View className="flex-1 gap-1">
-          <Text className="text-3xl font-bold">Active route</Text>
-          <Text className="text-muted-foreground">
-            Compartment manifest and stop sequence, in {VOLUME_UNIT_LABEL}
-          </Text>
-        </View>
-        <PendingQueueChip
-          counts={depth}
-          isOnline={network.isConnected !== false}
-        />
-      </View>
+      <PendingQueueChip
+        counts={depth}
+        isOnline={network.isConnected !== false}
+        className="self-start"
+      />
 
       {locationDenied && <PermissionBanner permissions={{ location: 'denied' }} />}
 
       {orders.length > 1 && (
-        <View className="flex-row flex-wrap gap-2">
-          {orders.map((entry) => {
-            const active = entry.order_id === selectedOrderId;
-            return (
-              <Pressable
-                key={entry.order_id}
-                accessibilityRole="button"
-                accessibilityState={{ selected: active }}
-                onPress={() => setSelectedOrderId(entry.order_id)}
-                className={
-                  active
-                    ? 'rounded-full bg-primary px-4 py-2'
-                    : 'rounded-full border border-input px-4 py-2'
-                }
-              >
-                <Text
-                  className={
-                    active
-                      ? 'text-sm font-semibold text-primary-foreground'
-                      : 'text-sm'
-                  }
-                >
-                  {entry.customer_name}
-                </Text>
-              </Pressable>
-            );
-          })}
+        <View
+          accessibilityRole="radiogroup"
+          accessibilityLabel="Delivery"
+          className="flex-row flex-wrap gap-2"
+        >
+          {orders.map((entry) => (
+            <ChoiceOption
+              key={entry.order_id}
+              variant="chip"
+              label={entry.customer_name}
+              checked={entry.order_id === selectedOrderId}
+              onPress={() => setSelectedOrderId(entry.order_id)}
+              testID="route-stop-chip"
+            />
+          ))}
         </View>
       )}
 
       {notice && (
-        <View className="rounded-xl bg-muted p-4">
+        <View accessibilityLiveRegion="polite" className="rounded-xl bg-muted p-4">
           <Text>{notice}</Text>
         </View>
+      )}
+
+      {/* ---- stop check-in, shown first so Arrive lands on it (R6.12) --- */}
+      {checkinStop && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Check in · {stopLabel(checkinStop)}</CardTitle>
+            <CardDescription>
+              Gallons that actually went into the tank. Nothing is converted.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="gap-3">
+            {Object.keys(checkinGallons).length === 0 && (
+              <Text className="text-muted-foreground">
+                This stop carries no planned grades, so there is nothing to report.
+              </Text>
+            )}
+            {Object.keys(checkinGallons).map((grade) => (
+              <View key={grade} className="gap-2">
+                <Text nativeID={`checkin-${grade}`} className="font-medium">
+                  {productName(grade)} ({VOLUME_UNIT_LABEL})
+                </Text>
+                <Input
+                  aria-label={`${productName(grade)} (${VOLUME_UNIT_LABEL})`}
+                  value={checkinGallons[grade]}
+                  onChangeText={(next) =>
+                    setCheckinGallons((current) => ({
+                      ...current,
+                      [grade]: next,
+                    }))
+                  }
+                  keyboardType="decimal-pad"
+                  placeholder="0.0"
+                  editable={!checkinBusy}
+                />
+              </View>
+            ))}
+            {blockedBy.length > 0 && (
+              <View className="gap-2 rounded-xl border-2 border-destructive p-3">
+                {blockedBy.map((row) => (
+                  <View key={row.compartmentId} className="gap-2">
+                    <ContaminationWarning row={row} />
+                    <Button size="sm" onPress={() => acknowledge(row)}>
+                      <Text>
+                        Acknowledge compartment {row.compartmentId}
+                      </Text>
+                    </Button>
+                  </View>
+                ))}
+              </View>
+            )}
+            <Button
+              disabled={checkinBusy}
+              onPress={() => void submitCheckin()}
+            >
+              <Text>{checkinBusy ? 'Recording…' : 'Submit check-in'}</Text>
+            </Button>
+            <Button
+              variant="outline"
+              disabled={checkinBusy}
+              onPress={() => {
+                setCheckinStop(null);
+                setBlockedBy([]);
+              }}
+            >
+              <Text>Cancel</Text>
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       {detail.isLoading && <Text>Loading the route…</Text>}
@@ -447,7 +540,6 @@ export default function RouteScreen() {
             </Text>
           ) : (
             ledger.map((row) => {
-              const warning = crossContaminationMessage(row);
               const outstanding =
                 row.crossContaminationWarning &&
                 !row.cleaningRecorded &&
@@ -455,14 +547,14 @@ export default function RouteScreen() {
               return (
                 <Card
                   key={row.compartmentId}
-                  className={outstanding ? 'border-red-300' : undefined}
+                  className={outstanding ? 'border-2 border-destructive' : undefined}
                 >
-                  <CardHeader>
+                  <CardHeader className="gap-2">
                     <CardTitle>Compartment {row.compartmentId}</CardTitle>
-                    <CardDescription>
-                      Loaded {row.loadedGrade} ·{' '}
-                      {formatGallons(row.loadedGallons)}
-                    </CardDescription>
+                    <ProductChip
+                      code={row.loadedGrade}
+                      suffix={`· ${formatGallons(row.loadedGallons)} loaded`}
+                    />
                   </CardHeader>
                   <CardContent className="gap-2">
                     <Text className="font-semibold">
@@ -482,11 +574,7 @@ export default function RouteScreen() {
                         ))}
                       </View>
                     )}
-                    {warning && (
-                      <Text className="font-semibold text-destructive">
-                        {warning}
-                      </Text>
-                    )}
+                    <ContaminationWarning row={row} />
                     {row.cleaningRecorded && (
                       <Text className="text-sm text-muted-foreground">
                         Last cleaned {localTime(row.lastCleanedAt)}
@@ -534,28 +622,20 @@ export default function RouteScreen() {
             </CardDescription>
           </CardHeader>
           <CardContent className="gap-3">
-            <View className="gap-2">
-              {CLEANING_METHOD_OPTIONS.map((option) => {
-                const active = option.value === cleaningMethod;
-                return (
-                  <Pressable
-                    key={option.value}
-                    accessibilityRole="radio"
-                    accessibilityState={{ selected: active }}
-                    onPress={() => setCleaningMethod(option.value)}
-                    className={
-                      active
-                        ? 'rounded-xl border-2 border-primary p-3'
-                        : 'rounded-xl border border-input p-3'
-                    }
-                  >
-                    <Text className="font-semibold">{option.label}</Text>
-                    <Text className="text-sm text-muted-foreground">
-                      {option.description}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+            <View
+              accessibilityRole="radiogroup"
+              accessibilityLabel="Cleaning method"
+              className="gap-2"
+            >
+              {CLEANING_METHOD_OPTIONS.map((option) => (
+                <ChoiceOption
+                  key={option.value}
+                  label={option.label}
+                  description={option.description}
+                  checked={option.value === cleaningMethod}
+                  onPress={() => setCleaningMethod(option.value)}
+                />
+              ))}
             </View>
             <Input
               value={cleaningNotes}
@@ -595,9 +675,11 @@ export default function RouteScreen() {
                 <CardContent className="gap-2">
                   {Object.entries(stop.planned_gallons_by_grade ?? {}).map(
                     ([grade, gallons]) => (
-                      <Text key={grade}>
-                        {grade}: {formatGallons(gallons)} planned
-                      </Text>
+                      <ProductChip
+                        key={grade}
+                        code={grade}
+                        suffix={`· ${formatGallons(gallons)} planned`}
+                      />
                     ),
                   )}
                   {stop.status !== 'completed' && (
@@ -614,75 +696,6 @@ export default function RouteScreen() {
             ))
           )}
         </View>
-      )}
-
-      {checkinStop && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Check in · {stopLabel(checkinStop)}</CardTitle>
-            <CardDescription>
-              Gallons that actually went into the tank. Nothing is converted.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="gap-3">
-            {Object.keys(checkinGallons).length === 0 && (
-              <Text className="text-muted-foreground">
-                This stop carries no planned grades, so there is nothing to report.
-              </Text>
-            )}
-            {Object.keys(checkinGallons).map((grade) => (
-              <View key={grade} className="gap-2">
-                <Text className="font-medium">
-                  {grade} ({VOLUME_UNIT_LABEL})
-                </Text>
-                <Input
-                  value={checkinGallons[grade]}
-                  onChangeText={(next) =>
-                    setCheckinGallons((current) => ({
-                      ...current,
-                      [grade]: next,
-                    }))
-                  }
-                  keyboardType="decimal-pad"
-                  placeholder="0.0"
-                  editable={!checkinBusy}
-                />
-              </View>
-            ))}
-            {blockedBy.length > 0 && (
-              <View className="gap-2 rounded-xl border border-red-300 p-3">
-                {blockedBy.map((row) => (
-                  <View key={row.compartmentId} className="gap-2">
-                    <Text className="font-semibold text-destructive">
-                      {crossContaminationMessage(row)}
-                    </Text>
-                    <Button size="sm" onPress={() => acknowledge(row)}>
-                      <Text>
-                        Acknowledge compartment {row.compartmentId}
-                      </Text>
-                    </Button>
-                  </View>
-                ))}
-              </View>
-            )}
-            <Button
-              disabled={checkinBusy}
-              onPress={() => void submitCheckin()}
-            >
-              <Text>{checkinBusy ? 'Recording…' : 'Submit check-in'}</Text>
-            </Button>
-            <Button
-              variant="outline"
-              disabled={checkinBusy}
-              onPress={() => {
-                setCheckinStop(null);
-                setBlockedBy([]);
-              }}
-            >
-              <Text>Cancel</Text>
-            </Button>
-          </CardContent>
-        </Card>
       )}
 
       {/* ---- vehicle inspection (R8.3, R8.8) ----------------------------- */}

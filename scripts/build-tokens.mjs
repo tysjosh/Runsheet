@@ -6,8 +6,8 @@
  *   node scripts/build-tokens.mjs --check    exit 1 if any generated file is stale
  *   node scripts/build-tokens.mjs --with-driver
  *       also generate driver-app/lib/tokens.ts and the marked block in
- *       driver-app/global.css. Off until task 4.1 adopts the tokens in the
- *       driver app, so Phase 1 leaves the driver app untouched.
+ *       driver-app/global.css (adopted by the driver app in task 4.1; the
+ *       driver app's Jest suite runs `--with-driver --check`).
  *
  * Source of truth: design/tokens.json. Outputs (committed):
  *   runsheet/src/styles/tokens.css   :root variables + Tailwind v4 @theme map
@@ -347,8 +347,12 @@ function buildDriverBlock() {
     "muted-foreground": n["text-muted"],
     accent: n.border,
     "accent-foreground": n.text,
-    destructive: resolve("red.500"),
-    "destructive-foreground": "#ffffff",
+    // Night destructive follows the night primary pattern (light fill, dark
+    // text): red.500 + white is 3.76:1 and red.600 on the night canvas is
+    // 3.88:1, both below AA. red.300 is 9.4:1 as text on canvas/surface and
+    // 9.4:1 under slate.900 text (task 4.1; driver output only).
+    destructive: resolve("red.300"),
+    "destructive-foreground": resolve("slate.900"),
     border: n.border,
     input: n.border,
     ring: n.primary,

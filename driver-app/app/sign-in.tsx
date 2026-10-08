@@ -115,7 +115,9 @@ export default function SignInScreen() {
     >
       <View className="flex-1 justify-center gap-8 px-6">
         <View className="gap-2">
-          <Text className="text-4xl font-bold">Runsheet Driver</Text>
+          <Text role="heading" aria-level={1} className="text-4xl font-bold">
+            <Text className="text-4xl font-bold text-primary">Runsheet</Text> Driver
+          </Text>
           <Text className="text-lg text-muted-foreground">
             {demoPreviewEnabled
               ? 'Open a local demo route with realistic fuel deliveries.'
@@ -127,6 +129,7 @@ export default function SignInScreen() {
           <View className="gap-2">
             <Text className="font-semibold">Email</Text>
             <Input
+              aria-label="Email"
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
@@ -140,6 +143,7 @@ export default function SignInScreen() {
           <View className="gap-2">
             <Text className="font-semibold">Password</Text>
             <Input
+              aria-label="Password"
               value={password}
               onChangeText={setPassword}
               secureTextEntry

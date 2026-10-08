@@ -185,6 +185,25 @@ describe('crossContaminationMessage', () => {
     expect(warning).toContain('Diesel #2');
   });
 
+  it('labels both grades through the mapper the screens pass (one sentence source)', () => {
+    const [row] = buildCompartmentLedger(
+      order(
+        [
+          compartment({
+            compartment_id: 'C-2',
+            product_grade: 'DIESEL_2',
+            prior_product_grade: 'GASOLINE_REG',
+            cross_contamination_warning: true,
+          }),
+        ],
+        [],
+      ),
+    );
+    expect(crossContaminationMessage(row, (grade) => `<${grade}>`)).toBe(
+      'Compartment C-2 last held <GASOLINE_REG> and is now loaded with <DIESEL_2>. ' +
+        'Confirm it was cleaned before you draw from it.',
+    );
+  });
   it('says nothing about a compartment carrying no warning', () => {
     const [row] = buildCompartmentLedger(
       order([compartment({ compartment_id: 'C-1' })], []),

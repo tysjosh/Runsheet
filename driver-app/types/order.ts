@@ -3,7 +3,7 @@
  *
  * The donor application carried two divergent `RiderOrder` declarations. This
  * module replaces both with a single `FuelOrder`, and it is the only order type
- * in the tree: screens, `components/DispatchOrderCard.tsx`, the query layer, and
+ * in the tree: screens, components, the query layer, and
  * the offline queue all read this shape.
  *
  * Field names match the wire shape returned by `GET /api/driver/work` and
