@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { isIndexableSite, SITE_URL } from "@/config/site";
+import AudienceGuard from "../components/AudienceGuard";
 import { SuperTokensProvider } from "../components/SuperTokensProvider";
 import "./globals.css";
 
@@ -89,7 +90,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={inter.variable}>
       <body className="antialiased">
-        <SuperTokensProvider>{children}</SuperTokensProvider>
+        <SuperTokensProvider>
+          <AudienceGuard>{children}</AudienceGuard>
+        </SuperTokensProvider>
       </body>
     </html>
   );

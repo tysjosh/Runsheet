@@ -25,11 +25,39 @@ const WEBSITE_DOMAIN =
 /** Path prefix the SDK auth routes are mounted under on the backend. */
 const API_BASE_PATH = process.env.NEXT_PUBLIC_ST_API_BASE_PATH || "/auth";
 
+/** Window event the audience guard listens for (customer portal §10.1). */
+export const SESSION_CHANGED_EVENT = "runsheet:session-changed";
+
+/** SDK session events that can change who the signed-in user is. */
+export const SESSION_CHANGE_ACTIONS: ReadonlySet<string> = new Set([
+  "SESSION_CREATED",
+  "SIGN_OUT",
+  "ACCESS_TOKEN_PAYLOAD_UPDATED",
+  "UNAUTHORISED",
+]);
+
+/**
+ * Re-broadcast an SDK session event as a window `CustomEvent`, so components
+ * that cache the session's audience (AudienceGuard) re-resolve it once instead
+ * of reading roles on every navigation.
+ */
+export function handleSessionEvent(event: { action: string }): void {
+  if (typeof window === "undefined") return;
+  if (!SESSION_CHANGE_ACTIONS.has(event.action)) return;
+  window.dispatchEvent(
+    new CustomEvent(SESSION_CHANGED_EVENT, {
+      detail: { action: event.action },
+    }),
+  );
+}
+
 /**
  * Build the SuperTokens frontend configuration from environment.
  *
  * Registers the EmailPassword recipe (email/password sign-in) and the Session
- * recipe (SDK-managed, cookie-backed sessions with automatic refresh).
+ * recipe (SDK-managed, cookie-backed sessions with automatic refresh). The
+ * Session recipe's documented `onHandleEvent` option forwards session changes
+ * to {@link SESSION_CHANGED_EVENT}.
  */
 export function frontendConfig(): SuperTokensConfig {
   return {
@@ -39,6 +67,9 @@ export function frontendConfig(): SuperTokensConfig {
       websiteDomain: WEBSITE_DOMAIN,
       apiBasePath: API_BASE_PATH,
     },
-    recipeList: [EmailPassword.init(), Session.init()],
+    recipeList: [
+      EmailPassword.init(),
+      Session.init({ onHandleEvent: handleSessionEvent }),
+    ],
   };
 }

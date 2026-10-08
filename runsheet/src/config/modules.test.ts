@@ -23,8 +23,10 @@ import { TABS as NOTIFICATION_TABS } from "../components/NotificationsHub";
 import { TABS as SETUP_TABS } from "../components/SetupHub";
 import { NAV_SECTIONS } from "../components/Sidebar";
 import {
+  CUSTOMER_ROLE,
   canSee,
   hasAnyRole,
+  isCustomerRole,
   moduleDescriptor,
   registeredModuleIds,
   visibleByCanSee,
@@ -366,5 +368,32 @@ describe("registry drift guard", () => {
       ...hubTabs.map(([, id]) => id),
     ]);
     expect(registeredModuleIds().filter((id) => !rendered.has(id))).toEqual([]);
+  });
+});
+
+describe("canSee — a customer sees no staff module (portal §10.1)", () => {
+  it("hides every registered module, including ones without requiredRoles", () => {
+    const ids = registeredModuleIds();
+    expect(ids.some((id) => !moduleDescriptor(id)?.requiredRoles)).toBe(true);
+    for (const id of ids) {
+      expect(canSee(id, RESOLVED([CUSTOMER_ROLE]))).toBe(false);
+      expect(canSee(id, RESOLVED([CUSTOMER_ROLE], true))).toBe(false);
+    }
+  });
+
+  it("hides modules even when a customer claim is mixed with staff roles", () => {
+    expect(canSee("today", RESOLVED(["admin", "customer"]))).toBe(false);
+    expect(canSee("depots", RESOLVED([" Customer "]))).toBe(false);
+  });
+
+  it("leaves staff visibility unchanged", () => {
+    expect(canSee("today", RESOLVED(["dispatcher"]))).toBe(true);
+    expect(canSee("depots", RESOLVED(["driver"]))).toBe(true);
+  });
+
+  it("isCustomerRole matches the role exactly", () => {
+    expect(isCustomerRole(["customer"])).toBe(true);
+    expect(isCustomerRole(["customers", "admin"])).toBe(false);
+    expect(isCustomerRole(null)).toBe(false);
   });
 });

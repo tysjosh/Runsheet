@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import EmailPassword from "supertokens-auth-react/recipe/emailpassword";
 import SignIn from "../../components/SignIn";
+import { isCustomerRole } from "../../config/modules";
+import { getCurrentUserRoles } from "../../utils/auth";
 import { throttledMessage } from "../../utils/authThrottle";
 
 export default function SignInPage() {
@@ -40,7 +42,9 @@ export default function SignInPage() {
     }
 
     // Use replace instead of push to prevent back navigation to signin.
-    router.replace("/dashboard");
+    // Customers land in the portal; staff land where they always have.
+    const roles = await getCurrentUserRoles();
+    router.replace(isCustomerRole(roles) ? "/portal" : "/dashboard");
   };
 
   return <SignIn onSignIn={handleSignIn} />;

@@ -29,8 +29,27 @@
  * nothing. `platform_admin` is the Runsheet-staff role; it is *additive* and
  * implies nothing, exactly as on the backend, so staff accounts carry `admin`
  * alongside it.
+ *
+ * `customer` is the portal identity (customer portal, OI-06). It sees no staff
+ * module at all: {@link canSee} refuses every id for it, including modules
+ * without `requiredRoles`, and the portal lives under `/portal` instead.
  */
-export type Role = "admin" | "dispatcher" | "driver" | "platform_admin";
+export type Role =
+  | "admin"
+  | "dispatcher"
+  | "driver"
+  | "platform_admin"
+  | "customer";
+
+/** The portal role (`auth.supertokens_init.CUSTOMER_PORTAL_ROLE`). */
+export const CUSTOMER_ROLE: Role = "customer";
+
+/** True when the roles carry the portal `customer` role (exact match). */
+export function isCustomerRole(
+  roles: readonly string[] | null | undefined,
+): boolean {
+  return hasAnyRole(roles, [CUSTOMER_ROLE]);
+}
 
 /**
  * Why a module might be deferrable.
@@ -429,9 +448,11 @@ export function moduleDescriptor(id: string): ModuleDescriptor | undefined {
  *    `requiredRoles: ["platform_admin"]`, so it is refused at step 3 for
  *    everyone else even when `mvpMode` is off. `mvpMode` is the broader switch:
  *    it hides Tier 4 from staff too.
- * 3. **`requiredRoles` with no exact match → `false`.** Unresolved roles
+ * 3. **A `customer` session → `false`.** Portal users see no staff module,
+ *    including the ones with no `requiredRoles` (design §10.1).
+ * 4. **`requiredRoles` with no exact match → `false`.** Unresolved roles
  *    (`null`) count as no roles, so nothing role-gated flashes visible.
- * 4. Otherwise visible. A module with no `requiredRoles` shows to any
+ * 5. Otherwise visible. A module with no `requiredRoles` shows to any
  *    signed-in user immediately, including before roles resolve.
  */
 export function canSee(id: string, ctx: VisibilityContext): boolean {
@@ -440,6 +461,8 @@ export function canSee(id: string, ctx: VisibilityContext): boolean {
 
   const mvpMode = ctx.mvpMode ?? mvpModeDefault();
   if (mvpMode && descriptor.tier === 4) return false;
+
+  if (isCustomerRole(ctx.roles)) return false;
 
   if (!descriptor.requiredRoles) return true;
   return hasAnyRole(ctx.roles, descriptor.requiredRoles);
