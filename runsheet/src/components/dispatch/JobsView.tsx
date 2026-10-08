@@ -466,7 +466,10 @@ export default function JobsView() {
       {showCreateModal && (
         <CreateJobModal
           onClose={() => setShowCreateModal(false)}
-          onCreated={(job) => setJobs((prev) => [job, ...prev])}
+          onCreated={(job) => {
+            setJobs((prev) => [job, ...prev]);
+            refreshCountsSoon();
+          }}
         />
       )}
     </div>

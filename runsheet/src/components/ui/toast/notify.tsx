@@ -12,7 +12,8 @@ import { useEffect, useState } from "react";
 
 export interface GlobalToast {
   id: number;
-  type: "success" | "error";
+  /** `warning` (additive, Phase 3): a non-blocking risk, e.g. low parts. */
+  type: "success" | "error" | "warning";
   message: string;
 }
 
@@ -35,7 +36,7 @@ export function notify({
   message,
   durationMs = 4000,
 }: {
-  type: "success" | "error";
+  type: "success" | "error" | "warning";
   message: string;
   durationMs?: number;
 }): number {
@@ -71,7 +72,11 @@ export function GlobalToaster() {
         <div
           key={t.id}
           className={`pointer-events-auto flex items-center gap-2 rounded-lg px-4 py-3 text-sm font-medium text-white shadow-lg ${
-            t.type === "success" ? "bg-primary" : "bg-danger"
+            t.type === "success"
+              ? "bg-primary"
+              : t.type === "warning"
+                ? "bg-warning"
+                : "bg-danger"
           }`}
         >
           {t.type === "success" ? (

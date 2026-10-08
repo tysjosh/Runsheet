@@ -16,9 +16,8 @@
  *
  * A single module-scoped id counter replaces the per-file `toastIdCounter`s.
  *
- * NOTE: `components/ops/CreateJobModal.tsx` intentionally keeps its own,
- * divergent toast (warning/error variants, string ids, bottom-right placement,
- * aria-live) and is NOT migrated onto this module.
+ * `components/ops/CreateJobModal.tsx` used to keep its own toast; it now
+ * uses the app-wide `notify` (with the additive `warning` type).
  */
 
 import { AlertTriangle, Check, X } from "lucide-react";

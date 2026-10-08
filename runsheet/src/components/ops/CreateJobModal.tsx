@@ -1,6 +1,5 @@
 "use client";
 
-import { AlertTriangle, X } from "lucide-react";
 import { useCallback, useState } from "react";
 import {
   type AssetReadinessIndicator,
@@ -9,14 +8,16 @@ import {
 } from "../../services/inventoryApi";
 import { createJob } from "../../services/schedulingApi";
 import type { AssetType, Job, JobType, Priority } from "../../types/api";
+import { Field, FormDialog, INPUT_CLASS, Select } from "../ui";
+import { notify } from "../ui/toast/notify";
 import AssetPicker from "./AssetPicker";
 
 const JOB_TYPES: { value: JobType; label: string }[] = [
-  { value: "cargo_transport", label: "Cargo Transport" },
-  { value: "passenger_transport", label: "Passenger Transport" },
-  { value: "vessel_movement", label: "Vessel Movement" },
-  { value: "airport_transfer", label: "Airport Transfer" },
-  { value: "crane_booking", label: "Crane Booking" },
+  { value: "cargo_transport", label: "Cargo transport" },
+  { value: "passenger_transport", label: "Passenger transport" },
+  { value: "vessel_movement", label: "Vessel movement" },
+  { value: "airport_transfer", label: "Airport transfer" },
+  { value: "crane_booking", label: "Crane booking" },
 ];
 
 const PRIORITIES: { value: Priority; label: string }[] = [
@@ -95,55 +96,6 @@ function ReadinessIndicator({
   );
 }
 
-// ─── Toast Notification Component ───────────────────────────────────────────
-
-// NOTE: This modal intentionally keeps its own divergent toast (warning/error
-// variants, string ids, bottom-right placement, aria-live) and is excluded from
-// the shared-toast consolidation in @/components/ui (see ui-scaffolding-
-// consolidation Req 1.5 / 4.3). Do not migrate it onto the canonical toast.
-
-interface ToastNotification {
-  id: string;
-  message: string;
-  type: "warning" | "error";
-}
-
-function ToastContainer({
-  toasts,
-  onDismiss,
-}: {
-  toasts: ToastNotification[];
-  onDismiss: (id: string) => void;
-}) {
-  if (toasts.length === 0) return null;
-
-  return (
-    <div className="fixed bottom-4 right-4 z-[60] space-y-2" aria-live="polite">
-      {toasts.map((toast) => (
-        <div
-          key={toast.id}
-          className={`flex items-start gap-2 px-4 py-3 rounded-lg shadow-lg text-sm max-w-sm ${
-            toast.type === "error"
-              ? "bg-error-light text-error-dark border border-error-light"
-              : "bg-warning-light text-warning-dark border border-warning-light"
-          }`}
-          role="alert"
-        >
-          <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-          <span className="flex-1">{toast.message}</span>
-          <button
-            onClick={() => onDismiss(toast.id)}
-            className="text-gray-500 hover:text-gray-600"
-            aria-label="Dismiss notification"
-          >
-            <X className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 // ─── Main Component ─────────────────────────────────────────────────────────
 
 interface CreateJobModalProps {
@@ -151,311 +103,215 @@ interface CreateJobModalProps {
   onCreated: (job: Job) => void;
 }
 
+type JobValues = {
+  job_type: JobType;
+  origin: string;
+  destination: string;
+  scheduled_time: string;
+  asset_assigned: string;
+  priority: Priority;
+  notes: string;
+};
+
+const INITIAL: JobValues = {
+  job_type: "cargo_transport",
+  origin: "",
+  destination: "",
+  scheduled_time: "",
+  asset_assigned: "",
+  priority: "normal",
+  notes: "",
+};
+
+export function validateJob(v: JobValues) {
+  const e: Record<string, string | undefined> = {};
+  if (!v.origin.trim()) e.origin = "Enter the origin.";
+  if (!v.destination.trim()) e.destination = "Enter the destination.";
+  if (!v.scheduled_time) e.scheduled_time = "Choose the scheduled time.";
+  return e;
+}
+
+/** "Assignment risk at X: Out of stock: … | Low stock: …", or null. */
+export function riskMessage(data: unknown): string | null {
+  const flags = (data as any)?.readiness_flags;
+  if (!flags) return null;
+  const names = (xs: { name: string }[] | undefined) =>
+    (xs ?? []).map((p) => p.name).join(", ");
+  const parts: string[] = [];
+  if (flags.missing_parts?.length)
+    parts.push(`Out of stock: ${names(flags.missing_parts)}`);
+  if (flags.low_parts?.length)
+    parts.push(`Low stock: ${names(flags.low_parts)}`);
+  if (parts.length === 0) return null;
+  const location = flags.depot_location || flags.location || "";
+  return `Assignment risk${location ? ` at ${location}` : ""}: ${parts.join(" | ")}`;
+}
+
+/**
+ * Create job (UI revamp, design.md §5 "Job create": md FormDialog, shared
+ * toast). The private bottom-right toast is gone: a parts-risk warning now
+ * goes through the app-wide toaster, so it outlives the closed dialog (the
+ * old one unmounted with the modal).
+ */
 export default function CreateJobModal({
   onClose,
   onCreated,
 }: CreateJobModalProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [toasts, setToasts] = useState<ToastNotification[]>([]);
   const [readinessMap, setReadinessMap] = useState<
     Record<string, AssetReadinessIndicator>
   >({});
-  const [form, setForm] = useState({
-    job_type: "cargo_transport" as JobType,
-    origin: "",
-    destination: "",
-    scheduled_time: "",
-    asset_assigned: "",
-    priority: "normal" as Priority,
-    notes: "",
-  });
 
-  // Fetch readiness for a set of asset ids (loaded live from the fleet roster
-  // by the AssetPicker for the current job type).
+  // Readiness for the assets the picker loaded for the current job type.
   const fetchReadiness = useCallback(async (assetIds: string[]) => {
     if (assetIds.length === 0) {
       setReadinessMap({});
       return;
     }
-
     const results: Record<string, AssetReadinessIndicator> = {};
     const settled = await Promise.allSettled(
       assetIds.map((assetId) => getAssetReadiness(assetId)),
     );
-
     settled.forEach((result, index) => {
-      if (result.status === "fulfilled") {
+      // Fail-open: a failed read shows no indicator for that asset.
+      if (result.status === "fulfilled")
         results[assetIds[index]] = result.value.data;
-      }
-      // Fail-open: if request fails, don't show indicator for that asset
     });
-
     setReadinessMap(results);
   }, []);
 
-  // Map AssetPicker's loaded ids → readiness fetch.
-  const handleAssetsLoaded = useCallback(
-    (assetIds: string[]) => {
-      fetchReadiness(assetIds);
-    },
-    [fetchReadiness],
-  );
-
-  const addToast = useCallback((message: string, type: "warning" | "error") => {
-    const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    setToasts((prev) => [...prev, { id, message, type }]);
-    // Auto-dismiss after 8 seconds
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 8000);
-  }, []);
-
-  const dismissToast = useCallback((id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.origin || !form.destination || !form.scheduled_time) {
-      setError("Origin, destination, and scheduled time are required.");
-      return;
-    }
-    setError("");
-    setSubmitting(true);
-    try {
-      const res = await createJob({
-        job_type: form.job_type,
-        origin: form.origin,
-        destination: form.destination,
-        scheduled_time: new Date(form.scheduled_time).toISOString(),
-        asset_assigned: form.asset_assigned || undefined,
-        priority: form.priority,
-        notes: form.notes || undefined,
-      });
-
-      // Check for risk flags in the response (Requirement 7.2)
-      const responseData = res.data as any;
-      if (responseData?.readiness_flags) {
-        const flags = responseData.readiness_flags;
-        const parts: string[] = [];
-        if (flags.missing_parts?.length) {
-          parts.push(
-            `Out of stock: ${flags.missing_parts.map((p: any) => p.name).join(", ")}`,
-          );
-        }
-        if (flags.low_parts?.length) {
-          parts.push(
-            `Low stock: ${flags.low_parts.map((p: any) => p.name).join(", ")}`,
-          );
-        }
-        if (parts.length > 0) {
-          const location = flags.depot_location || flags.location || "";
-          const locationStr = location ? ` at ${location}` : "";
-          addToast(
-            `Assignment risk${locationStr}: ${parts.join(" | ")}`,
-            "warning",
-          );
-        }
-      }
-
-      onCreated(res.data);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create job");
-    } finally {
-      setSubmitting(false);
-    }
+  const submit = async (v: JobValues): Promise<Job> => {
+    const res = await createJob({
+      job_type: v.job_type,
+      origin: v.origin.trim(),
+      destination: v.destination.trim(),
+      scheduled_time: new Date(v.scheduled_time).toISOString(),
+      asset_assigned: v.asset_assigned || undefined,
+      priority: v.priority,
+      notes: v.notes.trim() || undefined,
+    });
+    // Requirement 7.2: surface parts risk on the assigned asset.
+    const risk = riskMessage(res.data);
+    if (risk) notify({ type: "warning", message: risk, durationMs: 8000 });
+    return res.data;
   };
 
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
   return (
-    <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-        <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-          <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-            <h2 className="text-lg font-semibold text-primary">Create Job</h2>
-            <button
-              onClick={onClose}
-              className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-            {error && (
-              <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-                {error}
-              </p>
-            )}
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Job Type
-                </label>
-                <select
-                  value={form.job_type}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      job_type: e.target.value as JobType,
-                      asset_assigned: "",
-                    })
-                  }
-                  className={inputClass}
-                >
-                  {JOB_TYPES.map((t) => (
-                    <option key={t.value} value={t.value}>
-                      {t.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Priority
-                </label>
-                <select
-                  value={form.priority}
-                  onChange={(e) =>
-                    setForm({ ...form, priority: e.target.value as Priority })
-                  }
-                  className={inputClass}
-                >
-                  {PRIORITIES.map((p) => (
-                    <option key={p.value} value={p.value}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Origin
-              </label>
-              <input
-                type="text"
-                value={form.origin}
-                onChange={(e) => setForm({ ...form, origin: e.target.value })}
-                placeholder="e.g. Houston Terminal"
-                className={inputClass}
-                required
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Destination
-              </label>
-              <input
-                type="text"
-                value={form.destination}
-                onChange={(e) =>
-                  setForm({ ...form, destination: e.target.value })
+    <FormDialog<JobValues, Job>
+      open
+      size="md"
+      title="Create job"
+      submitLabel="Create job"
+      successMessage="Job created"
+      initialValues={INITIAL}
+      validate={validateJob}
+      onSubmit={submit}
+      onSaved={onCreated}
+      onClose={onClose}
+    >
+      {({ values, set, setValues, errors }) => {
+        const readiness = values.asset_assigned
+          ? readinessMap[values.asset_assigned]
+          : undefined;
+        return (
+          <>
+            <Field label="Job type" span={1} id="job-type">
+              <Select
+                id="job-type"
+                value={values.job_type}
+                onChange={(t) =>
+                  setValues((prev) => ({
+                    ...prev,
+                    job_type: t as JobType,
+                    asset_assigned: "",
+                  }))
                 }
+                options={JOB_TYPES}
+              />
+            </Field>
+            <Field label="Priority" span={1} id="job-priority">
+              <Select
+                id="job-priority"
+                value={values.priority}
+                onChange={(p) => set("priority", p as Priority)}
+                options={PRIORITIES}
+              />
+            </Field>
+            <Field label="Origin" required error={errors.origin}>
+              <input
+                id="job-origin"
+                type="text"
+                value={values.origin}
+                onChange={(e) => set("origin", e.target.value)}
+                placeholder="e.g. Houston Terminal"
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field label="Destination" required error={errors.destination}>
+              <input
+                id="job-destination"
+                type="text"
+                value={values.destination}
+                onChange={(e) => set("destination", e.target.value)}
                 placeholder="e.g. Dallas Depot"
-                className={inputClass}
-                required
+                className={INPUT_CLASS}
               />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Scheduled Time
-                </label>
-                <input
-                  type="datetime-local"
-                  value={form.scheduled_time}
-                  onChange={(e) =>
-                    setForm({ ...form, scheduled_time: e.target.value })
-                  }
-                  className={inputClass}
-                  required
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  Asset (optional)
-                </label>
-                <AssetPicker
-                  assetType={JOB_TYPE_TO_ASSET_TYPE[form.job_type]}
-                  value={form.asset_assigned || null}
-                  onChange={(assetId) =>
-                    setForm((prev) => ({ ...prev, asset_assigned: assetId }))
-                  }
-                  readinessByAsset={Object.fromEntries(
-                    Object.entries(readinessMap).map(([id, r]) => [
-                      id,
-                      r.status,
-                    ]),
-                  )}
-                  onAssetsLoaded={handleAssetsLoaded}
-                  aria-label="Asset"
-                />
-                {/* Readiness indicator below the picker */}
-                {form.asset_assigned && readinessMap[form.asset_assigned] && (
-                  <div className="mt-1.5 flex items-center gap-1.5">
-                    <ReadinessIndicator
-                      status={readinessMap[form.asset_assigned].status}
-                      missingParts={
-                        readinessMap[form.asset_assigned].missing_parts
-                      }
-                      lowParts={readinessMap[form.asset_assigned].low_parts}
-                    />
-                    <span className="text-[10px] text-gray-500">
-                      {readinessMap[form.asset_assigned].status === "ready"
-                        ? "Parts available"
-                        : readinessMap[form.asset_assigned].status === "warning"
-                          ? "Low stock warning"
-                          : "Critical shortage"}
-                    </span>
-                  </div>
+            </Field>
+            <Field
+              label="Scheduled time"
+              required
+              error={errors.scheduled_time}
+              span={1}
+            >
+              <input
+                id="job-scheduled"
+                type="datetime-local"
+                value={values.scheduled_time}
+                onChange={(e) => set("scheduled_time", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <div className="col-span-1">
+              <p className="mb-1 text-xs font-medium text-slate-700">Asset</p>
+              <AssetPicker
+                assetType={JOB_TYPE_TO_ASSET_TYPE[values.job_type]}
+                value={values.asset_assigned || null}
+                onChange={(assetId) => set("asset_assigned", assetId)}
+                readinessByAsset={Object.fromEntries(
+                  Object.entries(readinessMap).map(([id, r]) => [id, r.status]),
                 )}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Notes (optional)
-              </label>
-              <textarea
-                value={form.notes}
-                onChange={(e) => setForm({ ...form, notes: e.target.value })}
-                placeholder="Any additional details..."
-                rows={2}
-                className={`${inputClass} resize-none`}
+                onAssetsLoaded={fetchReadiness}
+                aria-label="Asset"
               />
+              {readiness && (
+                <div className="mt-1.5 flex items-center gap-1.5">
+                  <ReadinessIndicator
+                    status={readiness.status}
+                    missingParts={readiness.missing_parts}
+                    lowParts={readiness.low_parts}
+                  />
+                  <span className="text-xs text-text-muted">
+                    {readiness.status === "ready"
+                      ? "Parts available"
+                      : readiness.status === "warning"
+                        ? "Low stock warning"
+                        : "Critical shortage"}
+                  </span>
+                </div>
+              )}
             </div>
-
-            <div className="flex justify-end gap-3 pt-2">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={submitting}
-                className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-              >
-                {submitting ? "Creating..." : "Create Job"}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
-
-      {/* Toast notifications for risk flags */}
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-    </>
+            <Field label="Notes">
+              <textarea
+                id="job-notes"
+                value={values.notes}
+                onChange={(e) => set("notes", e.target.value)}
+                placeholder="Any additional details"
+                rows={2}
+                className={`${INPUT_CLASS} resize-none`}
+              />
+            </Field>
+          </>
+        );
+      }}
+    </FormDialog>
   );
 }
