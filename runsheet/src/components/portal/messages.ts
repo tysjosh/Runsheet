@@ -17,6 +17,11 @@ export const REQUEST_CHANGED_MESSAGE =
   "This request changed. Reloaded the latest version.";
 
 /** Announced after a customer cancels their own request (R4.10). */
-export function requestCancelledMessage(orderId: string): string {
-  return `Request ${orderId} cancelled.`;
+export function requestCancelledMessage(reference: string): string {
+  return `Request for ${reference} cancelled.`;
+}
+
+/** The customer's reference for an order: "{tank title}, {date}" (D29). */
+export function orderReference(tankTitle: string, dateText: string): string {
+  return dateText && dateText !== "—" ? `${tankTitle}, ${dateText}` : tankTitle;
 }

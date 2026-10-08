@@ -34,17 +34,12 @@ import type {
   StripeInstance,
   StripePaymentElement,
 } from "../../types/stripe-js";
-import { formatMoney } from "./format";
+import { NumberField } from "../ui/NumberField";
 import { newUuid } from "./ids";
 import LiveRegion from "./LiveRegion";
 import { PAYMENTS_UNAVAILABLE_MESSAGE } from "./messages";
-import {
-  fieldError,
-  fieldHint,
-  fieldInput,
-  fieldLabel,
-  primaryButton,
-} from "./styles";
+import { money as formatMoney } from "./portalFormat";
+import { fieldError, fieldHint, fieldLabel, primaryButton } from "./styles";
 
 export { PAYMENTS_UNAVAILABLE_MESSAGE };
 
@@ -109,8 +104,10 @@ export function parseDollars(text: string): number | null {
   return Number(whole) * 100 + Number(frac.padEnd(2, "0"));
 }
 
-function centsToInput(cents: number): string {
-  return (cents / 100).toFixed(2);
+/** Dollars (a NumberField value) → whole cents, or null. */
+function dollarsToCents(value: number | null): number | null {
+  if (value === null || Number.isNaN(value)) return null;
+  return Math.round(value * 100);
 }
 
 type Phase =
@@ -138,7 +135,7 @@ export default function PaymentForm({
 
   const [unavailable, setUnavailable] = useState(!paymentsAvailable);
   const [phase, setPhase] = useState<Phase>("amount");
-  const [amount, setAmount] = useState(centsToInput(remaining));
+  const [amount, setAmount] = useState<number | null>(remaining / 100);
   const [amountError, setAmountError] = useState<string | null>(null);
   const [alertText, setAlertText] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
@@ -317,7 +314,7 @@ export default function PaymentForm({
     event.preventDefault();
     if (phase !== "amount") return;
     setAlertText(null);
-    const cents = parseDollars(amount);
+    const cents = dollarsToCents(amount);
     if (cents === null || cents < MIN_CENTS || cents > remaining) {
       setAmountError(
         `Enter an amount from ${formatMoney(MIN_CENTS)} to ${formatMoney(remaining)}.`,
@@ -427,9 +424,7 @@ export default function PaymentForm({
   }
 
   if (unavailable) {
-    return (
-      <p className="text-sm text-gray-800">{PAYMENTS_UNAVAILABLE_MESSAGE}</p>
-    );
+    return <p className="text-sm text-text">{PAYMENTS_UNAVAILABLE_MESSAGE}</p>;
   }
 
   const amountId = `${uid}-amount`;
@@ -448,7 +443,7 @@ export default function PaymentForm({
       {alertText && (
         <p
           role="alert"
-          className="rounded-lg border border-error-light bg-error-light px-4 py-3 text-sm text-error-dark"
+          className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm font-medium text-red-800"
         >
           {alertText}
         </p>
@@ -460,17 +455,20 @@ export default function PaymentForm({
             <label htmlFor={amountId} className={fieldLabel}>
               Payment amount (USD)
             </label>
-            <input
-              id={amountId}
-              type="text"
-              inputMode="decimal"
-              autoComplete="off"
-              value={amount}
-              onChange={(e) => setAmount(e.target.value)}
-              aria-invalid={amountError ? true : undefined}
-              aria-describedby={`${amountId}-hint${amountError ? ` ${amountId}-error` : ""}`}
-              className={fieldInput}
-            />
+            <div className="mt-1 max-w-xs">
+              <NumberField
+                id={amountId}
+                value={amount}
+                onChange={setAmount}
+                unit="$"
+                decimals={2}
+                min={MIN_CENTS / 100}
+                max={remaining / 100}
+                aria-invalid={amountError ? true : undefined}
+                aria-describedby={`${amountId}-hint${amountError ? ` ${amountId}-error` : ""}`}
+                className="!h-11 !rounded-[10px] !border-slate-400 !text-base"
+              />
+            </div>
             <p id={`${amountId}-hint`} className={fieldHint}>
               From {formatMoney(MIN_CENTS)} up to the balance due,{" "}
               {formatMoney(remaining)}.
@@ -492,9 +490,7 @@ export default function PaymentForm({
       )}
 
       {(phase === "amount" || phase === "starting") && !invoice.payable && (
-        <p className="text-sm text-gray-800">
-          This invoice can't be paid online.
-        </p>
+        <p className="text-sm text-text">This invoice can't be paid online.</p>
       )}
 
       <section
@@ -502,12 +498,12 @@ export default function PaymentForm({
         hidden={!showElement}
         className="space-y-3"
       >
-        <h2 id={bankHeadingId} className="text-lg font-semibold text-gray-900">
+        <h2 id={bankHeadingId} className="text-lg font-semibold text-text">
           Bank account
         </h2>
         <div ref={containerRef} data-testid="payment-element" />
         {showElement && !stripeReady && (
-          <p className="text-sm text-gray-700">Loading the payment form…</p>
+          <p className="text-sm text-text-muted">Loading the payment form…</p>
         )}
         <button
           type="button"

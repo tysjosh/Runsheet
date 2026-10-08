@@ -11,12 +11,13 @@ import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import Session from "supertokens-auth-react/recipe/session";
 import { isCustomerRole } from "../../config/modules";
+import { configureFormat } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import { getPortalMe, type PortalMe } from "../../services/portalApi";
 import { getCurrentUserRoles } from "../../utils/auth";
 import { PortalMeContext } from "./PortalContext";
 import PortalShell from "./PortalShell";
-import { primaryButton } from "./styles";
+import { card, primaryButton } from "./styles";
 
 type GateState =
   | { kind: "checking" }
@@ -67,6 +68,9 @@ export default function PortalGate({
   const [state, setState] = useState<GateState>({ kind: "checking" });
 
   const load = useCallback(async () => {
+    // PD23: portal times use the customer's browser zone, never the tenant
+    // zone the staff shell configures.
+    configureFormat({ timeZone: undefined });
     setState({ kind: "checking" });
     try {
       if (!(await Session.doesSessionExist())) {
@@ -93,7 +97,10 @@ export default function PortalGate({
 
   if (state.kind === "checking" || state.kind === "redirecting") {
     return (
-      <div role="status" className="p-8 text-center text-sm text-gray-700">
+      <div
+        role="status"
+        className="flex min-h-screen items-center justify-center bg-canvas p-8 text-[15px] text-text-muted"
+      >
         Loading your account…
       </div>
     );
@@ -101,20 +108,25 @@ export default function PortalGate({
 
   if (state.kind === "error") {
     return (
-      <main id="main" className="mx-auto max-w-xl px-4 py-12">
-        <h1 className="text-xl font-semibold text-gray-900">Customer portal</h1>
-        <p role="alert" className="mt-3 text-sm text-gray-800">
-          {state.message}
-        </p>
-        {state.retry && (
-          <button
-            type="button"
-            className={`${primaryButton} mt-4`}
-            onClick={() => void load()}
-          >
-            Try again
-          </button>
-        )}
+      <main
+        id="main"
+        className="flex min-h-screen items-start justify-center bg-canvas px-4 py-16"
+      >
+        <div className={`${card} w-full max-w-[400px] p-6`}>
+          <h1 className="text-xl font-bold text-text">Customer portal</h1>
+          <p role="alert" className="mt-3 text-[15px] text-text">
+            {state.message}
+          </p>
+          {state.retry && (
+            <button
+              type="button"
+              className={`${primaryButton} mt-4`}
+              onClick={() => void load()}
+            >
+              Try again
+            </button>
+          )}
+        </div>
       </main>
     );
   }
@@ -124,6 +136,7 @@ export default function PortalGate({
       <PortalShell
         supplierName={state.me.supplier_name}
         customerName={state.me.customer_display_name}
+        email={state.me.email}
         invoicesAvailable={state.me.invoices_available}
       >
         {children}

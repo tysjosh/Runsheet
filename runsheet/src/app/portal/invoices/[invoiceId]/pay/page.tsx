@@ -1,18 +1,25 @@
 "use client";
 
-/** ACH payment for one invoice (R6, design §6.4). */
-
-import Link from "next/link";
+/**
+ * ACH payment for one invoice (R6, design §6.4, R14.14, D26): stays a page
+ * (Stripe Financial Connections opens its own overlay). Only the look
+ * changed; `PaymentForm`'s flow, idempotency and polling are unchanged.
+ */
 import { useParams } from "next/navigation";
-import { formatMoney } from "../../../../../components/portal/format";
 import { INVOICES_UNAVAILABLE_MESSAGE } from "../../../../../components/portal/messages";
 import {
-  PortalLoadError,
+  PortalBanner,
   PortalLoading,
+  PortalSectionError,
 } from "../../../../../components/portal/PageState";
 import PaymentForm from "../../../../../components/portal/PaymentForm";
 import { usePortalMe } from "../../../../../components/portal/PortalContext";
-import { pageHeading, textLink } from "../../../../../components/portal/styles";
+import PortalTitleRow from "../../../../../components/portal/PortalTitleRow";
+import {
+  date as formatDate,
+  money,
+} from "../../../../../components/portal/portalFormat";
+import { card } from "../../../../../components/portal/styles";
 import {
   portalErrorMessage,
   usePortalData,
@@ -24,67 +31,90 @@ export default function PortalPayInvoicePage() {
   const invoiceId = params?.invoiceId ?? "";
   const me = usePortalMe();
   const invoice = usePortalData(() => getPortalInvoice(invoiceId), [invoiceId]);
-
-  const back = (
-    <p>
-      <Link
-        href={`/portal/invoices/${encodeURIComponent(invoiceId)}`}
-        className={textLink}
-      >
-        Back to the invoice
-      </Link>
-    </p>
-  );
+  const back = {
+    href: `/portal/invoices/${encodeURIComponent(invoiceId)}`,
+    label: "Back to the invoice",
+  };
 
   if (!me.invoices_available) {
     return (
-      <div className="space-y-3">
-        {back}
-        <h1 className={pageHeading}>Pay invoice</h1>
-        <p className="text-sm text-gray-800">{INVOICES_UNAVAILABLE_MESSAGE}</p>
-      </div>
+      <>
+        <PortalTitleRow title="Pay invoice" back={back} />
+        <div data-portal-first>
+          <PortalBanner tone="info">
+            {INVOICES_UNAVAILABLE_MESSAGE}
+          </PortalBanner>
+        </div>
+      </>
     );
   }
-
-  // The form keeps its own state; only the first load shows the spinner, so a
-  // background reload after a terminal result doesn't unmount it.
+  // The form keeps its own state; only the first load shows the skeleton, so
+  // a background reload after a terminal result doesn't unmount it.
   if (invoice.loading && !invoice.data) {
-    return <PortalLoading label="Loading the invoice…" />;
+    return (
+      <>
+        <PortalTitleRow title="Pay invoice" back={back} />
+        <div data-portal-first className={`${card} px-4`}>
+          <PortalLoading label="Loading the invoice…" rows={3} />
+        </div>
+      </>
+    );
   }
   if (!invoice.data) {
     return (
-      <div className="space-y-3">
-        {back}
-        <h1 className={pageHeading}>Pay invoice</h1>
-        <PortalLoadError
-          message={portalErrorMessage(invoice.error, {
-            notFound: "We couldn't find that invoice.",
-            fallback: "We couldn't load the invoice.",
-          })}
-          onRetry={invoice.reload}
-        />
-      </div>
+      <>
+        <PortalTitleRow title="Pay invoice" back={back} />
+        <div data-portal-first>
+          <PortalSectionError
+            message={portalErrorMessage(invoice.error, {
+              notFound: "We couldn't find that invoice.",
+              fallback: "We couldn't load the invoice.",
+            })}
+            onRetry={invoice.reload}
+          />
+        </div>
+      </>
     );
   }
-
   const inv = invoice.data.data;
   return (
-    <div className="space-y-6">
-      {back}
-      <div>
-        <h1 className={pageHeading}>
-          Pay {inv.invoice_number ? `invoice ${inv.invoice_number}` : "invoice"}
-        </h1>
-        <p className="mt-1 text-sm text-gray-800">
-          Balance due: {formatMoney(inv.remaining_cents)}. Payments are made by
-          bank transfer (ACH) and can take a few business days to clear.
-        </p>
-      </div>
-      <PaymentForm
-        invoice={inv}
-        paymentsAvailable={me.payments_available}
-        onSettled={invoice.reload}
+    <>
+      <PortalTitleRow
+        title={
+          inv.invoice_number
+            ? `Pay invoice ${inv.invoice_number}`
+            : "Pay invoice"
+        }
+        back={back}
       />
-    </div>
+      <div className="space-y-4">
+        <section
+          aria-labelledby="pay-balance"
+          data-portal-first
+          className={`${card} p-4`}
+        >
+          <h2
+            id="pay-balance"
+            className="text-sm font-semibold text-text-muted"
+          >
+            Balance due
+          </h2>
+          <p className="text-[28px] font-extrabold leading-tight text-text">
+            {money(inv.remaining_cents)}
+          </p>
+          <p className="text-sm text-text-muted">
+            Due {formatDate(inv.due_date)}. Payments are made by bank transfer
+            (ACH) and can take a few business days to clear.
+          </p>
+        </section>
+        <section className={`${card} p-4`} aria-label="Payment">
+          <PaymentForm
+            invoice={inv}
+            paymentsAvailable={me.payments_available}
+            onSettled={invoice.reload}
+          />
+        </section>
+      </div>
+    </>
   );
 }

@@ -19,6 +19,7 @@ import {
   requestCancelledMessage,
 } from "../../../components/portal/messages";
 import { PortalMeContext } from "../../../components/portal/PortalContext";
+import { date } from "../../../components/portal/portalFormat";
 import type { PortalOrder } from "../../../services/portalApi";
 import PortalOrdersPage from "./page";
 
@@ -74,6 +75,10 @@ function installOrdersFetch(
     const method = (init?.method ?? "GET").toUpperCase();
     calls.push({ url: String(url), method });
     if (method === "POST") return fakeResponse(await cancel);
+    // The page also loads the tanks (titles and the request dialog).
+    if (String(url).includes("/portal/tanks")) {
+      return fakeResponse({ body: { data: [], next_cursor: null } });
+    }
     const next = queue.length > 1 ? queue.shift() : queue[0];
     return fakeResponse({ body: listBody(next ?? []) });
   }) as unknown as typeof fetch;
@@ -88,9 +93,16 @@ function renderPage() {
   );
 }
 
-function cancelButton(id = "QA-ORD-1") {
-  return screen.getByRole("button", { name: `Cancel request ${id}` });
+/** D29: the tank and the date, never the order id. */
+const REFERENCE = `North yard, ${date("2026-10-12T13:00:00Z")}`;
+const CANCEL_NAME = `Cancel request for ${REFERENCE}`;
+
+function cancelButton() {
+  return screen.getByRole("button", { name: CANCEL_NAME });
 }
+
+const orderGets = (calls: Calls) =>
+  calls.filter((c) => c.method === "GET" && /\/portal\/orders/.test(c.url));
 
 function row(button: HTMLElement): HTMLElement {
   const li = button.closest("li");
@@ -106,9 +118,10 @@ describe("customer Cancel request", () => {
     renderPage();
     expect(await screen.findByText("Confirmed")).toBeInTheDocument();
     expect(cancelButton()).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Cancel request QA-ORD-2" }),
-    ).toBeNull();
+    // No accessible name carries an internal order id.
+    for (const b of screen.getAllByRole("button")) {
+      expect(b.getAttribute("aria-label") ?? "").not.toMatch(/QA-ORD|ord_/);
+    }
     expect(
       screen.getAllByRole("button", { name: /^Cancel request/ }),
     ).toHaveLength(1);
@@ -121,9 +134,7 @@ describe("customer Cancel request", () => {
     });
     const calls = installOrdersFetch([[order()], [CANCELLED]], pending);
     renderPage();
-    const button = await screen.findByRole("button", {
-      name: "Cancel request QA-ORD-1",
-    });
+    const button = await screen.findByRole("button", { name: CANCEL_NAME });
     const li = row(button);
     button.focus();
     fireEvent.click(button);
@@ -139,14 +150,15 @@ describe("customer Cancel request", () => {
 
     finish({ body: { data: CANCELLED, request_id: "req-test" } });
 
-    const status = await screen.findByText(requestCancelledMessage("QA-ORD-1"));
+    const status = await screen.findByText(requestCancelledMessage(REFERENCE));
+    expect(status.textContent).not.toMatch(/QA-ORD/);
     expect(status).toHaveAttribute("role", "status");
     expect(status).toHaveAttribute("aria-live", "polite");
     expect(await screen.findByText("Cancelled")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /^Cancel request/ }),
     ).toBeNull();
-    expect(calls.filter((c) => c.method === "GET")).toHaveLength(2);
+    expect(orderGets(calls)).toHaveLength(2);
     // The row stayed mounted (in-place reload) and has focus.
     await waitFor(() => expect(li).toHaveFocus());
     expect(screen.queryByRole("alert")).toBeNull();
@@ -158,9 +170,7 @@ describe("customer Cancel request", () => {
       body: errorBody("ORDER_NOT_CANCELLABLE", "Order can't be cancelled"),
     });
     renderPage();
-    const button = await screen.findByRole("button", {
-      name: "Cancel request QA-ORD-1",
-    });
+    const button = await screen.findByRole("button", { name: CANCEL_NAME });
     const li = row(button);
     fireEvent.click(button);
 
@@ -170,7 +180,7 @@ describe("customer Cancel request", () => {
     expect(
       screen.queryByRole("button", { name: /^Cancel request/ }),
     ).toBeNull();
-    expect(calls.filter((c) => c.method === "GET")).toHaveLength(2);
+    expect(orderGets(calls)).toHaveLength(2);
     await waitFor(() => expect(li).toHaveFocus());
     expect(screen.queryByRole("alert")).toBeNull();
   });
@@ -181,15 +191,13 @@ describe("customer Cancel request", () => {
       body: errorBody("INTERNAL_ERROR", "boom"),
     });
     renderPage();
-    const button = await screen.findByRole("button", {
-      name: "Cancel request QA-ORD-1",
-    });
+    const button = await screen.findByRole("button", { name: CANCEL_NAME });
     fireEvent.click(button);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "We couldn't cancel this request. Try again.",
     );
-    expect(calls.filter((c) => c.method === "GET")).toHaveLength(1);
+    expect(orderGets(calls)).toHaveLength(1);
     expect(cancelButton()).not.toHaveAttribute("aria-disabled");
     expect(screen.queryByText(REQUEST_CHANGED_MESSAGE)).toBeNull();
   });

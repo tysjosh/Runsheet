@@ -1,33 +1,43 @@
 "use client";
 
 /**
- * The portal's own chrome (PD20, design §10.2): a skip link, a header with the
- * supplier and customer names and Sign out, the portal nav, and `main#main`.
+ * The portal's own chrome (D17, design §11.1): a skip link, one 56 px top bar
+ * (supplier mark, supplier and customer names, the section tabs from 768 px,
+ * the account menu), `main#main`, and below 768 px a 64 px bottom tab bar.
  *
- * It must import nothing from the staff shell: Sidebar, Header, AIChat,
- * GlobalSearch, NotificationBell, any WebSocket hook, or the dashboard shell
- * context. `app/portal/layout.test.tsx` (T-UI-SHELL) enforces this.
+ * It must import nothing from the staff shell: `components/shell/*`,
+ * Sidebar, Header, AIChat, GlobalSearch, NotificationBell, any WebSocket hook,
+ * or the dashboard shell context. `app/portal/layout.test.tsx` (T-UI-SHELL)
+ * enforces this.
  */
-
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
 import { signOut } from "../../utils/auth";
-import PortalNav from "./PortalNav";
-import { secondaryButton } from "./styles";
+import PortalAccountMenu from "./PortalAccountMenu";
+import PortalTabBar from "./PortalTabBar";
+import { isCurrentSection, portalNavItems } from "./portalNav";
+import { focusRing } from "./styles";
+import { PORTAL_TABS_IN_TOP_BAR, useMediaQuery } from "./useMediaQuery";
 
 export default function PortalShell({
   supplierName,
   customerName,
+  email,
   invoicesAvailable,
   children,
 }: {
   supplierName: string;
   customerName: string;
+  email: string;
   invoicesAvailable: boolean;
   children: React.ReactNode;
 }) {
   const router = useRouter();
+  const pathname = usePathname() ?? "/portal";
+  const wide = useMediaQuery(PORTAL_TABS_IN_TOP_BAR);
   const [signingOut, setSigningOut] = useState(false);
+  const items = portalNavItems(invoicesAvailable);
 
   const handleSignOut = async () => {
     if (signingOut) return;
@@ -39,40 +49,74 @@ export default function PortalShell({
     }
   };
 
+  const mark = (supplierName.trim()[0] ?? "R").toUpperCase();
+
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900">
+    <div className="min-h-screen bg-canvas text-[15px] text-text max-md:text-base">
       <a
         href="#main"
-        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-4 focus:z-50 focus:rounded-lg focus:bg-white focus:px-4 focus:py-2 focus:text-sm focus:font-medium focus:text-primary focus:shadow"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-2 focus:z-50 focus:rounded-lg focus:bg-surface focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-link focus:shadow"
       >
         Skip to content
       </a>
-      <header className="border-b border-gray-200 bg-white">
-        <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm text-gray-700">{supplierName}</p>
-            <p className="break-words text-lg font-semibold text-gray-900">
+      <header
+        data-portal-topbar
+        className="sticky top-0 z-40 h-14 border-b border-border bg-surface"
+      >
+        <div className="mx-auto flex h-14 max-w-[1120px] items-center gap-3 px-4">
+          <span
+            aria-hidden="true"
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-[13px] font-extrabold text-white"
+          >
+            {mark}
+          </span>
+          <div className="min-w-0 leading-tight md:max-w-[240px]">
+            <p className="truncate text-xs text-text-muted">{supplierName}</p>
+            <p className="truncate text-[15px] font-bold text-text">
               {customerName}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={handleSignOut}
-            disabled={signingOut}
-            className={secondaryButton}
-          >
-            Sign out
-          </button>
+          {wide && (
+            <nav aria-label="Portal" className="ml-4 flex h-14 self-stretch">
+              <ul className="flex h-14 items-stretch gap-1">
+                {items.map((item) => {
+                  const current = isCurrentSection(pathname, item);
+                  return (
+                    <li key={item.href} className="flex">
+                      <Link
+                        href={item.href}
+                        aria-current={current ? "page" : undefined}
+                        className={`flex items-center border-b-[3px] px-3.5 text-sm font-semibold ${focusRing} ${
+                          current
+                            ? "border-brand-600 text-brand-800"
+                            : "border-transparent text-slate-700 hover:text-text"
+                        }`}
+                      >
+                        {item.label}
+                      </Link>
+                    </li>
+                  );
+                })}
+              </ul>
+            </nav>
+          )}
+          <PortalAccountMenu
+            email={email}
+            supplierName={supplierName}
+            customerName={customerName}
+            onSignOut={() => void handleSignOut()}
+            signingOut={signingOut}
+          />
         </div>
       </header>
-      <PortalNav invoicesAvailable={invoicesAvailable} />
       <main
         id="main"
         tabIndex={-1}
-        className="mx-auto max-w-5xl px-4 py-6 focus:outline-none"
+        className="mx-auto max-w-[1120px] px-4 pb-[calc(88px+env(safe-area-inset-bottom))] focus:outline-none md:pb-10"
       >
         {children}
       </main>
+      {!wide && <PortalTabBar items={items} pathname={pathname} />}
     </div>
   );
 }
