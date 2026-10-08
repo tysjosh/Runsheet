@@ -53,6 +53,7 @@ jest.mock("./compliance/PriceProtectionContractsPage", () =>
 jest.mock("./compliance/PricingRulesPage", () => mockStub("Pricing rules"));
 jest.mock("../services/marginApi", () => ({
   getOpenMarginAlertCount: jest.fn().mockResolvedValue(0),
+  getMarginAvailability: jest.fn().mockResolvedValue("enabled"),
 }));
 jest.mock("./FleetTracking", () => mockStub("Tracking"));
 jest.mock("./Inventory", () => mockStub("Inventory"));

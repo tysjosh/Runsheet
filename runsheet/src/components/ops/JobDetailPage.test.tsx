@@ -120,10 +120,11 @@ describe("JobDetailPage — driver activity (G1)", () => {
       await screen.findByRole("region", { name: "Driver activity" }),
     ).toBeInTheDocument();
     await waitFor(() =>
-      expect(mockGetDriverActivity).toHaveBeenCalledWith("JOB-1", {
-        page: 1,
-        size: 20,
-      }),
+      expect(mockGetDriverActivity).toHaveBeenCalledWith(
+        "JOB-1",
+        { page: 1, size: 20 },
+        expect.any(AbortSignal),
+      ),
     );
   });
 });
