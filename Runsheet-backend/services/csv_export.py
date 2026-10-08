@@ -57,6 +57,8 @@ ExportType = Literal[
     "driver_hours", "driver_qualifications",
     # Customer portal (OI-06): one customer's own invoices.
     "portal_invoices",
+    # margin-feed FR7, tenant admin only.
+    "margin",
 ]
 
 _FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")

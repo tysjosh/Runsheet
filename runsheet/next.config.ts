@@ -8,6 +8,13 @@ const withBundleAnalyzer = bundleAnalyzer({
 
 const nextConfig: NextConfig = {
   reactStrictMode: false,
+  // `*.e2e.tsx` routes (the Dispatch Board Playwright harness) exist only
+  // when the e2e config starts the dev server with NEXT_PUBLIC_E2E_HARNESS=1;
+  // every other build ignores those files.
+  pageExtensions:
+    process.env.NEXT_PUBLIC_E2E_HARNESS === "1"
+      ? ["e2e.tsx", "tsx", "ts", "jsx", "js"]
+      : ["tsx", "ts", "jsx", "js"],
 
   // Security headers for all routes, including HSTS and a report-only CSP
   // (staging finding F6). See src/config/securityHeaders.ts.

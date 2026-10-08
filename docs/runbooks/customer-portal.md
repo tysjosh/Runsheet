@@ -72,7 +72,7 @@ Log lines to watch:
 
 ## Before merging a migration
 
-The portal adds one Alembic revision (`0011_customer_portal`). Before merging any branch that touches `alembic/versions/`, run:
+The portal adds one Alembic revision (`0012_customer_portal`, on top of `0011_margin_feed`). Before merging any branch that touches `alembic/versions/`, run:
 
 ```bash
 cd Runsheet-backend && alembic heads

@@ -908,6 +908,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    commerce_margin_feed_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling the cost / margin (COGS) feed: margin records "
+            "on estimates, deliveries and invoice lines, the admin-only "
+            "/api/commerce/margin API and the margin-driven RevenueGuard. "
+            "Also requires COMMERCE_BACKBONE_ENABLED and an active "
+            "persistence layer. When off, every margin route returns 404 and "
+            "no margin record is written. Default: False."
+        ),
+    )
+
     commerce_dunning_enabled: bool = Field(
         default=False,
         description=(

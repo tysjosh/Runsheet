@@ -625,8 +625,108 @@ class SalesPricingEngine:
                     product_code,
                     resolution.contract_id,
                 )
+                if (resolution.split_gallons_at_market_price or 0) > 0:
+                    # Gallons the contract doesn't cover bill at the
+                    # customer's normal price, not bare rack (D14c).
+                    resolution.excess_price_cents = await self.excess_price_cents(
+                        customer_id=customer_id,
+                        product_code=product_code,
+                        gallons=gallons,
+                        terminal_id=terminal_id,
+                        route_miles=route_miles,
+                        effective_date=effective_date,
+                        market_price_cents=resolution.market_price_cents,
+                        account_id=account_id,
+                    )
                 return resolution
 
+        # Fall-through: the customer's price-book rule (Req 11.2).
+        return await self._resolve_by_rule(
+            customer_id=customer_id,
+            product_code=product_code,
+            gallons=gallons,
+            terminal_id=terminal_id,
+            route_miles=route_miles,
+            effective_date=effective_date,
+            market_price_cents=market_price_cents,
+            account_id=account_id,
+        )
+
+    async def excess_price_cents(
+        self,
+        *,
+        customer_id: str,
+        product_code: str,
+        gallons: float,
+        terminal_id: str,
+        route_miles: float,
+        effective_date: date,
+        market_price_cents: int,
+        account_id: Optional[str],
+    ) -> int:
+        """Per-gallon price for delivered gallons a contract doesn't cover.
+
+        The price-book rule price for this delivery, exactly as a customer
+        with no contract would pay (D14c). Running out of a contract must
+        not make a customer cheaper than never having one, which billing
+        the excess at bare rack did. With no matching rule there is no
+        price-book price, so the excess bills at ``market_price_cents``.
+        """
+        try:
+            rule_resolution = await self._resolve_by_rule(
+                customer_id=customer_id,
+                product_code=product_code,
+                gallons=gallons,
+                terminal_id=terminal_id,
+                route_miles=route_miles,
+                effective_date=effective_date,
+                market_price_cents=market_price_cents or None,
+                account_id=account_id,
+            )
+        except PricingNoRuleMatchedError:
+            logger.warning(
+                "SalesPricingEngine: no pricing rule for contract excess "
+                "tenant=%s customer=%s product=%s; billing it at market",
+                self._tenant_id,
+                customer_id,
+                product_code,
+            )
+            return int(market_price_cents)
+        return int(rule_resolution.effective_price_cents)
+
+    async def consume_contract_gallons(self, contract_id: str, gallons: float) -> float:
+        """Consume contract volume for an invoice; returns gallons granted."""
+        if self._price_protection_service is None:
+            return 0.0
+        return await self._price_protection_service.consume_gallons(contract_id, gallons)
+
+    async def restore_contract_gallons(self, contract_id: str, gallons: float) -> None:
+        """Return gallons an invoice consumed (void or failed write)."""
+        if self._price_protection_service is None:
+            return
+        await self._price_protection_service.restore_gallons(contract_id, gallons)
+
+    async def _resolve_by_rule(
+        self,
+        *,
+        customer_id: str,
+        product_code: str,
+        gallons: float,
+        terminal_id: str,
+        route_miles: float,
+        effective_date: date,
+        market_price_cents: Optional[int],
+        account_id: Optional[str],
+    ) -> PriceResolution:
+        """Price a delivery from the pricing rules, ignoring contracts.
+
+        The non-contract half of :meth:`resolve_price`, shared with
+        :meth:`excess_price_cents` so contract excess bills at the same
+        price a delivery with no contract would.
+
+        Raises:
+            PricingNoRuleMatchedError: No rule matches.
+        """
         # Fall-through: consult the pricing_rules index and dispatch
         # on the rule's ``strategy`` (Req 11.2). Task 5.2 establishes
         # the dispatch structure — every strategy branch raises

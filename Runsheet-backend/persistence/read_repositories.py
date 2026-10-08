@@ -266,11 +266,11 @@ class InvoiceReadRepository:
     def _list_filters(*, status=None, customer_id=None, account_id=None,
                       order_id=None, qbo_push_state=None, created_from=None,
                       created_before=None, created_until=None,
-                      statuses=None) -> list:
+                      updated_from=None, statuses=None) -> list:
         """Filter list shared by :meth:`list` and :meth:`count`.
-
         ``statuses`` (SQL ``IN``) is applied together with ``status``; an
-        empty sequence matches nothing.
+        empty sequence matches nothing. ``updated_from`` is a filter only
+        (margin gap sweep); paging stays on the ``created_at`` keyset.
         """
         filters = []
         if status:
@@ -291,6 +291,8 @@ class InvoiceReadRepository:
             filters.append(InvoiceORM.created_at < created_before)
         if created_until is not None:
             filters.append(InvoiceORM.created_at <= created_until)
+        if updated_from is not None:
+            filters.append(InvoiceORM.updated_at >= updated_from)
         return filters
 
     async def count(self, session: AsyncSession, tenant_id: str, **filters) -> int:
@@ -307,6 +309,7 @@ class InvoiceReadRepository:
                    account_id: Optional[str] = None, order_id: Optional[str] = None,
                    qbo_push_state: Optional[str] = None,
                    created_from=None, created_before=None, created_until=None,
+                   updated_from=None,
                    cursor: Optional[str] = None,
                    limit: int = _DEFAULT_PAGE_LIMIT,
                    statuses: Optional[Sequence[str]] = None) -> Dict[str, Any]:
@@ -315,7 +318,8 @@ class InvoiceReadRepository:
             status=status, customer_id=customer_id, account_id=account_id,
             order_id=order_id, qbo_push_state=qbo_push_state,
             created_from=created_from, created_before=created_before,
-            created_until=created_until, statuses=statuses,
+            created_until=created_until, updated_from=updated_from,
+            statuses=statuses,
         )
         rows = await _keyset_page(
             session, InvoiceORM, tenant_id=tenant_id, filters=filters,

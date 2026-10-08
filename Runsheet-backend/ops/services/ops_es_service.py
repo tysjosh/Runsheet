@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
+from persistence.document_store import CrossTenantWriteError
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
 
@@ -209,6 +210,10 @@ class OpsElasticsearchService:
         except CircuitOpenException as e:
             self._es._handle_circuit_breaker_exception(e)
             return False
+        except CrossTenantWriteError:
+            # The id belongs to another tenant: a 409, not a database
+            # outage, so a webhook sender doesn't retry a poison event.
+            raise
         except Exception as e:
             self._es._handle_elasticsearch_error(
                 f"upsert_{entity_label}({index})", e

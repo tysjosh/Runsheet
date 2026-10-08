@@ -119,9 +119,9 @@ runsheet/.env.local
 # =============================================================================
 # Kiro
 # =============================================================================
-# Everything under .kiro/ stays local, except the data-export and customer-portal
-# specs, which are committed with their implementation so reviewers can read the
-# design they follow.
+# Everything under .kiro/ stays local, except the data-export, customer-portal and
+# margin-feed specs, which are committed with their implementation so reviewers
+# can read the design they follow.
 # A .kiro/ below the root (e.g. Runsheet-backend/.kiro/) is always local. The
 # pattern skips the root so the data-export negation below still works.
 /*/**/.kiro/
@@ -130,6 +130,7 @@ runsheet/.env.local
 .kiro/specs/*
 !.kiro/specs/data-export/
 !.kiro/specs/customer-portal/
+!.kiro/specs/margin-feed/
 
 # =============================================================================
 # IDE / Editor

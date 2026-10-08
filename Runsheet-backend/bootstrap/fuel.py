@@ -532,6 +532,25 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning(
             "Commerce invoice generation subscriber wiring failed: %s", e
         )
+    # Margin feed order-event subscriber: late-bound for the same reason
+    # (core builds MarginService before the OrderService exists). Core
+    # registers it itself only when order_service already existed, which
+    # sets ``margin_order_subscribers`` and keeps this to one registration.
+    try:
+        if (
+            container.has("order_service")
+            and container.has("margin_service")
+            and not container.has("margin_order_subscribers")
+        ):
+            from commerce.hooks.margin_order_subscriber import (
+                register_margin_order_subscribers,
+            )
+            container.margin_order_subscribers = register_margin_order_subscribers(
+                container.order_service, container.margin_service.hook
+            )
+            logger.info("Margin order-event subscribers registered (late-bound)")
+    except Exception as e:
+        logger.warning("Margin order subscriber wiring failed: %s", e)
 
     # ---------------------------------------------------------------
     # Cross-module reference loaders — depot (Req 10.1)

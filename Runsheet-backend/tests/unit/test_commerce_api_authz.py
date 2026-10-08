@@ -135,6 +135,10 @@ GATE_SYMBOLS = (
     "require_commerce_staff",
     "require_commerce_ops",
     "commerce_staff_dependency",
+    # margin_endpoints: tenant admin only (margin-feed D1), a router-level
+    # dependency chained after require_margin_enabled, so the flag 404 comes
+    # first (tests/integration/commerce/test_margin_authz.py).
+    "require_margin_admin",
 )
 
 

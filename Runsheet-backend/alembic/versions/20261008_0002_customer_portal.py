@@ -1,7 +1,7 @@
 """Customer portal: ``auth_users.customer_id``, portal grants, payment attempts.
 
-Revision ID: 0011_customer_portal
-Revises: 0010_acct_override_audit
+Revision ID: 0012_customer_portal
+Revises: 0011_margin_feed
 Create Date: 2026-10-08
 
 OI-06 (design §1.3, §1.4, §6.1, §9).
@@ -20,8 +20,10 @@ OI-06 (design §1.3, §1.4, §6.1, §9).
   details are stored. ``uq_ppa_inflight`` is the DB backstop for "one attempt
   in flight per invoice".
 
-Single-head rule: if another ``0011_*`` lands first, re-parent this file onto
-it and bump the id; never add a merge revision.
+Single-head rule: re-parented from ``0010_acct_override_audit`` onto
+``0011_margin_feed`` when margin-feed landed first. If another revision lands
+on the same parent, re-parent again and bump the id; never add a merge
+revision.
 """
 from typing import Sequence, Union
 
@@ -30,8 +32,8 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0011_customer_portal"
-down_revision: Union[str, None] = "0010_acct_override_audit"
+revision: str = "0012_customer_portal"
+down_revision: Union[str, None] = "0011_margin_feed"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

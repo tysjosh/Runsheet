@@ -15,6 +15,9 @@ import { defineConfig, devices } from "@playwright/test";
 export default defineConfig({
   // Directory containing test files
   testDir: "./e2e",
+  // The Dispatch Board spec needs the harness server of its own config
+  // (playwright.dispatch-board.config.ts).
+  testIgnore: "dispatch-board.spec.ts",
 
   // Run tests in files in parallel
   fullyParallel: true,

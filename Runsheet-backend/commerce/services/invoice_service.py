@@ -15,6 +15,7 @@ Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5, C1, C2, C3, C7
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
 from datetime import date, datetime, timedelta
@@ -75,6 +76,7 @@ def _invoice_must_clauses(
     created_from: Optional[datetime] = None,
     created_before: Optional[datetime] = None,
     created_until: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
     statuses: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Document-store must-clauses shared by ``InvoiceService.list`` and ``count``.
@@ -83,6 +85,8 @@ def _invoice_must_clauses(
     suffix) and compared as text, so date bounds use the same form.
     ``statuses`` becomes a ``terms`` clause applied together with ``status``;
     an empty sequence matches nothing.
+    ``updated_from`` filters ``updated_at >=`` the bound (margin gap sweep);
+    it is a filter only, paging stays on the ``created_at`` keyset.
     """
     from services.date_range import to_doc_bound
 
@@ -108,39 +112,40 @@ def _invoice_must_clauses(
         bounds["lte"] = to_doc_bound(created_until, z_suffix=False)
     if bounds:
         must_clauses.append({"range": {"created_at": bounds}})
+    if updated_from is not None:
+        must_clauses.append(
+            {"range": {"updated_at": {"gte": to_doc_bound(updated_from, z_suffix=False)}}}
+        )
     return must_clauses
 
 
 def _contract_split_lines(
     item: Dict[str, Any],
-    resolution: Any,
+    contract_gallons: float,
     contract_price_micros: int,
+    excess_price_micros: int,
 ) -> Optional[List[Dict[str, Any]]]:
     """Split a priced line when the contract covers only part of it (OI-14).
 
-    The price-protection resolver reports a split when the contract's
-    ``remaining_gallons`` is below the delivery: the contracted gallons
-    bill at the contract price and the excess at the market price. Without
-    the split, every gallon would bill at the contract price.
+    ``contract_gallons`` is what the contract granted this delivery (D14c:
+    consumed from its ``remaining_gallons``, so volume is honoured once
+    across invoices). Those gallons bill at the contract price and the rest
+    at ``excess_price_micros``, the customer's normal price-book price.
 
-    Returns ``None`` for a single-price resolution (the caller keeps the
-    line it already priced). Otherwise returns the replacement lines: the
-    contract-priced portion (omitted when no contract gallons remain) and
-    the market-priced excess. Each subtotal is rounded once with
+    Returns ``None`` when the contract covers the whole line (the caller
+    keeps the line it already priced). Otherwise returns the replacement
+    lines: the contract-priced portion (omitted when nothing was granted)
+    and the excess. Each subtotal is rounded once with
     :func:`line_subtotal_cents`, so the contract price is applied only to
     the contracted gallons.
     """
-    contract_gallons = getattr(resolution, "split_gallons_at_contract_price", None)
-    market_gallons = getattr(resolution, "split_gallons_at_market_price", None)
-    if contract_gallons is None or market_gallons is None or market_gallons <= 0:
-        return None
-
     total = float(item.get("quantity_gallons", item.get("quantity", 0)) or 0)
     contract_qty = max(0.0, min(float(contract_gallons), total))
     # Derive the excess from the line total so the two quantities always
-    # sum to the delivered gallons (no float drift from the resolver).
+    # sum to the delivered gallons (no float drift).
     market_qty = round(total - contract_qty, 6)
-    market_price_micros = int(resolution.market_price_cents) * MICROS_PER_CENT
+    if market_qty <= 0:
+        return None
 
     def _line(qty: float, micros: int, *, first: bool) -> Dict[str, Any]:
         line = dict(item)
@@ -157,9 +162,15 @@ def _contract_split_lines(
     lines: List[Dict[str, Any]] = []
     if contract_qty > 0:
         lines.append(_line(contract_qty, contract_price_micros, first=True))
-    if market_qty > 0:
-        lines.append(_line(market_qty, market_price_micros, first=not lines))
-    return lines or None
+    lines.append(_line(market_qty, excess_price_micros, first=not lines))
+    return lines
+
+
+def _engine_consumes_contracts(engine: Any) -> bool:
+    """True for an engine that can consume contract volume (D14c)."""
+    return inspect.iscoroutinefunction(
+        getattr(engine, "consume_contract_gallons", None)
+    )
 
 
 class InvoiceService:
@@ -234,6 +245,11 @@ class InvoiceService:
         # notification sent to prevent duplicate notifications on
         # repeated overdue scans (idempotency).
         self._notified_overdue_invoices: set = set()
+        # Optional MarginHook (margin feed). Injected via set_margin_hook()
+        # from bootstrap. Its methods are synchronous and schedule the
+        # margin work in the background; _notify_margin also catches any
+        # exception, so margin work never fails or blocks an invoice call.
+        self._margin_hook: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Dependency injection setters
@@ -287,6 +303,32 @@ class InvoiceService:
         Validates: Requirement 12.6
         """
         self._notification_service = notification_service
+
+    def set_margin_hook(self, margin_hook) -> None:
+        """Inject the MarginHook (margin feed, FR3).
+
+        generate_from_order, finalize_draft and void hand the persisted
+        invoice doc to the hook after the operation completed. The hook
+        deep-copies the doc and schedules the margin computation; it never
+        raises and is never awaited.
+        """
+        self._margin_hook = margin_hook
+
+    def _notify_margin(self, method: str, doc: Dict[str, Any]) -> None:
+        """Call ``margin_hook.<method>(doc)``; any exception is logged, never raised."""
+        hook = self._margin_hook
+        if hook is None:
+            return
+        try:
+            getattr(hook, method)(doc)
+        except Exception as exc:  # noqa: BLE001 - margin never fails the invoice
+            logger.error(
+                "InvoiceService: margin hook %s failed for invoice %s tenant %s: %s",
+                method,
+                doc.get("invoice_id"),
+                doc.get("tenant_id"),
+                type(exc).__name__,
+            )
 
     def set_dunning_service(self, dunning_service) -> None:
         """Inject the DunningService for overdue-invoice dunning cancellation.
@@ -439,6 +481,45 @@ class InvoiceService:
         await self._es.update_document(
             INVOICES_CURRENT_INDEX, invoice_id, partial
         )
+
+    async def _claim_void(
+        self,
+        invoice_id: str,
+        partial: Dict[str, Any],
+        event_sequence: int,
+        consumption: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Flip the projection to void under the row lock; return what to restore.
+
+        Returns the invoice's contract consumption when this call made the
+        flip, and ``[]`` when the projection was already void (another void
+        of the same invoice won). With no projection row to lock, it falls
+        back to a plain projection update and the caller's consumption.
+        """
+        partial["updated_at"] = utcnow().isoformat()
+        partial["_last_applied_seq"] = event_sequence
+
+        def _flip(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("status") == InvoiceStatus.VOID.value:
+                return None
+            return {**current, **partial}
+
+        document, applied = await self._es.atomic_update(
+            INVOICES_CURRENT_INDEX, invoice_id, _flip
+        )
+        if document is None:
+            await self._es.update_document(
+                INVOICES_CURRENT_INDEX, invoice_id, partial
+            )
+            return consumption
+        if not applied:
+            logger.info(
+                "InvoiceService: invoice %s was already voided; not restoring "
+                "its contract gallons again",
+                invoice_id,
+            )
+            return []
+        return list(document.get("contract_consumption") or consumption)
 
     async def _broadcast_invoice_ws(self, invoice_doc: Dict[str, Any]) -> None:
         """Non-blocking broadcast of the updated invoice projection on the WS channel.
@@ -791,10 +872,12 @@ class InvoiceService:
         # resolve the sell price for each line item before tax
         # computation and update unit_price_cents on the line.
         # Backwards compatible — if no factory, use existing prices.
-        # A contract split (remaining contract gallons below the
-        # delivery) replaces the line with a contract-priced line and a
-        # market-priced line (OI-14); keyed by id() of the original line.
-        split_by_line: Dict[int, List[Dict[str, Any]]] = {}
+        # Contract-priced lines are noted here and settled after
+        # validation (D14c): the contract's volume is consumed then, and
+        # any gallons it doesn't cover split off at the customer's normal
+        # price (OI-14). Keyed by id() of the original line.
+        contract_plans: List[tuple] = []
+        pricing_engine = None
         if self._sales_pricing_engine_factory is not None:
             try:
                 pricing_engine = self._sales_pricing_engine_factory(tenant_id)
@@ -850,11 +933,11 @@ class InvoiceService:
                             qty,
                             int(effective_price_micros),
                         )
-                        split_lines = _contract_split_lines(
-                            item, resolution, int(effective_price_micros)
-                        )
-                        if split_lines is not None:
-                            split_by_line[id(item)] = split_lines
+                        contract_id = getattr(resolution, "contract_id", None)
+                        if isinstance(contract_id, str) and contract_id:
+                            contract_plans.append(
+                                (item, resolution, int(effective_price_micros))
+                            )
                     except Exception as exc:
                         # Pricing failure for a single line item should
                         # not block the entire invoice — log and keep
@@ -892,12 +975,6 @@ class InvoiceService:
         # Tax is computed on each delivered line's total gallons, so a
         # contract split doesn't change tax rounding (OI-14).
         tax_basis_items = line_items
-        if split_by_line:
-            line_items = [
-                line
-                for item in line_items
-                for line in split_by_line.get(id(item), [item])
-            ]
 
         # Compute totals from line items (integer cents only, C1)
         subtotal_cents = sum(item.get("subtotal_cents", 0) for item in line_items)
@@ -1011,6 +1088,24 @@ class InvoiceService:
         if delivery_snapshot.get("pod_id"):
             external_refs["pod_id"] = delivery_snapshot["pod_id"]
 
+        # Settle contract volume last, after every validation that can
+        # refuse the invoice, so a refused invoice consumes nothing.
+        contract_consumption: List[Dict[str, Any]] = []
+        if contract_plans:
+            line_items, contract_consumption = await self._settle_contract_lines(
+                pricing_engine=pricing_engine,
+                line_items=line_items,
+                contract_plans=contract_plans,
+                customer_id=customer_id,
+                account_id=account_id,
+                effective_date=effective_date or now.date(),
+            )
+            subtotal_cents = sum(
+                item.get("subtotal_cents", 0) for item in line_items
+            )
+            total_cents = subtotal_cents + effective_tax_cents
+            remaining_cents = total_cents
+
         # Build the invoice document
         doc: Dict[str, Any] = {
             "invoice_id": invoice_id,
@@ -1050,6 +1145,9 @@ class InvoiceService:
         if tax_breakdown_doc is not None:
             doc["tax_breakdown"] = tax_breakdown_doc
             doc["exemptions_applied"] = exemptions_applied
+        if contract_consumption:
+            # What void gives back to each contract (D14c).
+            doc["contract_consumption"] = contract_consumption
 
         # Write event FIRST (Constraint C7)
         event_payload: Dict[str, Any] = {
@@ -1080,16 +1178,26 @@ class InvoiceService:
         else:
             event_payload["tax_source"] = "tax_cents_param"
 
-        event_doc = await self._write_invoice_event(
-            tenant_id=tenant_id,
-            invoice_id=invoice_id,
-            event_type=InvoiceEventType.CREATED,
-            payload=event_payload,
-            actor=actor,
-        )
+        if contract_consumption:
+            event_payload["contract_consumption"] = contract_consumption
 
-        # Then update projection
-        await self._es.index_document(INVOICES_CURRENT_INDEX, invoice_id, doc)
+        try:
+            event_doc = await self._write_invoice_event(
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                event_type=InvoiceEventType.CREATED,
+                payload=event_payload,
+                actor=actor,
+            )
+
+            # Then update projection
+            await self._es.index_document(INVOICES_CURRENT_INDEX, invoice_id, doc)
+        except BaseException:
+            # No invoice exists, so give the contract volume back.
+            await self._restore_contract_consumption(
+                tenant_id, invoice_id, contract_consumption, pricing_engine
+            )
+            raise
 
         # Dual-write the generated invoice to the Postgres source-of-truth
         # when opted in. Passes the service's authoritative totals (which may
@@ -1135,6 +1243,9 @@ class InvoiceService:
                 doc=doc,
             )
 
+        # --- Margin feed (FR3): last statement before the log line ------
+        self._notify_margin("invoice_generated", doc)
+
         logger.info(
             "Generated invoice %s from order %s for tenant %s (total: %d cents)",
             invoice_id,
@@ -1143,6 +1254,151 @@ class InvoiceService:
             total_cents,
         )
         return doc
+
+    async def _settle_contract_lines(
+        self,
+        *,
+        pricing_engine: Any,
+        line_items: List[Dict[str, Any]],
+        contract_plans: List[tuple],
+        customer_id: str,
+        account_id: str,
+        effective_date: date,
+    ) -> tuple:
+        """Consume contract volume and split off what it doesn't cover (D14c).
+
+        Each contract-priced line takes up to its gallons from the contract
+        (atomically, so volume is honoured once across invoices) and the rest
+        bills at the customer's normal price-book price. Returns the new
+        line list and the consumption to record on the invoice. If anything
+        fails part-way, what was already consumed is given back.
+        """
+        consumes = _engine_consumes_contracts(pricing_engine)
+        replacements: Dict[int, List[Dict[str, Any]]] = {}
+        consumption: List[Dict[str, Any]] = []
+        try:
+            for item, resolution, contract_micros in contract_plans:
+                total = float(
+                    item.get("quantity_gallons", item.get("quantity", 0)) or 0
+                )
+                planned = getattr(resolution, "split_gallons_at_contract_price", None)
+                wanted = total if planned is None else min(float(planned), total)
+                if consumes:
+                    granted = await pricing_engine.consume_contract_gallons(
+                        resolution.contract_id, wanted
+                    )
+                else:
+                    granted = wanted
+                if granted > 0:
+                    consumption.append(
+                        {
+                            "contract_id": resolution.contract_id,
+                            "line_id": item.get("line_id"),
+                            "gallons": granted,
+                        }
+                    )
+                if total - granted <= 1e-6:
+                    continue
+                excess_cents = getattr(resolution, "excess_price_cents", None)
+                if excess_cents is None or granted < wanted - 1e-6:
+                    # Another invoice took gallons since the quote, or the
+                    # resolver didn't price an excess: price it now.
+                    if inspect.iscoroutinefunction(
+                        getattr(pricing_engine, "excess_price_cents", None)
+                    ):
+                        excess_cents = await pricing_engine.excess_price_cents(
+                            customer_id=customer_id,
+                            product_code=item.get("product_code", ""),
+                            gallons=total,
+                            terminal_id=item.get("terminal_id", ""),
+                            route_miles=item.get("route_miles", 0.0),
+                            effective_date=effective_date,
+                            market_price_cents=resolution.market_price_cents,
+                            account_id=account_id,
+                        )
+                    else:
+                        excess_cents = resolution.market_price_cents
+                split = _contract_split_lines(
+                    item, granted, contract_micros,
+                    int(excess_cents) * MICROS_PER_CENT,
+                )
+                if split is not None:
+                    replacements[id(item)] = split
+        except BaseException:
+            await self._restore_contract_consumption(
+                None, None, consumption, pricing_engine
+            )
+            raise
+        lines = [
+            line
+            for item in line_items
+            for line in replacements.get(id(item), [item])
+        ]
+        return lines, consumption
+
+    async def _stored_contract_consumption(
+        self, tenant_id: str, invoice_id: str
+    ) -> List[Dict[str, Any]]:
+        """``contract_consumption`` from the document-store projection.
+
+        The Postgres invoice row has no column for it, so a read served from
+        Postgres (read cutover) doesn't carry it; the projection always does.
+        """
+        try:
+            query = inject_tenant_filter(
+                {"query": {"bool": {"must": [{"term": {"invoice_id": invoice_id}}]}},
+                 "size": 1},
+                tenant_id,
+            )
+            response = await self._es.search_documents(
+                INVOICES_CURRENT_INDEX, query, size=1
+            )
+            hits = ((response or {}).get("hits") or {}).get("hits") or []
+            if hits:
+                return list(hits[0].get("_source", {}).get("contract_consumption") or [])
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "InvoiceService: could not read contract consumption for %s",
+                invoice_id,
+            )
+        return []
+
+    async def _restore_contract_consumption(
+        self,
+        tenant_id: Optional[str],
+        invoice_id: Optional[str],
+        consumption: List[Dict[str, Any]],
+        pricing_engine: Any = None,
+    ) -> None:
+        """Give consumed contract gallons back; never raises (D14c)."""
+        if not consumption:
+            return
+        engine = pricing_engine
+        if engine is None and tenant_id and self._sales_pricing_engine_factory:
+            try:
+                engine = self._sales_pricing_engine_factory(tenant_id)
+            except Exception:  # noqa: BLE001
+                engine = None
+        restore = getattr(engine, "restore_contract_gallons", None)
+        if not inspect.iscoroutinefunction(restore):
+            logger.error(
+                "InvoiceService: cannot restore contract gallons for invoice "
+                "%s (no pricing engine): %s",
+                invoice_id,
+                consumption,
+            )
+            return
+        for entry in consumption:
+            try:
+                await restore(entry["contract_id"], float(entry["gallons"]))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "InvoiceService: failed to restore %s gallons to contract "
+                    "%s for invoice %s",
+                    entry.get("gallons"),
+                    entry.get("contract_id"),
+                    invoice_id,
+                )
 
     # ------------------------------------------------------------------
     # Finalize draft (Req 5.2)
@@ -1277,6 +1533,9 @@ class InvoiceService:
 
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
+
+        # Margin feed (FR3): freeze the invoice's margin records.
+        self._notify_margin("invoice_finalized", merged)
 
         # Post-commit callback: fire external sync as a non-blocking
         # asyncio task so HTTP latency is unaffected by QBO push latency.
@@ -1577,9 +1836,21 @@ class InvoiceService:
             "amount_paid_cents": 0,
             "remaining_cents": 0,
         }
-        await self._update_projection(
-            invoice_id, partial, event_doc["sequence_number"]
+        consumption = list(
+            invoice.get("contract_consumption")
+            or await self._stored_contract_consumption(tenant_id, invoice_id)
         )
+        if consumption:
+            # Restoring gallons isn't idempotent, so only the void that flips
+            # the projection to void restores them; an overlapping void of
+            # the same invoice (double-click, retry) restores nothing (D14c).
+            consumption = await self._claim_void(
+                invoice_id, partial, event_doc["sequence_number"], consumption
+            )
+        else:
+            await self._update_projection(
+                invoice_id, partial, event_doc["sequence_number"]
+            )
 
         # Mirror the void transition to Postgres when opted in.
         from commerce.services.commerce_persistence_bridge import (
@@ -1598,6 +1869,12 @@ class InvoiceService:
             event_type="voided",
         )
 
+        # A void invoice bills nothing, so its contract gallons go back
+        # (D14c). Empty unless this call won the void claim above.
+        await self._restore_contract_consumption(
+            tenant_id, invoice_id, consumption
+        )
+
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
         logger.info(
             "Voided invoice %s (reason: %s, force: %s, reversed %d payments) tenant %s",
@@ -1610,6 +1887,9 @@ class InvoiceService:
 
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
+
+        # Margin feed (FR3): void the invoice's margin records.
+        self._notify_margin("invoice_voided", merged)
 
         # Cancel dunning notifications when invoice is voided (Req 7.5)
         if self._dunning_service:
@@ -1885,6 +2165,7 @@ class InvoiceService:
         created_from: Optional[datetime] = None,
         created_before: Optional[datetime] = None,
         created_until: Optional[datetime] = None,
+        updated_from: Optional[datetime] = None,
         statuses: Optional[Sequence[str]] = None,
     ) -> int:
         """Count Invoices matching the :meth:`list` filters (data export)."""
@@ -1898,13 +2179,15 @@ class InvoiceService:
             account_id=account_id, order_id=order_id,
             qbo_push_state=qbo_push_state, created_from=created_from,
             created_before=created_before, created_until=created_until,
+            updated_from=updated_from,
             **status_kwargs,
         )
         if pg is not _NOT_CUT_OVER:
             return int(pg)
         clauses = _invoice_must_clauses(
             status, customer_id, account_id, order_id, qbo_push_state,
-            created_from, created_before, created_until, statuses=statuses,
+            created_from, created_before, created_until, updated_from,
+            statuses=statuses,
         )
         base_query: Dict[str, Any] = {
             "query": {"bool": {"must": clauses if clauses else [{"match_all": {}}]}},
@@ -1929,6 +2212,7 @@ class InvoiceService:
         created_from: Optional[datetime] = None,
         created_before: Optional[datetime] = None,
         created_until: Optional[datetime] = None,
+        updated_from: Optional[datetime] = None,
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
         statuses: Optional[Sequence[str]] = None,
@@ -1957,14 +2241,16 @@ class InvoiceService:
             account_id=account_id, order_id=order_id,
             qbo_push_state=qbo_push_state, created_from=created_from,
             created_before=created_before, created_until=created_until,
-            cursor=cursor, limit=limit, **status_kwargs,
+            updated_from=updated_from, cursor=cursor, limit=limit,
+            **status_kwargs,
         )
         if pg is not _NOT_CUT_OVER:
             return pg
 
         must_clauses = _invoice_must_clauses(
             status, customer_id, account_id, order_id, qbo_push_state,
-            created_from, created_before, created_until, statuses=statuses,
+            created_from, created_before, created_until, updated_from,
+            statuses=statuses,
         )
 
         base_query: Dict[str, Any] = {

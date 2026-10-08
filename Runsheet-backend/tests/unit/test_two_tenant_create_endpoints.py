@@ -450,3 +450,36 @@ def test_same_tenant_duplicate_is_409(app_factory, name):
         resp = client.post(case.post, json={**case.body, **case.changed})
         assert resp.status_code == 409, resp.text
         assert _record(client, case, record_id)[1] == before
+
+
+def test_refused_integration_create_deletes_its_credential(app_factory):
+    """Each vault put mints a new ref, so a refused create used to leave an
+    orphaned ciphertext behind (tenant-leak review issue 3)."""
+    from integrations.api.integrations_endpoints import (
+        configure_integrations_endpoints,
+        router,
+    )
+    from integrations.connector_base import IntegrationInstanceRepository
+
+    build, current, _ = app_factory
+    vault = _Vault()
+    store = _GlobalIdStore()
+
+    def _wire(app: FastAPI, es: _GlobalIdStore) -> None:
+        configure_integrations_endpoints(
+            repository=IntegrationInstanceRepository(es_service=store),
+            scheduler=_Scheduler(),  # type: ignore[arg-type]
+            credentials_vault=vault,
+            es_service=store,
+        )
+        app.include_router(router)
+
+    case = CASES["integrations"]
+    body = {**case.body, "credentials": {"api_key": "QA-not-a-real-key"}}
+    with TestClient(build(Case(**{**case.__dict__, "wire": _wire}))) as client:
+        current["tenant"] = A
+        assert client.post(case.post, json=body).status_code == 201
+        current["tenant"] = B
+        resp = client.post(case.post, json=body)
+        assert resp.status_code == 409, resp.text
+    assert vault.deleted == [f"cred:{B}:quickbooks_online_credentials:2"]

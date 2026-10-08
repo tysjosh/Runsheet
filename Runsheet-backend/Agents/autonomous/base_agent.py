@@ -127,9 +127,33 @@ class AutonomousAgentBase(ABC):
         Exceptions inside ``monitor_cycle`` are caught and logged so the
         loop never dies unexpectedly.
         """
-        from persistence.leader_election import is_sweep_leader, wait_for_leadership
+        from persistence.leader_election import (
+            LEADERSHIP_RETRY_SECONDS,
+            is_sweep_leader,
+            wait_for_leadership,
+            wait_until_due,
+        )
+        from persistence.periodic_runs import PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS
+
+        # Long-interval agents (the daily compliance crons) schedule from a
+        # persisted last run, so a deploy or leader change neither delays the
+        # next run by a whole interval nor runs it twice inside one.
+        persisted = self.poll_interval >= PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS
+        last_run: Optional[datetime] = None
 
         while self._running:
+            if persisted:
+                last_run = await wait_until_due(
+                    f"agent:{self.agent_id}",
+                    self.poll_interval,
+                    last_run,
+                    seed_if_missing=False,
+                )
+                if not self._running:
+                    break
+                await self._run_cycle()
+                continue
+
             # Only the sweep leader acts. Two processes running the same agent
             # is not merely duplicated work: ``_cooldown_tracker`` is
             # per-process memory, so each copy has its own idea of what it has
@@ -142,23 +166,29 @@ class AutonomousAgentBase(ABC):
             # compliance crons) meant those crons never ran on an environment
             # redeployed more often than daily.
             if not is_sweep_leader():
-                await wait_for_leadership(self.poll_interval)
+                await wait_for_leadership(
+                    min(self.poll_interval, LEADERSHIP_RETRY_SECONDS)
+                )
                 continue
 
-            cycle_start = datetime.now(timezone.utc)
-            self._tenant_activity = {}
-            try:
-                detections, actions = await self.monitor_cycle()
-                duration_ms = (
-                    datetime.now(timezone.utc) - cycle_start
-                ).total_seconds() * 1000
-                # Only log to ES when something was detected or acted on
-                # Reduces write volume by ~90% for idle cycles
-                if len(detections) > 0 or len(actions) > 0:
-                    await self._log_cycle(detections, actions, duration_ms)
-            except Exception:
-                self.logger.exception("Monitor cycle error")
+            await self._run_cycle()
             await asyncio.sleep(self.poll_interval)
+
+    async def _run_cycle(self) -> None:
+        """Run one ``monitor_cycle`` and log it; never raises."""
+        cycle_start = datetime.now(timezone.utc)
+        self._tenant_activity = {}
+        try:
+            detections, actions = await self.monitor_cycle()
+            duration_ms = (
+                datetime.now(timezone.utc) - cycle_start
+            ).total_seconds() * 1000
+            # Only log to ES when something was detected or acted on
+            # Reduces write volume by ~90% for idle cycles
+            if len(detections) > 0 or len(actions) > 0:
+                await self._log_cycle(detections, actions, duration_ms)
+        except Exception:
+            self.logger.exception("Monitor cycle error")
 
     async def _log_cycle(
         self, detections: List[Any], actions: List[Any], duration_ms: float

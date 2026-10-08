@@ -176,10 +176,25 @@ class DataSeeder:
                 index_name = "support_tickets"  # Support data goes to support_tickets index
             
             # Upsert documents (update existing, insert new)
-            await self.es_service.bulk_index_documents(index_name, documents)
-            
-            logger.info(f"✅ Successfully upserted {len(documents)} {data_type} documents")
-            return {"status": "success", "recordCount": len(documents)}
+            outcome = await self.es_service.bulk_index_documents(index_name, documents)
+            # The store refuses rows per document (e.g. an id another tenant
+            # owns) and reports them here; don't count those as uploaded.
+            failed = 0
+            errors: list = []
+            if isinstance(outcome, dict) and isinstance(outcome.get("failed"), int):
+                failed = outcome["failed"]
+                errors = list(outcome.get("errors") or [])[:20]
+            uploaded = len(documents) - failed
+            logger.info(
+                f"✅ Upserted {uploaded} of {len(documents)} {data_type} documents"
+                + (f" ({failed} refused)" if failed else "")
+            )
+            return {
+                "status": "success" if not failed else "partial",
+                "recordCount": uploaded,
+                "failed": failed,
+                "errors": errors,
+            }
             
         except Exception:
             logger.exception("Batch upsert failed")

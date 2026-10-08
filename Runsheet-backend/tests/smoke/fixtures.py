@@ -462,6 +462,21 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         path_params={"price_book_id": "pb_001"},
     ),
     "GET /api/commerce/pricing-rules": RouteFixture(),
+    # Margin feed (admin only; 404 while COMMERCE_MARGIN_FEED_ENABLED is off).
+    "GET /api/commerce/margin/alerts": RouteFixture(),
+    "GET /api/commerce/margin/cost-basis": RouteFixture(params={"product_code": "DIESEL_2"}),
+    "GET /api/commerce/margin/cost-entries": RouteFixture(),
+    "GET /api/commerce/margin/records": RouteFixture(),
+    "GET /api/commerce/margin/records/export": RouteFixture(),
+    "GET /api/commerce/margin/records/{record_id}": RouteFixture(
+        path_params={"record_id": "mr_001"},
+    ),
+    "GET /api/commerce/margin/recompute/{run_id}": RouteFixture(
+        path_params={"run_id": "run_001"},
+    ),
+    "GET /api/commerce/margin/reports": RouteFixture(),
+    "GET /api/commerce/margin/settings": RouteFixture(),
+    "GET /api/commerce/margin/summary": RouteFixture(),
     "GET /api/compliance/asset-certifications": RouteFixture(),
     "GET /api/compliance/asset-certifications/dashboard": RouteFixture(),
     "GET /api/compliance/asset-certifications/{cert_id}": RouteFixture(
@@ -548,6 +563,41 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
     "GET /api/portal/tanks/{customer_tank_id}/deliveries": RouteFixture(
         path_params={"customer_tank_id": "QA-TANK-001"},
     ),
+    "GET /api/portal/invoices": RouteFixture(),
+    "GET /api/portal/invoices/export": RouteFixture(),
+    "GET /api/portal/invoices/{invoice_id}": RouteFixture(
+        path_params={"invoice_id": "QA-INV-001"},
+    ),
+    "GET /api/portal/invoices/{invoice_id}/pdf": RouteFixture(
+        path_params={"invoice_id": "QA-INV-001"},
+    ),
+    "POST /api/portal/invoices/{invoice_id}/payments": RouteFixture(
+        method="POST",
+        path_params={"invoice_id": "QA-INV-001"},
+        headers={"Idempotency-Key": "qa-smoke-key-0001"},
+        json={"amount_cents": 10000},
+    ),
+    "GET /api/portal/payment-attempts/{payment_attempt_id}": RouteFixture(
+        path_params={"payment_attempt_id": "ppa_qa_0001"},
+    ),
+    # Staff admin of portal users (admin only; 404 PORTAL_DISABLED when off).
+    "GET /api/commerce/customers/{customer_id}/portal-users": RouteFixture(
+        path_params={"customer_id": "QA-PORTAL-CUST-A"},
+    ),
+    "POST /api/commerce/customers/{customer_id}/portal-users": RouteFixture(
+        method="POST",
+        path_params={"customer_id": "QA-PORTAL-CUST-A"},
+        json={"email": "qa-portal-user@example.com"},
+    ),
+    "POST /api/commerce/customers/{customer_id}/portal-users/{grant_id}/resend": RouteFixture(
+        method="POST",
+        path_params={"customer_id": "QA-PORTAL-CUST-A", "grant_id": "pg_qa_0001"},
+        json={},
+    ),
+    "DELETE /api/commerce/customers/{customer_id}/portal-users/{grant_id}": RouteFixture(
+        method="DELETE",
+        path_params={"customer_id": "QA-PORTAL-CUST-A", "grant_id": "pg_qa_0001"},
+    ),
 }
 
 
@@ -603,6 +653,12 @@ WS_FIXTURES: Dict[str, WSFixture] = {
     # connection-confirmation envelope on connect, like the other channels.
     "/ws/commerce/invoices": WSFixture(
         params={"token": ""},
+        expects_confirmation=True,
+    ),
+    # Dispatch Board lane events and presence (dispatch-board K10). Admin or
+    # dispatcher only; confirmation is sent after the role and flag checks.
+    "/ws/dispatch-board": WSFixture(
+        params={"service_date": "2026-01-01"},
         expects_confirmation=True,
     ),
 }

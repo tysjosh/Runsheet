@@ -48,6 +48,17 @@ class _FakeManager:
     async def connect_driver(self, websocket, **_kw):
         await websocket.accept()
 
+    # /ws/dispatch-board: the fake doubles as the board manager, the board
+    # service and the feature-flag reader (flag on, so the handshake proceeds).
+    async def connect_board(self, websocket, **_kw):
+        await websocket.accept()
+
+    async def get_overlay_state(self, _flag, _tenant_id):
+        return "shadow"
+
+    async def resolve_actor_name(self, _tenant_id, _user_id):
+        return "QA dispatcher"
+
 
 @pytest.fixture
 def stub_ws_backends(monkeypatch):
@@ -78,7 +89,9 @@ def test_staff_sessions_still_connect(portal_app, client, portal_on, sessions, s
     for path in _ws_paths(portal_app):
         role = "driver" if path == "/ws/driver" else "dispatcher"
         staff = sessions.staff(role)
-        with client.websocket_connect(f"{path}?token={staff.key}") as ws:
+        # service_date is required by /ws/dispatch-board; other sockets ignore it.
+        url = f"{path}?token={staff.key}&service_date=2026-10-08"
+        with client.websocket_connect(url) as ws:
             assert ws.receive_json() == {"connected": path}
 
 

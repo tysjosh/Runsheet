@@ -1713,6 +1713,9 @@ print(json.dumps({
             # server.js binds to this; without it Next listens on localhost only and
             # the ALB health check cannot reach the container at all.
             {"name": "HOSTNAME", "value": "0.0.0.0"},
+            # The ALB appends one X-Forwarded-For entry; /api/csp-report keys
+            # its rate limit on it (same setting as the api container).
+            {"name": "TRUSTED_PROXY_HOPS", "value": "1"},
         ] + [
             # Omitted entirely when blank. An empty-string HUBSPOT_FORM_GUID would
             # be indistinguishable from a set one to a naive truthiness check, and

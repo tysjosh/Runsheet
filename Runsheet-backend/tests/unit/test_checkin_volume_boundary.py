@@ -75,6 +75,22 @@ class _FakeES:
                 doc.update(fields)
         return True
 
+    async def atomic_update(self, index, doc_id, transform, *, upsert=None):
+        # Check-in and plan writes are compare-and-set (dispatch-board freeze
+        # rules 9 and 11 (b)); same id lookup as update_document above.
+        import copy
+
+        for doc in self.docs.get(index, []):
+            if doc_id in (doc.get("execution_id"), doc.get("plan_id")):
+                updated = transform(copy.deepcopy(doc))
+                if updated is None:
+                    return dict(doc), False
+                self.updates.append((index, doc_id, updated))
+                doc.clear()
+                doc.update(updated)
+                return dict(doc), True
+        return None, False
+
     async def index_document(self, index, doc_id, doc):
         self.indexed.append((index, doc_id, doc))
         self.docs.setdefault(index, []).append(doc)

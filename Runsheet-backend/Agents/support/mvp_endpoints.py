@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
+from Agents.support.plan_execution_service import merge_plan_fields
 from Agents.support.volume_units import (
     liters_to_us_gallons,
     us_gallons_to_liters,
@@ -246,6 +247,26 @@ def _get_pipeline():
             "Call configure_mvp_endpoints() during startup."
         )
     return _pipeline
+
+
+#: ``mvp_load_plans.source`` of plans published from the Dispatch Board
+#: (dispatch-board K2.4). Agent plans carry no ``source``.
+BOARD_PLAN_SOURCE = "dispatch_board"
+
+
+def _refuse_board_plan(plan_doc: Dict[str, Any], plan_id: str) -> None:
+    """409 ``BOARD_OWNED_PLAN`` for a Dispatch Board plan (dispatch-board K7.6).
+
+    Approve, reject and replan act on agent plans only; a board plan is
+    managed on the board. Called after the plan read and before any write.
+    """
+    if (plan_doc or {}).get("source") == BOARD_PLAN_SOURCE:
+        raise AppException(
+            error_code=ErrorCode.BOARD_OWNED_PLAN,
+            message="Manage this plan on the Dispatch Board",
+            status_code=409,
+            details={"plan_id": plan_id},
+        )
 
 
 def _get_es():
@@ -480,6 +501,30 @@ async def replan(
             status_code=503,
             details={"service": "exception_replanning_agent"},
         )
+
+    try:
+        # Board-published plans are re-planned on the Dispatch Board, never by
+        # the agent (dispatch-board K7.6). Read the plan before any write.
+        plan_resp = await _get_es().search_documents(
+            "mvp_load_plans",
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"tenant_id": tenant_id}},
+                            {"term": {"plan_id": plan_id}},
+                        ],
+                    },
+                },
+                "size": 1,
+            },
+            1,
+        )
+    except Exception as e:
+        logger.error("Failed to read plan %s before replan: %s", plan_id, e)
+        raise internal_error(message="Plan could not be read", details={"plan_id": plan_id}) from e
+    for hit in (plan_resp or {}).get("hits", {}).get("hits", []) or []:
+        _refuse_board_plan(hit.get("_source") or {}, plan_id)
 
     try:
         # Trigger the replanning agent's evaluation cycle
@@ -788,11 +833,19 @@ async def list_plans(
     status: Optional[str] = Query(None, description="Filter by plan status"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
+    source: Optional[Literal["dispatch_board"]] = Query(
+        None,
+        description=(
+            "Pass dispatch_board to list only Dispatch Board plans (read-only). "
+            "By default board plans are hidden."
+        ),
+    ),
 ):
     """List plans for a tenant with optional status filter, paginated.
 
     Queries mvp_load_plans by tenant_id, optionally filtered by status,
-    sorted by created_at descending.
+    sorted by created_at descending. Dispatch Board plans are excluded unless
+    ``?source=dispatch_board``, which returns only them (dispatch-board K7.6).
 
     Validates: Requirements 1.1, 1.3, 1.4, 1.5
     """
@@ -802,9 +855,14 @@ async def list_plans(
     must_clauses = [{"term": {"tenant_id": tenant_id}}]
     if status:
         must_clauses.append({"term": {"status": status}})
+    bool_query: Dict[str, Any] = {"must": must_clauses}
+    if source == BOARD_PLAN_SOURCE:
+        must_clauses.append({"term": {"source": BOARD_PLAN_SOURCE}})
+    else:
+        bool_query["must_not"] = [{"term": {"source": BOARD_PLAN_SOURCE}}]
 
     query = {
-        "query": {"bool": {"must": must_clauses}},
+        "query": {"bool": bool_query},
         "sort": [{"created_at": {"order": "desc"}}],
         "from": (page - 1) * size,
         "size": size,
@@ -884,6 +942,7 @@ async def approve_plan(
             )
 
         plan_doc = hits[0]["_source"]
+        _refuse_board_plan(plan_doc, plan_id)
         plan_status = plan_doc.get("status", "")
 
         # ``scheduled``: applied to its truck by the loading-plan executor
@@ -982,6 +1041,7 @@ async def reject_plan(
             )
 
         plan_doc = hits[0]["_source"]
+        _refuse_board_plan(plan_doc, plan_id)
         plan_status = plan_doc.get("status", "")
 
         if plan_status != "draft" and plan_status != "proposed":
@@ -1191,9 +1251,9 @@ async def driver_checkin(
         if result.get("all_complete"):
             es = _get_es()
             now = utcnow().isoformat()
-            await es.update_document(
-                "mvp_load_plans", plan_id, {"status": "completed"}
-            )
+            # Merged under the row lock so a concurrent board write of a new
+            # revision survives (dispatch-board freeze rule 11 (b)).
+            await merge_plan_fields(es, plan_id, {"status": "completed"})
 
             # Trigger outcome computation (Req 4.1–4.4)
             try:

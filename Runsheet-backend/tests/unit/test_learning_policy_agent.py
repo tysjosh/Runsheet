@@ -272,6 +272,28 @@ class TestEvaluate:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_revenue_guard_margin_review_proposal_logs_no_experiment(self):
+        """margin-feed: RevenueGuard's advisory ``margin.review.*`` proposal
+        reaches this agent (it subscribes to every PolicyChangeProposal) and
+        must not start a policy experiment."""
+        agent, deps = _make_agent()
+        agent._log_experiment = AsyncMock()
+        proposal = PolicyChangeProposal(
+            source_agent="revenue_guard",
+            parameter="margin.review.CUST-1.DIESEL_2",
+            old_value={"flag": "below_floor", "consecutive": 3},
+            new_value={"action": "review_pricing"},
+            evidence=["mr_1", "mr_2", "mr_3"],
+            rollback_plan={"action": "none", "reason": "advisory only"},
+            confidence=0.9,
+            tenant_id="tenant-1",
+        )
+        result = await agent.evaluate([proposal])
+        assert result == []
+        agent._log_experiment.assert_not_called()
+        deps["es_service"].index_document.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_tracks_outcome_history_per_source_agent(self):
         """Req 8.1: track outcome history per source agent."""
         agent, _ = _make_agent()

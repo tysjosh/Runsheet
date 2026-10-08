@@ -58,6 +58,26 @@
 | POST | `/api/commerce/invoices/{invoice_id}/finalize` | — | session_required | — | — | dict |
 | POST | `/api/commerce/invoices/{invoice_id}/retry-qbo-push` | — | session_required | — | — | dict |
 | POST | `/api/commerce/invoices/{invoice_id}/void` | — | session_required | — | — | dict |
+| GET | `/api/commerce/margin/alerts` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/alerts/{alert_id}/acknowledge` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/alerts/{alert_id}/approve` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/alerts/{alert_id}/dismiss` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/cost-basis` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/cost-entries` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries/import` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries/{entry_id}/supersede` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries/{entry_id}/void` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/preview` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/recompute` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/recompute/{run_id}` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/records` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/records/export` | — | session_required | — | — | — |
+| GET | `/api/commerce/margin/records/{record_id}` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/reports` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/settings` | — | session_required | — | — | Dict |
+| PUT | `/api/commerce/margin/settings` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/summary` | — | session_required | — | — | Dict |
 | GET | `/api/commerce/payments` | — | session_required | — | — | dict |
 | POST | `/api/commerce/payments` | — | session_required | — | — | dict |
 | GET | `/api/commerce/payments/{payment_id}` | — | session_required | — | — | dict |
@@ -134,6 +154,14 @@
 | GET | `/api/fleet/trucks` | /api/fleet | session_required | — | — | — |
 | GET | `/api/fleet/trucks/{truck_id}` | /api/fleet | session_required | — | — | — |
 | GET | `/api/fuel/alerts` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/status` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/{service_date}` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/commands` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/{service_date}/history` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/publish` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/{service_date}/publish/{publish_id}` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/suggestions/{plan_id}/reject` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/validate` | /api/fuel | session_required | — | — | dict |
 | POST | `/api/fuel/consumption` | /api/fuel | session_required | — | ConsumptionEvent | dict |
 | POST | `/api/fuel/consumption/batch` | /api/fuel | session_required | — | — | dict |
 | GET | `/api/fuel/destinations` | /api/fuel | session_required | — | — | DeliveryDestinationsResponse |
@@ -254,6 +282,8 @@
 | GET | `/api/notifications/{notification_id}` | — | session_required | — | — | — |
 | POST | `/api/notifications/{notification_id}/retry` | — | session_required | — | — | — |
 | POST | `/api/ops/admin/feature-flags/{tenant_id}/disable` | /api/ops/admin | session_required | — | — | dict |
+| GET | `/api/ops/admin/feature-flags/{tenant_id}/dispatch-board` | /api/ops/admin | session_required | — | — | dict |
+| POST | `/api/ops/admin/feature-flags/{tenant_id}/dispatch-board/{new_state}` | /api/ops/admin | session_required | — | — | dict |
 | POST | `/api/ops/admin/feature-flags/{tenant_id}/enable` | /api/ops/admin | session_required | — | — | dict |
 | GET | `/api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline` | /api/ops/admin | session_required | — | — | dict |
 | POST | `/api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline/{new_state}` | /api/ops/admin | session_required | — | — | dict |
@@ -371,6 +401,7 @@
 | `/api/fleet/live` | location_update, fleet_status | session_required |
 | `/ws/agent-activity` | agent_activity, approval_event | session_required |
 | `/ws/commerce/invoices` | — | session_required |
+| `/ws/dispatch-board` | — | session_required |
 | `/ws/driver` | — | session_required |
 | `/ws/fuel-planning` | — | session_required |
 | `/ws/notifications` | — | session_required |

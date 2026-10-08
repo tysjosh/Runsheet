@@ -85,7 +85,7 @@ import logging
 import math
 import random
 from datetime import date
-from typing import Any, AsyncIterator, Dict, Final, List, Optional
+from typing import Any, AsyncIterator, Callable, Dict, Final, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -132,6 +132,18 @@ _MAX_DECREMENT_RETRIES: Final[int] = 3
 #: decrement retries. Kept small because contract decrement is the hot
 #: path during invoice finalization.
 _DECREMENT_BACKOFF_BASE_SECONDS: Final[float] = 0.01
+
+
+def _current_remaining(document: Dict[str, Any]) -> float:
+    """``remaining_gallons`` of a raw contract document.
+
+    Mirrors the model default: a contract with no ``remaining_gallons`` yet
+    has its full ``contracted_gallons`` left.
+    """
+    remaining = document.get("remaining_gallons")
+    if remaining is None:
+        remaining = document.get("contracted_gallons") or 0.0
+    return max(0.0, float(remaining))
 
 #: Tolerance (gallons) for the post-write "did my decrement land"
 #: verification. The ``remaining_gallons`` field is a float and ES
@@ -234,6 +246,18 @@ class PriceResolution(BaseModel):
             "into ``resolve_price``. Echoed back on every resolution "
             "so settlement-variance reporting (Task 4.6) has the "
             "inputs it needs without a separate lookup."
+        ),
+    )
+    excess_price_cents: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Price for the gallons the contract does not cover, set by "
+            "``SalesPricingEngine`` on a split: the customer's normal "
+            "price-book price (the same rule resolution as a delivery "
+            "with no contract), or ``market_price_cents`` when no rule "
+            "matches. ``None`` from the bare resolver, which knows no "
+            "rules, and on the single-price path."
         ),
     )
 
@@ -818,6 +842,113 @@ class PriceProtectionService:
             f"for contract {contract_id} "
             f"(last_observed_version={last_observed_version})"
         )
+
+    # ------------------------------------------------------------------
+    # Invoice consumption (D14c)
+    # ------------------------------------------------------------------
+
+    async def consume_gallons(self, contract_id: str, gallons: float) -> float:
+        """Take up to ``gallons`` from the contract; return what was granted.
+
+        Invoicing calls this so a contract's volume is honoured once across
+        all invoices, not once per invoice (D14c). The grant is
+        ``min(gallons, remaining_gallons)``, computed inside the document
+        store's :meth:`atomic_update` transform. On Postgres that runs under
+        a ``SELECT … FOR UPDATE`` row lock, so two invoices racing for the
+        last gallons are serialized: the second sees what the first left
+        (possibly nothing). This replaces :meth:`decrement_gallons`'s
+        write-then-re-read check, which two writers of the same patch both
+        pass.
+        """
+        gallons = float(gallons)
+        if not math.isfinite(gallons) or gallons <= _REMAINING_GALLONS_EPSILON:
+            return 0.0
+        granted_box: List[float] = [0.0]
+
+        def _take(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            granted_box[0] = 0.0
+            if current.get("tenant_id") != self._tenant_id:
+                return None
+            remaining = _current_remaining(current)
+            granted = min(gallons, remaining)
+            if granted <= _REMAINING_GALLONS_EPSILON:
+                return None
+            granted_box[0] = granted
+            return {
+                **current,
+                "remaining_gallons": max(0.0, remaining - granted),
+                "version": int(current.get("version") or 0) + 1,
+                "updated_at": utcnow().isoformat(),
+            }
+
+        document = await self._atomic_contract_update(contract_id, _take)
+        if document is None:
+            raise ValueError("contract_not_found")
+        return granted_box[0]
+
+    async def restore_gallons(self, contract_id: str, gallons: float) -> None:
+        """Give back gallons an invoice consumed (void, or a failed write).
+
+        Capped at ``contracted_gallons``. A contract the lifecycle cron
+        marked ``exhausted`` goes back to ``active``: it has gallons again,
+        and the cron still expires it on ``end_date``. Runs as an
+        :meth:`atomic_update` transform, like :meth:`consume_gallons`, so a
+        restore can't overwrite a consume that committed in between.
+        """
+        gallons = float(gallons)
+        if not math.isfinite(gallons) or gallons <= 0:
+            return
+
+        def _give_back(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("tenant_id") != self._tenant_id:
+                return None
+            remaining = _current_remaining(current)
+            contracted = float(current.get("contracted_gallons") or 0.0)
+            new_remaining = min(contracted, remaining + gallons)
+            updated = {
+                **current,
+                "remaining_gallons": new_remaining,
+                "version": int(current.get("version") or 0) + 1,
+                "updated_at": utcnow().isoformat(),
+            }
+            if current.get("status") == "exhausted" and new_remaining > 0:
+                updated["status"] = "active"
+            return updated
+
+        document = await self._atomic_contract_update(contract_id, _give_back)
+        if document is None:
+            raise ValueError("contract_not_found")
+
+    async def _atomic_contract_update(
+        self,
+        contract_id: str,
+        transform: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]],
+    ) -> Optional[Dict[str, Any]]:
+        """Apply ``transform`` to one contract under the store's row lock.
+
+        Returns the stored document, or ``None`` when the contract doesn't
+        exist or belongs to another tenant (both read as
+        ``contract_not_found`` to the caller, as in :meth:`_fetch_contract`).
+        A written contract is mirrored to the Postgres config table, the
+        same as every other contract write in this service.
+        """
+        contract_id = (contract_id or "").strip()
+        if not contract_id:
+            raise ValueError("contract_id must be a non-empty string")
+        document, applied = await self._es.atomic_update(
+            PRICE_PROTECTION_CONTRACTS_INDEX, contract_id, transform
+        )
+        if document is None or document.get("tenant_id") != self._tenant_id:
+            return None
+        if applied:
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_compliance_config_upsert,
+            )
+            contract = PriceProtectionContract.model_validate(document)
+            await mirror_compliance_config_upsert(
+                "price_protection_contract", contract.model_dump(mode="json")
+            )
+        return document
 
     # ------------------------------------------------------------------
     # Lifecycle transitions — active → exhausted / expired (Req 3.6)

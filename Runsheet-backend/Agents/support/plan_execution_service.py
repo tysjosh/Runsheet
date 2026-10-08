@@ -47,6 +47,32 @@ logger = logging.getLogger(__name__)
 STORAGE_VOLUME_UNIT = "liter"
 
 
+async def merge_plan_fields(
+    es_service: Any, plan_id: str, fields: Mapping[str, Any]
+) -> Dict[str, Any]:
+    """Merge ``fields`` into the stored plan under the row lock (freeze rule 11 (b)).
+
+    The check-in path's plan writes (cost figures, the ``completed`` status)
+    used ``update_document``, which merges into a copy read outside any lock,
+    so a concurrent board write of a new revision could be lost. One
+    ``atomic_update`` merges only these keys into whatever is stored at commit
+    time. A missing plan raises like ``update_document`` did.
+    """
+    patch = dict(fields)
+
+    def transform(current: Dict[str, Any]) -> Dict[str, Any]:
+        return {**current, **patch}
+
+    stored, _applied = await es_service.atomic_update(
+        MVP_LOAD_PLANS_INDEX, plan_id, transform
+    )
+    if stored is None:
+        # Not ValueError: the check-in endpoint maps ValueError to 4xx, and a
+        # plan vanishing mid-request stays the 500 it was with update_document.
+        raise LookupError(f"Plan {plan_id} not found")
+    return stored
+
+
 class PlanExecutionService:
     """Business logic for plan execution tracking, outcomes, and costs.
 
@@ -280,38 +306,96 @@ class PlanExecutionService:
 
         # Record arrival time, quantities, and the driver context
         now = datetime.now(timezone.utc).isoformat()
-        stops[target_idx]["status"] = "completed"
-        stops[target_idx]["actual_arrival"] = now
-        stops[target_idx]["actual_quantities"] = actual_quantities
-        # R6.21 / R6.22 — the discriminator is written on every stop record.
-        stops[target_idx]["actual_quantities_unit"] = STORAGE_VOLUME_UNIT
-        stops[target_idx]["driver_id"] = driver_id                      # R6.1
-        stops[target_idx]["geotag"] = dict(geotag) if geotag else None   # R6.2
-        stops[target_idx]["event_timestamp"] = event_timestamp          # R6.3
-        stops[target_idx]["server_received_at"] = now                   # R6.3
-        stops[target_idx]["order_id"] = order_id
-        stops[target_idx]["pod_id"] = pod_id                            # R6.8
-        stops[target_idx]["quantity_variance"] = quantity_variance      # R6.9
-        stops[target_idx]["variance_unit"] = STORAGE_VOLUME_UNIT        # R6.20
-
-        completed_stops = execution.get("completed_stops", 0) + 1
-        total_stops = execution.get("total_stops", len(stops))
-        all_complete = completed_stops >= total_stops
-
-        # Update execution status if all stops complete
-        execution_status = "completed" if all_complete else "in_progress"
-
-        # Persist updated execution
-        update_doc = {
-            "stops": stops,
-            "completed_stops": completed_stops,
-            "status": execution_status,
-            "updated_at": now,
+        stop_fields = {
+            "status": "completed",
+            "actual_arrival": now,
+            "actual_quantities": actual_quantities,
+            # R6.21 / R6.22 — the discriminator is written on every stop record.
+            "actual_quantities_unit": STORAGE_VOLUME_UNIT,
+            "driver_id": driver_id,                                     # R6.1
+            "geotag": dict(geotag) if geotag else None,                 # R6.2
+            "event_timestamp": event_timestamp,                         # R6.3
+            "server_received_at": now,                                  # R6.3
+            "order_id": order_id,
+            "pod_id": pod_id,                                           # R6.8
+            "quantity_variance": quantity_variance,                     # R6.9
+            "variance_unit": STORAGE_VOLUME_UNIT,                       # R6.20
         }
 
-        await self._es.update_document(
-            MVP_PLAN_EXECUTIONS_INDEX, execution_id, update_doc
+        # Persist with compare-and-set on the stored document (dispatch-board
+        # freeze rule 9). The transform re-locates the stop, because a board
+        # amend may have rewritten the stop list since the read above, and
+        # refuses on a superseded execution or a stop that is gone or done.
+        verdict: Dict[str, Optional[str]] = {"refusal": None}
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("status") == "superseded":
+                verdict["refusal"] = "superseded"
+                return None
+            stored_stops = list(current.get("stops") or [])
+            idx = next(
+                (
+                    i
+                    for i, stop in enumerate(stored_stops)
+                    if stop.get("station_id") == station_id
+                    and stop.get("sequence") == sequence
+                ),
+                None,
+            )
+            if idx is None:
+                verdict["refusal"] = "missing"
+                return None
+            if stored_stops[idx].get("status") == "completed":
+                verdict["refusal"] = "completed"
+                return None
+            stored_stops[idx] = {**stored_stops[idx], **stop_fields}
+            completed = (current.get("completed_stops") or 0) + 1
+            total = current.get("total_stops", len(stored_stops))
+            return {
+                **current,
+                "stops": stored_stops,
+                "completed_stops": completed,
+                # Update execution status if all stops complete
+                "status": "completed" if completed >= total else "in_progress",
+                "updated_at": now,
+            }
+
+        stored, applied = await self._es.atomic_update(
+            MVP_PLAN_EXECUTIONS_INDEX, execution_id, transform
         )
+        if not applied:
+            refusal = verdict["refusal"] or "missing"
+            if refusal == "superseded":
+                # The same branch as a plan that is no longer dispatched.
+                raise ValueError(
+                    f"Plan {plan_id} is not in 'dispatched' status "
+                    "(current: superseded)"
+                )
+            details = {
+                "plan_id": plan_id,
+                "route_id": route_id,
+                "station_id": station_id,
+                "sequence": sequence,
+            }
+            if refusal == "completed":
+                raise stop_already_completed(
+                    message=(
+                        f"Stop already completed: station_id={station_id}, "
+                        f"sequence={sequence}"
+                    ),
+                    details=details,
+                )
+            raise resource_not_found(
+                message=(
+                    f"Stop not found: station_id={station_id}, "
+                    f"sequence={sequence}"
+                ),
+                details=details,
+            )
+
+        completed_stops = stored.get("completed_stops", 0)
+        total_stops = stored.get("total_stops", len(stored.get("stops") or []))
+        all_complete = completed_stops >= total_stops
 
         logger.info(
             "Recorded check-in for plan %s route %s station %s "
@@ -552,10 +636,8 @@ class PlanExecutionService:
         }
 
         # Persist estimated cost to the plan document
-        await self._es.update_document(
-            MVP_LOAD_PLANS_INDEX,
-            plan_id,
-            {"estimated_cost": cost_breakdown},
+        await merge_plan_fields(
+            self._es, plan_id, {"estimated_cost": cost_breakdown}
         )
 
         logger.info(
@@ -647,8 +729,8 @@ class PlanExecutionService:
         }
 
         # Persist actual cost and variance to the plan document
-        await self._es.update_document(
-            MVP_LOAD_PLANS_INDEX,
+        await merge_plan_fields(
+            self._es,
             plan_id,
             {
                 "actual_cost": actual_cost_breakdown,

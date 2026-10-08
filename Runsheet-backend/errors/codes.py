@@ -415,6 +415,29 @@ class ErrorCode(str, Enum):
 
     DUPLICATE_METER_NUMBER = "DUPLICATE_METER_NUMBER"
     """A meter with this meter_number is already registered for the tenant (HTTP 409)"""
+    # Driver transitions serialized with board writes (dispatch-board K8.6);
+    # ORDER_CHANGED_CONCURRENTLY (OI-41) is shared and defined above.
+    BOARD_ROUTE_UPDATING = "BOARD_ROUTE_UPDATING"
+    """The dispatcher is re-publishing the board route this order is on (HTTP 409)"""
+    # Dispatch Board (dispatch-board K11, K2.4).
+    DISPATCH_BOARD_DISABLED = "DISPATCH_BOARD_DISABLED"
+    """The Dispatch Board is not enabled for the tenant (HTTP 404)"""
+    DISPATCH_BOARD_READ_ONLY = "DISPATCH_BOARD_READ_ONLY"
+    """The Dispatch Board is in shadow mode; writes are refused (HTTP 409)"""
+    DISPATCH_BOARD_MODE_UNAVAILABLE = "DISPATCH_BOARD_MODE_UNAVAILABLE"
+    """The Dispatch Board mode could not be read for a write (HTTP 503)"""
+    BOARD_LANE_CONFLICT = "BOARD_LANE_CONFLICT"
+    """A board lane changed since the client's expected version (HTTP 409)"""
+    BOARD_COMMAND_BLOCKED = "BOARD_COMMAND_BLOCKED"
+    """A board command has a blocking check and was not committed (HTTP 422)"""
+    BOARD_PUBLISH_IN_PROGRESS = "BOARD_PUBLISH_IN_PROGRESS"
+    """A board lane is publishing or in recovery; edits are refused (HTTP 409)"""
+    BOARD_PUBLISH_NOT_READY = "BOARD_PUBLISH_NOT_READY"
+    """A board lane is not ready to publish (HTTP 409)"""
+    BOARD_UNDO_STALE = "BOARD_UNDO_STALE"
+    """Undo or redo no longer applies to the current lane content (HTTP 409)"""
+    BOARD_OWNED_PLAN = "BOARD_OWNED_PLAN"
+    """The plan was published from the Dispatch Board and is managed there (HTTP 409)"""
 
     # Commerce feature-flag gates. 404 so a tenant without the module cannot
     # tell the surface exists. The string values are what the UI matches on.
@@ -475,6 +498,12 @@ class ErrorCode(str, Enum):
 
     PAYMENT_PROVIDER_ERROR = "PAYMENT_PROVIDER_ERROR"
     """The payment provider call failed (HTTP 502)"""
+    # Margin feed (margin-feed design, "Error handling summary").
+    MARGIN_IMPORT_TOO_LARGE = "MARGIN_IMPORT_TOO_LARGE"
+    """A cost-entry CSV import exceeds 5 MB or 10,000 rows (HTTP 413)"""
+
+    MARGIN_RECOMPUTE_RUNNING = "MARGIN_RECOMPUTE_RUNNING"
+    """A margin recompute run is already running for the tenant (HTTP 409)"""
 
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
@@ -618,6 +647,16 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.HOS_FIGURES_UNAVAILABLE: 409,
     ErrorCode.DRIVER_NOT_DISPATCH_ELIGIBLE: 409,
     ErrorCode.DUPLICATE_METER_NUMBER: 409,
+    ErrorCode.BOARD_ROUTE_UPDATING: 409,
+    ErrorCode.DISPATCH_BOARD_DISABLED: 404,
+    ErrorCode.DISPATCH_BOARD_READ_ONLY: 409,
+    ErrorCode.DISPATCH_BOARD_MODE_UNAVAILABLE: 503,
+    ErrorCode.BOARD_LANE_CONFLICT: 409,
+    ErrorCode.BOARD_COMMAND_BLOCKED: 422,
+    ErrorCode.BOARD_PUBLISH_IN_PROGRESS: 409,
+    ErrorCode.BOARD_PUBLISH_NOT_READY: 409,
+    ErrorCode.BOARD_UNDO_STALE: 409,
+    ErrorCode.BOARD_OWNED_PLAN: 409,
     ErrorCode.COMMERCE_DISABLED: 404,
     ErrorCode.CUSTOMERS_DISABLED: 404,
     ErrorCode.PRICING_DISABLED: 404,
@@ -638,6 +677,8 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.PAYMENT_IN_PROGRESS: 409,
     ErrorCode.PORTAL_PAYMENTS_UNAVAILABLE: 409,
     ErrorCode.PAYMENT_PROVIDER_ERROR: 502,
+    ErrorCode.MARGIN_IMPORT_TOO_LARGE: 413,
+    ErrorCode.MARGIN_RECOMPUTE_RUNNING: 409,
 }
 
 

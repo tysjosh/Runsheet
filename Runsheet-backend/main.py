@@ -82,19 +82,14 @@ from commerce.api.ar_aging_endpoints import (
     router as commerce_ar_aging_router,
     configure_ar_aging_api,
 )
-from commerce.api.price_protection_endpoints import (
-    router as commerce_price_protection_router,
-)
-from commerce.api.pricing_endpoints import (
-    router as commerce_pricing_rules_router,
-)
+from commerce.api.price_protection_endpoints import router as commerce_price_protection_router
+from commerce.api.pricing_endpoints import router as commerce_pricing_rules_router
+from commerce.api.margin_endpoints import router as commerce_margin_router
 from Agents.support.mvp_endpoints import router as mvp_fuel_router
 from portal.api import routers as portal_routers
 from portal.audit import PortalAuditMiddleware
-from fuel.api.fuel_ops_endpoints import (
-    router as fuel_ops_router,
-    mvp_router as fuel_ops_mvp_router,
-)
+from fuel.api.fuel_ops_endpoints import router as fuel_ops_router, mvp_router as fuel_ops_mvp_router
+from fuel.api.dispatch_board_endpoints import router as dispatch_board_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -222,6 +217,7 @@ for _router in (
     mvp_fuel_router,
     fuel_ops_router,
     fuel_ops_mvp_router,
+    dispatch_board_router,  # /api/fuel/board: flag-gated 404; wired by bootstrap/agents.py
     auth_admin_router,
     auth_account_router,
     # GET /api/auth/public-config — unauthenticated by an explicit
@@ -256,6 +252,8 @@ try:
         # return 404". They now honour it like the rest.
         app.include_router(commerce_price_protection_router)
         app.include_router(commerce_pricing_rules_router)
+        # Margin feed (admin only; 404 while commerce_margin_feed_enabled is off).
+        app.include_router(commerce_margin_router)
 except Exception:
     # Settings may not load cleanly at import time in test environments;
     # the router will be registered during lifespan if needed.
