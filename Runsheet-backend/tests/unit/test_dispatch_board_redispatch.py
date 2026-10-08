@@ -225,6 +225,27 @@ def test_p9_amend_keeps_fixed_sequences_and_never_reuses_numbers(statuses, pinne
     assert again.changed is False and again.stops == res.stops
 
 
+async def test_cancelled_shelved_order_no_longer_blocks_republish(w):
+    """R13.5 (staging task 41): a shelved dispatched order blocks re-publish
+    until it is placed or cancelled. Once cancelled, the lane publishes and its
+    removed load's plan is retired."""
+    await publish_a(w, "o1", "o2")
+    plan = w.plan_of("T1")
+    await w.command("unassign_orders", lanes=("T1",), order_ids=["o1", "o2"])
+    assert sorted(w.lane_doc("T1").shelf) == ["o1", "o2"]
+    preview = await w.dry("T1")
+    assert "unplaced_dispatched_order" in {r for e in preview["not_ready"] for r in e["reasons"]}
+    await w.order_service.apply_status_transition(order=w.order("o1"), new_status="cancelled", reason="customer", guard_stored_state=True)
+    preview = await w.dry("T1")
+    assert "unplaced_dispatched_order" in {r for e in preview["not_ready"] for r in e["reasons"]}  # o2 still dispatched
+    await w.order_service.apply_status_transition(order=w.order("o2"), new_status="cancelled", reason="customer", guard_stored_state=True)
+    preview = await w.dry("T1")
+    assert preview["not_ready"] == []
+    await w.run("T1")
+    assert w.lane_doc("T1").publish.state == "published", w.lane_doc("T1").publish.last_result
+    assert w.plan(plan.plan_id)["status"] == "superseded"
+
+
 # ---- (a)-(c): amend and new revision through the driver work read ----------
 
 
