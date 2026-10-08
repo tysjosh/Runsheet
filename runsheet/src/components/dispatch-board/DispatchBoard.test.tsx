@@ -54,6 +54,7 @@ import {
   makeSnapshot,
   makeTrayOrder,
 } from "./state/testFixtures";
+import { chooseView, moreAction, viewButton } from "./testBoard";
 import { todayIn, writeStoredZone } from "./viewState";
 
 const mockGetBoard = getBoard as jest.MockedFunction<typeof getBoard>;
@@ -316,8 +317,8 @@ describe("view state and toolbar", () => {
     mockGetBoard.mockResolvedValue(snap());
     renderBoard();
     await screen.findByText("Truck T1");
-    fireEvent.click(screen.getByRole("button", { name: "Sequence" }));
-    fireEvent.click(screen.getByRole("button", { name: "Compact" }));
+    chooseView("Sequence");
+    chooseView("Compact");
     fireEvent.change(screen.getByRole("searchbox"), {
       target: { value: "1042" },
     });
@@ -327,10 +328,7 @@ describe("view state and toolbar", () => {
     expect(url.get("zoom")).toBe("sequence");
     expect(url.get("density")).toBe("compact");
     expect(url.get("q")).toBe("1042");
-    expect(screen.getByRole("button", { name: "Sequence" })).toHaveAttribute(
-      "aria-pressed",
-      "true",
-    );
+    expect(viewButton()).toHaveAccessibleName("View: Sequence · Compact");
     const stored = JSON.parse(
       window.localStorage.getItem("runsheet.dispatchBoard.view.v1") ?? "{}",
     );
@@ -382,7 +380,7 @@ describe("view state and toolbar", () => {
     await screen.findByText("Truck T1");
     expect(screen.getByRole("button", { name: "Undo" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Redo" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+    moreAction("Keyboard shortcuts");
     expect(screen.getByText("Assign selected")).toBeInTheDocument();
   });
 });

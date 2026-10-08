@@ -12,10 +12,14 @@
  */
 
 import { createContext, useContext } from "react";
+import type { CreateOrderFormValues } from "../../components/ops/CreateOrderModal";
+
+/** Fields the Create order dialog can open with (e.g. from a low tank). */
+export type CreateOrderPrefill = Partial<CreateOrderFormValues>;
 
 export interface DashboardChrome {
-  /** Open the global "Create Order" modal. */
-  openCreateOrder: () => void;
+  /** Open the global "Create Order" modal, optionally prefilled. */
+  openCreateOrder: (prefill?: CreateOrderPrefill) => void;
   /** Open the AI Copilot side panel. */
   openAIChat: () => void;
 }

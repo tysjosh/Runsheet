@@ -9,11 +9,14 @@
  * During a drag, `preview` (the server's `fill_by_compartment`, in percent)
  * replaces the current fill so the dispatcher sees the post-drop state.
  */
+
 import type {
   Allocation,
   Check,
   CompartmentView,
 } from "../../services/dispatchBoardApi";
+import { PRODUCT } from "../../styles/tokens";
+import { productToken } from "../ui/ProductChip";
 
 export interface GaugePreview {
   /** Percent full per compartment after the drop. */
@@ -106,6 +109,13 @@ export function previewFromChecks(
   return { fill, blocked, cleaning };
 }
 
+/** Short visible product text: the RP 1637 symbol for catalog codes. */
+function gaugeProductText(code: string | null): string {
+  if (!code) return "—";
+  // Unknown codes show as sent (the `_unknown` rule of ProductChip).
+  return code in PRODUCT ? productToken(code).symbol : code;
+}
+
 const HATCH =
   "repeating-linear-gradient(45deg, transparent 0 3px, rgba(0,0,0,0.18) 3px 5px)";
 
@@ -138,8 +148,9 @@ export function CompartmentGauge({
             key={s.compartmentId}
             data-compartment={s.compartmentId}
             data-blocked={s.blocked || undefined}
-            className={`relative overflow-hidden rounded-sm border bg-gray-100 ${
-              s.blocked ? "border-2 border-error" : "border-gray-300"
+            data-product={s.product ?? undefined}
+            className={`relative overflow-hidden rounded-sm border bg-slate-100 ${
+              s.blocked ? "border-2 border-red-700" : "border-slate-300"
             }`}
             style={{
               width: `${((caps[s.compartmentId] ?? 0) / total) * 100}%`,
@@ -147,17 +158,28 @@ export function CompartmentGauge({
             }}
             title={segmentText(s)}
           >
+            {/* Fill in the product's RP 1637 colour; the label names it. */}
             <span
               aria-hidden="true"
-              className="absolute inset-x-0 bottom-0 bg-primary/40"
-              style={{ height: `${s.percent}%` }}
+              className="absolute inset-x-0 bottom-0 border-t"
+              style={{
+                height: `${s.percent}%`,
+                backgroundColor: s.product
+                  ? productToken(s.product).bg
+                  : "var(--rs-slate-300, #cbd5e1)",
+                borderColor: s.product
+                  ? productToken(s.product).border
+                  : "transparent",
+              }}
             />
             <span className="sr-only">{segmentText(s)}</span>
             <span
               aria-hidden="true"
-              className="relative block truncate px-0.5 text-[10px] font-medium leading-tight text-gray-900"
+              className="relative m-px inline-block max-w-[calc(100%-2px)] truncate rounded-sm bg-white/90 px-0.5 text-[10px] font-semibold leading-tight text-slate-900"
             >
-              {compact ? `${s.percent}%` : `${s.product ?? "—"} ${s.percent}%`}
+              {compact
+                ? `${s.percent}%`
+                : `${gaugeProductText(s.product)} ${s.percent}%`}
               {s.needsCleaning && " Clean"}
               {s.blocked && " Blocked"}
             </span>

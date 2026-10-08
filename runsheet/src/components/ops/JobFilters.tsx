@@ -14,6 +14,8 @@ export interface JobFilterValues {
 interface JobFiltersProps {
   filters: JobFilterValues;
   onChange: (filters: JobFilterValues) => void;
+  /** Status is a chip row in the Jobs toolbar (UI revamp R8.6). */
+  hideStatus?: boolean;
 }
 
 const JOB_TYPE_OPTIONS: { value: JobType | ""; label: string }[] = [
@@ -41,14 +43,20 @@ const STATUS_OPTIONS: { value: JobStatus | ""; label: string }[] = [
  *
  * Validates: Requirement 11.3
  */
-export default function JobFilters({ filters, onChange }: JobFiltersProps) {
+export default function JobFilters({
+  filters,
+  onChange,
+  hideStatus = false,
+}: JobFiltersProps) {
   const update = (patch: Partial<JobFilterValues>) => {
     onChange({ ...filters, ...patch });
   };
 
   return (
     <div className="flex flex-wrap items-center gap-3">
-      <Filter className="w-4 h-4 text-gray-500" aria-hidden="true" />
+      {!hideStatus && (
+        <Filter className="w-4 h-4 text-gray-500" aria-hidden="true" />
+      )}
 
       <select
         value={filters.job_type}
@@ -63,18 +71,20 @@ export default function JobFilters({ filters, onChange }: JobFiltersProps) {
         ))}
       </select>
 
-      <select
-        value={filters.status}
-        onChange={(e) => update({ status: e.target.value as JobStatus | "" })}
-        className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
-        aria-label="Filter by status"
-      >
-        {STATUS_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
-        ))}
-      </select>
+      {!hideStatus && (
+        <select
+          value={filters.status}
+          onChange={(e) => update({ status: e.target.value as JobStatus | "" })}
+          className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
+          aria-label="Filter by status"
+        >
+          {STATUS_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      )}
 
       <input
         type="text"

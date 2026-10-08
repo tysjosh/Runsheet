@@ -16,7 +16,7 @@
  */
 
 import { Check, Clock, RotateCcw, ShieldAlert, X } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgentWebSocket } from "../../hooks/useAgentWebSocket";
 import type { ApprovalEntry } from "../../services/agentApi";
 import {
@@ -104,7 +104,12 @@ function Spinner({ light }: { light: boolean }) {
   );
 }
 
-export default function ApprovalQueue() {
+export interface ApprovalQueueProps {
+  /** Approval to scroll to and highlight (Live → Approvals `?id=`). */
+  focusId?: string;
+}
+
+export default function ApprovalQueue({ focusId }: ApprovalQueueProps = {}) {
   const [approvals, setApprovals] = useState<ApprovalEntry[]>([]);
   const [loading, setLoading] = useState(true);
   // Per-row in-flight flags so one row's request never unlocks another's.
@@ -232,6 +237,19 @@ export default function ApprovalQueue() {
     },
     [clearRowError, setRowBusy],
   );
+
+  // Bring the focused approval into view once it has loaded.
+  const focusedOnce = useRef(false);
+  useEffect(() => {
+    if (!focusId || loading || focusedOnce.current) return;
+    const el = document.querySelector<HTMLElement>(
+      `[data-testid="approval-row-${CSS.escape(focusId)}"]`,
+    );
+    if (!el) return;
+    focusedOnce.current = true;
+    el.scrollIntoView?.({ block: "center" });
+    el.focus({ preventScroll: true });
+  }, [focusId, loading, approvals]);
 
   const unresolved = approvals.filter(isUnresolved);
   const pendingCount = unresolved.filter((a) => a.status === "pending").length;
@@ -380,7 +398,13 @@ export default function ApprovalQueue() {
                 key={id}
                 data-testid={`approval-row-${id}`}
                 aria-busy={applying ? "true" : undefined}
-                className="border border-gray-100 rounded-lg p-3 hover:border-gray-200 transition-colors"
+                tabIndex={id === focusId ? -1 : undefined}
+                aria-current={id === focusId ? "true" : undefined}
+                className={`border rounded-lg p-3 transition-colors focus:outline-none ${
+                  id === focusId
+                    ? "border-fuchsia-600 ring-2 ring-fuchsia-200"
+                    : "border-gray-100 hover:border-gray-200"
+                }`}
               >
                 {/* Top row: agent + risk + time */}
                 <div className="flex items-center justify-between mb-2">

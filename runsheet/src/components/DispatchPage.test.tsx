@@ -24,7 +24,7 @@ jest.mock("../services/dispatchBoardApi", () => {
   const actual = jest.requireActual("../services/dispatchBoardApi");
   return { ...actual, getBoardStatus: jest.fn() };
 });
-jest.mock("./dispatch/SchedulingJobBoard", () => ({
+jest.mock("./dispatch/JobsView", () => ({
   __esModule: true,
   default: () => <div>Scheduling body</div>,
 }));

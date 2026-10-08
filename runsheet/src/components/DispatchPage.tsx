@@ -8,11 +8,10 @@
  * mode is active; otherwise Jobs is. `?tab=board|jobs|plans` picks a view, and
  * the old `scheduling` / `distribution` values still work as aliases.
  *
- * The view switcher sits in the title row. Task 2.2 moves the board's own
- * toolbar into the shared title/toolbar rows; until then the board renders
- * its toolbar below.
+ * The view switcher sits in the title row. The board contributes its day,
+ * shift and primary actions to that row through `usePageChrome()` and adds a
+ * single toolbar row of its own (UI revamp §7.2).
  */
-import { CalendarClock, Droplets, LayoutGrid } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import {
   type BoardMode,
@@ -28,7 +27,7 @@ import {
   useUrlTab,
 } from "./ui";
 
-const SchedulingJobBoard = lazy(() => import("./dispatch/SchedulingJobBoard"));
+const JobsView = lazy(() => import("./dispatch/JobsView"));
 const FuelDistributionPage = lazy(() => import("./ops/FuelDistributionPage"));
 const DispatchBoard = lazy(() => import("./dispatch-board/DispatchBoard"));
 
@@ -43,11 +42,10 @@ export const DISPATCH_TAB_ALIASES: Record<string, string> = {
 const BOARD_TAB: TabItem = {
   id: "board",
   label: "Board",
-  icon: <LayoutGrid className="w-4 h-4" />,
 };
 const TABS: TabItem[] = [
-  { id: "jobs", label: "Jobs", icon: <CalendarClock className="w-4 h-4" /> },
-  { id: "plans", label: "Plans", icon: <Droplets className="w-4 h-4" /> },
+  { id: "jobs", label: "Jobs" },
+  { id: "plans", label: "Plans" },
 ];
 
 export default function DispatchPage() {
@@ -110,7 +108,7 @@ export default function DispatchPage() {
                 onExit={() => setActive("jobs")}
               />
             )}
-            {active === "jobs" && <SchedulingJobBoard />}
+            {active === "jobs" && <JobsView />}
             {active === "plans" && <FuelDistributionPage />}
           </Suspense>
         </TabPanel>

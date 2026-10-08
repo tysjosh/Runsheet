@@ -18,9 +18,9 @@ const EXPECT: Record<
   number,
   { h1?: string; heading?: RegExp; tab?: string; api?: string; text?: RegExp }
 > = {
-  0: { h1: "Today" },
+  0: { h1: "Dashboard" },
   1: { h1: "Dispatch", tab: "Jobs" },
-  2: { text: /Back to Jobs/, api: `/scheduling/jobs/${MISSING_ID}` },
+  2: { h1: "Job not found", api: `/scheduling/jobs/${MISSING_ID}` },
   3: { heading: /job|cargo/i },
   4: { h1: "Live" },
   6: { h1: "Fuel", tab: "Stations" },
@@ -33,7 +33,7 @@ const EXPECT: Record<
   13: { heading: /invoice/i },
   14: { heading: /account/i },
   15: { h1: "Billing", tab: "AR Aging" },
-  16: { text: /Not found/, api: `/orders/${MISSING_ID}` },
+  16: { h1: "Order not found", api: `/orders/${MISSING_ID}` },
   17: { heading: /terminal/i },
   18: { h1: "Settings" },
   19: { h1: "Settings" },

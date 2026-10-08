@@ -8,6 +8,7 @@
  * - `?truck=` scrolls the windowed grid to that lane once (R1.6).
  * - The area under the last lane takes a dragged truck (add lane).
  */
+
 import { CalendarClock } from "lucide-react";
 import {
   type KeyboardEvent,
@@ -19,6 +20,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { assignLaneIdentities } from "../../../lib/identity";
 import type { LaneView } from "../../../services/dispatchBoardApi";
 import { EmptyState } from "../../ui";
 import { focusKey, useBoard } from "../BoardContext";
@@ -119,6 +121,12 @@ export function BoardGrid({
     [api.serviceDate, api.view.shift, api.snapshot.shifts, api.timezone],
   );
   const bodyWidth = timelineWidth(window);
+  // Identity colours in display order, so neighbours never clash (§2.3).
+  const laneKey = lanes.map((l) => l.truck_id).join("|");
+  const identities = useMemo(
+    () => assignLaneIdentities(laneKey ? laneKey.split("|") : []),
+    [laneKey],
+  );
 
   const heights = useMemo(
     () =>
@@ -259,6 +267,7 @@ export function BoardGrid({
                 window={window}
                 minWidth={bodyWidth}
                 collapsed={api.collapsed.has(lane.truck_id)}
+                identity={identities.get(lane.truck_id)?.hex}
               />
             ))}
             <div

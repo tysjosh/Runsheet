@@ -273,7 +273,7 @@ it("Accept all marks a blocked suggestion and offers its passing loads (R16.3)",
     return okResponse(snapshot().lanes);
   });
   await renderBoard(snapshot());
-  fireEvent.click(screen.getByRole("button", { name: "Suggestions (3)" }));
+  fireEvent.click(screen.getByRole("button", { name: "3 suggestions" }));
   const dialog = screen.getByRole("dialog", { name: "Agent suggestions" });
   await act(async () => {
     fireEvent.click(

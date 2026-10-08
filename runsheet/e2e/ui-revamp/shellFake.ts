@@ -6,7 +6,18 @@
  */
 import type { BrowserContext, Page, Route } from "@playwright/test";
 import { FakeBoard } from "../dispatchBoardFake";
-import { CUSTOMERS, INVOICES, JOBS, ORDERS, PROFILE, TENANT } from "./fixtures";
+import {
+  APPROVALS,
+  ASSETS,
+  CUSTOMERS,
+  FUEL_ALERTS,
+  INVOICES,
+  JOBS,
+  ORDERS,
+  PLANS,
+  PROFILE,
+  TENANT,
+} from "./fixtures";
 
 export const ORIGIN = "http://localhost:8080";
 /** Id the redirect spec uses for detail routes (answered 404). */
@@ -122,8 +133,21 @@ export async function installShellFake(
     if (path === "/orders") {
       const status = url.searchParams.get("status");
       const rows = status ? ORDERS.filter((o) => o.status === status) : ORDERS;
-      return json(200, paginated(rows));
+      // The list's own page size (chip counts ask for size=1 and read total).
+      const size = Number(url.searchParams.get("size") ?? rows.length);
+      return json(200, {
+        ...paginated(rows.slice(0, size)),
+        total: rows.length,
+      });
     }
+    if (path === "/fuel/mvp/plans") return json(200, paginated(PLANS));
+    if (path === "/fleet/assets")
+      return json(200, { data: ASSETS, request_id: "e2e" });
+    if (path === "/fuel/alerts")
+      return json(200, { data: FUEL_ALERTS, request_id: "e2e" });
+    if (path === "/agent/approvals") return json(200, paginated(APPROVALS));
+    if (path === "/agent/config/autonomy")
+      return json(200, { level: "auto-low", request_id: "e2e" });
     if (path === "/scheduling/jobs/delayed")
       return json(200, {
         data: JOBS.filter((j) => j.delayed),
@@ -134,7 +158,25 @@ export async function installShellFake(
         data: JOBS.filter((j) => j.status === "in_progress"),
         request_id: "e2e",
       });
-    if (path === "/scheduling/jobs") return json(200, paginated(JOBS));
+    if (path === "/scheduling/jobs") {
+      // Server-side status and paging, as the backend does (chip counts ask
+      // for size=1 and read pagination.total).
+      const status = url.searchParams.get("status");
+      const rows = status ? JOBS.filter((j) => j.status === status) : JOBS;
+      const size = Number(url.searchParams.get("size") ?? 20);
+      const page = Number(url.searchParams.get("page") ?? 1);
+      const body = paginated(rows.slice((page - 1) * size, page * size));
+      return json(200, {
+        ...body,
+        total: rows.length,
+        pagination: {
+          page,
+          size,
+          total: rows.length,
+          total_pages: Math.ceil(rows.length / size),
+        },
+      });
+    }
     // Single-object read: the generic list body would leave `trucks` unset.
     if (path === "/compliance/ifta/report")
       return json(200, {
