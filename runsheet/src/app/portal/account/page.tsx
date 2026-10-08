@@ -10,12 +10,18 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { usePortalMe } from "../../../components/portal/PortalContext";
 import PortalTitleRow from "../../../components/portal/PortalTitleRow";
-import { card, secondaryButton } from "../../../components/portal/styles";
+import {
+  listSection,
+  secondaryButton,
+  space,
+} from "../../../components/portal/styles";
 import { signOut } from "../../../utils/auth";
 
 function Row({ term, children }: { term: string; children: React.ReactNode }) {
   return (
-    <div className="border-t border-slate-100 px-4 py-3 first:border-t-0 sm:grid sm:grid-cols-[180px_1fr] sm:gap-4">
+    <div
+      className={`border-t border-slate-100 first:border-t-0 sm:grid sm:grid-cols-[180px_1fr] sm:gap-4 md:px-4 ${space.rowY}`}
+    >
       <dt className="text-sm text-text-muted">{term}</dt>
       <dd className="break-words text-[15px] font-medium text-text">
         {children}
@@ -42,11 +48,11 @@ export default function PortalAccountPage() {
   return (
     <>
       <PortalTitleRow title="Account" />
-      <div className="space-y-4">
+      <div className="space-y-6 md:space-y-4">
         <section
           aria-labelledby="account-heading"
           data-portal-first
-          className={card}
+          className={listSection}
         >
           <h2 id="account-heading" className="sr-only">
             Your account

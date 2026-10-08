@@ -18,7 +18,7 @@ import {
   window as formatWindow,
   volume,
 } from "./portalFormat";
-import { rowButton } from "./styles";
+import { rowButton, space } from "./styles";
 
 export function quantityText(order: PortalOrder, unit = "gal"): string {
   if (order.delivered_gallons !== null && order.status_code === "delivered") {
@@ -65,7 +65,7 @@ const OrderRow = forwardRef<
     ref={ref}
     tabIndex={-1}
     data-order-row
-    className="grid grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-0.5 border-t border-slate-100 px-3.5 py-2.5 first:border-t-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
+    className={`grid grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-x-3 border-t border-slate-100 first:border-t-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus ${space.inset} ${space.listRowY}`}
   >
     <span className="row-span-2 self-start pt-0.5">
       {order.product_code ? (
@@ -74,7 +74,7 @@ const OrderRow = forwardRef<
         <span aria-hidden="true" />
       )}
     </span>
-    <p className="min-w-0 truncate text-[15px] font-semibold text-text">
+    <p className="min-w-0 truncate text-[15px] font-semibold leading-5 text-text">
       {title} · {quantityText(order, unit)}
     </p>
     <PortalStatus
@@ -82,11 +82,11 @@ const OrderRow = forwardRef<
       code={order.status_code}
       label={order.status_label}
     />
-    <p className="col-span-2 col-start-2 min-w-0 truncate text-sm text-text-muted">
+    <p className="col-span-2 col-start-2 min-w-0 truncate text-sm leading-5 text-text-muted">
       {secondaryLine(order)}
     </p>
     {order.cancellable && onCancel && (
-      <div className="col-span-2 col-start-2 pt-1.5">
+      <div className="col-span-2 col-start-2 pt-2">
         <button
           type="button"
           className={rowButton}

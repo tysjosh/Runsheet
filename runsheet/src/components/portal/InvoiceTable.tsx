@@ -9,7 +9,7 @@ import type { PortalInvoice } from "../../services/portalApi";
 import PortalStatus from "./PortalStatus";
 import PortalTable, { type PortalColumn } from "./PortalTable";
 import { date as formatDate, money } from "./portalFormat";
-import { textLink } from "./styles";
+import { space, textLink } from "./styles";
 import { PORTAL_TABLES, useMediaQuery } from "./useMediaQuery";
 
 export function invoiceName(invoice: PortalInvoice): string {
@@ -26,7 +26,7 @@ export function InvoiceRow({ invoice }: { invoice: PortalInvoice }) {
   return (
     <li
       data-invoice-row
-      className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-0.5 border-t border-slate-100 px-3.5 py-2.5 first:border-t-0"
+      className={`grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 border-t border-slate-100 first:border-t-0 ${space.inset} ${space.listRowY}`}
     >
       <span className="flex min-w-0 items-center gap-2">
         <Link
@@ -44,10 +44,12 @@ export function InvoiceRow({ invoice }: { invoice: PortalInvoice }) {
       <span className="text-right text-[15px] font-semibold tabular-nums text-text">
         {money(invoice.remaining_cents)}
       </span>
-      <span className="min-w-0 truncate text-sm text-text-muted">
+      <span className="min-w-0 truncate text-sm leading-5 text-text-muted">
         Due {formatDate(invoice.due_date)} · {invoice.account_display_name}
       </span>
-      <span className="text-right text-xs text-text-muted">Balance due</span>
+      <span className="text-right text-xs leading-5 text-text-muted">
+        Balance due
+      </span>
     </li>
   );
 }

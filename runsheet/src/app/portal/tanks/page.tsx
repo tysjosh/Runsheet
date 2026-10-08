@@ -14,7 +14,7 @@ import {
 import { usePortalMe } from "../../../components/portal/PortalContext";
 import PortalTitleRow from "../../../components/portal/PortalTitleRow";
 import RequestDeliveryDialog from "../../../components/portal/RequestDeliveryDialog";
-import { card } from "../../../components/portal/styles";
+import { listSection, space } from "../../../components/portal/styles";
 import TankRow from "../../../components/portal/TankRow";
 import { sortTanks } from "../../../components/portal/tankLevel";
 import {
@@ -40,7 +40,7 @@ export default function PortalTanksPage() {
     <>
       <PortalTitleRow title="Tanks" />
       {tanks.loading ? (
-        <div data-portal-first className={`${card} px-3.5`}>
+        <div data-portal-first className={`${listSection} ${space.inset}`}>
           <PortalLoading label="Loading your tanks…" />
         </div>
       ) : tanks.error ? (
@@ -48,7 +48,7 @@ export default function PortalTanksPage() {
           <PortalSectionError message={tanks.error} onRetry={tanks.reload} />
         </div>
       ) : ranked.length === 0 ? (
-        <div data-portal-first className={card}>
+        <div data-portal-first className={listSection}>
           <PortalEmpty
             icon={<Fuel className="h-8 w-8" />}
             title="No tanks are set up yet."
@@ -56,9 +56,15 @@ export default function PortalTanksPage() {
           />
         </div>
       ) : (
-        <ul data-portal-first className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <ul
+          data-portal-first
+          className="grid grid-cols-1 divide-y divide-slate-100 sm:grid-cols-2 sm:gap-3 sm:divide-y-0"
+        >
           {ranked.map((tank) => (
-            <li key={tank.customer_tank_id} className={card}>
+            <li
+              key={tank.customer_tank_id}
+              className="sm:rounded-xl sm:border sm:border-border sm:bg-surface sm:px-3.5 md:px-0"
+            >
               <TankRow
                 tank={tank}
                 title={tanks.titles.get(tank.customer_tank_id) ?? tank.label}

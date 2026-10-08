@@ -17,7 +17,7 @@ import { signOut } from "../../utils/auth";
 import PortalAccountMenu from "./PortalAccountMenu";
 import PortalTabBar from "./PortalTabBar";
 import { isCurrentSection, portalNavItems } from "./portalNav";
-import { focusRing } from "./styles";
+import { focusRing, space } from "./styles";
 import { PORTAL_TABS_IN_TOP_BAR, useMediaQuery } from "./useMediaQuery";
 
 export default function PortalShell({
@@ -52,7 +52,7 @@ export default function PortalShell({
   const mark = (supplierName.trim()[0] ?? "R").toUpperCase();
 
   return (
-    <div className="min-h-screen bg-canvas text-[15px] text-text max-md:text-base">
+    <div className="min-h-screen bg-surface text-[15px] text-text max-md:text-base md:bg-canvas">
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-4 focus:top-2 focus:z-50 focus:rounded-lg focus:bg-surface focus:px-4 focus:py-2 focus:text-sm focus:font-semibold focus:text-link focus:shadow"
@@ -63,16 +63,26 @@ export default function PortalShell({
         data-portal-topbar
         className="sticky top-0 z-40 h-14 border-b border-border bg-surface"
       >
-        <div className="mx-auto flex h-14 max-w-[1120px] items-center gap-3 px-4">
+        <div
+          className={`mx-auto flex h-14 max-w-[1120px] items-center gap-3 py-2.5 ${space.gutter}`}
+        >
           <span
             aria-hidden="true"
             className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-[13px] font-extrabold text-white"
           >
             {mark}
           </span>
-          <div className="min-w-0 leading-tight md:max-w-[240px]">
-            <p className="truncate text-xs text-text-muted">{supplierName}</p>
-            <p className="truncate text-[15px] font-bold text-text">
+          <div className="min-w-0 flex-1 md:max-w-[240px] md:flex-none">
+            <p
+              className="truncate text-xs leading-4 text-text-muted"
+              title={supplierName}
+            >
+              {supplierName}
+            </p>
+            <p
+              className="truncate text-[15px] font-bold leading-[18px] text-text"
+              title={customerName}
+            >
               {customerName}
             </p>
           </div>
@@ -112,7 +122,7 @@ export default function PortalShell({
       <main
         id="main"
         tabIndex={-1}
-        className="mx-auto max-w-[1120px] px-4 pb-[calc(88px+env(safe-area-inset-bottom))] focus:outline-none md:pb-10"
+        className={`mx-auto max-w-[1120px] ${space.gutter} pb-[calc(88px+env(safe-area-inset-bottom))] focus:outline-none md:pb-10`}
       >
         {children}
       </main>

@@ -119,6 +119,82 @@ test.describe("portal chrome budget", () => {
     expect(small).toEqual([]);
   });
 
+  // Spacing scale (owner feedback, 2026-10-08): 20 px gutters, no card around
+  // phone list sections, 12 / 8 px around the title row, and truncated names
+  // with a title attribute in the top bar.
+  test("phone: 20 px gutters, title row spacing, uncarded sections, top bar names", async ({
+    page,
+  }) => {
+    await openPortal(page, "/portal", PHONE);
+    await page.locator("[data-tank-row]").first().waitFor();
+    const m = await page.evaluate(() => {
+      const first = document.querySelector<HTMLElement>(
+        "main [data-portal-first]",
+      );
+      const h1 = document.querySelector<HTMLElement>("main#main h1");
+      const row = h1?.parentElement;
+      const names = Array.from(
+        document.querySelectorAll<HTMLElement>("header[data-portal-topbar] p"),
+      );
+      const cs = first ? getComputedStyle(first) : null;
+      return {
+        firstLeft: first?.getBoundingClientRect().left ?? null,
+        firstBorder: cs?.borderTopWidth ?? null,
+        rowTop: row?.getBoundingClientRect().top ?? null,
+        rowPadTop: row ? getComputedStyle(row).paddingTop : null,
+        rowPadBottom: row ? getComputedStyle(row).paddingBottom : null,
+        names: names.map((n) => ({
+          title: n.getAttribute("title"),
+          overflow: getComputedStyle(n).textOverflow,
+        })),
+      };
+    });
+    expect(m.firstLeft).toBe(20);
+    expect(m.firstBorder).toBe("0px");
+    expect(m.rowTop).toBe(56);
+    expect(m.rowPadTop).toBe("12px");
+    expect(m.rowPadBottom).toBe("8px");
+    expect(m.names).toHaveLength(2);
+    for (const n of m.names) {
+      expect(n.title).toBeTruthy();
+      expect(n.overflow).toBe("ellipsis");
+    }
+  });
+  test("phone: order rows stay ≤ 72 px (R14.9) with the larger padding", async ({
+    page,
+  }) => {
+    await openPortal(page, "/portal/orders", PHONE);
+    const rows = page.locator("[data-order-row]");
+    await rows.first().waitFor();
+    const heights = await rows.evaluateAll((els) =>
+      els
+        .filter((el) => !el.querySelector("button"))
+        .map((el) => Math.round(el.getBoundingClientRect().height)),
+    );
+    expect(heights.length).toBeGreaterThan(0);
+    for (const h of heights) expect(h).toBeLessThanOrEqual(72);
+  });
+  test("desktop: list sections are cards and the title row is 16 / 12", async ({
+    page,
+  }) => {
+    await openPortal(page, "/portal", DESKTOP);
+    await page.locator("[data-tank-row]").first().waitFor();
+    const m = await page.evaluate(() => {
+      const first = document.querySelector<HTMLElement>(
+        "main [data-portal-first]",
+      );
+      const row =
+        document.querySelector<HTMLElement>("main#main h1")?.parentElement;
+      return {
+        border: first ? getComputedStyle(first).borderTopWidth : null,
+        padTop: row ? getComputedStyle(row).paddingTop : null,
+        padBottom: row ? getComputedStyle(row).paddingBottom : null,
+      };
+    });
+    expect(m.border).toBe("1px");
+    expect(m.padTop).toBe("16px");
+    expect(m.padBottom).toBe("12px");
+  });
   // Numbers are `INV-` + 6 zero-padded digits (invoice_service), growing past
   // a million; both must show whole and keep the budget.
   for (const number of ["INV-001021", "INV-12345678"]) {

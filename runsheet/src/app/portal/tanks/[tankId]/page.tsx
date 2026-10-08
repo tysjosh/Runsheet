@@ -28,9 +28,11 @@ import {
 import RequestDeliveryDialog from "../../../../components/portal/RequestDeliveryDialog";
 import {
   card,
+  listSection,
   primaryButton,
   secondaryButton,
   sectionHeading,
+  space,
 } from "../../../../components/portal/styles";
 import { NextDelivery } from "../../../../components/portal/TankRow";
 import {
@@ -202,16 +204,19 @@ export default function PortalTankDetailPage() {
           </dl>
         </section>
 
-        <section aria-labelledby="history-heading" className={card}>
-          <h2 id="history-heading" className={`${sectionHeading} px-4 pt-3`}>
+        <section aria-labelledby="history-heading" className={listSection}>
+          <h2
+            id="history-heading"
+            className={`${sectionHeading} md:px-4 md:pt-3`}
+          >
             Delivery history
           </h2>
           {history.loading ? (
-            <div className="px-4">
+            <div className="md:px-4">
               <PortalLoading label="Loading deliveries…" />
             </div>
           ) : history.error && history.items.length === 0 ? (
-            <div className="px-4 pb-2">
+            <div className="pb-2 md:px-4">
               <PortalSectionError
                 message={portalErrorMessage(history.error, {
                   fallback: "We couldn't load the delivery history.",
@@ -238,18 +243,18 @@ export default function PortalTankDetailPage() {
               {history.items.map((d) => (
                 <li
                   key={d.order_id}
-                  className="grid grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-0.5 border-t border-slate-100 px-4 py-2.5"
+                  className={`grid grid-cols-[22px_minmax(0,1fr)_auto] items-center gap-x-3 border-t border-slate-100 first:border-t-0 md:px-4 ${space.listRowY}`}
                 >
                   <span className="row-span-2 self-start pt-0.5">
                     {d.product_code && <ProductCap code={d.product_code} />}
                   </span>
-                  <span className="truncate text-[15px] font-semibold text-text">
+                  <span className="truncate text-[15px] font-semibold leading-6 text-text">
                     {deliveredVolume(d.delivered_gallons, unit)} delivered
                   </span>
                   <span className="text-sm text-text-muted">
                     {d.ticket_number ? `ticket ${d.ticket_number}` : ""}
                   </span>
-                  <span className="col-span-2 col-start-2 truncate text-sm text-text-muted">
+                  <span className="col-span-2 col-start-2 truncate text-sm leading-5 text-text-muted">
                     {dateTime(d.delivered_at)}
                     {d.product_code ? ` · ${productName(d.product_code)}` : ""}
                   </span>
@@ -258,7 +263,7 @@ export default function PortalTankDetailPage() {
             </ul>
           )}
           {Boolean(history.error) && history.items.length > 0 && (
-            <div className="px-4 pb-2">
+            <div className="pb-2 md:px-4">
               <PortalSectionError
                 message={portalErrorMessage(history.error, {
                   fallback: "We couldn't load more deliveries.",

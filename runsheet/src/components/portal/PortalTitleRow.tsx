@@ -1,19 +1,23 @@
 "use client";
 
 /**
- * The 48 px title row under the top bar (design §11.1): an optional back
- * button, exactly one `<h1>` (20 px bold), an optional status badge, and at
- * most one primary action on the right. No subtitles.
+ * The title row under the top bar (design §11.1): an optional back button,
+ * exactly one `<h1>` (20 px bold), an optional status badge, and at most one
+ * primary action on the right. No subtitles.
+ *
+ * Spacing comes from `space.titleRow`: on phones 12 px above, a 44 px row and
+ * 8 px below, always (min-height 64 / 76 px, so every page lines up) (56 + 12 + 44 + 8 = 120, the chrome budget); from 768 px 16 px
+ * above, a 48 px row and 12 px below (132 ≤ 136).
  *
  * `wrapTitle` is for titles that carry an identifier the reader must see in
- * full (invoice numbers): below 640 px the title drops to 18/24 px and wraps
- * instead of truncating, so two lines still fit the 120 px chrome budget
- * (56 top bar + 56 row + 8 gap). From 640 px up it behaves like the default.
+ * full (invoice numbers): below 640 px the title drops to 18/20 px and wraps
+ * instead of truncating, so two lines still fit the 44 px row. From 640 px up
+ * it behaves like the default.
  */
 import { ArrowLeft } from "lucide-react";
 import Link from "next/link";
 import { Fragment, forwardRef, type ReactNode } from "react";
-import { focusRing } from "./styles";
+import { focusRing, space } from "./styles";
 
 export interface PortalTitleRowProps {
   title: string;
@@ -41,7 +45,9 @@ function wrapWords(title: string): ReactNode {
 
 const PortalTitleRow = forwardRef<HTMLHeadingElement, PortalTitleRowProps>(
   ({ title, back, badge, action, wrapTitle = false }, ref) => (
-    <div className="flex min-h-12 items-center gap-2 py-1">
+    <div
+      className={`flex min-h-16 items-center gap-3 md:min-h-[76px] ${space.titleRow}`}
+    >
       {back && (
         <Link
           href={back.href}
@@ -57,7 +63,7 @@ const PortalTitleRow = forwardRef<HTMLHeadingElement, PortalTitleRowProps>(
         tabIndex={-1}
         className={`min-w-0 font-bold text-text focus:outline-none ${
           wrapTitle
-            ? "text-lg leading-6 [overflow-wrap:anywhere] sm:truncate sm:text-xl sm:leading-tight"
+            ? "text-lg leading-5 [overflow-wrap:anywhere] sm:truncate sm:text-xl sm:leading-tight"
             : "truncate text-xl leading-tight"
         }`}
       >

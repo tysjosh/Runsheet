@@ -25,3 +25,40 @@ export const fieldError = "mt-1 text-sm font-semibold text-red-700";
 
 export const card = "rounded-xl border border-border bg-surface";
 export const sectionHeading = "text-[15px] font-bold text-text";
+
+/**
+ * Portal spacing scale, on the shared `SPACE` tokens (0 4 8 12 16 20 24 32,
+ * `design/tokens.json`) as Tailwind steps. Use these instead of one-off
+ * paddings so phone and desktop rhythm stay consistent.
+ */
+export const space = {
+  /** Page gutter: SPACE[5] = 20 px, the driver app's screen padding. */
+  gutter: "px-5",
+  /** Title row: 12 above / 8 below on phones (the 120 px budget with a 44 px row), 16 / 12 from 768 px. */
+  titleRow: "pt-3 pb-2 md:pt-4 md:pb-3",
+  /** Gap between page sections: 32 px on phones (no cards to separate them), 16 px between cards. */
+  sectionGap: "gap-8 md:gap-4",
+  /** Row vertical padding: 16 px on phones, 12 px inside desktop cards. */
+  rowY: "py-4 md:py-3",
+  /**
+   * Two-line list rows (orders, invoices, delivery history): R14.9 caps them
+   * at 72 px below 1024, and a 24 px badge line + a 20 px text line leaves
+   * 14 px a side; the 1 px divider above counts toward the top.
+   */
+  listRowY: "pt-[13px] pb-3.5 md:py-3",
+  /** Horizontal inset inside a list section: none on phones (the gutter applies), 14 px in a card. */
+  inset: "md:px-3.5",
+} as const;
+
+/**
+ * A list section: on phones it sits on the page with dividers between rows
+ * (no card-within-a-page); from 768 px it's a card, as in the mockup.
+ */
+export const listSection =
+  "md:rounded-xl md:border md:border-border md:bg-surface";
+
+/**
+ * The title row's primary action. Still 44 px tall on phones (R14.19), with
+ * a narrower 14 px label so it sits beside the title without crowding it.
+ */
+export const titleActionButton = `${primaryButton} max-md:px-3.5 max-md:text-sm`;

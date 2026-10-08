@@ -31,8 +31,10 @@ import {
 } from "../../../../components/portal/portalFormat";
 import {
   card,
+  listSection,
   secondaryButton,
   sectionHeading,
+  space,
 } from "../../../../components/portal/styles";
 import {
   PORTAL_PHONE,
@@ -206,19 +208,24 @@ export default function PortalInvoiceDetailPage() {
           </section>
         )}
 
-        <section aria-labelledby="lines-heading" className={card}>
-          <h2 id="lines-heading" className={`${sectionHeading} px-4 pt-3`}>
+        <section aria-labelledby="lines-heading" className={listSection}>
+          <h2
+            id="lines-heading"
+            className={`${sectionHeading} md:px-4 md:pt-3`}
+          >
             Line items
           </h2>
           {inv.line_items.length === 0 ? (
-            <p className="px-4 py-3 text-sm text-text-muted">No line items.</p>
+            <p className="py-3 text-sm text-text-muted md:px-4">
+              No line items.
+            </p>
           ) : (
             <ul className="mt-1">
               {inv.line_items.map((line, index) => (
                 <li
                   // Line items have no id in the projection; the order is stable.
                   key={index}
-                  className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-slate-100 px-4 py-2.5"
+                  className={`flex flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-slate-100 first:border-t-0 md:px-4 ${space.rowY}`}
                 >
                   {line.product_code ? (
                     <ProductChip code={line.product_code} size="md" />

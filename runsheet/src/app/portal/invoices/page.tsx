@@ -22,12 +22,13 @@ import PortalPopover from "../../../components/portal/PortalPopover";
 import PortalTitleRow from "../../../components/portal/PortalTitleRow";
 import { date as formatDate } from "../../../components/portal/portalFormat";
 import {
-  card,
   fieldInput,
   fieldLabel,
   focusRing,
+  listSection,
   primaryButton,
   secondaryButton,
+  space,
 } from "../../../components/portal/styles";
 import {
   PORTAL_TABS_IN_TOP_BAR,
@@ -165,7 +166,7 @@ export default function PortalInvoicesPage() {
       {/* The filter row is this page's first content block (design §11.2). */}
       <div
         data-portal-first
-        className="-mx-4 mb-2 flex min-h-11 items-center gap-2 overflow-x-auto px-4 pb-1 md:mx-0 md:px-0"
+        className="-mx-5 mb-2 flex min-h-11 items-center gap-2 overflow-x-auto px-5 pb-1 md:mx-0 md:px-0"
       >
         <div
           role="group"
@@ -270,11 +271,11 @@ export default function PortalInvoicesPage() {
       </div>
 
       {list.loading ? (
-        <div className={`${card} px-3.5`}>
+        <div className={`${listSection} ${space.inset}`}>
           <PortalLoading label="Loading your invoices…" rows={5} />
         </div>
       ) : list.error && list.items.length === 0 ? (
-        <div className={`${card} px-3.5`}>
+        <div className={`${listSection} ${space.inset}`}>
           <PortalSectionError
             message={portalErrorMessage(list.error, {
               fallback: "We couldn't load your invoices.",
@@ -283,7 +284,7 @@ export default function PortalInvoicesPage() {
           />
         </div>
       ) : list.items.length === 0 ? (
-        <div className={card}>
+        <div className={listSection}>
           <PortalEmpty
             icon={<ReceiptText className="h-8 w-8" />}
             title="No invoices to show."
@@ -295,7 +296,7 @@ export default function PortalInvoicesPage() {
           />
         </div>
       ) : (
-        <div className={`${card} overflow-clip`}>
+        <div className={`${listSection} md:overflow-clip`}>
           <InvoiceTable invoices={list.items} caption="Your invoices" />
         </div>
       )}

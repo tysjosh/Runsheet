@@ -15,7 +15,7 @@ import LevelBar from "./LevelBar";
 import { PortalBadge } from "./PortalStatus";
 import { window as formatWindow, productName } from "./portalFormat";
 import { portalStatusStyle } from "./portalStatusMap";
-import { rowButton, textLink } from "./styles";
+import { rowButton, space, textLink } from "./styles";
 import { levelLine, tankLevel } from "./tankLevel";
 
 /** Next delivery badge style: the server code when sent, else its label. */
@@ -78,7 +78,7 @@ export default function TankRow({
     <article
       aria-labelledby={titleId}
       data-tank-row
-      className="grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-1.5 px-3.5 py-3"
+      className={`grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:gap-y-1.5 ${space.inset} ${space.rowY}`}
     >
       <span className="row-span-2 self-start pt-0.5">
         <ProductCap code={tank.product_code} size="md" />
@@ -99,7 +99,7 @@ export default function TankRow({
         )}
       </Heading>
       <StatusBadge status={level.status} label={level.label} size="md" />
-      <p className="col-span-2 col-start-2 text-sm text-text-muted">
+      <p className="col-span-2 col-start-2 text-sm leading-5 text-text-muted">
         {showProduct && (
           <span className="max-md:hidden">
             {productName(tank.product_code)} ·{" "}

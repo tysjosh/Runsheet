@@ -1,12 +1,13 @@
 /**
- * A Home panel (design §11.2): a card with a 4 px accent bar beside a 15 px
- * title and a "View all" link on the right. Accents follow the staff
+ * A Home panel (design §11.2): a 4 px accent bar beside a 15 px title and a
+ * "View all" link on the right. On phones it sits on the page (rows divided,
+ * no card); from 768 px it's a card (`listSection`). Accents follow the staff
  * Dashboard: red for tanks, orange for balance, cyan for orders.
  */
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { COLOR } from "../../styles/tokens";
-import { card, sectionHeading, textLink } from "./styles";
+import { listSection, sectionHeading, space, textLink } from "./styles";
 
 export const PANEL_ACCENT = {
   tanks: COLOR.red["600"],
@@ -36,9 +37,9 @@ export default function PortalPanel({
     <section
       aria-labelledby={id}
       data-portal-first={first || undefined}
-      className={`${card} overflow-hidden ${className}`}
+      className={`${listSection} md:overflow-hidden ${className}`}
     >
-      <div className="flex items-center gap-2 px-3.5 pt-3">
+      <div className={`flex items-center gap-2 md:pt-3 ${space.inset}`}>
         <span
           aria-hidden="true"
           className="h-4 w-1 shrink-0 rounded-sm"

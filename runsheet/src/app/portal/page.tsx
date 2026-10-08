@@ -31,7 +31,11 @@ import PortalTitleRow from "../../components/portal/PortalTitleRow";
 import { money } from "../../components/portal/portalFormat";
 import { PAST_ORDER_CODES } from "../../components/portal/portalStatusMap";
 import RequestDeliveryDialog from "../../components/portal/RequestDeliveryDialog";
-import { primaryButton } from "../../components/portal/styles";
+import {
+  primaryButton,
+  space,
+  titleActionButton,
+} from "../../components/portal/styles";
 import TankRow from "../../components/portal/TankRow";
 import { sortTanks } from "../../components/portal/tankLevel";
 import { orderTankTitle } from "../../components/portal/tankTitle";
@@ -136,7 +140,7 @@ export default function PortalHomePage() {
   const request = (
     <button
       type="button"
-      className={primaryButton}
+      className={titleActionButton}
       onClick={() => dialog.openFor(null)}
     >
       <Plus aria-hidden="true" className="h-4 w-4" />
@@ -160,7 +164,9 @@ export default function PortalHomePage() {
   return (
     <>
       <PortalTitleRow title="Home" action={request} />
-      <div className="grid gap-4 lg:grid-cols-[1.25fr_1fr] lg:items-start">
+      <div
+        className={`grid lg:grid-cols-[1.25fr_1fr] lg:items-start ${space.sectionGap}`}
+      >
         <PortalPanel
           id="tanks-heading"
           title="Your tanks"
@@ -169,18 +175,18 @@ export default function PortalHomePage() {
           first
         >
           {!me.ordering_available && (
-            <div className="px-3.5 pt-2">
+            <div className={`pt-2 ${space.inset}`}>
               <PortalBanner tone="warning">
                 {ORDERING_UNAVAILABLE_MESSAGE}
               </PortalBanner>
             </div>
           )}
           {tanks.loading ? (
-            <div className="px-3.5">
+            <div className={space.inset}>
               <PortalLoading label="Loading your tanks…" />
             </div>
           ) : tanks.error ? (
-            <div className="px-3.5 pb-2">
+            <div className={`pb-2 ${space.inset}`}>
               <PortalSectionError
                 message={tanks.error}
                 onRetry={tanks.reload}
@@ -210,7 +216,7 @@ export default function PortalHomePage() {
           )}
         </PortalPanel>
 
-        <div className="flex flex-col gap-4">
+        <div className={`flex flex-col ${space.sectionGap}`}>
           {me.invoices_available && (
             <PortalPanel
               id="balance-heading"
@@ -219,11 +225,11 @@ export default function PortalHomePage() {
               link={{ href: "/portal/invoices", label: "Invoices" }}
             >
               {balance.loading ? (
-                <div className="px-3.5">
+                <div className={space.inset}>
                   <PortalLoading label="Loading your balance…" rows={2} />
                 </div>
               ) : balance.error ? (
-                <div className="px-3.5 pb-2">
+                <div className={`pb-2 ${space.inset}`}>
                   <PortalSectionError
                     message={portalErrorMessage(balance.error, {
                       fallback: "We couldn't load your balance.",
@@ -232,7 +238,9 @@ export default function PortalHomePage() {
                   />
                 </div>
               ) : (
-                <div className="flex flex-wrap items-center gap-3 px-3.5 py-3">
+                <div
+                  className={`flex flex-wrap items-center gap-3 ${space.inset} ${space.rowY}`}
+                >
                   <div className="min-w-0">
                     <p className="text-[26px] font-extrabold leading-tight tracking-tight text-text">
                       {b?.lowerBound ? "At least " : ""}
@@ -272,11 +280,11 @@ export default function PortalHomePage() {
             link={{ href: "/portal/orders", label: "All orders" }}
           >
             {orders.loading ? (
-              <div className="px-3.5">
+              <div className={space.inset}>
                 <PortalLoading label="Loading your orders…" rows={2} />
               </div>
             ) : orders.error ? (
-              <div className="px-3.5 pb-2">
+              <div className={`pb-2 ${space.inset}`}>
                 <PortalSectionError
                   message={portalErrorMessage(orders.error, {
                     fallback: "We couldn't load your orders.",

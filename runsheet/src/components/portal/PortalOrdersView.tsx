@@ -39,7 +39,14 @@ import PortalTable, { type PortalColumn } from "./PortalTable";
 import PortalTitleRow from "./PortalTitleRow";
 import { productName } from "./portalFormat";
 import RequestDeliveryDialog from "./RequestDeliveryDialog";
-import { card, primaryButton, rowButton, secondaryButton } from "./styles";
+import {
+  listSection,
+  primaryButton,
+  rowButton,
+  secondaryButton,
+  space,
+  titleActionButton,
+} from "./styles";
 import { orderTankTitle } from "./tankTitle";
 import { PORTAL_TABLES, useMediaQuery } from "./useMediaQuery";
 import { usePagedList } from "./usePagedList";
@@ -203,7 +210,7 @@ export default function PortalOrdersView({
         action={
           <button
             type="button"
-            className={primaryButton}
+            className={titleActionButton}
             onClick={() => dialog.openFor(null)}
           >
             <Plus aria-hidden="true" className="h-4 w-4" />
@@ -217,11 +224,11 @@ export default function PortalOrdersView({
           <PortalBanner tone="critical">{cancelError}</PortalBanner>
         )}
         {list.loading ? (
-          <div data-portal-first className={`${card} px-3.5`}>
+          <div data-portal-first className={`${listSection} ${space.inset}`}>
             <PortalLoading label="Loading your orders…" rows={5} />
           </div>
         ) : list.error && list.items.length === 0 ? (
-          <div data-portal-first className={`${card} px-3.5`}>
+          <div data-portal-first className={`${listSection} ${space.inset}`}>
             <PortalSectionError
               message={portalErrorMessage(list.error, {
                 fallback: "We couldn't load your orders.",
@@ -230,7 +237,7 @@ export default function PortalOrdersView({
             />
           </div>
         ) : list.items.length === 0 ? (
-          <div data-portal-first className={card}>
+          <div data-portal-first className={listSection}>
             <PortalEmpty
               icon={<ClipboardList className="h-8 w-8" />}
               title="No orders yet."
@@ -251,7 +258,7 @@ export default function PortalOrdersView({
             ref={listRef}
             tabIndex={-1}
             data-portal-first
-            className={`${card} focus:outline-none focus-visible:ring-2 focus-visible:ring-focus`}
+            className={`${listSection} md:overflow-clip focus:outline-none focus-visible:ring-2 focus-visible:ring-focus`}
           >
             {wide ? (
               <PortalTable
