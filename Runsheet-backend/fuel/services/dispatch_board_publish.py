@@ -74,6 +74,8 @@ FORWARD_PHASES = ("apply", "amend", "notify", "finalize")
 _DROP_EXECUTOR_REASONS = frozenset({"order_changed_since_plan", "order_not_loadable"})
 #: Overrides off the order's litres by more than this block the publish (K7.2).
 OVERRIDE_TOLERANCE = 0.01
+#: Order statuses after which a shelved order no longer needs placing (R13.5).
+_FINISHED_ORDER_STATES = frozenset({"cancelled", "delivered", "failed"})
 BOARD_SOURCE = "dispatch_board"
 REVOKE_REASON = "reassigned_by_dispatcher"
 
@@ -1845,7 +1847,10 @@ class BoardPublishService:
                 reasons.append("no_driver")
             if not has_stops and not lane.publish.plans:
                 reasons.append("no_loads")
-            if lane.shelf:
+            # R13.5: a shelved order blocks until it is placed on a load or
+            # cancelled. A cancelled (or otherwise finished) one no longer needs
+            # placing; an unknown one still blocks.
+            if any((ctx.orders.get(o) or {}).get("status") not in _FINISHED_ORDER_STATES for o in lane.shelf):
                 reasons.append("unplaced_dispatched_order")
             for check in checks:
                 if check.outcome != "warn" or check.reason_code == "no_driver" or not check.warning_id:
