@@ -52,6 +52,32 @@ const PAGES: { id: string; path: string; ready: string; roles?: string[] }[] = [
   },
   { id: "analytics", path: "/dashboard/analytics", ready: "h1" },
   {
+    id: "fleet-trucks",
+    path: "/dashboard/fleet?tab=trucks",
+    ready: "tbody tr",
+  },
+  {
+    id: "fleet-drivers",
+    path: "/dashboard/fleet?tab=drivers",
+    ready: "tbody tr",
+  },
+  {
+    id: "fleet-drivers-qualifications",
+    path: "/dashboard/fleet?tab=drivers&view=qualifications",
+    ready: "tbody tr",
+  },
+  {
+    id: "fleet-inventory",
+    path: "/dashboard/fleet?tab=inventory",
+    ready: "tbody tr",
+  },
+  { id: "customers", path: "/dashboard/customers", ready: "tbody tr" },
+  {
+    id: "customers-communications",
+    path: "/dashboard/customers?tab=communications",
+    ready: "tbody tr",
+  },
+  {
     id: "settings-system",
     path: "/dashboard/settings?tab=system",
     ready: "dl",

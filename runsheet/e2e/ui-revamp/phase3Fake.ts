@@ -200,6 +200,22 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
       status ? STATIONS.filter((s) => s.status === status) : STATIONS,
     );
   }
+  if (path === "/commerce/ar-aging")
+    return {
+      data: {
+        tenant_id: TENANT,
+        total_open_cents: 4_512_300,
+        bucket_0_30_cents: 2_100_000,
+        bucket_31_60_cents: 1_200_000,
+        bucket_61_90_cents: 712_300,
+        bucket_90_plus_cents: 500_000,
+        by_account: [],
+        as_of: iso(8),
+      },
+      request_id: "e2e",
+    };
+  if (path === "/commerce/ar-aging/history")
+    return { data: [], request_id: "e2e" };
   if (path === "/fleet/trucks")
     return { data: TRUCKS, success: true, timestamp: iso(8) };
   if (path === "/fleet/summary")

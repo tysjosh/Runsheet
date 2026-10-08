@@ -36,7 +36,12 @@ export default function ARAgingDashboard({
         getArAging(),
         getArAgingHistory(),
       ]);
-      setAging(agingRes.data);
+      // A payload without the account list (older API, empty tenant) must
+      // not crash the tab.
+      setAging({
+        ...agingRes.data,
+        by_account: agingRes.data?.by_account ?? [],
+      });
       setHistory(historyRes.data);
     } catch (err) {
       const failure = classifyLoadError(err, "Failed to load AR aging data");
