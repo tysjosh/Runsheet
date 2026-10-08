@@ -28,6 +28,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useSchedulingWebSocket } from "../../hooks/useSchedulingWebSocket";
@@ -103,6 +104,8 @@ const CHIPS: {
 
 /** Page size of the server-paged list. */
 export const JOBS_PAGE_SIZE = 50;
+/** Chip counts refresh this long after the last status change or event. */
+export const COUNTS_REFRESH_DEBOUNCE_MS = 1_500;
 
 /** The API status a chip sends; "all" and "delayed" send none. */
 export function chipStatus(chip: JobChip): JobStatus | undefined {
@@ -226,6 +229,26 @@ export default function JobsView() {
     void loadCounts();
   }, [loadCounts]);
 
+  // Chip counts go stale when a job changes status (row menu, Fail dialog,
+  // or a live socket event from someone else). Refresh them, debounced so a
+  // burst of events costs one round of `size: 1` reads (owner item 3.x-2).
+  const countsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadCountsRef = useRef(loadCounts);
+  loadCountsRef.current = loadCounts;
+  const refreshCountsSoon = useCallback(() => {
+    if (countsTimer.current) clearTimeout(countsTimer.current);
+    countsTimer.current = setTimeout(() => {
+      countsTimer.current = null;
+      void loadCountsRef.current();
+    }, COUNTS_REFRESH_DEBOUNCE_MS);
+  }, []);
+  useEffect(
+    () => () => {
+      if (countsTimer.current) clearTimeout(countsTimer.current);
+    },
+    [],
+  );
+
   const pickChip = (next: JobChip) => {
     setChip(next);
     setPage(1);
@@ -235,9 +258,13 @@ export default function JobsView() {
     setPage(1);
   };
 
-  const handleJobCreated = useCallback((event: { job: Job }) => {
-    setJobs((prev) => [event.job, ...prev]);
-  }, []);
+  const handleJobCreated = useCallback(
+    (event: { job: Job }) => {
+      setJobs((prev) => [event.job, ...prev]);
+      refreshCountsSoon();
+    },
+    [refreshCountsSoon],
+  );
   const handleStatusChanged = useCallback(
     (event: {
       job_id: string;
@@ -260,8 +287,9 @@ export default function JobsView() {
             : j,
         ),
       );
+      refreshCountsSoon();
     },
-    [],
+    [refreshCountsSoon],
   );
   const handleDelayAlert = useCallback(
     (event: { job_id: string; delay_duration_minutes: number }) => {
@@ -276,8 +304,9 @@ export default function JobsView() {
             : j,
         ),
       );
+      refreshCountsSoon();
     },
-    [],
+    [refreshCountsSoon],
   );
   useSchedulingWebSocket({
     subscriptions: ["job_created", "status_changed", "delay_alert"],
@@ -295,6 +324,7 @@ export default function JobsView() {
           failure_reason: failureReason,
         });
         setJobs((prev) => prev.map((j) => (j.job_id === jobId ? res.data : j)));
+        refreshCountsSoon();
       } catch (err) {
         notify({
           type: "error",
@@ -306,7 +336,7 @@ export default function JobsView() {
         throw err;
       }
     },
-    [],
+    [refreshCountsSoon],
   );
 
   const totalPages =

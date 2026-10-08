@@ -212,3 +212,68 @@ it("cargo search lives in the overflow and opens in a drawer", async () => {
     await screen.findByRole("dialog", { name: "Cargo search" }),
   ).toBeInTheDocument();
 });
+
+describe("chip counts stay current (owner item 3.x-owner-2)", () => {
+  const countReads = () =>
+    m(getJobs).mock.calls.filter(([f]) => f?.size === 1).length;
+
+  it("refresh after a row-menu status change, debounced", async () => {
+    m(transitionStatus).mockResolvedValue({
+      data: job("J2", "completed"),
+    });
+    renderHosted();
+    await screen.findByRole("table", { name: "Job board" });
+    await waitFor(() => expect(countReads()).toBeGreaterThan(0));
+    const before = countReads();
+    jest.useFakeTimers();
+    try {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Actions for job J2" }),
+      );
+      await act(async () => {
+        fireEvent.click(screen.getByRole("menuitem", { name: "Complete" }));
+      });
+      await waitFor(() => expect(transitionStatus).toHaveBeenCalled());
+      // Not yet: the refresh waits for the debounce.
+      expect(countReads()).toBe(before);
+      await act(async () => {
+        jest.advanceTimersByTime(1_600);
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+    await waitFor(() => expect(countReads()).toBeGreaterThan(before));
+  });
+
+  it("refresh once for a burst of live socket events", async () => {
+    const { useSchedulingWebSocket } = jest.requireMock(
+      "../../hooks/useSchedulingWebSocket",
+    ) as { useSchedulingWebSocket: jest.Mock };
+    renderHosted();
+    await screen.findByRole("table", { name: "Job board" });
+    await waitFor(() => expect(countReads()).toBeGreaterThan(0));
+    const before = countReads();
+    const handlers = useSchedulingWebSocket.mock.calls.at(-1)?.[0];
+    jest.useFakeTimers();
+    try {
+      await act(async () => {
+        for (const id of ["J1", "J2", "J4"])
+          handlers.onStatusChanged({
+            job_id: id,
+            new_status: "completed",
+            old_status: "scheduled",
+          });
+        handlers.onDelayAlert({ job_id: "J1", delay_duration_minutes: 5 });
+        jest.advanceTimersByTime(1_600);
+      });
+    } finally {
+      jest.useRealTimers();
+    }
+    // One debounced round: one read per chip.
+    const chips = within(
+      screen.getByRole("group", { name: "Job status" }),
+    ).getAllByRole("button").length;
+    await waitFor(() => expect(countReads()).toBeGreaterThan(before));
+    expect(countReads() - before).toBeLessThanOrEqual(chips);
+  });
+});
