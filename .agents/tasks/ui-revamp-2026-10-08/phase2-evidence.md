@@ -20,6 +20,12 @@ Rebased onto `origin/production-readiness/go-live-blockers` @ `d10b314` (Phase 4
 | Dispatch board e2e (`PW_BOARD_PROD=1`) | 17 passed, 2 skipped (iPad). N1 at 60 lanes / 1,500 stops: median 16.7, p95 17.7 ms (budget 20), hover 17.7, scroll 17.7. |
 | Contrast / CVD (`styles/tokens.test.ts`) | passes in the jest run |
 
+### CI on `c5163ad` (run 37822467480): one failure, fixed
+
+All jobs passed except `dispatch-board-e2e`. Its "200 % zoom approximation and forced colours" test found the page 4 px wider than the 640 px viewport on Linux. The macOS run passed. A local diagnostic at 640/600/560 px showed the cause: the board toolbar row is already full at 640 px, and the search box couldn't shrink below its 128 px `min-w-32` floor, so Linux's wider fonts pushed the `⋯` button past the edge. The fix lowers the floor to `min-w-24` (96 px). The search box only shrinks when the row is full, so the 1024 px and wider layouts are unchanged. After the fix, locally: tsc and lint clean, dispatch-board jest 22 suites / 292 passed, `npm run build` 0, board e2e 17 passed / 2 skipped (p95 17.7 ms), and ui-revamp e2e 128 passed with the visual baselines unchanged.
+
+The CI perf line on that run read p95 66.6 ms, but CI only reports it and does not assert it (the job's runner is slower). The test passed.
+
 ## Iteration 2: review fixes (commit `ba98b9f`)
 
 This iteration fixes every finding in `phase2-review.json` (verdict CHANGES_REQUESTED). The notes are added under tasks 2.1, 2.4, 2.6 and 2.7 in `spec/tasks.md`, and only Phase 2 text changed there.

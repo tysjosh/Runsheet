@@ -363,7 +363,9 @@ export function BoardToolbarRow({
     >
       {takeover ?? (
         <>
-          <div className="relative w-56 min-w-32 shrink">
+          {/* min-w-24, not 32: at 640 px (1280 at 200 % zoom) the row is full,
+              and Linux fonts made a 128 px floor push the page 4 px sideways. */}
+          <div className="relative w-56 min-w-24 shrink">
             <Search
               className="pointer-events-none absolute left-2 top-1.5 h-4 w-4 text-slate-500"
               aria-hidden="true"
