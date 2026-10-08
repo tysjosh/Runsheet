@@ -24,6 +24,8 @@ develop-eggs/
 downloads/
 eggs/
 lib/
+# The web app keeps shared TS helpers in src/lib (format, identity).
+!runsheet/src/lib/
 lib64/
 parts/
 sdist/

@@ -686,6 +686,8 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
                   className="w-full px-4 py-3 pr-12 bg-white border-2 border-gray-200 rounded-2xl focus:outline-none focus:border-gray-400 focus:ring-2 focus:ring-gray-100 text-sm transition-all duration-200 disabled:bg-gray-100 disabled:cursor-not-allowed shadow-sm"
                 />
                 <button
+                  type="button"
+                  aria-label={isStreaming ? "Sending message" : "Send message"}
                   onClick={handleSend}
                   disabled={isStreaming || !input.trim()}
                   className="absolute right-2 top-1/2 transform -translate-y-1/2 p-2 text-gray-600 hover:text-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-200"

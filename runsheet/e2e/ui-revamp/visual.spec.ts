@@ -1,0 +1,65 @@
+/**
+ * Visual baselines (design.md §10): `toHaveScreenshot` at 1280×800 and
+ * 1440×900, with the clock fixed so dates and relative times are stable.
+ * Baselines live in `e2e/ui-revamp/__screenshots__/`; refresh them with
+ * `--update-snapshots` when a page is redesigned on purpose.
+ *
+ * Set UI_REVAMP_SHOTS_DIR to also write plain PNG copies (used for the
+ * phase evidence folder).
+ *
+ * Baselines are per platform (`<name>-<platform>.png`) because font
+ * rendering differs between macOS and Linux. A platform without recorded
+ * baselines (Linux CI today) skips the pixel comparison instead of failing on
+ * a missing file; record them there with
+ * `UI_REVAMP_RECORD=1 npx playwright test -c playwright.ui-revamp.config.ts
+ * visual --update-snapshots`.
+ */
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { expect, test } from "@playwright/test";
+import { VIEWPORTS } from "./pages";
+import { installShellFake, signIn } from "./shellFake";
+
+const PAGES = [
+  { id: "dashboard", path: "/dashboard", ready: "[data-feed-row]" },
+  {
+    id: "dispatch-board",
+    path: "/dashboard/dispatch?tab=board",
+    ready: '[role="grid"] [role="row"]',
+  },
+  { id: "orders", path: "/dashboard/orders", ready: "tbody tr" },
+  {
+    id: "billing-invoices",
+    path: "/dashboard/billing?tab=invoices",
+    ready: "tbody tr",
+  },
+  { id: "settings", path: "/dashboard/settings?tab=company", ready: "h1" },
+];
+
+for (const p of PAGES) {
+  for (const vp of VIEWPORTS) {
+    test(`${p.id} ${vp.width}x${vp.height}`, async ({ page, context }) => {
+      const baseline = path.join(
+        __dirname,
+        "__screenshots__",
+        `${p.id}-${vp.width}x${vp.height}-${process.platform}.png`,
+      );
+      test.skip(
+        !existsSync(baseline) && !process.env.UI_REVAMP_RECORD,
+        `no ${process.platform} baseline recorded`,
+      );
+      await page.clock.setFixedTime(new Date("2026-10-08T14:00:00Z"));
+      await signIn(context);
+      await installShellFake(page);
+      await page.setViewportSize(vp);
+      await page.goto(p.path);
+      await page.locator(p.ready).first().waitFor();
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await page.waitForTimeout(500);
+      const name = `${p.id}-${vp.width}x${vp.height}.png`;
+      const dir = process.env.UI_REVAMP_SHOTS_DIR;
+      if (dir) await page.screenshot({ path: `${dir}/${name}` });
+      await expect(page).toHaveScreenshot(name, { animations: "disabled" });
+    });
+  }
+}

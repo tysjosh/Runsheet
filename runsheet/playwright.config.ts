@@ -17,7 +17,9 @@ export default defineConfig({
   testDir: "./e2e",
   // The Dispatch Board spec needs the harness server of its own config
   // (playwright.dispatch-board.config.ts).
-  testIgnore: "dispatch-board.spec.ts",
+  // The UI revamp specs need the fake-backed server of
+  // playwright.ui-revamp.config.ts.
+  testIgnore: ["dispatch-board.spec.ts", "ui-revamp/**"],
 
   // Run tests in files in parallel
   fullyParallel: true,

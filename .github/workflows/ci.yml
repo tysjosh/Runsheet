@@ -675,3 +675,39 @@ jobs:
           name: dispatch-board-e2e-results
           path: runsheet/test-results/dispatch-board
           retention-days: 7
+
+  # UI revamp: chrome-height budget, axe, redirects, URL tabs and visual
+  # baselines against a fake backend (no staging). Pages not yet migrated
+  # carry test.fail() marks; visual baselines are recorded on macOS, so the
+  # pixel comparison skips on Linux until Linux baselines are recorded.
+  ui-revamp-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: runsheet
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: runsheet/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: UI revamp e2e (Chromium)
+        run: npx playwright test -c playwright.ui-revamp.config.ts --project=chromium
+
+      - name: Upload Playwright results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-revamp-e2e-results
+          path: runsheet/test-results/ui-revamp
+          retention-days: 7

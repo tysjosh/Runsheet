@@ -1,6 +1,17 @@
 import { type RefObject, useEffect } from "react";
 
 /**
+ * Focus inside one of these means an open popup owns Escape: a combobox or
+ * menu button whose popup is expanded, or the listbox/menu itself.
+ */
+const OPEN_POPUP_SELECTOR = [
+  '[role="combobox"][aria-expanded="true"]',
+  '[aria-haspopup]:not([aria-haspopup="false"])[aria-expanded="true"]',
+  '[role="listbox"]',
+  '[role="menu"]',
+].join(", ");
+
+/**
  * Accessibility behavior shared by modal dialogs and slide-over panels.
  *
  * While `isOpen`, this hook:
@@ -44,13 +55,11 @@ export function useDialogA11y(
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         // An open popup inside the dialog (listbox, menu) closes first; the
-        // dialog closes on the next Escape.
+        // dialog closes on the next Escape. Only popup owners count: an
+        // expanded disclosure or accordion toggle (plain aria-expanded) must
+        // not swallow Escape.
         const t = e.target as Element | null;
-        if (
-          t?.closest?.(
-            '[aria-expanded="true"], [role="listbox"], [role="menu"]',
-          )
-        ) {
+        if (t?.closest?.(OPEN_POPUP_SELECTOR)) {
           return;
         }
         e.stopPropagation();

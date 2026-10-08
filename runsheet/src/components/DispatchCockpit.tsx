@@ -515,6 +515,7 @@ function FeedRow({
   return (
     <button
       type="button"
+      data-feed-row
       onClick={onClick}
       className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-gray-50 focus:outline-none focus-visible:bg-gray-50"
     >
@@ -605,7 +606,7 @@ function OrderAttentionRow({
   };
 
   return (
-    <div className="px-4 py-3 hover:bg-gray-50">
+    <div data-feed-row className="px-4 py-3 hover:bg-gray-50">
       <div className="flex items-center gap-3">
         <span className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gray-50">
           <ClipboardList className="h-4 w-4 text-info" />

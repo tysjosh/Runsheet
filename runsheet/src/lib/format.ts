@@ -1,0 +1,293 @@
+/**
+ * One place for every number, quantity, money, date and product label the
+ * staff app shows (UI revamp R5.3, design.md §3.1).
+ *
+ * - Separators follow the browser locale (or `configureFormat({ locale })`).
+ * - Dates and times render in the tenant time zone, which the dashboard shell
+ *   publishes through `TenantSettingsContext` → `configureFormat`. Until it is
+ *   known they use the browser's zone.
+ * - Times are 24 h (dispatch convention).
+ * - Missing or non-finite values render as an em dash, never "NaN".
+ *
+ * New code must not call `toFixed` or `toLocale*String` directly;
+ * `format.guard.test.ts` ratchets the existing count down to zero.
+ */
+import { PRODUCT } from "../styles/tokens";
+
+export const EMPTY = "—";
+
+interface FormatConfig {
+  /** BCP 47 locale for separators and month names; undefined = browser. */
+  locale?: string;
+  /** IANA time zone; undefined = browser. */
+  timeZone?: string;
+}
+
+const config: FormatConfig = {};
+
+/** Set the process-wide defaults (the shell calls this once it knows the tenant). */
+export function configureFormat(next: FormatConfig): void {
+  if ("locale" in next) config.locale = next.locale || undefined;
+  if ("timeZone" in next) config.timeZone = next.timeZone || undefined;
+}
+
+/** Current defaults (for tests and components that build their own Intl objects). */
+export function formatConfig(): Readonly<FormatConfig> {
+  return { ...config };
+}
+
+type NumOpts = { decimals?: number; locale?: string };
+type DateOpts = { timeZone?: string; locale?: string };
+type DateInput = Date | string | number | null | undefined;
+
+const isNum = (v: unknown): v is number =>
+  typeof v === "number" && Number.isFinite(v);
+
+function toNumber(v: number | string | null | undefined): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return isNum(n) ? n : null;
+}
+
+function toDate(d: DateInput): Date | null {
+  if (d === null || d === undefined || d === "") return null;
+  const date = d instanceof Date ? d : new Date(d);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+// ── numbers ──────────────────────────────────────────────────────────────
+
+/** Grouped number with a fixed number of decimals: number(5283.44) → "5,283". */
+export function number(
+  v: number | string | null | undefined,
+  { decimals = 0, locale = config.locale }: NumOpts = {},
+): string {
+  const n = toNumber(v);
+  if (n === null) return EMPTY;
+  return new Intl.NumberFormat(locale, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(n);
+}
+
+/** Gallons, whole by default: gallons(4200) → "4,200 gal". */
+export function gallons(
+  v: number | string | null | undefined,
+  opts: NumOpts = {},
+): string {
+  const s = number(v, opts);
+  return s === EMPTY ? s : `${s} gal`;
+}
+
+/** Litres, whole by default: liters(15898.7) → "15,899 L". */
+export function liters(
+  v: number | string | null | undefined,
+  opts: NumOpts = {},
+): string {
+  const s = number(v, opts);
+  return s === EMPTY ? s : `${s} L`;
+}
+
+/** Money with 2 decimals: money(1234.5) → "$1,234.50". */
+export function money(
+  v: number | string | null | undefined,
+  {
+    currency = "USD",
+    locale = config.locale,
+    decimals = 2,
+  }: { currency?: string; locale?: string; decimals?: number } = {},
+): string {
+  const n = toNumber(v);
+  if (n === null) return EMPTY;
+  return new Intl.NumberFormat(locale, {
+    style: "currency",
+    currency,
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(n);
+}
+
+/**
+ * Percentage of a value already expressed in percent: pct(12) → "12%".
+ * (Pass `fraction: true` for 0–1 ratios: pct(0.12, {fraction: true}) → "12%".)
+ */
+export function pct(
+  v: number | string | null | undefined,
+  {
+    decimals = 0,
+    locale = config.locale,
+    fraction = false,
+  }: NumOpts & { fraction?: boolean } = {},
+): string {
+  const n = toNumber(v);
+  if (n === null) return EMPTY;
+  return new Intl.NumberFormat(locale, {
+    style: "percent",
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+  }).format(fraction ? n : n / 100);
+}
+
+/**
+ * Parse user-typed numbers using the locale's group and decimal separators:
+ * "5,283.4" (en-US) and "5.283,4" (de-DE) both → 5283.4. Returns null for an
+ * empty string and NaN for text that is not a number.
+ */
+export function parseNumber(
+  text: string,
+  { locale = config.locale }: { locale?: string } = {},
+): number | null {
+  const raw = text.trim();
+  if (raw === "") return null;
+  const parts = new Intl.NumberFormat(locale).formatToParts(12345.6);
+  const group = parts.find((p) => p.type === "group")?.value ?? ",";
+  const decimal = parts.find((p) => p.type === "decimal")?.value ?? ".";
+  // Normalise narrow/no-break spaces used as group separators (fr-FR, etc.).
+  let s = raw.replace(/[\s\u00a0\u202f]/g, "");
+  const groupChar = group.replace(/[\s\u00a0\u202f]/g, "");
+  if (groupChar) s = s.split(groupChar).join("");
+  if (decimal !== ".") s = s.replace(decimal, ".");
+  if (!/^[-+]?(\d+\.?\d*|\.\d+)$/.test(s)) return Number.NaN;
+  return Number(s);
+}
+
+// ── dates and times ──────────────────────────────────────────────────────
+
+function parts(d: Date, o: Intl.DateTimeFormatOptions, opts: DateOpts) {
+  const fmt = new Intl.DateTimeFormat(opts.locale ?? config.locale, {
+    timeZone: opts.timeZone ?? config.timeZone,
+    ...o,
+  });
+  const out: Record<string, string> = {};
+  for (const p of fmt.formatToParts(d)) out[p.type] = p.value;
+  return out;
+}
+
+/** "Wed 8 Oct" (weekday, day, month: the dispatch order in every locale). */
+export function date(d: DateInput, opts: DateOpts = {}): string {
+  const v = toDate(d);
+  if (!v) return EMPTY;
+  const p = parts(
+    v,
+    { weekday: "short", day: "numeric", month: "short" },
+    opts,
+  );
+  return `${p.weekday} ${p.day} ${p.month}`;
+}
+
+/** "Wed 8 Oct 2026". */
+export function dateLong(d: DateInput, opts: DateOpts = {}): string {
+  const v = toDate(d);
+  if (!v) return EMPTY;
+  const p = parts(
+    v,
+    { weekday: "short", day: "numeric", month: "short", year: "numeric" },
+    opts,
+  );
+  return `${p.weekday} ${p.day} ${p.month} ${p.year}`;
+}
+
+/** "08:30" (24 h). */
+export function time(d: DateInput, opts: DateOpts = {}): string {
+  const v = toDate(d);
+  if (!v) return EMPTY;
+  const p = parts(
+    v,
+    { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
+    opts,
+  );
+  return `${p.hour}:${p.minute}`;
+}
+
+/** "Wed 8 Oct, 08:30". */
+export function dateTime(d: DateInput, opts: DateOpts = {}): string {
+  const v = toDate(d);
+  if (!v) return EMPTY;
+  return `${date(v, opts)}, ${time(v, opts)}`;
+}
+
+function dayKey(d: Date, opts: DateOpts): string {
+  const p = parts(
+    d,
+    { year: "numeric", month: "2-digit", day: "2-digit" },
+    { ...opts, locale: "en-CA" },
+  );
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+/**
+ * A time window: "08:30–10:30" on one day; across days
+ * "Wed 8 Oct, 22:00 – Thu 9 Oct, 02:00". One open end renders "from 08:30" /
+ * "until 10:30".
+ */
+export function window(
+  a: DateInput,
+  b: DateInput,
+  opts: DateOpts = {},
+): string {
+  const start = toDate(a);
+  const end = toDate(b);
+  if (!start && !end) return EMPTY;
+  if (start && !end) return `from ${time(start, opts)}`;
+  if (!start && end) return `until ${time(end, opts)}`;
+  const s = start as Date;
+  const e = end as Date;
+  if (dayKey(s, opts) === dayKey(e, opts)) {
+    return `${time(s, opts)}–${time(e, opts)}`;
+  }
+  return `${dateTime(s, opts)} – ${dateTime(e, opts)}`;
+}
+
+/**
+ * "just now", "12 min ago", "3 h ago", "in 20 min"; beyond a day it falls back
+ * to `date()`. `now` is injectable for tests.
+ */
+export function relative(
+  d: DateInput,
+  { now = Date.now(), ...opts }: DateOpts & { now?: number } = {},
+): string {
+  const v = toDate(d);
+  if (!v) return EMPTY;
+  const diffMs = v.getTime() - now;
+  const abs = Math.abs(diffMs);
+  const future = diffMs > 0;
+  const say = (n: number, unit: string) =>
+    future ? `in ${n} ${unit}` : `${n} ${unit} ago`;
+  if (abs < 45_000) return "just now";
+  if (abs < 3_600_000) return say(Math.max(1, Math.round(abs / 60_000)), "min");
+  if (abs < 86_400_000) return say(Math.round(abs / 3_600_000), "h");
+  return date(v, opts);
+}
+
+// ── products ─────────────────────────────────────────────────────────────
+
+/** "JET_A" → "Jet a"; "kerosene_k1" → "Kerosene k1". */
+export function humanize(code: string): string {
+  const s = code.replace(/[_-]+/g, " ").trim().toLowerCase();
+  return s ? s[0].toUpperCase() + s.slice(1) : code;
+}
+
+/** Readable product name for a catalog code; unknown codes are humanised. */
+export function productName(code: string | null | undefined): string {
+  if (!code) return EMPTY;
+  const token = PRODUCT[code as keyof typeof PRODUCT];
+  return token?.name ?? humanize(code);
+}
+
+/** Namespace-style import: `import { format } from "@/lib/format"`. */
+export const format = {
+  number,
+  gallons,
+  liters,
+  money,
+  pct,
+  parseNumber,
+  date,
+  dateLong,
+  time,
+  dateTime,
+  window,
+  relative,
+  productName,
+  humanize,
+};

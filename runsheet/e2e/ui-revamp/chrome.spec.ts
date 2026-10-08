@@ -1,0 +1,56 @@
+/**
+ * Chrome budget (R4.7, D8): the first data row starts ≤ 172 px from the
+ * viewport top at 1280×800 and 1440×900. Phase 1 delivers the 48 px top bar
+ * and the 44 px title row; each page's own toolbar/summary bands come down in
+ * the task named in `pages.ts`, so until then the page is marked
+ * `test.fail()` (flip it when the task lands).
+ */
+import { expect, test } from "@playwright/test";
+import { FIRST_ROW_BUDGET, firstRowTop } from "./measure";
+import { SHELL_PAGES, VIEWPORTS } from "./pages";
+import { installShellFake, signIn } from "./shellFake";
+
+test.describe("shell chrome", () => {
+  for (const vp of VIEWPORTS) {
+    test(`top bar is 48 px and the title row 44 px at ${vp.width}×${vp.height}`, async ({
+      page,
+      context,
+    }) => {
+      await signIn(context);
+      await installShellFake(page);
+      await page.setViewportSize(vp);
+      await page.goto("/dashboard/billing?tab=invoices");
+      const bar = page.locator('[data-chrome="topbar"]');
+      const title = page.locator('[data-chrome="titlerow"]').first();
+      await expect(title).toBeVisible();
+      expect((await bar.boundingBox())?.height).toBe(48);
+      expect((await title.boundingBox())?.height).toBe(44);
+      expect((await title.boundingBox())?.y).toBe(48);
+      await expect(page.locator("h1")).toHaveCount(1);
+    });
+  }
+});
+
+for (const p of SHELL_PAGES) {
+  for (const vp of VIEWPORTS) {
+    test(`${p.id}: first row ≤ ${FIRST_ROW_BUDGET} px at ${vp.width}×${vp.height}`, async ({
+      page,
+      context,
+    }) => {
+      test.fail(p.chromeTask !== null, `page migrates in task ${p.chromeTask}`);
+      await signIn(context);
+      await installShellFake(page);
+      await page.setViewportSize(vp);
+      await page.goto(p.path);
+      await expect(page.locator("h1")).toHaveText(p.h1);
+      if (p.ready)
+        await page.locator(p.ready).first().waitFor({ timeout: 10_000 });
+      const top = await firstRowTop(page);
+      test
+        .info()
+        .annotations.push({ type: "firstRowTop", description: String(top) });
+      expect(top).not.toBeNull();
+      expect(top as number).toBeLessThanOrEqual(FIRST_ROW_BUDGET);
+    });
+  }
+}
