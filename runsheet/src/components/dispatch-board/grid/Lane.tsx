@@ -28,6 +28,8 @@ export interface LaneProps {
   window: { start: number; end: number };
   minWidth: number;
   collapsed: boolean;
+  /** Identity colour from `assignLaneIdentities` (UI revamp §7.2). */
+  identity?: string;
 }
 
 function NewLoadSlot({ lane, left }: { lane: LaneView; left: number }) {
@@ -113,6 +115,7 @@ export const Lane = memo(function Lane({
   window,
   minWidth,
   collapsed,
+  identity,
 }: LaneProps) {
   const api = useBoard();
   const density = api.view.density;
@@ -184,7 +187,11 @@ export const Lane = memo(function Lane({
       className="flex border-b border-gray-200 bg-white"
       style={{ height }}
     >
-      <LaneHeader lane={lane} etasUnavailable={layout.etasUnavailable} />
+      <LaneHeader
+        lane={lane}
+        etasUnavailable={layout.etasUnavailable}
+        identity={identity}
+      />
       {collapsed ? (
         <div
           role="gridcell"

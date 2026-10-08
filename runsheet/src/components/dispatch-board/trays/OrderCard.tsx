@@ -6,7 +6,9 @@
  */
 import { GripVertical } from "lucide-react";
 import { type KeyboardEvent, type MouseEvent, memo, useRef } from "react";
+import { productName } from "../../../lib/format";
 import type { TrayOrder } from "../../../services/dispatchBoardApi";
+import { ProductCap, StatusBadge, statusKeyFor } from "../../ui";
 import { focusKey, useBoard } from "../BoardContext";
 import { matchClass, matchSuffix, trayOrderMatch } from "../boardMatch";
 import { formatGallons, formatWindow } from "../boardTime";
@@ -60,11 +62,18 @@ export interface OrderCardProps {
 
 function Badge({ children }: { children: string }) {
   return (
-    <span className="rounded border border-gray-300 bg-white px-1 text-[11px] font-medium text-gray-700">
+    <span className="rounded border border-slate-300 bg-white px-1 text-[11px] font-medium text-slate-700">
       {children}
     </span>
   );
 }
+
+const ORDER_STATUS_LABEL: Record<string, string> = {
+  placed: "Placed",
+  confirmed: "Confirmed",
+  scheduled: "Scheduled",
+  on_hold: "On hold",
+};
 
 export const OrderCard = memo(function OrderCard({ order }: OrderCardProps) {
   const api = useBoard();
@@ -135,8 +144,8 @@ export const OrderCard = memo(function OrderCard({ order }: OrderCardProps) {
         openMenu();
       }}
       data-match={state}
-      className={`flex scroll-my-2 gap-1 rounded-md border bg-white p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary ${
-        selected ? "border-primary bg-primary-soft" : "border-gray-200"
+      className={`flex scroll-my-2 gap-1 rounded-lg border bg-white p-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+        selected ? "border-primary bg-primary-soft" : "border-slate-200"
       } ${dragging ? "opacity-50" : ""} ${matchClass(state)}`}
     >
       {!onHold && !api.readOnly && (
@@ -144,36 +153,65 @@ export const OrderCard = memo(function OrderCard({ order }: OrderCardProps) {
           ref={grip}
           aria-hidden="true"
           data-drag-handle=""
-          className="flex min-h-6 min-w-6 cursor-grab touch-none items-center justify-center text-gray-400 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+          className="flex min-h-6 min-w-6 cursor-grab touch-none items-center justify-center text-slate-500 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           <GripVertical className="h-4 w-4" />
         </span>
       )}
-      <div aria-hidden="true" className="min-w-0 flex-1">
-        <div className="flex items-center justify-between gap-2">
-          <span className="truncate font-medium text-gray-900">
-            {order.customer_name ?? order.customer_id ?? "Customer unknown"}
-          </span>
-          {order.priority_bucket && <Badge>{order.priority_bucket}</Badge>}
-        </div>
-        <div className="text-gray-700">
-          {order.product_code ?? "—"} · {quantityText(order)}
-        </div>
-        <div className="text-xs text-gray-600">
-          {formatWindow(
-            order.delivery_window_start,
-            order.delivery_window_end,
-            api.timezone,
-          )}
-          {order.call_type &&
-            ` · ${CALL_TYPE_LABEL[order.call_type] ?? order.call_type}`}
-        </div>
-        <div className="mt-1 flex flex-wrap gap-1">
-          <span className="text-[11px] text-gray-500">#{order.order_id}</span>
-          {onHold && <Badge>On hold</Badge>}
-          {order.missing_window && <Badge>No window</Badge>}
-          {order.dyed && <Badge>Dyed</Badge>}
-        </div>
+      <OrderFace order={order} onHold={onHold} timeZone={api.timezone} />
+    </div>
+  );
+});
+
+/**
+ * The card's visible text, memoised so the board's per-frame context
+ * re-renders during a drag skip it (N1 budget with the added caps/badges).
+ */
+const OrderFace = memo(function OrderFace({
+  order,
+  onHold,
+  timeZone,
+}: {
+  order: TrayOrder;
+  onHold: boolean;
+  timeZone: string;
+}) {
+  return (
+    <div aria-hidden="true" className="min-w-0 flex-1">
+      <div className="flex items-center gap-2">
+        {order.product_code && (
+          <ProductCap code={order.product_code} decorative />
+        )}
+        <span className="min-w-0 flex-1 truncate font-semibold text-slate-900">
+          {order.customer_name ?? order.customer_id ?? "Customer unknown"}
+        </span>
+        {onHold ? (
+          <StatusBadge status="delayed" label="On hold" />
+        ) : (
+          <StatusBadge
+            status={statusKeyFor(order.status) ?? "draft"}
+            label={ORDER_STATUS_LABEL[order.status ?? ""] ?? "Placed"}
+          />
+        )}
+      </div>
+      <div className="truncate text-xs text-slate-700">
+        {order.product_code ? productName(order.product_code) : "—"} ·{" "}
+        {quantityText(order)}
+      </div>
+      <div className="text-xs text-slate-600">
+        {formatWindow(
+          order.delivery_window_start,
+          order.delivery_window_end,
+          timeZone,
+        )}
+        {order.call_type &&
+          ` · ${CALL_TYPE_LABEL[order.call_type] ?? order.call_type}`}
+      </div>
+      <div className="mt-1 flex flex-wrap gap-1">
+        <span className="text-[11px] text-slate-600">#{order.order_id}</span>
+        {order.priority_bucket && <Badge>{order.priority_bucket}</Badge>}
+        {order.missing_window && <Badge>No window</Badge>}
+        {order.dyed && <Badge>Dyed</Badge>}
       </div>
     </div>
   );

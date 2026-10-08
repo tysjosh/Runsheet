@@ -4,6 +4,7 @@
  * never carried by colour alone. Product and priority options come from the
  * snapshot's tray orders.
  */
+import { productName } from "../../lib/format";
 import type { BoardFilters } from "./viewState";
 
 type ListKey = Exclude<keyof BoardFilters, "has_warnings">;
@@ -79,7 +80,7 @@ export function FilterChips({
 }: FilterChipsProps) {
   const options: Record<ListKey, { value: string; label: string }[]> = {
     call_type: FIXED.call_type,
-    product: products.map((p) => ({ value: p, label: p })),
+    product: products.map((p) => ({ value: p, label: productName(p) })),
     priority: priorities.map((p) => ({ value: p, label: p })),
     window: FIXED.window,
     status: FIXED.status,

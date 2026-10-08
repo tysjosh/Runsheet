@@ -45,6 +45,7 @@ import {
 } from "../state/testFixtures";
 import {
   boardSnap,
+  chooseView,
   mockSend,
   okResponse,
   renderBoard,
@@ -199,7 +200,7 @@ describe("lane rows", () => {
     expect(row("T2")).toHaveAttribute("data-layout", "sequence");
     expect(within(row("T2")).getByText("ETAs unavailable")).toBeInTheDocument();
     expect(within(row("T1")).queryByText("ETAs unavailable")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Sequence" }));
+    chooseView("Sequence");
     expect(row("T1")).toHaveAttribute("data-layout", "sequence");
   });
 

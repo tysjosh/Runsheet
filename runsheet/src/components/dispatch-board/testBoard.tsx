@@ -3,7 +3,7 @@
  * `dispatchBoardApi` (and the socket and Pragmatic, see `testMocks.ts`)
  * before importing this file, so nothing reaches a backend.
  */
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import {
   type BoardCommand,
   type BoardSnapshot,
@@ -75,6 +75,33 @@ export function sentBodies(): Omit<
     const { client_command_id: _id, input_modality: _m, ...rest } = cmd;
     return rest as Omit<BoardCommand, "client_command_id" | "input_modality">;
   });
+}
+
+/**
+ * The View menu (UI revamp §7.2) holds Timeline/Sequence and
+ * Comfortable/Compact as radio items. Opens it and returns the item.
+ */
+export function viewItem(name: string | RegExp): HTMLElement {
+  if (!screen.queryByRole("menu", { name: "View" })) {
+    fireEvent.click(screen.getByRole("button", { name: /^View:/ }));
+  }
+  return screen.getByRole("menuitemradio", { name });
+}
+
+/** Picks a View menu choice (the menu closes after a choice). */
+export function chooseView(name: string | RegExp) {
+  fireEvent.click(viewItem(name));
+}
+
+/** The View menu trigger, whose label names the current zoom and density. */
+export function viewButton(): HTMLElement {
+  return screen.getByRole("button", { name: /^View:/ });
+}
+
+/** Opens `⋯` and picks an item ("Keyboard shortcuts", "Suggestions (3)"). */
+export function moreAction(name: string | RegExp) {
+  fireEvent.click(screen.getByRole("button", { name: "More board actions" }));
+  fireEvent.click(screen.getByRole("menuitem", { name }));
 }
 
 export function sentModalities(): string[] {

@@ -30,7 +30,11 @@ for (const [url, h1, tab] of CASES) {
     await installShellFake(page);
     await page.goto(url);
     await expect(page.locator("h1")).toHaveText(h1);
-    const t = page.getByRole("tab", { name: tab, exact: true });
+    // The hub's view tabs live in its title row (a view may add its own
+    // secondary tabs, e.g. Plans · Forecasts under Dispatch → Plans).
+    const t = page
+      .locator('[data-chrome="titlerow"]')
+      .getByRole("tab", { name: tab, exact: true });
     await expect(t).toHaveAttribute("aria-selected", "true");
     await page.reload();
     await expect(t).toHaveAttribute("aria-selected", "true");

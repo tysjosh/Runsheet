@@ -299,7 +299,9 @@ test.describe("publish (R12.2, R12.8)", () => {
       lane.driver = board.drivers[0];
     }
     await boot(page, board);
-    await page.getByRole("button", { name: "Publish all ready" }).click();
+    await page
+      .getByRole("button", { name: /^Publish (all|\d+) ready$/ })
+      .click();
     const review = page.getByRole("dialog", { name: "Review and publish" });
     await expect(review).toBeVisible();
     await expect(review.getByText("QA- Driver 1").first()).toBeVisible();
@@ -397,7 +399,12 @@ test.describe("stacked layout below 1024 px (R20.2)", () => {
     const board = new FakeBoard(SMALL);
     await boot(page, board);
     await expect(page.locator('[data-layout="stacked"]')).toHaveCount(1);
-    await expect(page.getByRole("button", { name: "Timeline" })).toBeDisabled();
+    // Zoom lives in the View menu (UI revamp §7.2): Timeline is disabled.
+    await page.getByRole("button", { name: /^View:/ }).click();
+    await expect(
+      page.getByRole("menuitemradio", { name: /^Timeline/ }),
+    ).toHaveAttribute("aria-disabled", "true");
+    await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Truck T01 actions" }).click();
     await page.getByRole("menuitem", { name: "Details" }).click();
     const drawer = page.getByRole("dialog", { name: "Truck T01 details" });
@@ -610,22 +617,25 @@ test.describe("accessibility (N5, R18, R19)", () => {
       page.getByRole("group", { name: "Board" }),
     ).toMatchAriaSnapshot(`
       - group "Board":
+        - searchbox "Search orders, customers, trucks and drivers"
+        - button "Filters"
+        - 'button "View: Timeline · Comfortable"'
+        - button "Map" [pressed=false]
+        - button "Undo" [disabled]
+        - button "Redo" [disabled]
+        - button "More board actions"
+    `);
+    // The day and primary actions are the title row (standalone harness).
+    await expect(page.getByRole("group", { name: "Day" })).toMatchAriaSnapshot(`
+      - group "Day":
         - button "Previous day"
         - textbox "Service day"
         - button "Next day"
-        - combobox "Shift"
-        - group "Zoom":
-          - button "Timeline" [pressed]
-          - button "Sequence"
-        - group "Density":
-          - button "Comfortable" [pressed]
-          - button "Compact"
-        - searchbox "Search orders, customers, trucks and drivers"
-        - button "Publish all ready"
-        - button "Undo" [disabled]
-        - button "Redo" [disabled]
-        - button "Keyboard shortcuts"
     `);
+    await expect(page.getByRole("combobox", { name: "Shift" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /^Publish (all|\d+) ready$/ }),
+    ).toBeVisible();
     await expect(
       page.getByRole("region", { name: "Trays" }),
     ).toMatchAriaSnapshot(`
@@ -674,7 +684,9 @@ test.describe("accessibility (N5, R18, R19)", () => {
     `);
     found.menu = await axe(page, "body");
     await page.keyboard.press("Escape");
-    await page.getByRole("button", { name: "Publish all ready" }).click();
+    await page
+      .getByRole("button", { name: /^Publish (all|\d+) ready$/ })
+      .click();
     const review = page.getByRole("dialog", { name: "Review and publish" });
     await expect(review).toBeVisible();
     found.publish = await axe(page, "body");

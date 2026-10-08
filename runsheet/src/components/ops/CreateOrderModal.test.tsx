@@ -66,9 +66,13 @@ const mockListFuelProducts = listFuelProducts as jest.MockedFunction<
  * accessible name, then click the option whose label matches `optionName`.
  * Options load asynchronously on mount, so `findByRole` polls until ready.
  */
-async function pickOption(triggerName: string, optionName: RegExp) {
+async function pickOption(
+  triggerName: string,
+  optionName: RegExp,
+  role: "button" | "combobox" = "button",
+) {
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: triggerName }));
+    fireEvent.click(screen.getByRole(role, { name: triggerName }));
   });
   const option = await screen.findByRole("option", { name: optionName });
   await act(async () => {
@@ -255,7 +259,7 @@ describe("CreateOrderModal — submission", () => {
     render(<CreateOrderModal isOpen={true} onClose={jest.fn()} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     expect(mockCreateOrder).not.toHaveBeenCalled();
@@ -287,7 +291,7 @@ describe("CreateOrderModal — submission", () => {
     // Customer ID and Product Code are now searchable pickers — select rather
     // than type. The picker returns the underlying id/code as the value.
     await pickOption("Customer ID", /Acme Fuel/);
-    await pickOption("Product Code", /Diesel #2/);
+    await pickOption("Product", /Diesel #2/, "combobox");
 
     await act(async () => {
       fireEvent.change(getInput("co-customer-name"), {
@@ -308,7 +312,7 @@ describe("CreateOrderModal — submission", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     await waitFor(() => expect(mockCreateOrder).toHaveBeenCalledTimes(1));
@@ -332,7 +336,7 @@ describe("CreateOrderModal — submission", () => {
       document.getElementById(id) as HTMLInputElement;
 
     await pickOption("Customer ID", /Acme Fuel/);
-    await pickOption("Product Code", /Diesel #2/);
+    await pickOption("Product", /Diesel #2/, "combobox");
 
     await act(async () => {
       fireEvent.change(getInput("co-customer-name"), {
@@ -353,7 +357,7 @@ describe("CreateOrderModal — submission", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     await waitFor(() => {
@@ -387,7 +391,7 @@ describe("CreateOrderModal — submission", () => {
       document.getElementById(id) as HTMLInputElement;
 
     await pickOption("Customer ID", /Acme Fuel/);
-    await pickOption("Product Code", /Diesel #2/);
+    await pickOption("Product", /Diesel #2/, "combobox");
 
     await act(async () => {
       fireEvent.change(getInput("co-customer-name"), {
@@ -408,7 +412,7 @@ describe("CreateOrderModal — submission", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     const alert = await screen.findByRole("alert");

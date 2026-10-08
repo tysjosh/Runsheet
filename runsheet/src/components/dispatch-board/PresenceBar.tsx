@@ -3,6 +3,7 @@
  * (`board_presence`, K17.1). Presence never blocks anyone.
  */
 import type { BoardPresenceUser } from "../../hooks/useDispatchBoardSocket";
+import { identityFor } from "../../lib/identity";
 import { actorDisplayName } from "./state/announce";
 
 function initials(name: string): string {
@@ -28,14 +29,15 @@ export function PresenceBar({ users }: PresenceBarProps) {
         <li
           key={u.user_id}
           title={names[i]}
-          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white bg-primary text-xs font-semibold text-white"
+          className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-white text-[10px] font-bold text-white"
+          style={{ backgroundColor: identityFor(u.user_id).hex }}
         >
           <span aria-hidden="true">{initials(names[i])}</span>
           <span className="sr-only">{names[i]}</span>
         </li>
       ))}
       {users.length > 5 && (
-        <li className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-white bg-gray-200 text-xs font-semibold text-gray-700">
+        <li className="flex h-6 w-6 items-center justify-center rounded-full border-2 border-white bg-slate-200 text-[10px] font-semibold text-slate-800">
           +{users.length - 5}
         </li>
       )}

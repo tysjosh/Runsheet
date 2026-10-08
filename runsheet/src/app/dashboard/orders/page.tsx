@@ -4,7 +4,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "../../../components/ErrorBoundary";
 import LoadingSpinner from "../../../components/LoadingSpinner";
-import { useDashboardChrome } from "../shell-context";
 
 const OrdersBoard = lazy(() => import("../../../components/ops/OrdersPage"));
 
@@ -19,7 +18,6 @@ function Loading() {
 export default function OrdersPageRoute() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { openCreateOrder } = useDashboardChrome();
   const initialQuery = searchParams.get("q") ?? "";
 
   return (
@@ -30,8 +28,8 @@ export default function OrdersPageRoute() {
             onOrderClick={(id) =>
               router.push(`/dashboard/orders/${encodeURIComponent(id)}`)
             }
-            onCreateOrder={openCreateOrder}
             initialQuery={initialQuery}
+            initialStatus={searchParams.get("status") ?? ""}
           />
         </Suspense>
       </ErrorBoundary>

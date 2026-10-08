@@ -48,6 +48,7 @@ import { generatePlan } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
 import { getCurrentUserId } from "../../utils/auth";
 import { EmptyState, LoadErrorState, ToastContainer, useToasts } from "../ui";
+import { useInPageChrome, usePageChrome } from "../ui/PageHeader";
 import { BoardBanners } from "./BoardBanners";
 import {
   BoardContext,
@@ -55,7 +56,13 @@ import {
   type DrawerTarget,
 } from "./BoardContext";
 import { BoardLiveRegion, useAnnouncer } from "./BoardLiveRegion";
-import { BoardToolbar } from "./BoardToolbar";
+import {
+  BoardDayControls,
+  BoardPrimaryActions,
+  BoardTitleControls,
+  type BoardTitleControlsProps,
+  BoardToolbarRow,
+} from "./BoardToolbar";
 import { AssignToMenu } from "./dialogs/AssignToMenu";
 import { CardMenu } from "./dialogs/CardMenu";
 import {
@@ -792,47 +799,115 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
   // A full-screen drawer is modal: the board behind it is inert.
   const behind = stacked && drawer !== null;
 
+  // ── Chrome (UI revamp §7.2): title-row controls go to the Dispatch header
+  // through usePageChrome(); standalone (no host) they get their own row.
+  const zoneText = timezone ? zoneAbbreviation(timezone) : "";
+  const readyCount = useMemo(() => lanes.filter(looksReady).length, [lanes]);
+  const generateDisabledReason = readOnly
+    ? "Plans can't be generated while the board is read-only."
+    : !isToday
+      ? "Plans are generated for today."
+      : null;
+  const publishDisabledReason = readOnly
+    ? "Nothing can be published while the board is read-only."
+    : null;
+  // Handlers read the latest state through a ref, so the memoised title
+  // nodes only change when what they show changes (not on every drag frame).
+  const titleHandlers = useRef({
+    onDateChange: (_d: string) => {},
+    onShiftChange: (_s: BoardView["shift"]) => {},
+    onGenerate: () => {},
+    onPublishAll: () => {},
+  });
+  titleHandlers.current = {
+    onDateChange: (date) => updateView({ date: clampDate(date, today) }),
+    onShiftChange: (shift) => updateView({ shift }),
+    onGenerate: () => void generate(),
+    onPublishAll: publishAllReady,
+  };
+  const shifts = snapshot?.shifts;
+  const titleProps = useMemo<BoardTitleControlsProps>(
+    () => ({
+      serviceDate,
+      today,
+      zone: zoneText,
+      shift: view.shift,
+      shifts: shifts ?? [],
+      presence,
+      onDateChange: (d) => titleHandlers.current.onDateChange(d),
+      onShiftChange: (s) => titleHandlers.current.onShiftChange(s),
+      generateDisabledReason,
+      generating,
+      onGenerate: () => titleHandlers.current.onGenerate(),
+      readyCount,
+      publishDisabledReason,
+      onPublishAll: () => titleHandlers.current.onPublishAll(),
+    }),
+    [
+      serviceDate,
+      today,
+      zoneText,
+      view.shift,
+      shifts,
+      presence,
+      generateDisabledReason,
+      generating,
+      readyCount,
+      publishDisabledReason,
+    ],
+  );
+  const hosted = useInPageChrome();
+  const titleContext = useMemo(
+    () => <BoardDayControls {...titleProps} />,
+    [titleProps],
+  );
+  const titleActions = useMemo(
+    () => <BoardPrimaryActions {...titleProps} />,
+    [titleProps],
+  );
+  usePageChrome(hosted ? { context: titleContext, actions: titleActions } : {});
+
+  const firstLaneId = lanes[0]?.truck_id;
+  const historyTruck =
+    view.truck && state.lanesById[view.truck] ? view.truck : firstLaneId;
+  const placeTakeover =
+    api && snapshot?.service_date === serviceDate && placing && !stacked ? (
+      <PlaceModeBanner />
+    ) : null;
   const toolbar = (
-    <BoardToolbar
-      view={shownView}
-      zoomLocked={stacked}
-      serviceDate={serviceDate}
-      today={today}
-      zone={timezone ? zoneAbbreviation(timezone) : ""}
-      shifts={snapshot?.shifts ?? []}
-      products={products}
-      priorities={priorities}
-      presence={presence}
-      canUndo={canUndo}
-      canRedo={canRedo}
-      onViewChange={updateView}
-      onDateChange={(date) => updateView({ date: clampDate(date, today) })}
-      onUndo={() => void commands.undo()}
-      onRedo={() => void commands.redo()}
-      onHelp={() => setHelpOpen(true)}
-      suggestionCount={snapshot?.suggestions.length ?? 0}
-      onSuggestions={() => setSuggestionsScope({})}
-      generateDisabledReason={
-        readOnly
-          ? "Plans can't be generated while the board is read-only."
-          : !isToday
-            ? "Plans are generated for today."
+    <>
+      {!hosted && <BoardTitleControls {...titleProps} />}
+      <BoardToolbarRow
+        view={shownView}
+        zoomLocked={stacked}
+        products={products}
+        priorities={priorities}
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onViewChange={updateView}
+        onUndo={() => void commands.undo()}
+        onRedo={() => void commands.redo()}
+        onHelp={() => setHelpOpen(true)}
+        suggestionCount={snapshot?.suggestions.length ?? 0}
+        onSuggestions={() => setSuggestionsScope({})}
+        splitMap={splitMap}
+        onToggleMap={() => {
+          setVisibleLanes(visibleRef.current);
+          setSplitMap((on) => !on);
+        }}
+        onHistory={
+          historyTruck
+            ? () => setDrawer({ truckId: historyTruck, tab: "history" })
             : null
-      }
-      generating={generating}
-      onGenerate={() => void generate()}
-      splitMap={splitMap}
-      onToggleMap={() => {
-        setVisibleLanes(visibleRef.current);
-        setSplitMap((on) => !on);
-      }}
-      publishDisabledReason={
-        readOnly
-          ? "Nothing can be published while the board is read-only."
-          : null
-      }
-      onPublishAll={publishAllReady}
-    />
+        }
+        readOnlyText={
+          snapshot?.service_date === serviceDate && readOnly && readOnlyReason
+            ? readOnlyText
+            : null
+        }
+        takeover={placeTakeover}
+      />
+    </>
   );
 
   // The held snapshot is for another day while a day switch loads or failed.
@@ -979,7 +1054,8 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
         {toolbar}
         {snapshot && currentDay && (
           <BoardBanners
-            readOnlyReason={readOnly ? readOnlyReason : null}
+            // The read-only notice is a chip in the toolbar row (0 px here).
+            readOnlyReason={null}
             paused={socket.paused}
             degradedSources={snapshot.degraded_sources}
             truncated={false}
@@ -987,7 +1063,8 @@ export default function DispatchBoard({ mode, onExit }: DispatchBoardProps) {
         )}
         {api && currentDay && <PublishBanners lanes={lanes} />}
       </div>
-      {api && currentDay && <PlaceModeBanner pinned={stacked} />}
+      {/* Stacked: pinned to the bottom edge. Panels: the toolbar takeover. */}
+      {api && currentDay && stacked && <PlaceModeBanner pinned />}
       {body}
       <CardMenu request={controller.menu} onClose={controller.closeMenu} />
       {api && controller.assign && (

@@ -1,6 +1,8 @@
 /**
- * List fixtures for the UI revamp specs: at least 20 rows per list endpoint,
- * so every measured page has a first data row (design.md §6). Values are
+ * List fixtures for the UI revamp specs (design.md §6). Pages measured in
+ * Phase 2 (Dashboard, Dispatch Board, Jobs, Plans, Orders, Live) each get a
+ * data row from these; Phase 3 pages add theirs as they migrate (until then
+ * their chrome spec stays `test.fail` and some render an empty state). Values are
  * synthetic (QA- prefixes, example.com) and deterministic.
  */
 export const TENANT = "e2e-tenant";
@@ -138,3 +140,61 @@ export const PROFILE = {
   roles: ["admin", "dispatcher"],
   has_pii_access: true,
 };
+// ── Phase 2 fixtures (Dashboard, Live, Plans) ───────────────────────────────
+const PLAN_STATUSES = [
+  "draft",
+  "proposed",
+  "approved",
+  "dispatched",
+  "rejected",
+];
+export const PLANS = Array.from({ length: 20 }, (_, i) => ({
+  plan_id: `QA-PLAN-${String(300 + i)}`,
+  run_id: `QA-RUN-${300 + i}`,
+  status: PLAN_STATUSES[i % PLAN_STATUSES.length],
+  truck_id: `QA-TRK-${100 + (i % 7)}`,
+  created_at: iso(5, i),
+  total_utilization_pct: 60 + (i % 35),
+  execution_status: null,
+}));
+export const ASSETS = Array.from({ length: 8 }, (_, i) => ({
+  id: `QA-TRK-${100 + i}`,
+  name: `QA-TRK-${100 + i}`,
+  assetType: "vehicle",
+  status: "active",
+  currentLocation: {
+    coordinates: { lat: 39.78 + i / 50, lon: -89.65 - i / 50 },
+  },
+}));
+export const FUEL_ALERTS = Array.from({ length: 3 }, (_, i) => ({
+  station_id: `QA-STN-${i}`,
+  name: `QA Station tank ${i}`,
+  fuel_type: ["GASOLINE_REG", "KEROSENE", "DIESEL_2"][i],
+  status: ["critical", "low", "empty"][i],
+  current_stock_gallons: 400 + i * 300,
+  capacity_gallons: 6000,
+  current_stock_liters: 1500 + i * 1100,
+  capacity_liters: 22700,
+  stock_percentage: [12, 23, 4][i],
+  days_until_empty: [0.6, 1.3, 0.2][i],
+  location_name: "Springfield",
+}));
+export const APPROVALS = Array.from({ length: 3 }, (_, i) => ({
+  action_id: `QA-ACT-${i}`,
+  action_type: "route_plan",
+  tool_name: ["route_plan", "refill_proposal", "reassign_driver"][i],
+  parameters: {},
+  risk_level: ["low", "medium", "high"][i],
+  proposed_by: ["route_agent", "fuel_agent", "dispatch_agent"][i],
+  proposed_at: iso(13, i * 5),
+  status: "pending",
+  reviewed_by: null,
+  reviewed_at: null,
+  expiry_time: "2099-01-01T00:00:00Z",
+  impact_summary: [
+    "Route plan for 4 loads",
+    "Refill proposal: QA Station tank 0",
+    "Swap driver on QA-TRK-102",
+  ][i],
+  tenant_id: TENANT,
+}));

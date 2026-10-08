@@ -24,6 +24,7 @@ import {
   useContext,
   useId,
   useLayoutEffect,
+  useRef,
   useState,
   useSyncExternalStore,
 } from "react";
@@ -117,12 +118,30 @@ export function PageChromeProvider({ children }: { children: ReactNode }) {
 export function usePageChrome(contribution: ChromeContribution): boolean {
   const store = useContext(ChromeContext);
   const id = useId();
-  // Runs every render so the host always shows the latest nodes. Only the
-  // host subscribes, so this cannot loop.
+  const last = useRef<ChromeContribution | null>(null);
+  // Runs every render so the host always shows the latest nodes, but only
+  // republishes when a node changed identity: callers that memoise their
+  // nodes (the Dispatch Board re-renders on every drag frame) don't re-render
+  // the host each time. Only the host subscribes, so this cannot loop.
   useLayoutEffect(() => {
+    const prev = last.current;
+    if (
+      prev &&
+      prev.actions === contribution.actions &&
+      prev.counts === contribution.counts &&
+      prev.context === contribution.context
+    )
+      return;
+    last.current = contribution;
     store?.set(id, contribution);
   });
-  useLayoutEffect(() => () => store?.remove(id), [store, id]);
+  useLayoutEffect(
+    () => () => {
+      last.current = null;
+      store?.remove(id);
+    },
+    [store, id],
+  );
   return store !== null;
 }
 

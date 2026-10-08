@@ -1,11 +1,32 @@
 "use client";
 
-import { ChevronDown, ChevronUp, ExternalLink } from "lucide-react";
+/**
+ * Job list for Dispatch → Jobs (UI revamp R8.6, §7.2).
+ *
+ * The shared `DataTable`: single-line sticky 36 px header, 40 px rows, status
+ * as a `StatusBadge` (hue + icon + label) with no full-row tinting, dates
+ * through `lib/format`, and the status transitions (Assign, Start, Complete,
+ * Fail, Cancel, from `JobActionButtons`' state machine) in a per-row `⋯`
+ * menu. "Fail" asks for a reason in a small `FormDialog`. Sorting keeps the
+ * board's field/order logic.
+ */
+import { ExternalLink } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import {
+  type Column,
+  DataTable,
+  Field,
+  FormDialog,
+  INPUT_CLASS,
+  type MenuItem,
+  StatusBadge,
+  statusKeyFor,
+  type TableSort,
+} from "@/components/ui";
+import { dateTime } from "../../lib/format";
 import type { Job, JobStatus } from "../../types/api";
-import JobActionButtons from "./JobActionButtons";
+import { TRANSITION_BUTTONS, VALID_TRANSITIONS } from "./JobActionButtons";
 
 type SortField =
   | "job_id"
@@ -19,9 +40,6 @@ type SortField =
 
 type SortOrder = "asc" | "desc";
 
-const STICKY_ACTIONS =
-  "sticky right-0 shadow-[-6px_0_6px_-6px_rgba(0,0,0,0.15)]";
-
 interface JobBoardProps {
   jobs: Job[];
   onTransition: (
@@ -31,69 +49,52 @@ interface JobBoardProps {
   ) => Promise<void>;
   /** Optional callback when a job row is clicked — navigates to job detail */
   onSelectJob?: (jobId: string) => void;
+  loading?: boolean;
+  error?: { message: string; onRetry?: () => void } | null;
 }
 
-/**
- * Row background color based on job status.
- * Delayed jobs get an orange overlay regardless of status.
- *
- * Validates: Requirement 11.2
- */
-function getRowColor(job: Job): string {
-  if (job.delayed) return "bg-warning-light";
-  switch (job.status) {
-    case "scheduled":
-      return "bg-info-light";
-    case "assigned":
-      return "bg-warning-light";
-    case "in_progress":
-      return "bg-success-light";
-    case "completed":
-      return "bg-gray-50";
-    case "failed":
-      return "bg-error-light";
-    case "cancelled":
-      return "bg-gray-50";
-    default:
-      return "";
+const STATUS_LABEL: Record<string, string> = {
+  scheduled: "Scheduled",
+  assigned: "Assigned",
+  in_progress: "In progress",
+  completed: "Completed",
+  failed: "Failed",
+  cancelled: "Cancelled",
+};
+
+/** Status badge for a job: Delayed wins over the job's own status. */
+export function JobStatusBadge({
+  job,
+}: {
+  job: Pick<Job, "status" | "delayed" | "delay_duration_minutes">;
+}) {
+  if (job.delayed) {
+    return (
+      <StatusBadge
+        status="delayed"
+        label={
+          job.delay_duration_minutes
+            ? `Delayed +${job.delay_duration_minutes} min`
+            : "Delayed"
+        }
+      />
+    );
   }
-}
-
-function getStatusBadge(status: JobStatus, delayed: boolean): string {
-  if (delayed) return "text-warning-dark bg-warning-light";
-  switch (status) {
-    case "scheduled":
-      return "text-info-dark bg-info-light";
-    case "assigned":
-      return "text-warning-dark bg-warning-light";
-    case "in_progress":
-      return "text-success-dark bg-success-light";
-    case "completed":
-      return "text-gray-600 bg-gray-100";
-    case "failed":
-      return "text-error-dark bg-error-light";
-    case "cancelled":
-      return "text-gray-500 bg-gray-100";
-    default:
-      return "text-gray-700 bg-gray-100";
-  }
-}
-
-function formatDate(dateStr?: string): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const key =
+    job.status === "scheduled"
+      ? "planned"
+      : (statusKeyFor(job.status) ?? "draft");
+  return (
+    <StatusBadge
+      status={key}
+      label={STATUS_LABEL[job.status] ?? job.status.replace(/_/g, " ")}
+    />
+  );
 }
 
 function formatJobType(jobType: string): string {
-  return jobType
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+  const s = jobType.replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 function compareValues(
@@ -107,30 +108,21 @@ function compareValues(
   return order === "asc" ? cmp : -cmp;
 }
 
-/**
- * Sortable job board with color-coded rows and action buttons.
- *
- * Validates: Requirements 11.1, 11.2, 11.4, 11.7
- */
 export default function JobBoard({
   jobs,
   onTransition,
   onSelectJob,
+  loading = false,
+  error = null,
 }: JobBoardProps) {
   const [sortField, setSortField] = useState<SortField>("scheduled_time");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
+  const [failing, setFailing] = useState<string | null>(null);
 
-  const handleSort = useCallback(
-    (field: SortField) => {
-      if (sortField === field) {
-        setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
-      } else {
-        setSortField(field);
-        setSortOrder("asc");
-      }
-    },
-    [sortField],
-  );
+  const handleSort = useCallback((s: TableSort) => {
+    setSortField(s.key as SortField);
+    setSortOrder(s.direction);
+  }, []);
 
   const sorted = [...jobs].sort((a, b) => {
     const aVal = a[sortField] as string | undefined;
@@ -138,141 +130,174 @@ export default function JobBoard({
     return compareValues(aVal, bVal, sortOrder);
   });
 
-  const sortableHeader = (field: SortField, label: string) => (
-    <button
-      type="button"
-      onClick={() => handleSort(field)}
-      aria-sort={
-        sortField === field
-          ? sortOrder === "asc"
-            ? "ascending"
-            : "descending"
-          : "none"
-      }
-      className="flex items-center text-xs font-medium text-gray-600 uppercase tracking-wider"
-    >
-      {label}
-      {sortField === field &&
-        (sortOrder === "asc" ? (
-          <ChevronUp className="w-3 h-3 inline ml-1" />
-        ) : (
-          <ChevronDown className="w-3 h-3 inline ml-1" />
-        ))}
-    </button>
-  );
-
   const columns: Column<Job>[] = [
     {
       key: "job_id",
-      label: sortableHeader("job_id", "Job ID"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm font-medium text-primary",
-      render: (job) =>
+      header: "Job",
+      sortable: true,
+      width: 150,
+      truncate: true,
+      title: (job) => job.job_id,
+      className: "font-semibold text-slate-900",
+      cell: (job) =>
         job.job_type === "cargo_transport" ? (
           <Link
             href={`/dashboard/dispatch/jobs/${encodeURIComponent(job.job_id)}/cargo`}
-            className="hover:underline flex items-center gap-1"
+            className="inline-flex items-center gap-1 text-link hover:underline"
             onClick={(e) => e.stopPropagation()}
+            aria-label={`${job.job_id} cargo manifest`}
           >
             {job.job_id}
-            <ExternalLink className="w-3 h-3 text-gray-500" />
+            <ExternalLink aria-hidden="true" className="h-3 w-3" />
           </Link>
         ) : (
           job.job_id
         ),
     },
     {
-      key: "job_type",
-      label: sortableHeader("job_type", "Type"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-700",
-      render: (job) => formatJobType(job.job_type),
+      key: "status",
+      header: "Status",
+      sortable: true,
+      width: 170,
+      cell: (job) => <JobStatusBadge job={job} />,
     },
     {
-      key: "status",
-      label: sortableHeader("status", "Status"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      render: (job) => (
-        <span
-          className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
-        >
-          {job.delayed ? "Delayed" : job.status.replace(/_/g, " ")}
-        </span>
-      ),
+      key: "job_type",
+      header: "Type",
+      sortable: true,
+      truncate: true,
+      className: "text-slate-700",
+      cell: (job) => formatJobType(job.job_type),
     },
     {
       key: "origin",
-      label: sortableHeader("origin", "Origin"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-700",
-      render: (job) => job.origin,
+      header: "Origin",
+      sortable: true,
+      truncate: true,
+      className: "text-slate-700",
+      cell: (job) => job.origin,
     },
     {
       key: "destination",
-      label: sortableHeader("destination", "Destination"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-700",
-      render: (job) => job.destination,
+      header: "Destination",
+      sortable: true,
+      truncate: true,
+      className: "text-slate-700",
+      cell: (job) => job.destination,
     },
     {
       key: "asset_assigned",
-      label: sortableHeader("asset_assigned", "Asset"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-700",
-      render: (job) => job.asset_assigned ?? "—",
+      header: "Truck",
+      sortable: true,
+      width: 110,
+      truncate: true,
+      className: "text-slate-700",
+      cell: (job) => job.asset_assigned ?? "—",
     },
     {
       key: "scheduled_time",
-      label: sortableHeader("scheduled_time", "Scheduled"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-600",
-      render: (job) => formatDate(job.scheduled_time),
+      header: "Scheduled",
+      sortable: true,
+      width: 140,
+      className: "whitespace-nowrap text-slate-700 tabular-nums",
+      cell: (job) => dateTime(job.scheduled_time),
     },
     {
       key: "estimated_arrival",
-      label: sortableHeader("estimated_arrival", "Est. Arrival"),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-600",
-      render: (job) => formatDate(job.estimated_arrival),
-    },
-    {
-      key: "actions",
-      label: "Actions",
-      // Pinned to the right edge so Reject stays visible when the table
-      // scrolls horizontally (e.g. at 1280 px). Opaque backgrounds and a left
-      // shadow keep scrolled cells from showing through.
-      headerClassName: `${STICKY_ACTIONS} bg-gray-50`,
-      className: `${STICKY_ACTIONS} bg-white`,
-      // Stop row-click propagation so action buttons don't trigger navigation.
-      render: (job) => (
-        <div onClick={(e) => e.stopPropagation()}>
-          <JobActionButtons
-            jobId={job.job_id}
-            currentStatus={job.status}
-            onTransition={onTransition}
-          />
-        </div>
-      ),
+      header: "ETA",
+      sortable: true,
+      width: 140,
+      className: "whitespace-nowrap text-slate-700 tabular-nums",
+      cell: (job) => dateTime(job.estimated_arrival),
     },
   ];
 
+  const rowMenu = (job: Job): MenuItem[] => {
+    const targets = VALID_TRANSITIONS[job.status] ?? [];
+    const items: MenuItem[] = [];
+    if (onSelectJob)
+      items.push({
+        id: "open",
+        label: "Open job",
+        onSelect: () => onSelectJob(job.job_id),
+      });
+    for (const t of targets) {
+      const btn = TRANSITION_BUTTONS[t];
+      if (!btn) continue;
+      items.push({
+        id: t,
+        label: t === "failed" ? `${btn.label}…` : btn.label,
+        icon: btn.icon,
+        danger: t === "failed" || t === "cancelled",
+        onSelect: () =>
+          t === "failed"
+            ? setFailing(job.job_id)
+            : void onTransition(job.job_id, t).catch(() => {}),
+      });
+    }
+    return items;
+  };
+
   return (
-    <Table<Job>
-      ariaLabel="Job board"
-      variant="standard"
-      columns={columns}
-      data={sorted}
-      getRowId={(job) => job.job_id}
-      onRowClick={onSelectJob ? (job) => onSelectJob(job.job_id) : undefined}
-      rowClassName={(job) => getRowColor(job)}
-      emptyState={
-        <div className="text-gray-500">
-          <p className="text-lg font-medium text-gray-500">No jobs found</p>
-          <p className="text-sm text-gray-500 mt-1">
-            Try adjusting your filters
-          </p>
-        </div>
-      }
-    />
+    <>
+      <DataTable<Job>
+        ariaLabel="Job board"
+        columns={columns}
+        data={sorted}
+        getRowId={(job) => job.job_id}
+        rowLabel={(job) => `job ${job.job_id}`}
+        onRowClick={onSelectJob ? (job) => onSelectJob(job.job_id) : undefined}
+        sort={{ key: sortField, direction: sortOrder }}
+        onSortChange={handleSort}
+        rowMenu={rowMenu}
+        loading={loading}
+        error={error}
+        emptyState={
+          <div>
+            <p className="text-sm font-semibold text-slate-800">
+              No jobs found
+            </p>
+            <p className="mt-1 text-xs text-text-muted">
+              Try another status or clear the filters.
+            </p>
+          </div>
+        }
+      />
+      {failing && (
+        <FormDialog<{ reason: string }>
+          open
+          size="sm"
+          title={`Mark job ${failing} as failed`}
+          help="A reason is required and is recorded on the job's event timeline."
+          submitLabel="Mark failed"
+          initialValues={{ reason: "" }}
+          validate={(v) =>
+            v.reason.trim() ? {} : { reason: "Enter a reason." }
+          }
+          onSubmit={async (v) => {
+            await onTransition(failing, "failed", v.reason.trim());
+          }}
+          successMessage={`Job ${failing} marked failed`}
+          onClose={() => setFailing(null)}
+        >
+          {({ values, set, errors }) => (
+            <Field
+              label="Failure reason"
+              required
+              error={errors.reason}
+              span={2}
+            >
+              <textarea
+                rows={3}
+                value={values.reason}
+                onChange={(e) => set("reason", e.target.value)}
+                placeholder="Customer site inaccessible, equipment breakdown…"
+                className={`${INPUT_CLASS} h-auto py-2`}
+              />
+            </Field>
+          )}
+        </FormDialog>
+      )}
+    </>
   );
 }

@@ -56,11 +56,14 @@ export function PlaceModeBanner({ pinned = false }: PlaceModeBannerProps) {
   return (
     <div
       data-testid="place-mode-banner"
-      className={`flex items-center gap-3 border-primary bg-primary-soft px-4 py-2 text-sm text-gray-900 ${
-        pinned ? "fixed inset-x-0 bottom-0 z-30 border-t shadow-lg" : "border-b"
+      className={`flex items-center gap-3 bg-primary-soft text-sm text-slate-900 ${
+        pinned
+          ? "fixed inset-x-0 bottom-0 z-30 border-t border-primary px-4 py-2 shadow-lg"
+          : // Rendered in the toolbar row's slot (R8.3): no extra row.
+            "h-full min-w-0 flex-1"
       }`}
     >
-      <p role="status" className="flex-1">
+      <p role="status" className="min-w-0 flex-1 truncate font-medium">
         {placingText(item)}
       </p>
       {item.kind !== "truck" && (

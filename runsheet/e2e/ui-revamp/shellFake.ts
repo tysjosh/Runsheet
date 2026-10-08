@@ -6,7 +6,18 @@
  */
 import type { BrowserContext, Page, Route } from "@playwright/test";
 import { FakeBoard } from "../dispatchBoardFake";
-import { CUSTOMERS, INVOICES, JOBS, ORDERS, PROFILE, TENANT } from "./fixtures";
+import {
+  APPROVALS,
+  ASSETS,
+  CUSTOMERS,
+  FUEL_ALERTS,
+  INVOICES,
+  JOBS,
+  ORDERS,
+  PLANS,
+  PROFILE,
+  TENANT,
+} from "./fixtures";
 
 export const ORIGIN = "http://localhost:8080";
 /** Id the redirect spec uses for detail routes (answered 404). */
@@ -122,8 +133,21 @@ export async function installShellFake(
     if (path === "/orders") {
       const status = url.searchParams.get("status");
       const rows = status ? ORDERS.filter((o) => o.status === status) : ORDERS;
-      return json(200, paginated(rows));
+      // The list's own page size (chip counts ask for size=1 and read total).
+      const size = Number(url.searchParams.get("size") ?? rows.length);
+      return json(200, {
+        ...paginated(rows.slice(0, size)),
+        total: rows.length,
+      });
     }
+    if (path === "/fuel/mvp/plans") return json(200, paginated(PLANS));
+    if (path === "/fleet/assets")
+      return json(200, { data: ASSETS, request_id: "e2e" });
+    if (path === "/fuel/alerts")
+      return json(200, { data: FUEL_ALERTS, request_id: "e2e" });
+    if (path === "/agent/approvals") return json(200, paginated(APPROVALS));
+    if (path === "/agent/config/autonomy")
+      return json(200, { level: "auto-low", request_id: "e2e" });
     if (path === "/scheduling/jobs/delayed")
       return json(200, {
         data: JOBS.filter((j) => j.delayed),

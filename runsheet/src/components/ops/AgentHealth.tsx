@@ -7,7 +7,7 @@
  * with last activity timestamp. Provides pause/resume controls wired to the
  * POST `/agent/{agent_id}/pause` and `/agent/{agent_id}/resume` endpoints.
  *
- * Audience: this panel renders inside `OperationsControlView` and `/ops/command`,
+ * Audience: this panel renders inside Live → Agents (`live/LiveView`) and `/ops/command`,
  * both of which are `admin` + `dispatcher` surfaces — but the autonomous agents
  * are process-wide, so pausing one stops it for every tenant. The backend
  * restricts pause/resume to `platform_admin` via

@@ -29,6 +29,17 @@ const PAGES = [
   },
   { id: "orders", path: "/dashboard/orders", ready: "tbody tr" },
   {
+    id: "dispatch-jobs",
+    path: "/dashboard/dispatch?tab=jobs",
+    ready: "tbody tr",
+  },
+  {
+    id: "dispatch-plans",
+    path: "/dashboard/dispatch?tab=plans",
+    ready: "tbody tr",
+  },
+  { id: "live", path: "/dashboard/control", ready: "[data-feed-row]" },
+  {
     id: "billing-invoices",
     path: "/dashboard/billing?tab=invoices",
     ready: "tbody tr",
@@ -36,8 +47,11 @@ const PAGES = [
   { id: "settings", path: "/dashboard/settings?tab=company", ready: "h1" },
 ];
 
+const BOARD_1024 = { width: 1024, height: 768 } as const;
 for (const p of PAGES) {
-  for (const vp of VIEWPORTS) {
+  const vps =
+    p.id === "dispatch-board" ? [BOARD_1024, ...VIEWPORTS] : VIEWPORTS;
+  for (const vp of vps) {
     test(`${p.id} ${vp.width}x${vp.height}`, async ({ page, context }) => {
       const baseline = path.join(
         __dirname,

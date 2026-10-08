@@ -848,7 +848,13 @@ export default function OrderDetailView({
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-error mb-4">{error ?? "Order not found"}</p>
+          {/* One heading even when the order can't be shown (R2.5). */}
+          <PageTitle className="mb-1 text-base font-semibold text-slate-900">
+            Order not found
+          </PageTitle>
+          <p className="text-red-800 mb-4">
+            {error ?? `We couldn't find order "${orderId}".`}
+          </p>
           <button
             type="button"
             onClick={goBack}

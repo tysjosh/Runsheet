@@ -4,10 +4,8 @@ import { lazy, Suspense } from "react";
 import ErrorBoundary from "../../../components/ErrorBoundary";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 
-// Live (labelled "Live" in the nav; route id `control`).
-const OperationsControl = lazy(
-  () => import("../../../components/ops/OperationsControlPage"),
-);
+// Live (labelled "Live" in the nav; route id `control`), UI revamp §7.3.
+const LiveView = lazy(() => import("../../../components/live/LiveView"));
 
 function Loading() {
   return (
@@ -22,7 +20,7 @@ export default function ControlPageRoute() {
     <div className="flex-1 bg-gray-50">
       <ErrorBoundary componentName="Live">
         <Suspense fallback={<Loading />}>
-          <OperationsControl />
+          <LiveView />
         </Suspense>
       </ErrorBoundary>
     </div>
