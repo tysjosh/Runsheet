@@ -87,6 +87,27 @@ async def timed(fn: Callable[[], Awaitable[object]], n: int) -> List[float]:
     return out
 
 
+def _coverage_tracing() -> bool:
+    try:
+        import coverage
+    except ImportError:  # pragma: no cover - coverage is a dev dependency
+        return False
+    return coverage.Coverage.current() is not None
+
+
+def assert_within(samples: List[float], budget_s: float) -> None:
+    """Enforce a p95 budget, except under coverage tracing.
+
+    Line tracing makes this code 3–8x slower (snapshot p95 3.7 s under
+    ``--cov`` against 0.45 s without), so a timing there says nothing about N1.
+    CI's backend job runs the suite with ``--cov`` and then this module again
+    with ``--no-cov``, where the budgets are enforced.
+    """
+    if _coverage_tracing():
+        pytest.skip(f"p95 {p95(samples) * 1000:.0f} ms under coverage tracing; budgets run with --no-cov")
+    assert p95(samples) <= budget_s
+
+
 def report(name: str, samples: List[float]) -> None:
     ms = [s * 1000 for s in samples]
     print(
@@ -190,7 +211,7 @@ async def test_snapshot_p95_within_budget(h):
     samples = await timed(lambda: h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ), 10)
     report("snapshot (60 lanes, 1,500 stops, 120 tray, cross-day + suggested driver)", samples)
     assert h.drivers.search_calls, "suggested-driver searches ran"
-    assert p95(samples) <= SNAPSHOT_P95_S
+    assert_within(samples, SNAPSHOT_P95_S)
 
 
 async def test_batch_validate_p95_within_budget(h):
@@ -199,7 +220,7 @@ async def test_batch_validate_p95_within_budget(h):
     )
     samples = await timed(lambda: h.service.validate(T, TODAY, body, tz=TZ), 20)
     report("batch validate (1 order x 60 lanes, 30 of them reaching 30 stops)", samples)
-    assert p95(samples) <= BATCH_VALIDATE_P95_S
+    assert_within(samples, BATCH_VALIDATE_P95_S)
 
 
 async def test_position_validate_p95_within_budget(h):
@@ -215,7 +236,7 @@ async def test_position_validate_p95_within_budget(h):
     )
     samples = await timed(lambda: h.service.validate(T, TODAY, body, tz=TZ), 20)
     report("position validate (1 order, 29-stop lane, index 2)", samples)
-    assert p95(samples) <= POSITION_VALIDATE_P95_S
+    assert_within(samples, POSITION_VALIDATE_P95_S)
 
 
 @pytest.mark.parametrize("kind", ["order", "stop", "load", "driver"])
@@ -271,4 +292,4 @@ async def test_command_p95_within_budget(h):
         samples.append(time.perf_counter() - started)
         assert [l["truck_id"] for l in res["lanes"]] == [truck], res
     report("command (move_stops reorder, 29-stop lane, 1,500-stop draft)", samples)
-    assert p95(samples) <= COMMAND_P95_S
+    assert_within(samples, COMMAND_P95_S)

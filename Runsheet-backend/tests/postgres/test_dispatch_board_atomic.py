@@ -220,6 +220,18 @@ async def test_tray_and_history_queries_on_the_real_translator(es, tenant):
     assert [i["lanes"][0]["truck_id"] for i in t2["items"]] == ["T2"]
 
 
+async def test_tray_excludes_drafted_orders_on_the_real_translator(es, tenant):
+    """Phase 7 P7-1: the tray query's ``must_not terms order_id`` on Postgres."""
+    svc = await _service(es, tenant)
+    for oid in ("a", "b", "c"):
+        await es.index_document("fuel_orders_current", oid, order(oid, tenant_id=tenant))
+    await _send(svc, tenant, _cmd("add_lane", {"T1": 0}, truck_id="T1"))
+    await _send(svc, tenant, _cmd("assign_orders", {"T1": 1}, order_ids=["a", "c"], truck_id="T1"))
+    snap = await svc.snapshot(tenant, TODAY, mode="active_gated", tz=TZ)
+    assert [o["order_id"] for o in snap["trays"]["orders"]] == ["b"]
+    assert snap["trays"]["orders_truncated"] is False
+
+
 async def test_truck_type_and_dq_lookups_on_the_real_translator(es, tenant):
     """Plan task 36b: the ``should`` of two ``terms`` with ``minimum_should_match``
     (R2.8) and the ``_source``-filtered DQ read (R3.4) on Postgres."""

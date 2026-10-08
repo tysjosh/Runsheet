@@ -85,6 +85,25 @@ jobs:
                  --cov-fail-under=${{ env.COVERAGE_THRESHOLD }} \
                  -x -q
 
+      # The Dispatch Board N1 latency budgets (plan task 39) skip their timing
+      # assertion under coverage tracing, which slows this code several-fold
+      # (snapshot p95 3.7 s with --cov, 0.45 s without). Enforce them here,
+      # untraced.
+      - name: Dispatch Board latency budgets (no coverage tracing)
+        env:
+          REDIS_URL: "redis://localhost:6379"
+          JWT_SECRET: "ci-test-jwt-secret"
+          JWT_ALGORITHM: "HS256"
+          ENVIRONMENT: "test"
+        run: |
+          set -o pipefail
+          python -m pytest tests/unit/test_dispatch_board_perf.py --no-cov -q -p no:cacheprovider -rs \
+            | tee /tmp/board-perf.log
+          if grep -qE '^SKIPPED' /tmp/board-perf.log; then
+            echo "❌ A latency budget was skipped; it must run untraced here."
+            exit 1
+          fi
+
       - name: Check changed-file coverage
         run: python scripts/check_coverage.py --threshold 0
 
