@@ -120,7 +120,7 @@ test.describe("portal chrome budget", () => {
   });
 
   // Spacing scale (owner feedback, 2026-10-08): 20 px gutters, no card around
-  // phone list sections, 12 / 8 px around the title row, and truncated names
+  // phone list sections, 8 / 8 px around the title row, and truncated names
   // with a title attribute in the top bar.
   test("phone: 20 px gutters, title row spacing, uncarded sections, top bar names", async ({
     page,
@@ -152,13 +152,42 @@ test.describe("portal chrome budget", () => {
     expect(m.firstLeft).toBe(20);
     expect(m.firstBorder).toBe("0px");
     expect(m.rowTop).toBe(56);
-    expect(m.rowPadTop).toBe("12px");
+    expect(m.rowPadTop).toBe("8px");
     expect(m.rowPadBottom).toBe("8px");
     expect(m.names).toHaveLength(2);
     for (const n of m.names) {
       expect(n.title).toBeTruthy();
       expect(n.overflow).toBe("ellipsis");
     }
+  });
+  // P3P-R11 (mockup 390 frame): all three tanks and the whole Balance due
+  // panel, Pay included, sit above the bottom tab bar on Home.
+  test("phone: Home shows every tank and the Balance due panel on one screen", async ({
+    page,
+  }) => {
+    await openPortal(page, "/portal", PHONE);
+    const tanks = page.locator("[data-tank-row]");
+    await tanks.first().waitFor();
+    const m = await page.evaluate(() => {
+      const navs = document.querySelectorAll<HTMLElement>(
+        'nav[aria-label="Portal"]',
+      );
+      const tabBar = navs[navs.length - 1];
+      const balance = Array.from(document.querySelectorAll("main h2"))
+        .find((h) => h.textContent?.trim() === "Balance due")
+        ?.closest("section");
+      return {
+        tabBarTop: tabBar?.getBoundingClientRect().top ?? 0,
+        tanks: Array.from(document.querySelectorAll("[data-tank-row]")).map(
+          (el) => el.getBoundingClientRect().bottom,
+        ),
+        balance: balance?.getBoundingClientRect().bottom ?? null,
+      };
+    });
+    expect(m.tanks).toHaveLength(3);
+    for (const b of m.tanks) expect(b).toBeLessThanOrEqual(m.tabBarTop);
+    expect(m.balance).not.toBeNull();
+    expect(m.balance ?? Infinity).toBeLessThanOrEqual(m.tabBarTop);
   });
   test("phone: order rows stay ≤ 72 px (R14.9) with the larger padding", async ({
     page,

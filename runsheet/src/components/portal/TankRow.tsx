@@ -13,7 +13,11 @@ import { ProductCap } from "../ui/ProductChip";
 import { StatusBadge } from "../ui/StatusBadge";
 import LevelBar from "./LevelBar";
 import { PortalBadge } from "./PortalStatus";
-import { window as formatWindow, productName } from "./portalFormat";
+import {
+  date as formatDate,
+  window as formatWindow,
+  productName,
+} from "./portalFormat";
 import { portalStatusStyle } from "./portalStatusMap";
 import { rowButton, space, textLink } from "./styles";
 import { levelLine, tankLevel } from "./tankLevel";
@@ -28,7 +32,18 @@ function nextDeliveryStyle(next: NonNullable<PortalTank["next_delivery"]>) {
   return portalStatusStyle("order", "awaiting_confirmation");
 }
 
-export function NextDelivery({ tank }: { tank: PortalTank }) {
+export function NextDelivery({
+  tank,
+  compact = false,
+}: {
+  tank: PortalTank;
+  /**
+   * List rows on phones show only the day beside the badge (mockup 390
+   * frame: "Awaiting confirmation · Thu 9 Oct"); the full window shows from
+   * 768 px and on the tank page.
+   */
+  compact?: boolean;
+}) {
   const next = tank.next_delivery;
   if (!next) {
     return (
@@ -36,6 +51,9 @@ export function NextDelivery({ tank }: { tank: PortalTank }) {
     );
   }
   const style = nextDeliveryStyle(next);
+  const full = formatWindow(next.window_start, next.window_end);
+  const short = next.window_start ? formatDate(next.window_start) : full;
+  const split = compact && short !== full;
   return (
     <span className="inline-flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-sm text-text-muted">
       <span className="sr-only">Next delivery:</span>
@@ -44,9 +62,8 @@ export function NextDelivery({ tank }: { tank: PortalTank }) {
         icon={style.icon}
         label={next.status_label}
       />
-      <span className="min-w-0">
-        {formatWindow(next.window_start, next.window_end)}
-      </span>
+      <span className={`min-w-0 ${split ? "max-md:hidden" : ""}`}>{full}</span>
+      {split && <span className="min-w-0 md:hidden">{short}</span>}
     </span>
   );
 }
@@ -78,7 +95,7 @@ export default function TankRow({
     <article
       aria-labelledby={titleId}
       data-tank-row
-      className={`grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 md:gap-y-1.5 ${space.inset} ${space.rowY}`}
+      className={`grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 md:gap-y-1.5 ${space.inset} ${space.rowY}`}
     >
       <span className="row-span-2 self-start pt-0.5">
         <ProductCap code={tank.product_code} size="md" />
@@ -115,11 +132,16 @@ export default function TankRow({
         className="col-span-2 col-start-2"
       />
       <div className="col-span-2 col-start-2 flex flex-wrap items-center justify-between gap-2">
-        <NextDelivery tank={tank} />
+        <NextDelivery tank={tank} compact />
         {onRequest && (
           <button
             type="button"
-            className={rowButton}
+            // Phones (mockup-portal.html, 390 frame): a tank with a delivery
+            // on the way shows that delivery in the action slot instead of
+            // its own button, so three tanks, Balance due and Active orders
+            // fit one screen. The title row's Request delivery and the tank
+            // page still offer it; from 768 px every row keeps the button.
+            className={`${rowButton} ${tank.next_delivery ? "max-md:hidden" : ""}`}
             aria-label={`Request delivery for ${title}`}
             onClick={() => onRequest(tank.customer_tank_id)}
           >

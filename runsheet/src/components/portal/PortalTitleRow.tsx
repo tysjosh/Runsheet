@@ -5,9 +5,11 @@
  * exactly one `<h1>` (20 px bold), an optional status badge, and at most one
  * primary action on the right. No subtitles.
  *
- * Spacing comes from `space.titleRow`: on phones 12 px above, a 44 px row and
- * 8 px below, always (min-height 64 / 76 px, so every page lines up) (56 + 12 + 44 + 8 = 120, the chrome budget); from 768 px 16 px
- * above, a 48 px row and 12 px below (132 ≤ 136).
+ * Spacing comes from `space.titleRow`: on phones 8 px above, a 44 px row and
+ * 8 px below (56 + 8 + 44 + 8 = 116, leaving 4 px of the 120 px chrome
+ * budget); from 768 px 16 px above, a 48 px row and 12 px below (132 ≤ 136).
+ * The min-heights (60 / 76 px) keep every page's first content on the same
+ * pixel.
  *
  * `wrapTitle` is for titles that carry an identifier the reader must see in
  * full (invoice numbers): below 640 px the title drops to 18/20 px and wraps
@@ -46,7 +48,7 @@ function wrapWords(title: string): ReactNode {
 const PortalTitleRow = forwardRef<HTMLHeadingElement, PortalTitleRowProps>(
   ({ title, back, badge, action, wrapTitle = false }, ref) => (
     <div
-      className={`flex min-h-16 items-center gap-3 md:min-h-[76px] ${space.titleRow}`}
+      className={`flex min-h-[60px] items-center gap-3 md:min-h-[76px] ${space.titleRow}`}
     >
       {back && (
         <Link

@@ -98,6 +98,32 @@ describe("TankRow", () => {
     expect(screen.getByText("Not scheduled")).toBeInTheDocument();
   });
 
+  it("on phones shows the day only and drops the row button when a delivery is on the way (P3P-R11)", () => {
+    render(
+      <TankRow
+        tank={tank({
+          next_delivery: {
+            order_id: "o1",
+            status_code: "confirmed",
+            status_label: "Confirmed",
+            window_start: "2026-10-09T14:00:00Z",
+            window_end: "2026-10-09T18:00:00Z",
+          },
+        })}
+        title="North yard"
+        onRequest={jest.fn()}
+      />,
+    );
+    const full = screen.getByText(/–/);
+    expect(full).toHaveClass("max-md:hidden");
+    const short = full.nextElementSibling;
+    expect(short).toHaveClass("md:hidden");
+    expect(short?.textContent).not.toMatch(/–/);
+    expect(
+      screen.getByRole("button", { name: "Request delivery for North yard" }),
+    ).toHaveClass("max-md:hidden");
+  });
+
   it("offers Request delivery for this tank", () => {
     const onRequest = jest.fn();
     render(<TankRow tank={tank()} title="North yard" onRequest={onRequest} />);
