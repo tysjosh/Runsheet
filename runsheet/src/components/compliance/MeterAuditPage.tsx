@@ -12,6 +12,7 @@ import {
   type MeterRegistration,
 } from "../../services/complianceApi";
 import AssetPicker from "../ops/AssetPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -485,7 +486,9 @@ export default function MeterAuditPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">Meter Registry & Audit</h1>
+            <PageTitle className="text-2xl font-bold">
+              Meter Registry & Audit
+            </PageTitle>
             <p className="text-gray-600 mt-1">
               Manage registered meters, track calibration status, and view
               per-meter delivery audit trails.

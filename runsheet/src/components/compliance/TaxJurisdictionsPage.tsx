@@ -9,6 +9,7 @@ import {
   getTaxJurisdictions,
   type JurisdictionRate,
 } from "../../services/complianceApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -549,7 +550,9 @@ export default function TaxJurisdictionsPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">Tax Jurisdictions</h1>
+            <PageTitle className="text-2xl font-bold">
+              Tax Jurisdictions
+            </PageTitle>
             <p className="text-gray-600 mt-1">
               Manage fuel tax rates by jurisdiction level, FIPS code, and tax
               type.

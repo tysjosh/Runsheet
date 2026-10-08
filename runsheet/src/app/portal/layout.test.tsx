@@ -9,11 +9,14 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import type React from "react";
 
-jest.mock("../../components/Sidebar", () => {
+jest.mock("../../components/shell/Sidebar", () => {
   throw new Error("staff shell module imported by the portal: Sidebar");
 });
-jest.mock("../../components/Header", () => {
-  throw new Error("staff shell module imported by the portal: Header");
+jest.mock("../../components/shell/TopBar", () => {
+  throw new Error("staff shell module imported by the portal: TopBar");
+});
+jest.mock("../../components/shell/useNavCounts", () => {
+  throw new Error("staff shell module imported by the portal: useNavCounts");
 });
 jest.mock("../../components/AIChat", () => {
   throw new Error("staff shell module imported by the portal: AIChat");

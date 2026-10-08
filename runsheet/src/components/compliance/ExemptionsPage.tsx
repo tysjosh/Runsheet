@@ -10,6 +10,7 @@ import {
   type TaxExemption,
 } from "../../services/complianceApi";
 import CustomerPicker from "../ops/CustomerPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -281,7 +282,9 @@ export default function ExemptionsPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">Tax Exemption Certificates</h1>
+            <PageTitle className="text-2xl font-bold">
+              Tax Exemption Certificates
+            </PageTitle>
             <p className="text-gray-600 mt-1">
               Manage customer tax exemption certificates for dyed diesel, farm,
               and road-use exemptions.

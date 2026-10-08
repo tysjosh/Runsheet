@@ -30,6 +30,7 @@ import {
   retryNotification,
 } from "../services/notificationApi";
 import type { PaginationMeta } from "../services/schedulingApi";
+import { PageTitle } from "./ui/PageHeader";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -455,9 +456,9 @@ export default function NotificationHistoryTab() {
               <Bell className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-primary">
+              <PageTitle className="text-2xl font-semibold text-primary">
                 Notification History
-              </h1>
+              </PageTitle>
               <p className="text-gray-500">
                 Track and manage customer notifications
               </p>

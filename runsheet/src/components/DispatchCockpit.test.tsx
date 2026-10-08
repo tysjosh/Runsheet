@@ -152,7 +152,7 @@ it("renders placed orders as attention rows and deep-links to the detail page", 
 
   expect(await screen.findByText("Acme Fuel Co")).toBeInTheDocument();
   fireEvent.click(screen.getByText("Acme Fuel Co"));
-  expect(mockPush).toHaveBeenCalledWith("/orders/ord_1");
+  expect(mockPush).toHaveBeenCalledWith("/dashboard/orders/ord_1");
 });
 
 it("shows delayed jobs and navigates to Dispatch via onNavigate", async () => {

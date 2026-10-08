@@ -170,7 +170,7 @@ export default function JobBoard({
       render: (job) =>
         job.job_type === "cargo_transport" ? (
           <Link
-            href={`/ops/scheduling/${encodeURIComponent(job.job_id)}/cargo`}
+            href={`/dashboard/dispatch/jobs/${encodeURIComponent(job.job_id)}/cargo`}
             className="hover:underline flex items-center gap-1"
             onClick={(e) => e.stopPropagation()}
           >

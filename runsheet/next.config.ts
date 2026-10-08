@@ -1,5 +1,6 @@
 import bundleAnalyzer from "@next/bundle-analyzer";
 import type { NextConfig } from "next";
+import { nextRedirects } from "./src/config/redirects";
 import { buildSecurityHeaders } from "./src/config/securityHeaders";
 
 const withBundleAnalyzer = bundleAnalyzer({
@@ -16,6 +17,10 @@ const nextConfig: NextConfig = {
       ? ["e2e.tsx", "tsx", "ts", "jsx", "js"]
       : ["tsx", "ts", "jsx", "js"],
 
+  // Retired routes (UI revamp design.md §4) → their /dashboard homes, 308.
+  async redirects() {
+    return nextRedirects();
+  },
   // Security headers for all routes, including HSTS and a report-only CSP
   // (staging finding F6). See src/config/securityHeaders.ts.
   async headers() {

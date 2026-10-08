@@ -98,7 +98,7 @@ interface FuelDashboardPageProps {
   /**
    * When embedded in the Fuel Ops hub, the hub owns the page header + the
    * top-level tab set, so this view suppresses its own header/tabs and renders
-   * the panel for the controlled `view`. Standalone (`/ops/fuel`) it keeps its
+   * the panel for the controlled `view`. Standalone (`/dashboard/fuel-ops`) it keeps its
    * own header and tabs.
    */
   embedded?: boolean;

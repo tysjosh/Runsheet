@@ -229,7 +229,9 @@ export default function NotificationBell() {
 
   const goToCommand = () => {
     setOpen(false);
-    router.push("/ops/command");
+    // Agent alerts and approvals live on Live (UI revamp IA; the /ops/command
+    // console retires in task 3.6).
+    router.push("/dashboard/control");
   };
 
   return (

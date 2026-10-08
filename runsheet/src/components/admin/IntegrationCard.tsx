@@ -2,7 +2,7 @@
 
 /**
  * Per-provider card used by the Integration Marketplace
- * (:route:`/admin/integrations`).
+ * (:route:`/dashboard/settings?tab=integrations`).
  *
  * Renders a single :class:`ProviderCatalogEntry` along with the
  * currently-configured :class:`IntegrationInstance` (when one exists)

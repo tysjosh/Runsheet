@@ -241,20 +241,39 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["admin"],
     note: "Contains Feature Flags, whose API 403s for non-admins.",
   },
-  // There is deliberately no `settings` entry.
+  // ── UI revamp IA (R2.2, R2.3) ─────────────────────────────────────────────
   //
-  // It emptied out one piece at a time: password change moved to
-  // `/dashboard/profile`, Support was deleted, and Data Import moved to
-  // AdminHub. That left a top-level nav item holding a single tab, Agent
-  // Settings — which is admin policy (autonomy level and memory deletion gated
-  // to `admin`, agent pause/resume to `platform_admin`, by
-  // `Agents/api_authz.py`). AdminHub
-  // already owns `agents` (Agent Monitoring), so Agent Settings now lives
-  // beside it as an AdminHub tab and the nav entry is gone.
-  //
-  // Dispatchers are not blinded by this: `AgentAutonomyBanner` on
-  // `/ops/control` still shows the current autonomy level, and that is the
-  // surface where they work a shift.
+  // `orders` and `live` are new nav entries; `live` is the nav label for the
+  // `/dashboard/control` route, so it carries the same gate as `control`.
+  // `settings` is the new home of Setup and Admin (`/dashboard/settings`).
+  // Its sections keep their own gates: Setup's tabs additionally need `setup`,
+  // Admin's need `admin` (admin only), so moving them under one nav item does
+  // not widen who sees an Admin tab. `setup`, `admin`, `notifications` and
+  // `drivers` stay registered as those container gates.
+  {
+    id: "orders",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Order intake and the bulk confirm/hold queue.",
+  },
+  {
+    id: "live",
+    tier: 2,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Nav label for /dashboard/control (alias of `control`).",
+  },
+  {
+    id: "settings",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Setup + Admin. Each section keeps its own gate (setup / admin).",
+  },
+  {
+    id: "system-health",
+    tier: 2,
+    requiredRoles: ["platform_admin"],
+    note: "Poison-queue depth for Runsheet staff (task 3.9).",
+  },
 
   // ── CommerceHub tabs ──────────────────────────────────────────────────────
   //
@@ -421,7 +440,7 @@ const MODULES: readonly ModuleDescriptor[] = [
   // example and production — audit 2026-05-08 recommendation #1) and its create,
   // detail and update endpoints were never implemented, so the create-ticket
   // modal could not work in any environment. Its other two tabs were customer
-  // notifications, which now live at `/dashboard/notifications` under the
+  // notifications, which now live at `/dashboard/customers?tab=communications` under the
   // `notification-history` and `notification-settings` ids above.
 ];
 

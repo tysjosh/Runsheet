@@ -45,6 +45,7 @@ import {
   listStormRoadRestrictions,
   uploadStormRoadRestriction,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Role gate (mirrors StormModeBanner) ─────────────────────────────────────
 
@@ -598,10 +599,10 @@ export default function RoadRestrictionsPanel({
       <div className="max-w-5xl w-full mx-auto space-y-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
+            <PageTitle className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
               <MapIcon className="w-5 h-5" aria-hidden="true" />
               Road restrictions
-            </h1>
+            </PageTitle>
             <p className="text-sm text-gray-500">
               Dispatcher-authored road-closure polygons surfaced on the
               Storm_Mode map overlay and respected by the route solver.

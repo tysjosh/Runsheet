@@ -53,7 +53,7 @@ describe("DepotDetailPage load failures", () => {
     expect(mockBack).toHaveBeenCalled();
     expect(screen.getByRole("link", { name: "Go to Setup" })).toHaveAttribute(
       "href",
-      "/dashboard/setup",
+      "/dashboard/settings?tab=company",
     );
     expect(screen.queryByText(/\[object Object\]/)).toBeNull();
   });

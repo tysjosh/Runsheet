@@ -43,6 +43,7 @@ import {
 } from "../../services/ordersApi";
 import { getCurrentUserRoles } from "../../utils/auth";
 import DriverPicker from "../ops/DriverPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -229,7 +230,7 @@ function IntakeMetadataSection({ order }: { order: FuelOrder }) {
               <div className="flex justify-between">
                 <span className="text-gray-500">Import Batch</span>
                 <a
-                  href={`/admin/imports/${meta.import_batch_id}`}
+                  href={`/dashboard/settings?tab=import&batch=${encodeURIComponent(meta.import_batch_id)}`}
                   className="text-info hover:underline text-xs font-mono"
                 >
                   {meta.import_batch_id}
@@ -887,9 +888,9 @@ export default function OrderDetailView({
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </button>
           <div className="flex-1">
-            <h1 className="text-xl font-semibold text-primary">
+            <PageTitle className="text-xl font-semibold text-primary">
               Order {order.order_id.slice(0, 16)}…
-            </h1>
+            </PageTitle>
             <p className="text-sm text-gray-500">
               Created {formatDateTime(order.created_at)}
             </p>

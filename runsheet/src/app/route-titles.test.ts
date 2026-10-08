@@ -13,16 +13,6 @@
 const ROUTE_TITLES: Array<[route: string, load: () => unknown, title: string]> =
   [
     [
-      "/admin/integrations",
-      () => require("./admin/integrations/layout"),
-      "Integrations",
-    ],
-    [
-      "/admin/weather-alerts",
-      () => require("./admin/weather-alerts/layout"),
-      "Weather Alerts",
-    ],
-    [
       "/auth/forgot-password",
       () => require("./auth/forgot-password/layout"),
       "Forgot password",
@@ -32,39 +22,7 @@ const ROUTE_TITLES: Array<[route: string, load: () => unknown, title: string]> =
       () => require("./auth/reset-password/layout"),
       "Reset password",
     ],
-    ["/commerce", () => require("./commerce/layout"), "Commerce"],
-    [
-      "/commerce/accounts/[id]",
-      () => require("./commerce/accounts/[id]/layout"),
-      "Account",
-    ],
-    [
-      "/commerce/ar-aging",
-      () => require("./commerce/ar-aging/layout"),
-      "AR Aging",
-    ],
-    [
-      "/commerce/customers",
-      () => require("./commerce/customers/layout"),
-      "Commerce Customers",
-    ],
-    [
-      "/commerce/customers/[id]",
-      () => require("./commerce/customers/[id]/layout"),
-      "Commerce Customer",
-    ],
-    [
-      "/commerce/invoices/[id]",
-      () => require("./commerce/invoices/[id]/layout"),
-      "Invoice",
-    ],
-    [
-      "/compliance/terminals/[id]",
-      () => require("./compliance/terminals/[id]/layout"),
-      "Terminal",
-    ],
-    ["/dashboard", () => require("./dashboard/(today)/layout"), "Today"],
-    ["/dashboard/admin", () => require("./dashboard/admin/layout"), "Admin"],
+    ["/dashboard", () => require("./dashboard/(today)/layout"), "Dashboard"],
     [
       "/dashboard/analytics",
       () => require("./dashboard/analytics/layout"),
@@ -76,15 +34,26 @@ const ROUTE_TITLES: Array<[route: string, load: () => unknown, title: string]> =
       "Billing",
     ],
     [
+      "/dashboard/billing/accounts/[id]",
+      () => require("./dashboard/billing/accounts/[id]/layout"),
+      "Account",
+    ],
+    [
+      "/dashboard/billing/invoices/[id]",
+      () => require("./dashboard/billing/invoices/[id]/layout"),
+      "Invoice",
+    ],
+    [
       "/dashboard/compliance",
       () => require("./dashboard/compliance/layout"),
       "Compliance",
     ],
     [
-      "/dashboard/control",
-      () => require("./dashboard/control/layout"),
-      "Control Center",
+      "/dashboard/compliance/terminals/[id]",
+      () => require("./dashboard/compliance/terminals/[id]/layout"),
+      "Terminal",
     ],
+    ["/dashboard/control", () => require("./dashboard/control/layout"), "Live"],
     [
       "/dashboard/customers",
       () => require("./dashboard/customers/layout"),
@@ -96,25 +65,30 @@ const ROUTE_TITLES: Array<[route: string, load: () => unknown, title: string]> =
       "Customer",
     ],
     [
+      "/dashboard/customers/tanks/[id]",
+      () => require("./dashboard/customers/tanks/[id]/layout"),
+      "Tank",
+    ],
+    [
       "/dashboard/dispatch",
       () => require("./dashboard/dispatch/layout"),
       "Dispatch",
     ],
     [
-      "/dashboard/drivers",
-      () => require("./dashboard/drivers/layout"),
-      "Drivers",
+      "/dashboard/dispatch/jobs/[id]",
+      () => require("./dashboard/dispatch/jobs/[id]/layout"),
+      "Job",
+    ],
+    [
+      "/dashboard/dispatch/jobs/[id]/cargo",
+      () => require("./dashboard/dispatch/jobs/[id]/cargo/layout"),
+      "Cargo Manifest",
     ],
     ["/dashboard/fleet", () => require("./dashboard/fleet/layout"), "Fleet"],
     [
       "/dashboard/fuel-ops",
       () => require("./dashboard/fuel-ops/layout"),
-      "Fuel Ops",
-    ],
-    [
-      "/dashboard/notifications",
-      () => require("./dashboard/notifications/layout"),
-      "Notifications",
+      "Fuel",
     ],
     ["/dashboard/orders", () => require("./dashboard/orders/layout"), "Orders"],
     [
@@ -127,45 +101,20 @@ const ROUTE_TITLES: Array<[route: string, load: () => unknown, title: string]> =
       () => require("./dashboard/profile/layout"),
       "Profile",
     ],
-    ["/dashboard/setup", () => require("./dashboard/setup/layout"), "Setup"],
-    ["/ops", () => require("./ops/(overview)/layout"), "Operations"],
+    [
+      "/dashboard/settings",
+      () => require("./dashboard/settings/layout"),
+      "Settings",
+    ],
+    [
+      "/dashboard/settings/depots/[id]",
+      () => require("./dashboard/settings/depots/[id]/layout"),
+      "Depot",
+    ],
     [
       "/ops/command",
       () => require("./ops/command/(console)/layout"),
       "Command Interface",
-    ],
-    [
-      "/ops/control",
-      () => require("./ops/control/layout"),
-      "Operations Control",
-    ],
-    ["/ops/fuel", () => require("./ops/fuel/layout"), "Fuel Monitoring"],
-    [
-      "/ops/fuel/depots/[id]",
-      () => require("./ops/fuel/depots/[id]/layout"),
-      "Depot",
-    ],
-    [
-      "/ops/fuel/tanks/[id]",
-      () => require("./ops/fuel/tanks/[id]/layout"),
-      "Tank",
-    ],
-    ["/ops/inventory", () => require("./ops/inventory/layout"), "Inventory"],
-    ["/ops/scheduling", () => require("./ops/scheduling/layout"), "Job Board"],
-    [
-      "/ops/scheduling/[id]",
-      () => require("./ops/scheduling/[id]/layout"),
-      "Job",
-    ],
-    [
-      "/ops/scheduling/[id]/cargo",
-      () => require("./ops/scheduling/[id]/cargo/layout"),
-      "Cargo Manifest",
-    ],
-    [
-      "/orders/[orderId]",
-      () => require("./orders/[orderId]/layout"),
-      "Order Details",
     ],
     ["/privacy", () => require("./privacy/page"), "Privacy"],
     [
@@ -191,19 +140,23 @@ function titleOf(load: () => unknown): string | undefined {
 // `title.template` down from an object title; a plain string here would make
 // every child render without the " · Runsheet" suffix.
 const PARENT_LAYOUTS: Array<[segment: string, load: () => unknown]> = [
-  ["commerce", () => require("./commerce/layout")],
-  ["commerce/customers", () => require("./commerce/customers/layout")],
+  ["dashboard/billing", () => require("./dashboard/billing/layout")],
+  ["dashboard/compliance", () => require("./dashboard/compliance/layout")],
   ["dashboard/customers", () => require("./dashboard/customers/layout")],
+  ["dashboard/dispatch", () => require("./dashboard/dispatch/layout")],
+  [
+    "dashboard/dispatch/jobs/[id]",
+    () => require("./dashboard/dispatch/jobs/[id]/layout"),
+  ],
   ["dashboard/orders", () => require("./dashboard/orders/layout")],
-  ["ops/fuel", () => require("./ops/fuel/layout")],
-  ["ops/scheduling", () => require("./ops/scheduling/layout")],
-  ["ops/scheduling/[id]", () => require("./ops/scheduling/[id]/layout")],
+  ["dashboard/settings", () => require("./dashboard/settings/layout")],
 ];
 
 describe("per-route page titles", () => {
   it("covers every route except the landing page", () => {
-    // 43 routes in total; `/` deliberately keeps the root `title.default`.
-    expect(ROUTE_TITLES).toHaveLength(42);
+    // Staff routes after the UI revamp consolidation (design.md §4); `/`
+    // deliberately keeps the root `title.default`.
+    expect(ROUTE_TITLES).toHaveLength(27);
   });
 
   it.each(ROUTE_TITLES)("%s has its own title", (_route, load, expected) => {

@@ -5,8 +5,8 @@ import { lazy, Suspense } from "react";
 import ErrorBoundary from "../../../components/ErrorBoundary";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 
-const CustomersPage = lazy(
-  () => import("../../../components/commerce/CustomersListPage"),
+const CustomersHub = lazy(
+  () => import("../../../components/customers/CustomersHub"),
 );
 
 function Loading() {
@@ -23,7 +23,7 @@ export default function CustomersPageRoute() {
     <div className="flex-1 bg-gray-50">
       <ErrorBoundary componentName="Customers">
         <Suspense fallback={<Loading />}>
-          <CustomersPage
+          <CustomersHub
             onSelectCustomer={(id) =>
               router.push(`/dashboard/customers/${encodeURIComponent(id)}`)
             }

@@ -1,10 +1,10 @@
 "use client";
+
 import { FileCheck, Gauge, Map, Shield } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
-import { canSee, visibleByCanSee } from "../config/modules";
-import { getCurrentUserRoles } from "../utils/auth";
+import { lazy, Suspense } from "react";
 import LoadingSpinner from "./LoadingSpinner";
-import { PageHeader, type Tab, TabNavigation } from "./ui";
+import { useHubTabs } from "./shell/useHubTabs";
+import { PageChromeProvider, PageHeader, type Tab, TabPanel } from "./ui";
 
 const AssetCertificationsPage = lazy(
   () => import("./compliance/AssetCertificationsPage"),
@@ -17,7 +17,7 @@ const IFTAReportPage = lazy(() => import("./compliance/IFTAReportPage"));
 export const TABS: Tab[] = [
   {
     id: "certifications",
-    label: "Certs",
+    label: "Certifications",
     icon: <Shield className="w-4 h-4" />,
   },
   { id: "meters", label: "Meters", icon: <Gauge className="w-4 h-4" /> },
@@ -25,46 +25,32 @@ export const TABS: Tab[] = [
   { id: "ifta", label: "IFTA", icon: <Map className="w-4 h-4" /> },
 ];
 
-type TabId = string;
-
 export default function ComplianceHub() {
-  const [activeTab, setActiveTab] = useState<TabId>("certifications");
-  const [roles, setRoles] = useState<readonly string[] | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const r = await getCurrentUserRoles();
-      if (!cancelled) setRoles(r);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const visibleTabs = visibleByCanSee(TABS, { roles });
-  const effectiveTab =
-    visibleTabs.some((t) => t.id === activeTab) || visibleTabs.length === 0
-      ? activeTab
-      : visibleTabs[0].id;
-  const shows = (id: string) => effectiveTab === id && canSee(id, { roles });
-
+  const { tabs, active, setActive, shows } = useHubTabs(TABS);
   return (
-    <div className="flex flex-col h-full">
-      <PageHeader title="Compliance" />
-      <TabNavigation
-        tabs={visibleTabs}
-        activeTab={effectiveTab}
-        onChange={setActiveTab}
-      />
-      <div className="flex-1 overflow-auto">
-        <Suspense fallback={<LoadingSpinner message="Loading..." />}>
-          {shows("certifications") && <AssetCertificationsPage />}
-          {shows("meters") && <MeterAuditPage />}
-          {shows("bols") && <TerminalBOLsPage />}
-          {shows("ifta") && <IFTAReportPage />}
-        </Suspense>
+    <PageChromeProvider>
+      <div className="flex flex-col h-full">
+        <PageHeader
+          host
+          title="Compliance"
+          tabs={tabs}
+          tab={active}
+          onTabChange={setActive}
+          tabIdBase="compliance"
+        />
+        <TabPanel
+          idBase="compliance"
+          value={active}
+          className="flex-1 overflow-auto"
+        >
+          <Suspense fallback={<LoadingSpinner message="Loading..." />}>
+            {shows("certifications") && <AssetCertificationsPage />}
+            {shows("meters") && <MeterAuditPage />}
+            {shows("bols") && <TerminalBOLsPage />}
+            {shows("ifta") && <IFTAReportPage />}
+          </Suspense>
+        </TabPanel>
       </div>
-    </div>
+    </PageChromeProvider>
   );
 }

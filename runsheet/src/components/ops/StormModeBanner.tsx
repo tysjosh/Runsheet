@@ -346,7 +346,7 @@ export interface StormModeBannerProps {
 export default function StormModeBanner({
   roles: rolesProp,
   actorId: actorIdProp,
-  detailsHref = "/admin/weather-alerts",
+  detailsHref = "/dashboard/settings?tab=weather-alerts",
   fetchStatus = getStormModeStatus,
   pollIntervalMs = STATUS_POLL_INTERVAL_MS,
 }: StormModeBannerProps) {

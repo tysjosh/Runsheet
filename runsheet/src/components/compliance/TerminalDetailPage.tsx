@@ -10,6 +10,7 @@ import {
   type Terminal,
   type TerminalWaitSummary,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 interface TerminalDetailPageProps {
   terminalId: string;
@@ -94,7 +95,9 @@ export default function TerminalDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{terminal.name}</h1>
+            <PageTitle className="text-2xl font-bold">
+              {terminal.name}
+            </PageTitle>
             {terminal.branded && <Badge variant="info">Branded</Badge>}
           </div>
           <Badge variant={statusVariant(terminal.status)}>

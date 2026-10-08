@@ -65,7 +65,7 @@ export default function DefaultDepotWarning() {
       </span>
       <span className="text-sm text-warning-dark opacity-90">{message}</span>
       <a
-        href="/dashboard/setup"
+        href="/dashboard/settings?tab=company"
         className="ml-auto text-xs font-medium text-warning-dark underline hover:opacity-80"
       >
         Configure in Setup → Depots

@@ -25,6 +25,7 @@ import {
   retryQboPush,
   voidInvoice,
 } from "../../services/commerceApi";
+import { PageTitle } from "../ui/PageHeader";
 
 interface InvoiceDetailPageProps {
   invoiceId: string;
@@ -256,9 +257,9 @@ export default function InvoiceDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">
+            <PageTitle className="text-2xl font-bold">
               Invoice {invoice.invoice_number}
-            </h1>
+            </PageTitle>
             <p className="text-gray-600">Due: {invoice.due_date}</p>
             {/* Navigable references to the order, account, and customer this
                 invoice belongs to (Req 12.1, 13.1). Account is an in-hub

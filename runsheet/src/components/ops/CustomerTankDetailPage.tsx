@@ -8,6 +8,7 @@ import {
   type CustomerTankWithLinks,
   getCustomerTankWithLinks,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 interface CustomerTankDetailPageProps {
   customerTankId: string;
@@ -102,7 +103,7 @@ export default function CustomerTankDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">Customer Tank</h1>
+            <PageTitle className="text-2xl font-bold">Customer Tank</PageTitle>
             <p className="font-mono text-sm text-gray-500">
               {tank.customer_tank_id}
             </p>

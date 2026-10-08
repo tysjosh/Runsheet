@@ -4,9 +4,10 @@ import { lazy, Suspense } from "react";
 import ErrorBoundary from "../../../components/ErrorBoundary";
 import LoadingSpinner from "../../../components/LoadingSpinner";
 
-// Reuse the standalone Operations Control page component in-shell, as the
-// original dashboard shell did.
-const OperationsControl = lazy(() => import("../../ops/control/page"));
+// Live (labelled "Live" in the nav; route id `control`).
+const OperationsControl = lazy(
+  () => import("../../../components/ops/OperationsControlPage"),
+);
 
 function Loading() {
   return (
@@ -19,7 +20,7 @@ function Loading() {
 export default function ControlPageRoute() {
   return (
     <div className="flex-1 bg-gray-50">
-      <ErrorBoundary componentName="Control Center">
+      <ErrorBoundary componentName="Live">
         <Suspense fallback={<Loading />}>
           <OperationsControl />
         </Suspense>

@@ -34,7 +34,7 @@ describe("CustomerDetailPage load failures", () => {
     ).toBeInTheDocument();
     expect(screen.getByText(/customer "cust_missing"/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Back to Customers/ }));
-    expect(mockPush).toHaveBeenCalledWith("/commerce/customers");
+    expect(mockPush).toHaveBeenCalledWith("/dashboard/customers");
     expect(
       screen.getByRole("link", { name: "Go to Customers" }),
     ).toHaveAttribute("href", "/dashboard/customers");

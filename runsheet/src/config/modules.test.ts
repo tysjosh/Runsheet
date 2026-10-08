@@ -14,14 +14,18 @@
  *     navigation.
  */
 
-import { TABS as ADMIN_TABS } from "../components/AdminHub";
 import { TABS as COMMERCE_TABS } from "../components/CommerceHub";
 import { TABS as COMPLIANCE_TABS } from "../components/ComplianceHub";
+import {
+  TAB_GATES as CUSTOMER_TAB_GATES,
+  TABS as CUSTOMER_TABS,
+} from "../components/customers/CustomersHub";
+import { TABS as FLEET_TABS } from "../components/FleetDashboard";
 import { TABS as FUEL_OPS_TABS } from "../components/FuelOpsPage";
-import { TABS as NOTIFICATION_TABS } from "../components/NotificationsHub";
-
-import { TABS as SETUP_TABS } from "../components/SetupHub";
-import { NAV_SECTIONS } from "../components/Sidebar";
+import {
+  SETTINGS_SECTIONS,
+  sectionVisible,
+} from "../components/settings/SettingsPage";
 import {
   CUSTOMER_ROLE,
   canSee,
@@ -31,6 +35,7 @@ import {
   registeredModuleIds,
   visibleByCanSee,
 } from "./modules";
+import { NAV_SECTIONS } from "./nav";
 
 // Every test pins `mvpMode` explicitly rather than relying on the
 // `NEXT_PUBLIC_MVP_MODE` default, so these cases keep their meaning if the
@@ -210,26 +215,51 @@ describe("canSee — unresolved roles behave as no roles", () => {
   });
 });
 
-describe("the Settings nav item is gone", () => {
-  it("no longer registers a settings module", () => {
-    // It emptied out one piece at a time — password change to
-    // `/dashboard/profile`, Support deleted, Data Import to AdminHub — leaving a
-    // top-level nav item holding a single admin-policy tab. That tab moved to
-    // AdminHub beside Agent Monitoring and the nav entry was removed, which also
-    // settles the "pending the driver/web-app decision" note that used to live
-    // here: a driver now matches no nav item and gets the shell's
-    // "for dispatchers and administrators" wall.
-    expect(moduleDescriptor("settings")).toBeUndefined();
-    expect(canSee("settings", RESOLVED(["admin"]))).toBe(false);
+describe("Settings is the home of Setup and Admin (UI revamp R10.4)", () => {
+  it("registers settings for the operations roles", () => {
+    expect(moduleDescriptor("settings")?.requiredRoles).toEqual([
+      "admin",
+      "dispatcher",
+    ]);
+    expect(canSee("settings", RESOLVED(["dispatcher"]))).toBe(true);
+    expect(canSee("settings", RESOLVED(["driver"]))).toBe(false);
+  });
+
+  it("does not widen Admin sections to dispatchers", () => {
+    // Admin's tabs used to sit behind the admin-only `admin` nav item. Under
+    // Settings each keeps that gate, so a dispatcher sees only Setup's
+    // sections (and notification rules, which they could already edit).
+    const dispatcher = SETTINGS_SECTIONS.filter((s) =>
+      sectionVisible(s, ["dispatcher"]),
+    ).map((s) => s.id);
+    expect(dispatcher).toEqual([
+      "company",
+      "road-restrictions",
+      "tax",
+      "exemptions",
+      "notifications",
+    ]);
+    for (const s of SETTINGS_SECTIONS.filter((x) => x.gate === "admin")) {
+      expect(sectionVisible(s, ["dispatcher"])).toBe(false);
+    }
+  });
+
+  it("shows an admin every section except platform_admin-only Stripe", () => {
+    const admin = SETTINGS_SECTIONS.filter((s) => sectionVisible(s, ["admin"]));
+    expect(admin.map((s) => s.id)).not.toContain("stripe");
+    expect(admin).toHaveLength(SETTINGS_SECTIONS.length - 1);
+    expect(
+      sectionVisible(
+        SETTINGS_SECTIONS.find((s) => s.id === "stripe") as never,
+        ["admin", "platform_admin"],
+      ),
+    ).toBe(true);
   });
 
   it("makes Agent Settings admin-only, matching the backend", () => {
     // `Agents/api_authz.py`: PATCH /agent/config/autonomy and DELETE
-    // /agent/memory/{id} require `admin` via agent_admin_dependency; POST
-    // /agent/{id}/pause|resume additionally require `platform_admin` (the
-    // page hides those controls otherwise). The old note claimed the tab was
-    // "read-only for non-admins already", which covered the autonomy radios
-    // only — pause/resume and memory deletion were ungated in UI and API both.
+    // /agent/memory/{id} require `admin`; pause/resume additionally require
+    // `platform_admin` (the page hides those controls otherwise).
     expect(moduleDescriptor("agent-settings")?.requiredRoles).toEqual([
       "admin",
     ]);
@@ -245,57 +275,34 @@ describe("the Settings nav item is gone", () => {
     }
   });
 
-  it("still lets a dispatcher read the autonomy level elsewhere", () => {
-    // Losing the tab must not blind the shift. `AgentAutonomyBanner` renders in
-    // OperationsControlView on `/ops/control`, and GET /agent/config/autonomy is
-    // gated to admin+dispatcher — so a dispatcher keeps the same information in
-    // the surface where they actually work.
+  it("still lets a dispatcher read the autonomy level on Live", () => {
     expect(canSee("control", RESOLVED(["dispatcher"]))).toBe(true);
+    expect(canSee("live", RESOLVED(["dispatcher"]))).toBe(true);
   });
 
-  it("no longer registers a security tab", () => {
-    // It rendered <ChangePassword />, the same component ProfilePage renders, so
-    // it was a second door onto one form. Removed rather than gated. `canSee`
-    // fails closed on unknown ids, so a stray reference now hides rather than
-    // renders — and the drift guard below proves no surface still asks for it.
+  it("no longer registers a security or support tab", () => {
     expect(moduleDescriptor("security")).toBeUndefined();
-    expect(canSee("security", RESOLVED(["admin"]))).toBe(false);
+    expect(moduleDescriptor("support")).toBeUndefined();
   });
 
-  it("gates the Data Import tab in AdminHub", () => {
-    // import_endpoints.py::IMPORT_ADMIN_ROLES — admin only. A dispatcher is
-    // deliberately excluded: one CSV can overwrite the customer, asset, driver
-    // or inventory master data for the entire tenant, and those rows then drive
-    // pricing, routing and readiness. That is administration, not shift work.
+  it("gates Data Import to admin", () => {
+    // import_endpoints.py::IMPORT_ADMIN_ROLES — admin only: one CSV can
+    // overwrite the tenant's master data.
     expect(canSee("import", RESOLVED(["admin"]))).toBe(true);
     expect(canSee("import", RESOLVED(["dispatcher"]))).toBe(false);
     expect(canSee("import", RESOLVED(["driver"]))).toBe(false);
   });
 
-  it("keeps the rest of AdminHub reachable for an admin", () => {
-    // Narrowing Data Import must not narrow the hub around it.
-    expect(canSee("admin", RESOLVED(["admin"]))).toBe(true);
-    expect(canSee("agents", RESOLVED(["admin"]))).toBe(true);
-  });
-
-  it("no longer registers a support tab", () => {
-    // It was a ticketing UI for the legacy Nigerian last-mile CRM: the list
-    // endpoint sits behind LEGACY_NG_DELIVERY_ENABLED (false everywhere) and
-    // create/detail/update were never implemented, so the create-ticket modal
-    // could not work in any environment.
-    expect(moduleDescriptor("support")).toBeUndefined();
-    expect(canSee("support", RESOLVED(["admin"]))).toBe(false);
-  });
-
-  it("keeps the customer notification surfaces, on their own route", () => {
-    // Support's other two tabs were real and backed by notifications/api. They
-    // moved to /dashboard/notifications rather than being deleted with it.
-    expect(moduleDescriptor("notification-history")).toBeDefined();
-    expect(moduleDescriptor("notification-settings")).toBeDefined();
+  it("keeps the customer notification surfaces for both operations roles", () => {
     for (const role of ["admin", "dispatcher"]) {
       expect(canSee("notification-history", RESOLVED([role]))).toBe(true);
       expect(canSee("notification-settings", RESOLVED([role]))).toBe(true);
     }
+  });
+
+  it("registers system-health for platform_admin only", () => {
+    expect(canSee("system-health", RESOLVED(["platform_admin"]))).toBe(true);
+    expect(canSee("system-health", RESOLVED(["admin"]))).toBe(false);
   });
 });
 
@@ -329,7 +336,7 @@ describe("registry drift guard", () => {
   const registered = new Set(registeredModuleIds());
 
   const navItems = NAV_SECTIONS.flatMap((section) =>
-    section.items.map((item) => [`${section.label}/${item.id}`, item.id]),
+    section.items.map((item) => [`${section.id}/${item.id}`, item.id]),
   );
 
   it.each(navItems)("nav item %s is registered", (_label, id) => {
@@ -338,17 +345,20 @@ describe("registry drift guard", () => {
 
   const hubTabs: [string, string][] = (
     [
-      ["CommerceHub", COMMERCE_TABS],
-      ["ComplianceHub", COMPLIANCE_TABS],
-      ["AdminHub", ADMIN_TABS],
-      ["SetupHub", SETUP_TABS],
-      ["FuelOpsPage", FUEL_OPS_TABS],
-      // No SettingsPage: it was a one-tab shell and its tab (agent-settings)
-      // moved into AdminHub, so ADMIN_TABS above now covers it.
-      ["NotificationsPage", NOTIFICATION_TABS],
+      ["CommerceHub", COMMERCE_TABS.map((t) => t.id)],
+      ["ComplianceHub", COMPLIANCE_TABS.map((t) => t.id)],
+      ["FuelOpsPage", FUEL_OPS_TABS.map((t) => t.id)],
+      // Fleet's Trucks and Inventory ride on the `fleet` id; Drivers keeps
+      // its own `drivers` gate.
+      ["FleetDashboard", ["fleet", "drivers"]],
+      [
+        "CustomersHub",
+        CUSTOMER_TABS.flatMap((t) => CUSTOMER_TAB_GATES[t.id] ?? [t.id]),
+      ],
+      ["SettingsPage", SETTINGS_SECTIONS.flatMap((s) => [s.moduleId, s.gate])],
     ] as const
-  ).flatMap(([hub, tabs]) =>
-    tabs.map((tab) => [`${hub}/${tab.id}`, tab.id] as [string, string]),
+  ).flatMap(([hub, ids]) =>
+    ids.map((id) => [`${hub}/${id}`, id] as [string, string]),
   );
 
   it.each(hubTabs)("hub tab %s is registered", (_label, id) => {
@@ -360,14 +370,28 @@ describe("registry drift guard", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  // Ids that gate a route rather than a nav item or tab: `control` is the
+  // /dashboard/control route the Live nav item opens. `system-health` is
+  // rendered by task 3.9 (Settings → System health).
+  const ROUTE_GATES = ["control", "system-health"];
+
   it("registers nothing that no surface renders", () => {
     // The reverse direction: a stale entry is harmless at runtime but it rots,
     // and a reader cannot tell a dead id from a live one.
     const rendered = new Set([
       ...navItems.map(([, id]) => id as string),
       ...hubTabs.map(([, id]) => id),
+      ...ROUTE_GATES,
     ]);
     expect(registeredModuleIds().filter((id) => !rendered.has(id))).toEqual([]);
+  });
+
+  it("covers every Fleet tab", () => {
+    expect(FLEET_TABS.map((t) => t.id)).toEqual([
+      "trucks",
+      "drivers",
+      "inventory",
+    ]);
   });
 });
 

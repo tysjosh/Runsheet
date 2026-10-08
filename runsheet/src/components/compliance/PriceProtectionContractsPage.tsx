@@ -22,6 +22,7 @@ import {
 } from "../../services/complianceApi";
 import CustomerPicker from "../ops/CustomerPicker";
 import ProductPicker from "../ops/ProductPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -479,7 +480,9 @@ export default function PriceProtectionContractsPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">Price Protection Contracts</h1>
+            <PageTitle className="text-2xl font-bold">
+              Price Protection Contracts
+            </PageTitle>
             <p className="text-gray-600 mt-1">
               Manage sell-side price-protection contracts and track settlement
               variance.

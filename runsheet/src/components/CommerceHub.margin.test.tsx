@@ -58,10 +58,10 @@ async function renderAs(roles: string[], initialTab?: string) {
 it("hides the Margin tab from a dispatcher and never asks for alert counts", async () => {
   await renderAs(["dispatcher"]);
   expect(
-    await screen.findByRole("button", { name: "Invoices" }),
+    await screen.findByRole("tab", { name: "Invoices" }),
   ).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: /^Margin/ }),
+    screen.queryByRole("tab", { name: /^Margin/ }),
   ).not.toBeInTheDocument();
   expect(mockCount).not.toHaveBeenCalled();
 });
@@ -79,7 +79,7 @@ it.each([
 ])("hides the Margin tab from %j", async (roles) => {
   await renderAs(roles, "margin");
   expect(
-    screen.queryByRole("button", { name: /^Margin/ }),
+    screen.queryByRole("tab", { name: /^Margin/ }),
   ).not.toBeInTheDocument();
   expect(screen.queryByText("Margin hub")).not.toBeInTheDocument();
   expect(mockCount).not.toHaveBeenCalled();
@@ -92,9 +92,9 @@ it("shows the Margin tab to an admin with the open-alert badge", async () => {
     name: "3 open margin alerts",
   });
   expect(badge).toHaveTextContent("3");
-  expect(screen.getByRole("button", { name: /^Margin/ })).toHaveAttribute(
-    "aria-current",
-    "page",
+  expect(screen.getByRole("tab", { name: /^Margin/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
   );
   expect(mockCount).toHaveBeenCalledTimes(1);
 });
@@ -103,7 +103,7 @@ it("omits the badge when nothing is open", async () => {
   mockCount.mockResolvedValue(0);
   await renderAs(["admin"]);
   await waitFor(() => expect(mockCount).toHaveBeenCalled());
-  expect(screen.getByRole("button", { name: "Margin" })).toBeInTheDocument();
+  expect(screen.getByRole("tab", { name: "Margin" })).toBeInTheDocument();
   expect(
     screen.queryByRole("img", { name: /open margin alert/ }),
   ).not.toBeInTheDocument();

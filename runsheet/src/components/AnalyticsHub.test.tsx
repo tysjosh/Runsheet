@@ -29,13 +29,15 @@ describe("AnalyticsHub Ops Monitoring tab", () => {
       render(<AnalyticsHub />);
       await waitFor(() => expect(rolesMock).toHaveBeenCalled());
       expect(screen.getByText("Overview")).toBeInTheDocument();
-      expect(screen.queryByText("Ops Monitoring")).not.toBeInTheDocument();
+      expect(screen.queryByText(/Ops monitoring/i)).not.toBeInTheDocument();
     },
   );
 
   it("is shown for platform_admin", async () => {
     rolesMock.mockResolvedValue(["platform_admin", "admin"]);
     render(<AnalyticsHub />);
-    expect(await screen.findByText("Ops Monitoring")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("tab", { name: /Ops monitoring/i }),
+    ).toBeInTheDocument();
   });
 });

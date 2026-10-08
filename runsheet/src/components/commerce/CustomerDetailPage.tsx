@@ -10,6 +10,7 @@ import {
   getCustomer,
 } from "../../services/commerceApi";
 import { getCurrentUserRoles } from "../../utils/auth";
+import { PageTitle } from "../ui/PageHeader";
 import PortalAccessPanel from "./PortalAccessPanel";
 
 interface CustomerDetailPageProps {
@@ -96,7 +97,7 @@ export default function CustomerDetailPage({
         failure={loadFailure}
         entityLabel="Customer"
         entityId={customerId}
-        onBack={() => (onBack ? onBack() : router.push("/commerce/customers"))}
+        onBack={() => (onBack ? onBack() : router.push("/dashboard/customers"))}
         backLabel="Back to Customers"
         homeHref="/dashboard/customers"
         homeLabel="Go to Customers"
@@ -115,7 +116,7 @@ export default function CustomerDetailPage({
           <Button
             variant="ghost"
             onClick={() =>
-              onBack ? onBack() : router.push("/commerce/customers")
+              onBack ? onBack() : router.push("/dashboard/customers")
             }
           >
             ← Back to Customers
@@ -123,7 +124,9 @@ export default function CustomerDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">{customer.display_name}</h1>
+            <PageTitle className="text-2xl font-bold">
+              {customer.display_name}
+            </PageTitle>
             {customer.legal_name && (
               <p className="text-gray-600">{customer.legal_name}</p>
             )}

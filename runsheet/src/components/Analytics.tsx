@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { COLOR, SEMANTIC } from "@/styles/tokens";
 import { type AnalyticsMetrics, apiService } from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
+import { PageTitle } from "./ui/PageHeader";
 
 // Google Charts component
 declare global {
@@ -264,9 +265,9 @@ export default function Analytics() {
               <BarChart3 className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-primary">
+              <PageTitle className="text-2xl font-semibold text-primary">
                 Analytics Dashboard
-              </h1>
+              </PageTitle>
               <p className="text-gray-500">
                 Performance insights and operational metrics
               </p>

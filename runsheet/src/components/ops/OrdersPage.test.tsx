@@ -174,7 +174,7 @@ describe("OrdersPage — customer linkage", () => {
     render(<OrdersPage tenantId="tenant-a" />);
 
     const link = await screen.findByRole("link", { name: "Acme Fuel Co" });
-    expect(link).toHaveAttribute("href", "/commerce/customers/CUST-001");
+    expect(link).toHaveAttribute("href", "/dashboard/customers/CUST-001");
   });
 
   it("shows an Unlinked badge when the order has no customer_id", async () => {
@@ -215,7 +215,7 @@ describe("OrdersPage — customer linkage", () => {
     const link = await screen.findByRole("link", {
       name: "Acme Fuels (current)",
     });
-    expect(link).toHaveAttribute("href", "/commerce/customers/CUST-7");
+    expect(link).toHaveAttribute("href", "/dashboard/customers/CUST-7");
     // The stale snapshot name is not rendered.
     expect(screen.queryByText("Old Snapshot Name")).not.toBeInTheDocument();
   });

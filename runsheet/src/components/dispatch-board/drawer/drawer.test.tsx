@@ -258,10 +258,10 @@ describe("Checks tab (R8.7, R9.6, R10.5)", () => {
     ).toBeInTheDocument();
     expect(
       within(blocking).getByRole("link", { name: "Request an HOS override" }),
-    ).toHaveAttribute("href", "/dashboard/drivers?driver=D1");
+    ).toHaveAttribute("href", "/dashboard/fleet?tab=drivers&driver=D1");
     expect(
       within(blocking).getByRole("link", { name: "Open driver profile" }),
-    ).toHaveAttribute("href", "/dashboard/drivers?driver=D1");
+    ).toHaveAttribute("href", "/dashboard/fleet?tab=drivers&driver=D1");
     expect(
       within(blocking).getByRole("button", { name: "Remove and re-add" }),
     ).toBeInTheDocument();

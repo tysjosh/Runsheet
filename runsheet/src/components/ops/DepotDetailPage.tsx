@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, EntityLink, LoadErrorState } from "@/components/ui";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import { type DepotReadResponse, getDepot } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 interface DepotDetailPageProps {
   depotId: string;
@@ -63,7 +64,7 @@ export default function DepotDetailPage({
         entityLabel="Depot"
         entityId={depotId}
         onBack={() => (onBack ? onBack() : router.back())}
-        homeHref="/dashboard/setup"
+        homeHref="/dashboard/settings?tab=company"
         homeLabel="Go to Setup"
         onRetry={fetchDepot}
       />
@@ -87,7 +88,7 @@ export default function DepotDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{depot.name}</h1>
+            <PageTitle className="text-2xl font-bold">{depot.name}</PageTitle>
             {depot.is_default && <Badge variant="info">Default</Badge>}
           </div>
           <Badge variant={statusVariant(depot.status)}>{depot.status}</Badge>

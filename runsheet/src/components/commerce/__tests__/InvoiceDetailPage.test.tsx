@@ -503,7 +503,7 @@ describe("InvoiceDetailPage", () => {
     const customerLink = screen.getByRole("link", { name: /cust_001/ });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/cust_001",
+      "/dashboard/customers/cust_001",
     );
   });
 
@@ -524,7 +524,7 @@ describe("InvoiceDetailPage", () => {
     });
 
     const orderLink = screen.getByRole("link", { name: /ord_777/ });
-    expect(orderLink).toHaveAttribute("href", "/orders/ord_777");
+    expect(orderLink).toHaveAttribute("href", "/dashboard/orders/ord_777");
   });
 
   it("navigates to the account in-hub via the onViewAccount callback", async () => {

@@ -11,6 +11,7 @@ import {
 } from "../../services/complianceApi";
 import DriverPicker from "../ops/DriverPicker";
 import ProductPicker from "../ops/ProductPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── View modes ──────────────────────────────────────────────────────────────
 
@@ -428,7 +429,7 @@ export default function TerminalBOLsPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">Terminal BOLs</h1>
+            <PageTitle className="text-2xl font-bold">Terminal BOLs</PageTitle>
             <p className="text-gray-600 mt-1">
               View ingested terminal Bills of Lading and manually upload scanned
               BOL documents.

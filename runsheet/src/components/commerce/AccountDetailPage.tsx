@@ -16,6 +16,7 @@ import {
   getAccount,
   getAccountAging,
 } from "../../services/commerceApi";
+import { PageTitle } from "../ui/PageHeader";
 
 interface AccountDetailPageProps {
   accountId: string;
@@ -137,7 +138,7 @@ export default function AccountDetailPage({
     return (
       <div>
         <header className="px-6 pt-6">
-          <h1 className="text-2xl font-bold">Account</h1>
+          <PageTitle className="text-2xl font-bold">Account</PageTitle>
           <p className="font-mono text-sm text-gray-500">{accountId}</p>
         </header>
         {state}
@@ -173,7 +174,9 @@ export default function AccountDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold">{account.display_name}</h1>
+            <PageTitle className="text-2xl font-bold">
+              {account.display_name}
+            </PageTitle>
             <p className="text-gray-600">
               Tier: {account.tier} · Net Terms: {account.net_terms_days} days
             </p>

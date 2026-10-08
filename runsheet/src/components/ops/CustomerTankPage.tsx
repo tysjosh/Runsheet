@@ -64,6 +64,7 @@ import {
   updateCustomerTank,
 } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1569,9 +1570,9 @@ export default function CustomerTankPage({
         <div className="flex items-start justify-between">
           {!embedded && (
             <div>
-              <h1 className="text-xl font-semibold text-primary">
+              <PageTitle className="text-xl font-semibold text-primary">
                 Customer Tanks
-              </h1>
+              </PageTitle>
               <p className="text-sm text-gray-500 mt-1">
                 Per-customer fuel tanks used by the forecaster to drive runout
                 predictions, K-factor learning, and storm-mode prioritization.

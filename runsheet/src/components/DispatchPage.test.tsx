@@ -10,17 +10,21 @@ import {
   waitFor,
 } from "@testing-library/react";
 
-const mockReplace = jest.fn();
+// The router writes the URL the way Next.js does; tests re-render to read it.
+const mockReplace = jest.fn((url: string) => {
+  mockParams = new URLSearchParams(url.split("?")[1] ?? "");
+});
 let mockParams = new URLSearchParams();
 jest.mock("next/navigation", () => ({
   useRouter: () => ({ replace: mockReplace, push: jest.fn() }),
+  usePathname: () => "/dashboard/dispatch",
   useSearchParams: () => mockParams,
 }));
 jest.mock("../services/dispatchBoardApi", () => {
   const actual = jest.requireActual("../services/dispatchBoardApi");
   return { ...actual, getBoardStatus: jest.fn() };
 });
-jest.mock("../app/ops/scheduling/page", () => ({
+jest.mock("./dispatch/SchedulingJobBoard", () => ({
   __esModule: true,
   default: () => <div>Scheduling body</div>,
 }));
@@ -39,16 +43,26 @@ import DispatchPage, { BOARD_STATUS_POLL_MS } from "./DispatchPage";
 const mockStatus = getBoardStatus as jest.MockedFunction<typeof getBoardStatus>;
 
 function tabNames() {
-  return screen
-    .getAllByRole("button")
-    .filter((b) => b.closest("nav[aria-label='Tabs']"))
-    .map((b) => b.textContent);
+  return screen.getAllByRole("tab").map((b) => b.textContent);
 }
 
 beforeEach(() => {
   mockParams = new URLSearchParams();
-  mockReplace.mockReset();
+  mockReplace.mockClear();
   mockStatus.mockReset();
+});
+
+describe("Dispatch title row", () => {
+  it("renders one h1 with Board · Jobs · Plans inline", async () => {
+    mockStatus.mockResolvedValue({ mode: "active_gated" });
+    const { container } = render(<DispatchPage />);
+    await screen.findByText("Board body active_gated");
+    expect(container.querySelectorAll("h1")).toHaveLength(1);
+    expect(
+      screen.getByRole("tablist", { name: "Dispatch views" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tabpanel")).toHaveAccessibleName("Board");
+  });
 });
 
 describe("Board tab visibility", () => {
@@ -60,7 +74,7 @@ describe("Board tab visibility", () => {
     render(<DispatchPage />);
     await waitFor(() => expect(mockStatus).toHaveBeenCalled());
     expect(await screen.findByText("Scheduling body")).toBeInTheDocument();
-    expect(tabNames()).toEqual(["Scheduling", "Fuel Distribution"]);
+    expect(tabNames()).toEqual(["Jobs", "Plans"]);
   });
 
   it.each(["active_gated", "active_auto"] as const)(
@@ -69,18 +83,18 @@ describe("Board tab visibility", () => {
       mockStatus.mockResolvedValue({ mode });
       render(<DispatchPage />);
       expect(await screen.findByText(`Board body ${mode}`)).toBeInTheDocument();
-      expect(tabNames()).toEqual(["Board", "Scheduling", "Fuel Distribution"]);
-      expect(screen.getByRole("button", { name: "Board" })).toHaveAttribute(
-        "aria-current",
-        "page",
+      expect(tabNames()).toEqual(["Board", "Jobs", "Plans"]);
+      expect(screen.getByRole("tab", { name: "Board" })).toHaveAttribute(
+        "aria-selected",
+        "true",
       );
     },
   );
 
-  it("shadow shows the tab but keeps Scheduling as the default", async () => {
+  it("shadow shows the tab but keeps Jobs as the default", async () => {
     mockStatus.mockResolvedValue({ mode: "shadow" });
     render(<DispatchPage />);
-    await screen.findByRole("button", { name: "Board" });
+    await screen.findByRole("tab", { name: "Board" });
     expect(screen.getByText("Scheduling body")).toBeInTheDocument();
   });
 });
@@ -93,15 +107,27 @@ describe("?tab= deep link", () => {
     expect(await screen.findByText("Board body shadow")).toBeInTheDocument();
   });
 
-  it("?tab=distribution wins over the active default", async () => {
+  it("?tab=distribution (legacy alias of plans) wins over the active default", async () => {
     mockParams = new URLSearchParams("tab=distribution");
     mockStatus.mockResolvedValue({ mode: "active_gated" });
     render(<DispatchPage />);
-    await screen.findByRole("button", { name: "Board" });
+    await screen.findByRole("tab", { name: "Board" });
     expect(screen.getByText("Distribution body")).toBeInTheDocument();
   });
 
-  it("?tab=board on a disabled board falls back to Scheduling", async () => {
+  it("?tab=scheduling (legacy alias of jobs) opens Jobs", async () => {
+    mockParams = new URLSearchParams("tab=scheduling");
+    mockStatus.mockResolvedValue({ mode: "active_gated" });
+    render(<DispatchPage />);
+    await screen.findByRole("tab", { name: "Board" });
+    expect(screen.getByText("Scheduling body")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "Jobs" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+  });
+
+  it("?tab=board on a disabled board falls back to Jobs", async () => {
     mockParams = new URLSearchParams("tab=board");
     mockStatus.mockRejectedValue(
       new BoardApiError("no", 404, "DISPATCH_BOARD_DISABLED"),
@@ -114,14 +140,15 @@ describe("?tab= deep link", () => {
   it("changing tab writes ?tab= and keeps other params", async () => {
     mockParams = new URLSearchParams("date=2026-10-08");
     mockStatus.mockResolvedValue({ mode: "active_gated" });
-    render(<DispatchPage />);
+    const { rerender } = render(<DispatchPage />);
     await screen.findByText("Board body active_gated");
-    fireEvent.click(screen.getByRole("button", { name: "Fuel Distribution" }));
-    expect(await screen.findByText("Distribution body")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "Plans" }));
     expect(mockReplace).toHaveBeenCalledWith(
-      "?date=2026-10-08&tab=distribution",
+      "/dashboard/dispatch?date=2026-10-08&tab=plans",
       { scroll: false },
     );
+    rerender(<DispatchPage />);
+    expect(await screen.findByText("Distribution body")).toBeInTheDocument();
   });
 });
 
@@ -142,7 +169,7 @@ describe("kill switch", () => {
       jest.advanceTimersByTime(BOARD_STATUS_POLL_MS);
     });
     expect(await screen.findByText("Scheduling body")).toBeInTheDocument();
-    expect(tabNames()).toEqual(["Scheduling", "Fuel Distribution"]);
+    expect(tabNames()).toEqual(["Jobs", "Plans"]);
   });
 
   it("re-reads /status on window focus; a transient error keeps the tab", async () => {

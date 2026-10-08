@@ -74,6 +74,7 @@ import {
   listTerminals,
   submitTerminalWaitReport,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Defaults and constants ──────────────────────────────────────────────────
 
@@ -1550,9 +1551,9 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
       <div className="border-b border-gray-200 bg-white px-6 py-4 space-y-3">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-primary">
+            <PageTitle className="text-xl font-semibold text-primary">
               Terminal Sourcing
-            </h1>
+            </PageTitle>
             <p className="text-sm text-gray-500 mt-0.5">
               Rank loading terminals against live rack prices, contracts, and
               wait times for a specific truck run.

@@ -231,7 +231,7 @@ export default function DispatchCockpit({
 
   const openOrder = (orderId: string) => {
     if (onOpenOrder) onOpenOrder(orderId);
-    else router.push(`/orders/${encodeURIComponent(orderId)}`);
+    else router.push(`/dashboard/orders/${encodeURIComponent(orderId)}`);
   };
   const removeOrder = (orderId: string) =>
     setOrders((prev) => prev.filter((o) => o.order_id !== orderId));

@@ -135,6 +135,33 @@ function useContributions(enabled: boolean) {
   );
 }
 
+/** True inside a hub's `PageChromeProvider` (the hub owns the `<h1>`). */
+export function useInPageChrome(): boolean {
+  return useContext(ChromeContext) !== null;
+}
+
+/**
+ * A page title for components that are rendered both standalone (as a route)
+ * and inside a hub tab: `<h1>` on its own, `<h2>` under a hub's title row, so
+ * a page never carries two `<h1>`s (R2.5).
+ */
+export function PageTitle({
+  children,
+  className = "",
+  id,
+}: {
+  children: ReactNode;
+  className?: string;
+  id?: string;
+}) {
+  const Tag = useInPageChrome() ? "h2" : "h1";
+  return (
+    <Tag id={id} className={className}>
+      {children}
+    </Tag>
+  );
+}
+
 // ── header ───────────────────────────────────────────────────────────────
 
 export function PageHeader(props: PageHeaderProps) {

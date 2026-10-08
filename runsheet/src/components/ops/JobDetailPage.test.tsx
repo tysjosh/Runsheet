@@ -151,11 +151,11 @@ describe("JobDetailPage — linked records", () => {
 
     // Order link → /orders/ORD-9
     const orderLink = await screen.findByRole("link", { name: /ORD-9/ });
-    expect(orderLink).toHaveAttribute("href", "/orders/ORD-9");
+    expect(orderLink).toHaveAttribute("href", "/dashboard/orders/ORD-9");
 
     // Customer link shows resolved display name → /commerce/customers/CUST-7
     const customerLink = screen.getByRole("link", { name: /Acme Fuels/ });
-    expect(customerLink).toHaveAttribute("href", "/commerce/customers/CUST-7");
+    expect(customerLink).toHaveAttribute("href", "/dashboard/customers/CUST-7");
   });
 
   it("requests the resolver expand for order/customer/asset/driver", async () => {

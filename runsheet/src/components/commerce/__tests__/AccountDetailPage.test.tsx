@@ -337,7 +337,7 @@ describe("AccountDetailPage", () => {
     const customerLink = screen.getByRole("link", { name: /cust_001/ });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/cust_001",
+      "/dashboard/customers/cust_001",
     );
   });
 });

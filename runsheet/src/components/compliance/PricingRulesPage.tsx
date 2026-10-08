@@ -16,6 +16,7 @@ import {
 } from "../../services/complianceApi";
 import CustomerPicker from "../ops/CustomerPicker";
 import ProductPicker from "../ops/ProductPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Sub-view types ──────────────────────────────────────────────────────────
 
@@ -320,7 +321,9 @@ export default function PricingRulesPage() {
       <header className="mb-6">
         <div className="flex justify-between items-center">
           <div>
-            <h1 className="text-2xl font-bold">Sales Pricing Rules</h1>
+            <PageTitle className="text-2xl font-bold">
+              Sales Pricing Rules
+            </PageTitle>
             <p className="text-gray-600 mt-1">
               Manage pricing strategies for customers and products. Test price
               resolution with the panel below.

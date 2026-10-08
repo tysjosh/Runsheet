@@ -69,6 +69,7 @@ import {
   listReconciliationRecords,
   verifyPodHashChain,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1367,9 +1368,9 @@ export default function ReconciliationPage({
       <div className="border-b border-gray-200 bg-white px-6 py-4">
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-primary">
+            <PageTitle className="text-xl font-semibold text-primary">
               Reconciliation
-            </h1>
+            </PageTitle>
             <p className="text-sm text-gray-500 mt-0.5">
               Four-way variance tracking: ordered → loaded → delivered →
               invoiced gallons.

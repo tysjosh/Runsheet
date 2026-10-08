@@ -222,8 +222,10 @@ export function TabPanel({
     <div
       role="tabpanel"
       id={`${idBase}-panel`}
-      aria-labelledby={`${idBase}-tab-${value}`}
-      className={className}
+      aria-labelledby={value ? `${idBase}-tab-${value}` : undefined}
+      // biome-ignore lint/a11y/noNoninteractiveTabindex: WAI-ARIA tabs make the panel focusable; it is also the scroll region
+      tabIndex={0}
+      className={`focus:outline-none ${className}`}
     >
       {children}
     </div>

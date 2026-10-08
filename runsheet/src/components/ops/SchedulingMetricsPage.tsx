@@ -42,6 +42,7 @@ import {
   getDelayMetrics,
   getJobMetrics,
 } from "../../services/schedulingApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Section Card ────────────────────────────────────────────────────────────
 
@@ -312,9 +313,9 @@ export default function SchedulingMetricsPage() {
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-primary">
+              <PageTitle className="text-2xl font-semibold text-primary">
                 Scheduling Metrics
-              </h1>
+              </PageTitle>
               <p className="text-gray-500">
                 Job counts, completion rates, asset utilization & delay
                 statistics

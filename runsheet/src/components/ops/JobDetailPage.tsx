@@ -61,6 +61,7 @@ import type {
 } from "../../types/api";
 import LoadingSpinner from "../LoadingSpinner";
 import { entityHref } from "../ui/EntityLink";
+import { PageTitle } from "../ui/PageHeader";
 import CargoManifestEditor from "./CargoManifestEditor";
 import DriverActivitySection from "./DriverActivitySection";
 import JobActionButtons from "./JobActionButtons";
@@ -725,9 +726,9 @@ export default function JobDetailPage({
             </button>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-semibold text-primary">
+                <PageTitle className="text-2xl font-semibold text-primary">
                   {job.job_id}
-                </h1>
+                </PageTitle>
                 <span
                   className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
                 >
@@ -974,14 +975,14 @@ export default function JobDetailPage({
                 label="Order"
                 link={links.order}
                 fallbackId={job.order_id}
-                href={(id) => `/orders/${encodeURIComponent(id)}`}
+                href={(id) => `/dashboard/orders/${encodeURIComponent(id)}`}
               />
               <LinkedRefField
                 icon={<User className="w-4 h-4" />}
                 label="Customer"
                 link={links.customer}
                 fallbackId={job.customer_id}
-                href={(id) => `/commerce/customers/${encodeURIComponent(id)}`}
+                href={(id) => `/dashboard/customers/${encodeURIComponent(id)}`}
               />
               <LinkedRefField
                 icon={<Truck className="w-4 h-4" />}

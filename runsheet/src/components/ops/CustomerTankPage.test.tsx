@@ -341,11 +341,11 @@ describe("CustomerTankPage — list render", () => {
     const customerLink = await screen.findByRole("link", { name: "CUST-0042" });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/CUST-0042",
+      "/dashboard/customers/CUST-0042",
     );
     // Refilling order renders as a navigable link to the orders module.
     const orderLink = screen.getByRole("link", { name: "ORD-9" });
-    expect(orderLink).toHaveAttribute("href", "/orders/ORD-9");
+    expect(orderLink).toHaveAttribute("href", "/dashboard/orders/ORD-9");
   });
 
   it("renders a neutral placeholder when a tank has no refilling order", async () => {

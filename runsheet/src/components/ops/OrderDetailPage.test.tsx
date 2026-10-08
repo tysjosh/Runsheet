@@ -73,7 +73,7 @@ jest.mock("../../services/complianceApi", () => ({
   }),
 }));
 
-import OrderDetailPage from "../../app/orders/[orderId]/page";
+import OrderDetailPage from "../../app/dashboard/orders/[orderId]/page";
 import type {
   FuelOrder,
   FuelOrderEvent,
@@ -364,7 +364,7 @@ describe("OrderDetailPage — cross-module resolved links", () => {
     });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/CUST-001",
+      "/dashboard/customers/CUST-001",
     );
     expect(screen.queryByText(/stale snapshot name/i)).not.toBeInTheDocument();
   });
@@ -401,7 +401,7 @@ describe("OrderDetailPage — cross-module resolved links", () => {
     );
     expect(screen.getByRole("link", { name: /jane driver/i })).toHaveAttribute(
       "href",
-      "/dashboard/drivers?driver=drv-007",
+      "/dashboard/fleet?tab=drivers&driver=drv-007",
     );
   });
 
@@ -438,7 +438,7 @@ describe("OrderDetailPage — cross-module resolved links", () => {
     const driverLink = await screen.findByRole("link", { name: /drv-007/i });
     expect(driverLink).toHaveAttribute(
       "href",
-      "/dashboard/drivers?driver=drv-007",
+      "/dashboard/fleet?tab=drivers&driver=drv-007",
     );
   });
 });

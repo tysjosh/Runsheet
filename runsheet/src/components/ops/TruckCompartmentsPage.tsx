@@ -75,6 +75,7 @@ import {
   listTruckCompartments,
   recordCleaningEvent,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1443,10 +1444,10 @@ export default function TruckCompartmentsPage({
       >
         <div className="flex items-start justify-between gap-4 mb-6">
           <div>
-            <h1 className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
+            <PageTitle className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
               <TruckIcon className="w-5 h-5" aria-hidden="true" />
               Truck compartments
-            </h1>
+            </PageTitle>
             <p className="text-sm text-gray-500">
               Review compartment state and record a cleaning event when the
               cross-contamination guard flags a compartment as{" "}

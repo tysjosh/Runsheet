@@ -1,6 +1,9 @@
 import type { Metadata } from "next";
 
-export const metadata: Metadata = { title: "Compliance" };
+// Object title so child routes keep the " · Runsheet" template.
+export const metadata: Metadata = {
+  title: { default: "Compliance", template: "%s · Runsheet" },
+};
 
 export default function ComplianceLayout({
   children,

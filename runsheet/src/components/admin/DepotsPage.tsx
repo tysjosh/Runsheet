@@ -57,6 +57,7 @@ import {
   listDepots,
   updateDepot,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1133,7 +1134,9 @@ export default function DepotsPage({ initialFilters }: DepotsPageProps = {}) {
         {/* Header */}
         <div className="flex items-start justify-between">
           <div>
-            <h1 className="text-xl font-semibold text-primary">Depots</h1>
+            <PageTitle className="text-xl font-semibold text-primary">
+              Depots
+            </PageTitle>
             <p className="text-sm text-gray-500 mt-1">
               Loading yards trucks start and end at. Required by the route
               solver — the agent falls back to the tenant default when a truck
