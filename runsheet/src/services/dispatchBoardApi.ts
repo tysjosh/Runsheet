@@ -218,6 +218,13 @@ export interface LanePublish {
   attempt: RedispatchAttempt | null;
 }
 
+/** R3.4: the DQ qualification that expires first (past dates included). */
+export interface QualificationExpiry {
+  kind: "cdl" | "medical_card" | "hazmat" | "tanker";
+  /** ISO date (YYYY-MM-DD). */
+  expires_on: string;
+}
+
 export interface DriverSummary {
   driver_id: string;
   name: string | null;
@@ -225,6 +232,9 @@ export interface DriverSummary {
   assigned_truck_id: string | null;
   cdl_class: string | null;
   hazmat_endorsement: boolean | null;
+  /** R3.4, from the DQ record; null (or absent) when the driver has none. */
+  tanker_endorsement?: boolean | null;
+  nearest_expiry?: QualificationExpiry | null;
   eligible: boolean | null;
   ineligible_reasons: string[];
   hos: Record<string, unknown> | null;
@@ -249,6 +259,8 @@ export interface CompartmentView {
 
 export interface LaneView {
   truck_id: string;
+  /** R2.8: asset subtype; sent on snapshot reads only, kept across lane updates. */
+  truck_type?: string | null;
   version: number;
   driver_id: string | null;
   driver: DriverSummary | null;

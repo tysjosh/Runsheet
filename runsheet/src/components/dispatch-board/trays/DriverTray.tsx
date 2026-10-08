@@ -7,7 +7,10 @@
  */
 import { GripVertical } from "lucide-react";
 import { type KeyboardEvent, type MouseEvent, useRef } from "react";
-import type { DriverSummary } from "../../../services/dispatchBoardApi";
+import type {
+  DriverSummary,
+  QualificationExpiry,
+} from "../../../services/dispatchBoardApi";
 import { focusKey, useBoard } from "../BoardContext";
 import { driverMatch, matchClass, matchSuffix } from "../boardMatch";
 import { useDraggableItem } from "../dnd/adapter";
@@ -19,6 +22,7 @@ import {
   useRovingState,
 } from "../keyboard/roving";
 import { driverMenu } from "../menus";
+import { todayIn } from "../viewState";
 
 /** HOS figure in hours from the snapshot's `{availability, value}` shape. */
 export function hosHours(
@@ -36,8 +40,32 @@ export function reasonText(code: string): string {
   return code.split(":")[0].replace(/_/g, " ").trim();
 }
 
+const EXPIRY_KIND: Record<QualificationExpiry["kind"], string> = {
+  cdl: "CDL",
+  medical_card: "Medical card",
+  hazmat: "HAZMAT endorsement",
+  tanker: "Tanker endorsement",
+};
+
+/**
+ * R3.4: "Medical card expires 2026-11-02" (or "expired" when the date is
+ * before `today`, an ISO date). Dates are compared as ISO strings.
+ */
+export function expiryText(
+  expiry: QualificationExpiry | null | undefined,
+  today: string,
+): string | null {
+  if (!expiry) return null;
+  const verb = expiry.expires_on < today ? "expired" : "expires";
+  return `${EXPIRY_KIND[expiry.kind]} ${verb} ${expiry.expires_on}`;
+}
+
 /** Text lines of a driver chip (also its accessible name). */
-export function driverText(d: DriverSummary, isToday: boolean): string[] {
+export function driverText(
+  d: DriverSummary,
+  isToday: boolean,
+  today: string,
+): string[] {
   const parts = [d.name ?? `Driver ${d.driver_id}`];
   parts.push(d.status ? d.status.replace(/_/g, " ") : "status unknown");
   parts.push(
@@ -46,7 +74,10 @@ export function driverText(d: DriverSummary, isToday: boolean): string[] {
   const qual: string[] = [];
   if (d.cdl_class) qual.push(`CDL ${d.cdl_class}`);
   if (d.hazmat_endorsement) qual.push("HAZMAT");
+  if (d.tanker_endorsement) qual.push("Tanker");
   if (qual.length) parts.push(qual.join(", "));
+  const expiry = expiryText(d.nearest_expiry, today);
+  if (expiry) parts.push(expiry);
   if (isToday) {
     const drive = hosHours(d.hos, "remaining_drive_time");
     if (drive !== null) parts.push(`${drive.toFixed(1)} h driving left`);
@@ -75,7 +106,7 @@ function DriverChip({ driver }: { driver: DriverSummary }) {
   });
   const selected = api.isSelected("driver", driver.driver_id);
   const state = driverMatch(driver, api.view.search);
-  const text = driverText(driver, api.isToday);
+  const text = driverText(driver, api.isToday, todayIn(api.timezone));
   const ineligible = driver.eligible === false;
 
   const openMenu = () =>

@@ -293,6 +293,56 @@ describe("driver tray", () => {
     expect(within(ben).getByText("Not eligible")).toBeInTheDocument();
   });
 
+  it("shows the tanker endorsement and the nearest expiry, and nothing without a DQ record (R3.4)", async () => {
+    await renderBoard(
+      trays({
+        trays: {
+          orders: [],
+          orders_truncated: false,
+          drivers: [
+            makeDriver("D1", {
+              name: "Ana",
+              cdl_class: "A",
+              hazmat_endorsement: false,
+              tanker_endorsement: true,
+              nearest_expiry: {
+                kind: "medical_card",
+                expires_on: "2999-11-02",
+              },
+            }),
+            makeDriver("D2", {
+              name: "Ben",
+              cdl_class: null,
+              hazmat_endorsement: false,
+              tanker_endorsement: false,
+              nearest_expiry: { kind: "tanker", expires_on: "2000-09-30" },
+            }),
+            makeDriver("D3", {
+              name: "Cy",
+              cdl_class: null,
+              hazmat_endorsement: null,
+            }),
+          ],
+          trucks: [],
+        },
+      }),
+    );
+    fireEvent.click(screen.getByRole("tab", { name: /Drivers/ }));
+    const [ana, ben, cy] = within(
+      screen.getByRole("listbox", { name: "Drivers" }),
+    ).getAllByRole("option");
+    expect(ana.getAttribute("aria-label")).toBe(
+      "Ana, active, not paired, CDL A, Tanker, Medical card expires 2999-11-02",
+    );
+    expect(
+      within(ana).getByText(/Medical card expires 2999-11-02/),
+    ).toBeInTheDocument();
+    expect(ben.getAttribute("aria-label")).toBe(
+      "Ben, active, not paired, Tanker endorsement expired 2000-09-30",
+    );
+    expect(cy.getAttribute("aria-label")).toBe("Cy, active, not paired");
+  });
+
   it("shows no HOS figure on a future day", async () => {
     navigation.params = new URLSearchParams(`date=${addDays(TODAY, 1)}`);
     await renderBoard(

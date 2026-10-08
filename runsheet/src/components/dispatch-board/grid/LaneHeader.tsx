@@ -42,6 +42,11 @@ export const LANE_STATE_LABEL: Record<
   recovering: { label: "Recovering", variant: "error" },
 };
 
+/** R2.8: the asset subtype as words ("tank_wagon" → "tank wagon"). */
+export function truckTypeText(type: string): string {
+  return type.replace(/_/g, " ").trim();
+}
+
 /** Open warnings / blocks on the lane (not acknowledged). */
 export function openIssues(
   lane: LaneView,
@@ -72,7 +77,9 @@ export function laneSummary(
   }
   const warnings = openIssues(lane, acknowledged).length;
   const parts = [
-    `Truck ${lane.truck_id}`,
+    lane.truck_type
+      ? `Truck ${lane.truck_id} (${truckTypeText(lane.truck_type)})`
+      : `Truck ${lane.truck_id}`,
     lane.driver?.name
       ? `driver ${lane.driver.name}`
       : lane.driver_id
@@ -222,6 +229,11 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
             }`}
           >
             <span>Truck {lane.truck_id}</span>
+            {lane.truck_type && (
+              <span className="ml-1 text-xs font-normal text-gray-600">
+                {truckTypeText(lane.truck_type)}
+              </span>
+            )}
           </button>
         </div>
         <Badge variant={state.variant} size="sm">

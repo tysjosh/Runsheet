@@ -45,6 +45,7 @@ from fuel.services.dispatch_board_models import (
     LaneView,
     MoveStopsCommand,
     PublishResult,
+    QualificationExpiry,
     ReapplyCommand,
     RevertCommand,
     Snapshot,
@@ -93,10 +94,49 @@ PRIORITY_TIMEOUT_S = 2.0
 
 _PRIORITIES_INDEX = "mvp_delivery_priorities"
 _TRUCK_COMPARTMENTS_INDEX = "truck_compartments"
+# Fleet assets (``asset_subtype`` is the truck type, R2.8) and the compliance
+# driver-qualification records (endorsement and expiry dates, R3.4).
+_ASSETS_INDEX = "trucks"
+_DQ_DRIVERS_INDEX = "drivers"
+_DQ_EXPIRY_FIELDS = (
+    ("cdl_expiry_date", "cdl"),
+    ("medical_card_expiry_date", "medical_card"),
+    ("hazmat_endorsement_expiry_date", "hazmat"),
+    ("tanker_endorsement_expiry_date", "tanker"),
+)
 
 
 def _hits(resp: Any) -> List[Dict[str, Any]]:
     return [h.get("_source") or {} for h in ((resp or {}).get("hits") or {}).get("hits") or []]
+
+
+def _parse_day(value: Any) -> Optional[date]:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _dq_summary(
+    record: Optional[Dict[str, Any]], today: Optional[date]
+) -> Tuple[Optional[bool], Optional[QualificationExpiry]]:
+    """R3.4: (tanker endorsement held and unexpired, earliest expiry incl. past ones).
+
+    ``(None, None)`` when the driver has no DQ record: unknown, not "no".
+    """
+    if record is None:
+        return None, None
+    dates = [(d, kind) for field, kind in _DQ_EXPIRY_FIELDS if (d := _parse_day(record.get(field))) is not None]
+    tanker_on = next((d for d, kind in dates if kind == "tanker"), None)
+    tanker = tanker_on is not None and (today is None or tanker_on >= today)
+    nearest = min(dates, default=None)
+    return tanker, (QualificationExpiry(kind=nearest[1], expires_on=nearest[0]) if nearest else None)
 
 
 def _total(resp: Any) -> int:
@@ -231,7 +271,14 @@ class DispatchBoardService:
             )
         return publish
 
-    def lane_view(self, lane: Lane, ctx: Optional[ValidationContext] = None, *, suggested: Optional[SuggestedDriver] = None) -> LaneView:
+    def lane_view(
+        self,
+        lane: Lane,
+        ctx: Optional[ValidationContext] = None,
+        *,
+        suggested: Optional[SuggestedDriver] = None,
+        truck_type: Optional[str] = None,
+    ) -> LaneView:
         state = self._lane_state(lane)
         driver = None
         compartments: List[CompartmentView] = []
@@ -253,6 +300,7 @@ class DispatchBoardService:
                 )
         return LaneView(
             truck_id=lane.truck_id,
+            truck_type=truck_type,
             version=lane.version,
             driver_id=lane.driver_id,
             driver=driver,
@@ -270,8 +318,17 @@ class DispatchBoardService:
             ever_published=lane.publish.published_version is not None or bool(lane.publish.plans),
         )
 
-    def _driver_summary(self, doc: Dict[str, Any], ctx: Optional[ValidationContext], *, paired_truck_id: Optional[str] = None) -> DriverSummary:
+    def _driver_summary(
+        self,
+        doc: Dict[str, Any],
+        ctx: Optional[ValidationContext],
+        *,
+        paired_truck_id: Optional[str] = None,
+        dq_record: Optional[Dict[str, Any]] = None,
+        today: Optional[date] = None,
+    ) -> DriverSummary:
         driver_id = doc.get("driver_id")
+        tanker, nearest = _dq_summary(dq_record, today)
         qual = (ctx.qualification.get(driver_id) if ctx else None) or None
         hos = None
         if ctx is not None and ctx.is_today and driver_id in ctx.hos_advisories:
@@ -289,6 +346,8 @@ class DispatchBoardService:
             assigned_truck_id=doc.get("assigned_truck_id"),
             cdl_class=doc.get("cdl_class"),
             hazmat_endorsement=doc.get("hazmat_endorsement"),
+            tanker_endorsement=tanker,
+            nearest_expiry=nearest,
             eligible=(qual or {}).get("eligible") if qual else None,
             ineligible_reasons=list((qual or {}).get("reasons") or []) if qual else [],
             hos=hos,
@@ -389,8 +448,13 @@ class DispatchBoardService:
                 degraded.add("suggestions")
                 logger.warning("dispatch board suggestion read failed: %s", type(exc).__name__)
         unpaired = [t for t in lane_ids if not draft.lanes[t].driver_id]
-        suggested = await self._suggested_drivers(draft, unpaired)
-        views = [self.lane_view(draft.lanes[t], ctx, suggested=suggested.get(t)) for t in lane_ids]
+        suggested, truck_types = await asyncio.gather(
+            self._suggested_drivers(draft, unpaired), self._truck_types(tenant_id, lane_ids)
+        )
+        views = [
+            self.lane_view(draft.lanes[t], ctx, suggested=suggested.get(t), truck_type=truck_types.get(t))
+            for t in lane_ids
+        ]
         snap = Snapshot(
             service_date=service_date,
             timezone=tz,
@@ -612,18 +676,86 @@ class DispatchBoardService:
     async def _driver_tray(self, draft: BoardDraft) -> List[DriverSummary]:
         if self._drivers is None:
             return []
-        try:
-            result = await self._drivers.search(draft.tenant_id, size=500)
-        except Exception as exc:
-            logger.warning("dispatch board driver tray failed: %s", type(exc).__name__)
+        result, dq = await asyncio.gather(
+            self._drivers.search(draft.tenant_id, size=500), self._dq_records(draft.tenant_id), return_exceptions=True
+        )
+        if isinstance(result, BaseException):
+            logger.warning("dispatch board driver tray failed: %s", type(result).__name__)
             return []
+        if isinstance(dq, BaseException):  # _dq_records never raises; belt and braces
+            dq = {}
         paired = {lane.driver_id: t for t, lane in draft.lanes.items() if lane.driver_id}
+        today = eta.today_in(draft.timezone, self.now())
         out = []
         for d in (result or {}).get("drivers") or []:
             doc = d.model_dump(mode="json") if hasattr(d, "model_dump") else d
             if doc.get("tenant_id") != draft.tenant_id:
                 continue
-            out.append(self._driver_summary(doc, None, paired_truck_id=paired.get(doc.get("driver_id"))))
+            driver_id = doc.get("driver_id")
+            out.append(
+                self._driver_summary(
+                    doc, None, paired_truck_id=paired.get(driver_id), dq_record=dq.get(driver_id), today=today
+                )
+            )
+        return out
+
+    async def _dq_records(self, tenant_id: str) -> Dict[str, Dict[str, Any]]:
+        """R3.4: the tenant's DQ records keyed by ops driver id.
+
+        A DQ record names its ops driver in ``external_refs.ops_driver_id`` (B10)
+        or shares the ops id. One read for the whole tray; a failure leaves the
+        fields empty and never fails the snapshot.
+        """
+        query = {
+            "query": {"bool": {"filter": [{"term": {"tenant_id": tenant_id}}]}},
+            "_source": ["driver_id", "tenant_id", "external_refs", *(f for f, _k in _DQ_EXPIRY_FIELDS)],
+            "size": 1000,
+        }
+        try:
+            resp = await self._es.search_documents(_DQ_DRIVERS_INDEX, query, 1000)
+        except Exception as exc:
+            logger.warning("dispatch board DQ read failed: %s", type(exc).__name__)
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        for source in _hits(resp):
+            if source.get("tenant_id") != tenant_id:
+                continue
+            ops_id = (source.get("external_refs") or {}).get("ops_driver_id")
+            for key in (source.get("driver_id"), ops_id):
+                if key:
+                    out[key] = source
+        return out
+
+    async def _truck_types(self, tenant_id: str, truck_ids: Sequence[str]) -> Dict[str, str]:
+        """R2.8: ``asset_subtype`` per lane truck from the ``trucks`` index (asset_id or truck_id)."""
+        if not truck_ids:
+            return {}
+        ids = list(truck_ids)
+        query = {
+            "query": {
+                "bool": {
+                    "filter": [{"term": {"tenant_id": tenant_id}}],
+                    "should": [{"terms": {"asset_id": ids}}, {"terms": {"truck_id": ids}}],
+                    "minimum_should_match": 1,
+                }
+            },
+            "_source": ["asset_id", "truck_id", "tenant_id", "asset_subtype"],
+            "size": min(2 * len(ids), 1000),
+        }
+        try:
+            resp = await self._es.search_documents(_ASSETS_INDEX, query, query["size"])
+        except Exception as exc:
+            logger.warning("dispatch board truck type read failed: %s", type(exc).__name__)
+            return {}
+        wanted = set(ids)
+        out: Dict[str, str] = {}
+        for source in _hits(resp):
+            subtype = source.get("asset_subtype")
+            if source.get("tenant_id") != tenant_id or not isinstance(subtype, str) or not subtype:
+                continue
+            for key in (source.get("asset_id"), source.get("truck_id")):
+                if key in wanted:
+                    out[key] = subtype
         return out
 
     async def _truck_tray(self, draft: BoardDraft) -> List[TrayTruck]:

@@ -218,3 +218,21 @@ async def test_tray_and_history_queries_on_the_real_translator(es, tenant):
     assert len(rest["items"]) == 1 and rest["items"][0]["command_id"] != page["items"][0]["command_id"]
     t2 = await svc.history(tenant, TODAY, HistoryQuery(truck_id="T2"), tz=TZ)
     assert [i["lanes"][0]["truck_id"] for i in t2["items"]] == ["T2"]
+
+
+async def test_truck_type_and_dq_lookups_on_the_real_translator(es, tenant):
+    """Plan task 36b: the ``should`` of two ``terms`` with ``minimum_should_match``
+    (R2.8) and the ``_source``-filtered DQ read (R3.4) on Postgres."""
+    svc = await _service(es, tenant)
+    await es.index_document("trucks", f"{tenant}-a1", {"tenant_id": tenant, "asset_id": "T1", "asset_subtype": "tank_wagon"})
+    await es.index_document("trucks", f"{tenant}-a2", {"tenant_id": tenant, "truck_id": "T2", "asset_subtype": "transport"})
+    await es.index_document("trucks", f"{tenant}-a3", {"tenant_id": tenant, "asset_id": "T9", "asset_subtype": "bobtail"})
+    await es.index_document("trucks", f"{tenant}-x", {"tenant_id": "pytest-board-other", "asset_id": "T1", "asset_subtype": "bobtail"})
+    assert await svc._truck_types(tenant, ["T1", "T2", "T3"]) == {"T1": "tank_wagon", "T2": "transport"}
+    await es.index_document("drivers", f"{tenant}-dq", {
+        "tenant_id": tenant, "driver_id": f"driver_{tenant}", "external_refs": {"ops_driver_id": "d1"},
+        "full_name": "PII never read", "cdl_expiry_date": "2027-05-01", "tanker_endorsement_expiry_date": "2027-01-01",
+    })
+    records = await svc._dq_records(tenant)
+    assert set(records) == {f"driver_{tenant}", "d1"}
+    assert "full_name" not in records["d1"] and records["d1"]["tanker_endorsement_expiry_date"] == "2027-01-01"

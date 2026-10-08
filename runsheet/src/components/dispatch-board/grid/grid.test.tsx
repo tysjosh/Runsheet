@@ -104,6 +104,28 @@ describe("lane rows", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows the truck type in the header and the lane name, and nothing when unknown (R2.8)", async () => {
+    await renderBoard(
+      boardSnap({
+        lanes: [
+          makeLane("T1", 1, { truck_type: "tank_wagon" }),
+          makeLane("T2", 1),
+        ],
+      }),
+    );
+    expect(
+      screen.getByRole("row", {
+        name: "Truck T1 (tank wagon), no driver, 0 loads, 0 stops, 0 warnings, Draft",
+      }),
+    ).toBeInTheDocument();
+    expect(within(row("T1")).getByText("tank wagon")).toBeInTheDocument();
+    expect(
+      screen.getByRole("row", {
+        name: "Truck T2, no driver, 0 loads, 0 stops, 0 warnings, Draft",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("the Pair button sends pair_driver for the suggested driver (R6.5)", async () => {
     mockSend.mockResolvedValue(
       okResponse([makeLane("T1", 2, { driver_id: "D7" })]),

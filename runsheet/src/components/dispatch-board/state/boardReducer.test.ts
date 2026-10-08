@@ -74,6 +74,41 @@ describe("higher version wins", () => {
     expect(state.lanesById.T1.version).toBe(8);
   });
 
+  it("keeps the snapshot's truck type when a command answer or event has none (R2.8)", () => {
+    const typed = run([
+      {
+        type: "snapshotLoaded",
+        snapshot: makeSnapshot({
+          lanes: [makeLane("T1", 3, { truck_type: "transport" })],
+        }),
+      },
+    ]);
+    const state = run(
+      [
+        { type: "lanesReceived", source: "socket", lanes: [makeLane("T1", 4)] },
+        {
+          type: "lanesReceived",
+          source: "command",
+          lanes: [makeLane("T1", 5, { truck_type: null })],
+        },
+      ],
+      typed,
+    );
+    expect(state.lanesById.T1.version).toBe(5);
+    expect(state.lanesById.T1.truck_type).toBe("transport");
+    const retyped = run(
+      [
+        {
+          type: "lanesReceived",
+          source: "fetch",
+          lanes: [makeLane("T1", 6, { truck_type: "bobtail" })],
+        },
+      ],
+      state,
+    );
+    expect(retyped.lanesById.T1.truck_type).toBe("bobtail");
+  });
+
   it("a new lane from a socket event is appended", () => {
     const state = run(
       [

@@ -586,6 +586,52 @@ async def test_suggested_driver_cases():
     assert snap["lanes"][0]["suggested_driver"] is None  # zero matches
 
 
+async def test_lane_truck_type_present_missing_and_other_tenant(h):
+    """R2.8 (plan task 36b): ``truck_type`` is the asset's ``asset_subtype``."""
+    for t in ("T1", "T2", "T3"):
+        await h.run("add_lane", truck_id=t, lanes=(t,))
+    h.store.seed("trucks", "a1", {"tenant_id": T, "asset_id": "T1", "asset_subtype": "tank_wagon"})
+    h.store.seed("trucks", "a2", {"tenant_id": T, "truck_id": "T2", "asset_subtype": "transport"})  # older key
+    h.store.seed("trucks", "a3", {"tenant_id": "tenant-2", "asset_id": "T3", "asset_subtype": "bobtail"})
+    snap = await h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ)
+    types = {l["truck_id"]: l["truck_type"] for l in snap["lanes"]}
+    assert types == {"T1": "tank_wagon", "T2": "transport", "T3": None}
+    h.store.fail_on("search_documents", "trucks")
+    snap = await h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ)
+    assert {l["truck_id"]: l["truck_type"] for l in snap["lanes"]} == {"T1": None, "T2": None, "T3": None}
+    assert snap["degraded_sources"] == []
+
+
+async def test_driver_tray_tanker_endorsement_and_nearest_expiry(h):
+    """R3.4 (plan task 36b): from the compliance DQ record, matched by id or ops id."""
+    h.store.seed("drivers", "driver_aaa", {
+        "tenant_id": T, "driver_id": "driver_aaa", "external_refs": {"ops_driver_id": "d1"},
+        "cdl_expiry_date": "2027-05-01", "medical_card_expiry_date": "2026-11-02",
+        "tanker_endorsement_expiry_date": "2027-01-01",
+    })
+    h.store.seed("drivers", "d2", {
+        "tenant_id": T, "driver_id": "d2", "cdl_expiry_date": "2027-05-01",
+        "medical_card_expiry_date": "2027-06-01", "tanker_endorsement_expiry_date": "2026-09-30",  # lapsed
+    })
+    h.store.seed("drivers", "other", {
+        "tenant_id": "tenant-2", "driver_id": "x", "external_refs": {"ops_driver_id": "d3"},
+        "cdl_expiry_date": "2026-10-10", "tanker_endorsement_expiry_date": "2027-01-01",
+    })
+    snap = await h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ)
+    tray = {d["driver_id"]: d for d in snap["trays"]["drivers"]}
+    assert tray["d1"]["tanker_endorsement"] is True
+    assert tray["d1"]["nearest_expiry"] == {"kind": "medical_card", "expires_on": "2026-11-02"}
+    assert tray["d2"]["tanker_endorsement"] is False
+    assert tray["d2"]["nearest_expiry"] == {"kind": "tanker", "expires_on": "2026-09-30"}
+    # No record in this tenant: unknown, not "no".
+    assert tray["d3"]["tanker_endorsement"] is None and tray["d3"]["nearest_expiry"] is None
+    h.store.fail_on("search_documents", "drivers")
+    snap = await h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ)
+    tray = {d["driver_id"]: d for d in snap["trays"]["drivers"]}
+    assert set(tray) == {"d1", "d2", "d3"}
+    assert all(d["tanker_endorsement"] is None and d["nearest_expiry"] is None for d in tray.values())
+
+
 async def test_hos_figures_today_only(h):
     h.seed_order("o1")
     await h.lane_with("T1", "o1", driver_id="d1")

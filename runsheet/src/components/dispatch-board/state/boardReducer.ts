@@ -160,8 +160,14 @@ function withLane(
   if (!supersedes(lane, current)) {
     return { lanesById: state.lanesById, laneOrder: state.laneOrder };
   }
+  // Only snapshot reads carry the truck type (R2.8); a truck's type doesn't
+  // change, so command answers and events keep the one already shown.
+  const next =
+    lane.truck_type == null && current?.truck_type
+      ? { ...lane, truck_type: current.truck_type }
+      : lane;
   return {
-    lanesById: { ...state.lanesById, [lane.truck_id]: lane },
+    lanesById: { ...state.lanesById, [lane.truck_id]: next },
     laneOrder: current ? state.laneOrder : [...state.laneOrder, lane.truck_id],
   };
 }

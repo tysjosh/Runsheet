@@ -581,6 +581,13 @@ class HistoryQuery(_Strict):
 # ---------------------------------------------------------------------------
 
 
+class QualificationExpiry(_Strict):
+    """R3.4: the qualification on the driver's DQ record that expires first."""
+
+    kind: Literal["cdl", "medical_card", "hazmat", "tanker"]
+    expires_on: date
+
+
 class DriverSummary(_Strict):
     driver_id: str
     name: Optional[str] = None
@@ -588,6 +595,9 @@ class DriverSummary(_Strict):
     assigned_truck_id: Optional[str] = None
     cdl_class: Optional[str] = None
     hazmat_endorsement: Optional[bool] = None
+    # R3.4, from the compliance DQ record; None when the driver has no record.
+    tanker_endorsement: Optional[bool] = None
+    nearest_expiry: Optional[QualificationExpiry] = None
     eligible: Optional[bool] = None
     ineligible_reasons: List[str] = Field(default_factory=list)
     hos: Optional[Dict[str, Any]] = None
@@ -611,6 +621,8 @@ class CompartmentView(_Strict):
 
 class LaneView(_Strict):
     truck_id: str
+    # R2.8: the asset's ``asset_subtype``; filled on snapshot reads only.
+    truck_type: Optional[str] = None
     version: int
     driver_id: Optional[str] = None
     driver: Optional[DriverSummary] = None
