@@ -192,6 +192,49 @@ def _autocharge_ceiling_key(tenant_id: str) -> str:
     return AUTOCHARGE_CEILING_REDIS_KEY_TEMPLATE.format(tenant_id=tenant_id)
 
 
+def stripe_key_mode(key: Any) -> Optional[str]:
+    """Return ``"live"`` / ``"test"`` from a Stripe key prefix, else ``None``.
+
+    Recognises secret (``sk_``), restricted (``rk_``) and publishable
+    (``pk_``) keys. Only the prefix is read; the key is never logged.
+    """
+
+    if not isinstance(key, str):
+        return None
+    key = key.strip()
+    for mode in ("live", "test"):
+        if any(key.startswith(f"{kind}_{mode}_") for kind in ("sk", "rk", "pk")):
+            return mode
+    return None
+
+
+def stripe_key_mode_warnings(
+    envelope: Mapping[str, Any], *, live_keys_expected: Optional[bool]
+) -> List[str]:
+    """Describe Stripe key-mode problems in ``envelope`` (review R4).
+
+    * the secret and publishable keys are in different modes (the Payment
+      Element would fail in the browser);
+    * ``live_keys_expected is False`` (any non-production environment) and
+      the secret key is a live key.
+
+    ``live_keys_expected=None`` skips the environment check. Advisory only:
+    callers log the messages and carry on.
+    """
+
+    secret_mode = stripe_key_mode(envelope.get("secret_key"))
+    publishable_mode = stripe_key_mode(envelope.get("publishable_key"))
+    warnings: List[str] = []
+    if secret_mode and publishable_mode and secret_mode != publishable_mode:
+        warnings.append(
+            f"secret key is {secret_mode} mode but publishable key is "
+            f"{publishable_mode} mode"
+        )
+    if live_keys_expected is False and secret_mode == "live":
+        warnings.append("live-mode secret key in a non-production environment")
+    return warnings
+
+
 def _coerce_amount_usd(value: Any) -> float:
     """Best-effort coerce a payload ``amount_usd`` into a non-negative float."""
 
@@ -333,6 +376,7 @@ class StripeConnector(IntegrationConnector):
         stripe_module: Optional[Any] = None,
         default_autocharge_ceiling_usd: float = DEFAULT_AUTOCHARGE_CEILING_USD,
         clock: Any = time.time,
+        live_keys_expected: Optional[bool] = None,
     ) -> None:
         if not isinstance(tenant_id, str) or not tenant_id.strip():
             raise ValueError("tenant_id must be a non-empty string")
@@ -356,6 +400,9 @@ class StripeConnector(IntegrationConnector):
         self._stripe_module = stripe_module
         self._default_ceiling = float(default_autocharge_ceiling_usd)
         self._clock = clock
+        # True in production, False elsewhere, None = unknown (no
+        # environment check). Drives WARN-only key-mode checks (review R4).
+        self._live_keys_expected = live_keys_expected
 
         # In-memory cache of the credential envelope so a single
         # webhook verify / sync_pull does not round-trip to the vault
@@ -407,6 +454,7 @@ class StripeConnector(IntegrationConnector):
         )
         self._credentials_ref = ref
         self._cached_envelope = dict(envelope)
+        self._warn_on_key_modes(envelope)
 
         logger.info(
             "StripeConnector.connect: stored credentials tenant=%s "
@@ -1065,7 +1113,17 @@ class StripeConnector(IntegrationConnector):
                 f"signature verification failed: {exc}"
             ) from exc
 
-        return _as_dict(event)
+        event_dict = _as_dict(event)
+        if self._live_keys_expected is False and event_dict.get("livemode") is True:
+            # Advisory only (review R4): the event still processes.
+            logger.warning(
+                "StripeConnector: live-mode webhook event in a non-production "
+                "environment tenant=%s instance=%s event_id=%s",
+                self._tenant_id,
+                self._instance_id,
+                event_dict.get("id"),
+            )
+        return event_dict
 
     async def handle_webhook_event(
         self, event: Mapping[str, Any]
@@ -1166,7 +1224,21 @@ class StripeConnector(IntegrationConnector):
                 "StripeConnector: vault returned non-dict envelope"
             )
         self._cached_envelope = dict(envelope)
+        self._warn_on_key_modes(envelope)
         return dict(envelope)
+
+    def _warn_on_key_modes(self, envelope: Mapping[str, Any]) -> None:
+        """Log each key-mode problem at WARN (review R4). Never logs keys."""
+
+        for problem in stripe_key_mode_warnings(
+            envelope, live_keys_expected=self._live_keys_expected
+        ):
+            logger.warning(
+                "StripeConnector: key mode check tenant=%s instance=%s: %s",
+                self._tenant_id,
+                self._instance_id,
+                problem,
+            )
 
     async def _get_stripe_module(self) -> Any:
         """Return the ``stripe`` SDK, importing lazily when necessary."""

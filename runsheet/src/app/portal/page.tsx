@@ -25,7 +25,10 @@ import {
   sectionHeading,
   textLink,
 } from "../../components/portal/styles";
-import { levelText } from "../../components/portal/TankCard";
+import {
+  levelText,
+  STALE_READING_TEXT,
+} from "../../components/portal/TankCard";
 import {
   portalErrorMessage,
   usePortalData,
@@ -138,7 +141,7 @@ export default function PortalOverviewPage() {
                 </Link>
                 {": "}
                 {levelText(tank, unit)}
-                {tank.reading_stale ? " (reading out of date)" : ""}
+                {tank.reading_stale ? ` (${STALE_READING_TEXT})` : ""}
               </li>
             ))}
           </ul>

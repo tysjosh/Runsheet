@@ -23,6 +23,7 @@ Only `admin` sessions can use these routes. They live under the customer's comme
 - A customer can have at most 10 active portal users (`PORTAL_MAX_USERS_PER_CUSTOMER`). The 11th invite answers 409 `PORTAL_USER_LIMIT_REACHED`.
 - An email that already belongs to staff, a driver, or another customer answers 409 `PORTAL_EMAIL_IN_USE`. The response doesn't say which; the WARN log line carries the reason.
 - Revoke deletes the user's SuperTokens identity and its `auth_users` row, and revokes its sessions. The grant row stays, as `revoked`, for history. Inviting the same email again creates a fresh identity.
+- Revoke window: the grant/customer check is cached per backend process for `PORTAL_PRINCIPAL_CACHE_SECONDS` (default 60, the R2.11 bound). The task that handles the revoke clears its cache, so the user's next call there fails. Another backend task, including the old and new tasks overlapping during a rolling deploy, can keep serving that user's portal calls until its cached entry expires, up to 60 s. Staging runs one backend task. If production runs more than one and needs a shorter window, lower `PORTAL_PRINCIPAL_CACHE_SECONDS`; each lower value costs one more grant/customer read per user per window.
 - Archiving the customer (`PATCH /api/commerce/customers/{id}` with `status=archived`) revokes every portal session for that customer. Its grants stay active, so un-archiving restores access.
 
 ## Stripe webhook events
@@ -49,6 +50,8 @@ Log lines to watch:
 | `portal_payment_provider_error` | ERROR | A Stripe call failed or timed out during payment create, replay or cancel. The customer saw 502 `PAYMENT_PROVIDER_ERROR` and can retry. |
 | `portal_payment_late_success` | WARN | `succeeded` arrived for an attempt the portal had marked `failed` or `canceled`. The payment was recorded anyway, because money moved. |
 | `portal_payment_unapplied` | ERROR | The payment was recorded but not applied to the invoice. Follow the procedure below. |
+| `StripeConnector: key mode check` | WARN | The tenant's secret and publishable keys are in different modes (the Payment Element will fail in the browser), or a non-production environment holds a live secret key. Staging must use test-mode keys. Nothing is blocked; fix the keys in the Integration Marketplace. |
+| `StripeConnector: live-mode webhook event in a non-production environment` | WARN | A live-mode event reached staging or dev. The event is still processed. Check which Stripe account the webhook endpoint belongs to. |
 
 ## Unapplied-payment procedure
 

@@ -15,8 +15,8 @@ import {
 import { card, textLink } from "./styles";
 
 export const NO_FORECAST_TEXT = "Forecast not available yet";
-export const STALE_READING_TEXT =
-  "This reading is out of date. The level may have changed since.";
+/** R7.3 fixed text. */
+export const STALE_READING_TEXT = "Reading may be out of date";
 
 /** "1,240 of 2,000 gal (62%)". */
 export function levelText(tank: PortalTank, unit = "gal"): string {

@@ -2117,8 +2117,16 @@ async def initialize(app, container: ServiceContainer) -> None:
             else None
         )
 
+        # WARN-only key-mode checks (review R4): live keys are expected only
+        # in production.
+        _stripe_live_keys_expected = (
+            getattr(settings.environment, "value", settings.environment)
+            == "production"
+        )
+
         def _build_stripe_connector(tenant_id: str, instance):
             return StripeConnector(
+                live_keys_expected=_stripe_live_keys_expected,
                 tenant_id=tenant_id,
                 instance_id=instance.instance_id,
                 credentials_vault=credentials_vault,
