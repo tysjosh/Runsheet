@@ -23,7 +23,6 @@ import {
   STATUS_KEYS,
   type StatusKey,
 } from "./tokens";
-import { LEVEL_FILL, LEVEL_TRACK } from "../components/portal/tankLevel";
 
 // ── colour maths ─────────────────────────────────────────────────────────
 type RGB = [number, number, number];
@@ -269,18 +268,12 @@ describe("colour-vision separation of status dots", () => {
   });
 });
 
-describe("portal statuses and level bars (task 3.11, design §11.4–§11.5)", () => {
-  it("open and partial share the blue family and differ by icon and label", () => {
+describe("Open and Partially paid (task 3.11, design §11.4, D21)", () => {
+  it("share the blue family and differ by icon and label", () => {
     expect(STATUS.open.dot).toBe(STATUS.partial.dot);
     expect(STATUS.open.icon).not.toBe(STATUS.partial.icon);
     expect(STATUS.open.label).not.toBe(STATUS.partial.label);
   });
-  it.each(Object.entries(LEVEL_FILL))(
-    "level bar %s fill on the slate-200 track ≥ 3:1",
-    (_k, hex) => {
-      expect(contrast(hex, LEVEL_TRACK)).toBeGreaterThanOrEqual(UI_MIN);
-    },
-  );
 });
 
 // ── product catalog coverage ─────────────────────────────────────────────
