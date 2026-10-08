@@ -7,6 +7,7 @@ import type {
   DriverUtilization,
 } from "../ops/DriverUtilizationList";
 import DriverUtilizationList from "../ops/DriverUtilizationList";
+import { Skeleton } from "../ui";
 
 /**
  * Driver Utilization View — displays real-time driver availability and workload
@@ -59,24 +60,19 @@ export default function DriverUtilizationView() {
   }, [loadData]);
 
   if (loading) {
-    return <LoadingSpinner message="Loading driver utilization..." />;
+    return (
+      <div className="p-4">
+        <Skeleton rows={6} label="Loading driver utilization" />
+      </div>
+    );
   }
-
   return (
-    <div className="h-full flex flex-col bg-white p-6">
-      <div className="mb-4">
-        <p className="text-gray-600">
-          Monitor driver availability and workload for dispatch operations
-        </p>
-      </div>
-
-      <div className="flex-1 overflow-y-auto">
-        <DriverUtilizationList
-          drivers={drivers}
-          statusFilter={statusFilter}
-          onStatusFilterChange={setStatusFilter}
-        />
-      </div>
+    <div className="flex h-full flex-col bg-surface">
+      <DriverUtilizationList
+        drivers={drivers}
+        statusFilter={statusFilter}
+        onStatusFilterChange={setStatusFilter}
+      />
     </div>
   );
 }
