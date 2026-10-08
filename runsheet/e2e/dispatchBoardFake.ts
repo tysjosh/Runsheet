@@ -67,6 +67,21 @@ export function truckId(i: number): string {
   return `T${String(i + 1).padStart(2, "0")}`;
 }
 
+/**
+ * Catalog product codes, stable per order id, so cards and stops render real
+ * product names and colours (the shared unit fixtures use "ULSD", which isn't
+ * in the catalog and draws as "?").
+ */
+const CATALOG = [
+  "DIESEL_2",
+  "GASOLINE_REG",
+  "HEATING_OIL",
+  "OFF_ROAD_DIESEL",
+] as const;
+export function productFor(orderId: string): string {
+  const n = Number.parseInt(orderId.replace(/\D/g, ""), 10) || 0;
+  return CATALOG[n % CATALOG.length];
+}
 export class FakeBoard {
   lanes = new Map<string, LaneView>();
   tray: TrayOrder[] = [];
@@ -100,6 +115,7 @@ export class FakeBoard {
                 makeStop(id, {
                   snapshot: {
                     ...makeStop(id).snapshot,
+                    product_code: productFor(id),
                     gallons_requested: 1500,
                   },
                 }),
@@ -127,6 +143,7 @@ export class FakeBoard {
       this.tray.push(
         makeTrayOrder(id, {
           customer_name: `QA- Customer ${k + 1}`,
+          product_code: productFor(id),
           gallons_requested: 1200,
         }),
       );
@@ -347,7 +364,12 @@ export class FakeBoard {
       }
       case "unassign_orders": {
         const { stops } = this.takeStops(body.order_ids);
-        for (const s of stops) this.tray.unshift(makeTrayOrder(s.order_id));
+        for (const s of stops)
+          this.tray.unshift(
+            makeTrayOrder(s.order_id, {
+              product_code: s.snapshot.product_code ?? productFor(s.order_id),
+            }),
+          );
         break;
       }
       case "pair_driver": {

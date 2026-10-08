@@ -649,7 +649,7 @@ test.describe("accessibility (N5, R18, R19)", () => {
             - heading "Orders (4)" [level=2]
             - combobox "Sort"
             - listbox "Orders to plan":
-              - option "Order 5000, QA- Customer 1, ULSD, 1,200 gal, No window, One off"
+              - option "Order 5000, QA- Customer 1, DIESEL_2, 1,200 gal, No window, One off"
     `);
     await expect(laneRow(page, "T01")).toMatchAriaSnapshot(`
       - row:

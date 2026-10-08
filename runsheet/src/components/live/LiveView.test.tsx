@@ -28,6 +28,10 @@ jest.mock("../../services/agentApi", () => ({
   getAutonomyLevel: jest.fn(),
   getApprovals: jest.fn(),
 }));
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserRoles: jest.fn(async () => ["admin"]),
+}));
 jest.mock("../../hooks/useSchedulingWebSocket", () => ({
   useSchedulingWebSocket: jest.fn(),
 }));
@@ -56,6 +60,7 @@ import { apiService } from "../../services/api";
 import { getAlerts as getFuelAlerts } from "../../services/fuelApi";
 import { getAlerts as getInventoryAlerts } from "../../services/inventoryApi";
 import { getActiveJobs, getDelayedJobs } from "../../services/schedulingApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import LiveView from "./LiveView";
 
 const m = <T,>(f: T) => f as unknown as jest.Mock;
@@ -74,6 +79,7 @@ const job = (id: string, extra: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   jest.clearAllMocks();
   mockParams = new URLSearchParams();
+  m(getCurrentUserRoles).mockResolvedValue(["admin"]);
   m(getActiveJobs).mockResolvedValue({
     data: [
       job("J1"),
@@ -162,6 +168,16 @@ describe("LiveView", () => {
     ).toHaveAttribute("href", "/dashboard/settings?tab=agents");
   });
 
+  it("shows the autonomy chip as text, not a link, to a dispatcher", async () => {
+    m(getCurrentUserRoles).mockResolvedValue(["dispatcher"]);
+    render(<LiveView />);
+    expect(
+      await screen.findByText(/Agent autonomy:/, { selector: "span" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /Agent autonomy/ }),
+    ).not.toBeInTheDocument();
+  });
   it("lists trucks with status, not coordinates (R9.3)", async () => {
     render(<LiveView />);
     const trucks = await screen.findByRole("list", {

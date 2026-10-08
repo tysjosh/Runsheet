@@ -185,7 +185,34 @@ describe("title row", () => {
     ).toHaveAttribute("href", "/dashboard/control?tab=approvals");
     expect(
       within(counts).getByRole("link", { name: "0 exceptions" }),
-    ).toHaveAttribute("href", "/dashboard/control");
+    ).toHaveAttribute("href", "/dashboard/dispatch?tab=jobs&status=failed");
+  });
+
+  it("with the board on, delayed opens the Jobs Delayed chip and exceptions open the board on their statuses", async () => {
+    m(getBoardStatus).mockResolvedValue({ mode: "active_gated" });
+    m(getDelayedJobs).mockResolvedValue({
+      data: [{ job_id: "J1", delay_duration_minutes: 10 }],
+    });
+    const lane = makeLane("T3", 2, {
+      loads: [makeLoad("L1", ["O5", "O6", "O8"])],
+    });
+    lane.loads[0].stops[0].snapshot.status = "failed";
+    lane.loads[0].stops[1].snapshot.status = "rejected";
+    m(getBoard).mockResolvedValue(
+      makeSnapshot({ service_date: TODAY, lanes: [lane] }),
+    );
+    await renderDash();
+    const counts = screen.getByRole("list", { name: "Counts" });
+    // The board has no "delayed" status; the count's source is Jobs.
+    expect(
+      within(counts).getByRole("link", { name: "1 delayed" }),
+    ).toHaveAttribute("href", "/dashboard/dispatch?tab=jobs&status=delayed");
+    expect(
+      within(counts).getByRole("link", { name: "2 exceptions" }),
+    ).toHaveAttribute(
+      "href",
+      boardLink({ date: TODAY, status: "failed,rejected" }),
+    );
   });
 });
 

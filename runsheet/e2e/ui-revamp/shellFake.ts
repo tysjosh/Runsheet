@@ -158,7 +158,25 @@ export async function installShellFake(
         data: JOBS.filter((j) => j.status === "in_progress"),
         request_id: "e2e",
       });
-    if (path === "/scheduling/jobs") return json(200, paginated(JOBS));
+    if (path === "/scheduling/jobs") {
+      // Server-side status and paging, as the backend does (chip counts ask
+      // for size=1 and read pagination.total).
+      const status = url.searchParams.get("status");
+      const rows = status ? JOBS.filter((j) => j.status === status) : JOBS;
+      const size = Number(url.searchParams.get("size") ?? 20);
+      const page = Number(url.searchParams.get("page") ?? 1);
+      const body = paginated(rows.slice((page - 1) * size, page * size));
+      return json(200, {
+        ...body,
+        total: rows.length,
+        pagination: {
+          page,
+          size,
+          total: rows.length,
+          total_pages: Math.ceil(rows.length / size),
+        },
+      });
+    }
     // Single-object read: the generic list body would leave `trucks` unset.
     if (path === "/compliance/ifta/report")
       return json(200, {

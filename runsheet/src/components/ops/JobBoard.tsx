@@ -22,6 +22,7 @@ import {
   type MenuItem,
   StatusBadge,
   statusKeyFor,
+  type TablePagination,
   type TableSort,
 } from "@/components/ui";
 import { dateTime } from "../../lib/format";
@@ -51,6 +52,8 @@ interface JobBoardProps {
   onSelectJob?: (jobId: string) => void;
   loading?: boolean;
   error?: { message: string; onRetry?: () => void } | null;
+  /** Server paging (the list endpoint pages; sorting applies to the page). */
+  pagination?: TablePagination;
 }
 
 const STATUS_LABEL: Record<string, string> = {
@@ -114,6 +117,7 @@ export default function JobBoard({
   onSelectJob,
   loading = false,
   error = null,
+  pagination,
 }: JobBoardProps) {
   const [sortField, setSortField] = useState<SortField>("scheduled_time");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
@@ -252,6 +256,7 @@ export default function JobBoard({
         rowMenu={rowMenu}
         loading={loading}
         error={error}
+        pagination={pagination}
         emptyState={
           <div>
             <p className="text-sm font-semibold text-slate-800">

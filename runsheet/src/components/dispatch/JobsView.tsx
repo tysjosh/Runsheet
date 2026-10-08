@@ -10,6 +10,12 @@
  * list is the shared `DataTable` with a per-row action menu and no row
  * tinting. `?status=` (e.g. `delayed` from the Dashboard) picks the chip.
  *
+ * The chip is a server filter: a status chip is sent as `status` (and to the
+ * export), "Delayed" reads `/scheduling/jobs/delayed`, and the list pages on
+ * the server. Chip counts are tenant totals from one `size: 1` read per
+ * status with the other filters applied (the endpoint has no aggregate);
+ * they fail open to no count. Search narrows the page on screen.
+ *
  * A row opens the job at `/dashboard/dispatch/jobs/:id` (R8.6).
  *
  * Live: `job_created`, `status_changed` and `delay_alert` patch rows in place.
@@ -28,6 +34,7 @@ import { useSchedulingWebSocket } from "../../hooks/useSchedulingWebSocket";
 import { classifyLoadError } from "../../services/apiErrors";
 import {
   type JobFilters as ApiJobFilters,
+  getDelayedJobs,
   getJobs,
   transitionStatus,
 } from "../../services/schedulingApi";
@@ -94,6 +101,27 @@ const CHIPS: {
   { id: "cancelled", label: "Cancelled", status: "cancelled" },
 ];
 
+/** Page size of the server-paged list. */
+export const JOBS_PAGE_SIZE = 50;
+
+/** The API status a chip sends; "all" and "delayed" send none. */
+export function chipStatus(chip: JobChip): JobStatus | undefined {
+  return chip === "all" || chip === "delayed" ? undefined : chip;
+}
+
+/**
+ * `/scheduling/jobs/delayed` takes no filters, so the toolbar's type, truck
+ * and date filters apply to that (complete) set here.
+ */
+export function matchesFilters(job: Job, f: JobFilterValues): boolean {
+  if (f.job_type && job.job_type !== f.job_type) return false;
+  if (f.asset_assigned && job.asset_assigned !== f.asset_assigned) return false;
+  const day = (job.scheduled_time ?? "").slice(0, 10);
+  if (f.start_date && day < f.start_date) return false;
+  if (f.end_date && day > f.end_date) return false;
+  return true;
+}
+
 export function matchesChip(job: Job, chip: JobChip): boolean {
   if (chip === "all") return true;
   if (chip === "delayed") return job.delayed;
@@ -126,6 +154,9 @@ export default function JobsView() {
     CHIPS.some((c) => c.id === initialChip) ? initialChip : "all",
   );
   const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const [counts, setCounts] = useState<Partial<Record<JobChip, number>>>({});
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showCargoSearch, setShowCargoSearch] = useState(false);
 
@@ -133,19 +164,76 @@ export default function JobsView() {
     try {
       setLoading(true);
       setError(null);
-      const res = await getJobs(toApiJobFilters(filters));
-      setJobs(Array.isArray(res.data) ? res.data : []);
+      if (chip === "delayed") {
+        const res = await getDelayedJobs();
+        const rows = (Array.isArray(res.data) ? res.data : []).filter((j) =>
+          matchesFilters(j, filters),
+        );
+        setJobs(rows);
+        setTotal(rows.length);
+      } else {
+        const res = await getJobs({
+          ...toApiJobFilters(filters),
+          status: chipStatus(chip),
+          page,
+          size: JOBS_PAGE_SIZE,
+        });
+        const rows = Array.isArray(res.data) ? res.data : [];
+        setJobs(rows);
+        setTotal(res.pagination?.total ?? rows.length);
+      }
     } catch (err) {
       const f = classifyLoadError(err, "Jobs couldn't be loaded.");
       setError(f.kind === "network" ? NETWORK_COPY : f.message);
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [filters, chip, page]);
 
   useEffect(() => {
     void loadData();
   }, [loadData]);
+
+  // Tenant totals per chip with the other filters applied.
+  const loadCounts = useCallback(async () => {
+    const base = toApiJobFilters(filters);
+    const results = await Promise.allSettled(
+      CHIPS.map((c) =>
+        c.id === "delayed"
+          ? getDelayedJobs().then(
+              (r) =>
+                (Array.isArray(r.data) ? r.data : []).filter((j) =>
+                  matchesFilters(j, filters),
+                ).length,
+            )
+          : getJobs({
+              ...base,
+              status: chipStatus(c.id),
+              page: 1,
+              size: 1,
+            }).then((r) => r.pagination?.total),
+      ),
+    );
+    const next: Partial<Record<JobChip, number>> = {};
+    results.forEach((r, i) => {
+      if (r.status === "fulfilled" && typeof r.value === "number")
+        next[CHIPS[i].id] = r.value;
+    });
+    setCounts(next);
+  }, [filters]);
+
+  useEffect(() => {
+    void loadCounts();
+  }, [loadCounts]);
+
+  const pickChip = (next: JobChip) => {
+    setChip(next);
+    setPage(1);
+  };
+  const changeFilters = (next: JobFilterValues) => {
+    setFilters(next);
+    setPage(1);
+  };
 
   const handleJobCreated = useCallback((event: { job: Job }) => {
     setJobs((prev) => [event.job, ...prev]);
@@ -221,23 +309,9 @@ export default function JobsView() {
     [],
   );
 
-  const counts = useMemo(() => {
-    const out: Record<JobChip, number> = {
-      all: 0,
-      scheduled: 0,
-      assigned: 0,
-      in_progress: 0,
-      delayed: 0,
-      completed: 0,
-      failed: 0,
-      cancelled: 0,
-    };
-    for (const j of jobs) {
-      if (!matchesSearch(j, query)) continue;
-      for (const c of CHIPS) if (matchesChip(j, c.id)) out[c.id] += 1;
-    }
-    return out;
-  }, [jobs, query]);
+  const totalPages =
+    chip === "delayed" ? 1 : Math.max(1, Math.ceil(total / JOBS_PAGE_SIZE));
+  // Live patches can move a row out of the chip; the page shows the chip only.
   const visible = useMemo(
     () => jobs.filter((j) => matchesChip(j, chip) && matchesSearch(j, query)),
     [jobs, chip, query],
@@ -270,7 +344,7 @@ export default function JobsView() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             aria-label="Search jobs"
-            placeholder="Search jobs, places, trucks"
+            placeholder="Search this page"
             className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
           />
         }
@@ -280,25 +354,35 @@ export default function JobsView() {
               label="Job status"
               options={CHIPS.map((c) => ({ ...c, count: counts[c.id] }))}
               value={chip}
-              onChange={(v) => setChip(v as JobChip)}
-              className="overflow-x-auto"
+              onChange={(v) => pickChip(v as JobChip)}
+              collapse
             />
             <FilterPopover
               count={secondary}
               label="Job filters"
-              onClear={() => setFilters(INITIAL_FILTERS)}
+              onClear={() => changeFilters(INITIAL_FILTERS)}
             >
-              <JobFilters filters={filters} onChange={setFilters} hideStatus />
+              <JobFilters
+                filters={filters}
+                onChange={changeFilters}
+                hideStatus
+              />
             </FilterPopover>
           </>
         }
         end={
-          <ExportCsvButton
-            type="jobs"
-            params={{ ...toApiJobFilters(filters) }}
-            subject="jobs"
-            allowedRoles={["admin", "dispatcher"]}
-          />
+          // The export route can't filter "delayed", so that chip has none.
+          chip === "delayed" ? undefined : (
+            <ExportCsvButton
+              type="jobs"
+              params={{
+                ...toApiJobFilters(filters),
+                ...(chipStatus(chip) ? { status: chipStatus(chip) } : {}),
+              }}
+              subject="jobs"
+              allowedRoles={["admin", "dispatcher"]}
+            />
+          )
         }
         overflow={[
           {
@@ -320,6 +404,16 @@ export default function JobsView() {
           onTransition={handleTransition}
           onSelectJob={(id) =>
             router.push(`/dashboard/dispatch/jobs/${encodeURIComponent(id)}`)
+          }
+          pagination={
+            totalPages > 1
+              ? {
+                  page,
+                  totalPages,
+                  totalItems: total,
+                  onPageChange: setPage,
+                }
+              : undefined
           }
         />
       </div>

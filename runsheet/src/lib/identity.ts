@@ -82,13 +82,28 @@ export function assignLaneIdentities(
   return out;
 }
 
-/** Up to two initials: "Darnell Price" → "DP", "TRK-104" → "T1". */
+/**
+ * Up to two initials: "Darnell Price" → "DP". An id ending in a number keeps
+ * the part that tells it apart from its siblings: "QA-TRK-104" → "04",
+ * "TRK-7" → "T7", "T07" → "07" (first letters would make a fleet all "Q1").
+ */
 export function initials(label: string): string {
   const words = label
     .replace(/[^\p{L}\p{N}\s-]/gu, " ")
     .split(/[\s-]+/)
     .filter(Boolean);
   if (words.length === 0) return "?";
-  if (words.length === 1) return words[0].slice(0, 2).toUpperCase();
-  return (words[0][0] + words[words.length - 1][0]).toUpperCase();
+  if (words.length === 1) {
+    // "T07" → "07": board lanes T01…T09 would otherwise all read "T0".
+    const digits = words[0].match(/\d+$/)?.[0] ?? "";
+    if (digits.length >= 2 && digits.length < words[0].length)
+      return digits.slice(-2);
+    return words[0].slice(0, 2).toUpperCase();
+  }
+  const last = words[words.length - 1];
+  if (/^\d+$/.test(last))
+    return last.length >= 2
+      ? last.slice(-2)
+      : (words[words.length - 2][0] + last).toUpperCase();
+  return (words[0][0] + last[0]).toUpperCase();
 }

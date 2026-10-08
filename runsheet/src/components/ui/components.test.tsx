@@ -186,6 +186,12 @@ describe("identity", () => {
     expect(initials("QA-UAT Darnell Price")).toBe("QP");
     expect(initials("Kim")).toBe("KI");
     expect(initials("")).toBe("?");
+    // Ids keep their distinguishing number (Live truck avatars were all "Q1").
+    expect(initials("QA-TRK-101")).toBe("01");
+    expect(initials("QA-TRK-102")).toBe("02");
+    expect(initials("TRK-7")).toBe("T7");
+    expect(initials("T07")).toBe("07");
+    expect(initials("T1")).toBe("T1");
   });
   it("avatar exposes the label and uses an identity colour", () => {
     render(<IdentityAvatar id="d1" label="Darnell Price" />);

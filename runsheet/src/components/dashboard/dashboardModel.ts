@@ -119,6 +119,28 @@ export function orderSeverity(o: FuelOrder): number {
   return o.status === "on_hold" ? 600 : 400;
 }
 
+/**
+ * Where the exceptions count leads: today's board filtered to the statuses of
+ * the counted stops (so it shows the same set), the one stop itself when
+ * there is one, or the Jobs Failed chip when the board has none.
+ */
+export function exceptionsLink(
+  exceptions: BoardException[],
+  date: string,
+): string {
+  if (exceptions.length === 0) return LINKS.jobs("failed");
+  if (exceptions.length === 1) {
+    const [e] = exceptions;
+    return boardLink({ date, truck: e.truckId, order: e.orderId });
+  }
+  const statuses = [
+    ...new Set(
+      exceptions.map((e) => e.status).filter((v): v is string => Boolean(v)),
+    ),
+  ].sort();
+  return boardLink({ date, status: statuses.join(",") });
+}
+
 /** Stops on the board whose order status is an exception (failed, rejected). */
 export function boardExceptions(lanes: LaneView[]): BoardException[] {
   const out: BoardException[] = [];

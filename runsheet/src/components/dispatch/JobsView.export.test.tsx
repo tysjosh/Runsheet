@@ -16,6 +16,7 @@ jest.mock("next/navigation", () => ({
 }));
 jest.mock("../../services/schedulingApi", () => ({
   getJobs: jest.fn(async () => ({ data: [], request_id: "r" })),
+  getDelayedJobs: jest.fn(async () => ({ data: [], request_id: "r" })),
   transitionStatus: jest.fn(),
 }));
 jest.mock("../../hooks/useSchedulingWebSocket", () => ({
@@ -80,4 +81,17 @@ it("exports the current filters for a dispatcher", async () => {
   expect(mockDownload).toHaveBeenCalledWith("jobs", {
     start_date: "2026-10-01",
   });
+});
+it("exports the selected status chip", async () => {
+  mockRoles.mockResolvedValue(["dispatcher"]);
+  render(<SchedulingJobBoardPage />);
+  await screen.findByRole("button", { name: /^Export CSV ?: jobs$/ });
+  fireEvent.click(screen.getByRole("button", { name: /^Failed/ }));
+  const button = await screen.findByRole("button", {
+    name: /^Export CSV ?: jobs$/,
+  });
+  await act(async () => {
+    fireEvent.click(button);
+  });
+  expect(mockDownload).toHaveBeenCalledWith("jobs", { status: "failed" });
 });
