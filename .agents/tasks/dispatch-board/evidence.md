@@ -435,7 +435,7 @@ Status: tasks 37–40 done for everything that can be automated. No `phase7-revi
 
 **Pre-existing CI failure fixed:** the backend suite's `test_volume_factor_single_source.py` failed on this branch (since Phases 4–6). `boardTime.ts` and `state/precheck.ts` each declared their own `3.78541` gallon factor. Both now import `LITERS_PER_GALLON` from `services/fuelApi.ts` (3.785411784).
 
-#### Performance numbers (N1 target size)
+#### Performance numbers (first pass, 480 stops; superseded by the review fix below)
 Backend (`$PY -m pytest tests/unit/test_dispatch_board_perf.py -s`, in-memory store, so service CPU cost only, no network or database; staging numbers are task 41):
 
 | Operation | Budget (p95) | Before fix | After fix (median / p95 / max) |
@@ -454,7 +454,7 @@ Frontend, Chromium on this Mac (2020-class or newer laptop), 60-lane / 600-order
 | Production, run 3 | 185 | 16.7 ms | **18.5 ms** | 50.0 ms | 11 | 614 ms |
 | Dev server (recorded only), 2 runs | 340 | 16.7–16.9 ms | 50.4–66.4 ms | 117–150 ms | 11 | 834–893 ms |
 
-The 20 ms p95 is enforced only for a local production-bundle run. A dev-server run and CI only record it, because dev React is several times slower (K15: advisory on CI). "Lanes visible after navigation" is a stand-in for the N1 3.0 s first meaningful paint, measured against the in-process fake rather than a real snapshot. One drag-start batch validate ran per drag (`validate_calls: 1`).
+The 20 ms p95 is enforced only for a local production-bundle run. A dev-server run only records it (CI did not run Playwright at all at this point; the review fix adds a job), because dev React is several times slower (K15: advisory on CI). "Lanes visible after navigation" is a stand-in for the N1 3.0 s first meaningful paint, measured against the in-process fake rather than a real snapshot. One drag-start batch validate ran per drag (`validate_calls: 1`).
 
 #### Accessibility findings
 - Fixed: lane rows owned a non-cell child (the gauge list), which was axe `aria-required-children` (critical).
@@ -486,10 +486,55 @@ cwd `.worktrees/dispatch-board/runsheet` unless named.
 - **iPad drags are pointer-driven in WebKit's touch profile.** This is the same limit the T1 spike recorded. The long press itself is the owner check above.
 - No review loop ran in this step, so no freeze decision was needed.
 
+#### Review fix (phase7-review.json, CHANGES_REQUESTED)
+All five findings fixed. No staging, AWS, deploy or CodeBuild action; the flag default is untouched.
+
+| Finding | Fix | Tests |
+|---|---|---|
+| P7-1 (HIGH) N1 stop count not exercised | **N1 reading:** N1 says "600 orders, 1,500 stops per day", but a stop is one order on one lane (I1), so both can't hold. The fixture now uses the larger figure, 1,500 lane stops (1,620 orders that day), so the budgets cover the worst reading; `requirements.md` is unchanged. Three changes make all four budgets hold there. (1) Commands copy only the lanes the pre-checks expect to touch: `engine.apply(..., scope=touched)` via `scoped_copy`. If the engine touches a lane outside the scope it raises `ScopeExceeded` and `_handle` reruns once from a fresh draft read with a full copy, so a shared lane is never committed. (2) `engine.clone` (dump + validate, about 3× faster than `model_copy(deep=True)`) for every board deep copy in `apply` and the validation probes. (3) `_best_fit` refreshes the lane once and shallow-copies loads and stops per trial (`_trial_copy`) and computes times only for trials (`refresh_lane(..., allocations=False)`); `apply` still refreshes the chosen lane in full. Also: the tray query now excludes orders already on the draft (`must_not terms order_id`), so 1,500 drafted orders no longer push unassigned orders past the 1,000-order tray page (the reviewer's spot-check got an empty tray). | `test_dispatch_board_service.py`: drafted orders don't use up the tray page; a scoped command copy leaves the read draft unchanged and equals a full copy; a scoped apply outside its scope raises; a command outside its estimate reruns once on a full copy and commits once; `clone` is equal and unshared (5 new). Perf fixture asserts 1,500 stops, max 29 per load, 120 tray orders, not truncated. |
+| P7-2 (MEDIUM) superlinear batch validate | Half the lanes hold 29 stops (one under `MAX_STOPS_PER_LOAD`), so each order probe there fills a load to the limit. Profiling showed the per-candidate cost was deep copies (best-fit trial lanes and probe scope) plus solver allocations in every trial; both fixed above. The position-validate and command cases also run on a 29-stop lane. | Budget tests below |
+| P7-3 (MEDIUM) not in CI | New `dispatch-board-e2e` job in `.github/workflows/ci.yml`: `npm ci`, `npx playwright install --with-deps chromium`, `PW_BOARD_PROD=1 npx playwright test -c playwright.dispatch-board.config.ts --project=chromium`, results uploaded on failure. No secrets: every call goes to the in-process fake. The frame-time p95 stays advisory on CI (`!process.env.CI`, K15); the e2e and axe assertions are enforced. The job has not run yet (nothing is pushed from this step). | YAML parses (8 jobs) |
+| P7-4 (LOW) no drag stop → tray e2e | `stop dropped on the order tray is unassigned (R7.1)`: pointer drag of a stop grip onto the Order tray → `unassign_orders` with `input_modality: "drag"`, the lane loses the stop, and the order shows in the tray after the reload. | chromium + webkit pass |
+| P7-5 (LOW) Timeline reason sr-only | The reason "Timeline needs a screen at least 1,024 pixels wide." is now visible text next to the zoom control below 1024 px (still the button's `aria-describedby`). | `responsive.test.tsx` asserts it isn't `sr-only` |
+
+**Frame time at 1,500 stops.** With 25 stops per lane in the Playwright fixture, the production p95 first rose to 33–34 ms: auto-scroll frames mounting lanes of 25 cards. `BoardGrid` now windows on `useDeferredValue(scrollTop)`, so mounting the lanes that scroll in is an interruptible render; the 5-row overscan covers the lag. Hover frames were already 17.5 ms.
+
+Backend, `$PY -m pytest tests/unit/test_dispatch_board_perf.py -s` (in-memory store; documents copied through JSON as the jsonb column does, instead of the fake's triple `deepcopy`; heap frozen before timing, see below; service CPU only, staging is task 41). Fixture: 60 lanes, 1,500 stops (30 lanes × 29, 30 × 21), 120 tray orders, tomorrow draft with 50 orders, 70 drivers:
+
+| Operation | Budget (p95) | Reviewer's spot-check at 1,500 stops | After fix, standalone (median / p95 / max) | After fix, inside the full suite |
+|---|---|---|---|---|
+| Snapshot | 2,000 ms | 458 / 682 ms (tray empty) | 409 / 413 / 413 ms | 426 / 475 / 475 ms |
+| Batch validate (1 order × 60 lanes) | 500 ms | 1,153 / **1,436** ms | 202 / 251 / 260 ms | 189 / 277 / 374 ms |
+| Position validate (29-stop lane) | 300 ms | 281 / **305** ms | 94 / 101 / 107 ms | 66 / 85 / 89 ms |
+| Command (`move_stops`, 29-stop lane) | 600 ms | 621 / **845** ms | 151 / 218 / 224 ms | 148 / 231 / 249 ms |
+
+Frontend, Chromium production bundle (`PW_BOARD_PROD=1`), 60 lanes × 25 stops + 120 tray orders, drag across lanes plus auto-scroll, 3 runs:
+
+| Run | Frames | Median | p95 (budget 20 ms) | Hover p95 | Auto-scroll p95 | Max | Lane rows in DOM | Lanes visible |
+|---|---|---|---|---|---|---|---|---|
+| 1 | 300 | 16.7 ms | **17.4 ms** | 17.5 | 17.4 | 33.4 ms | 11 | 640 ms |
+| 2 | 283 | 16.7 ms | **17.5 ms** | 17.3 | 17.5 | 33.3 ms | 11 | 1,010 ms |
+| 3 | 304 | 16.7 ms | **17.6 ms** | 17.6 | 17.6 | 34.2 ms | 11 | 1,014 ms |
+
+Before the `useDeferredValue` change, the same fixture gave p95 33.4–34.1 ms (auto-scroll p95 33 ms); at 8 stops per lane it gave 17.6 ms.
+
+**Commands and results (review fix).** cwd `.worktrees/dispatch-board/runsheet` unless named.
+- `npx tsc --noEmit` → exit 0. `npm run lint` → 468 files, 0 errors, 1 warning (existing).
+- `npm test -- --ci --maxWorkers=2` → **104 suites, 1224 passed, 1 skipped, 0 failed**. (A run with default workers was killed by memory pressure on this machine, with timeouts in unrelated suites; the 2-worker run is clean.)
+- `npx playwright test -c playwright.dispatch-board.config.ts` (dev server) → **27 passed**, 30 skipped by project.
+- `PW_BOARD_PROD=1 … --project=chromium -g performance --repeat-each=3` → 3 passed (table above); `.next` deleted.
+- Backend `tests/unit/test_dispatch_board_*.py tests/unit/test_dispatch_validation*.py tests/unit/test_board*.py tests/integration/test_dispatch_board_publish_flow.py` → 430 passed.
+- Full backend suite, CI env → first run **3 failed** (the perf budgets: medians were fine, but 0.5–0.8 s full-GC pauses over the heap left by 13,000 earlier tests hit random samples). Fixed with a perf-only fixture that runs `gc.collect(); gc.freeze()` before timing, as in a fresh service process. Rerun → **13190 passed, 238 skipped, 0 failed** (5 m 44 s).
+- Not run: the Postgres suite. The tray query's new `must_not` + `terms` clause uses operators `persistence/document_query.py` supports, but it wasn't exercised on Postgres here; staging (task 41) will.
+- Disk: 6.5 GB free at the start, down to 1.6 GB during the Playwright builds, 6.5 GB after cleanup (`npm cache clean`, `brew cleanup`, `.next` and test results deleted). No Docker build, no volume prune.
+
+**Decisions.** (1) The N1 contradiction is resolved by testing the larger figure, not by changing N1; this needs no owner call because it only tightens the test. (2) Scoped command copies fail closed: an out-of-scope touch raises before any lane is refreshed or committed, and the retry uses a full copy. (3) Frame-time p95 stays advisory on CI per K15. (4) This is the first review fix pass for Phase 7, so no freeze decision was needed.
+
 #### Open items (not blocking Phase 7)
 - Owner iPad long-press check (above).
 - Manual assistive-technology passes and expert WCAG review (above).
-- Staging latency numbers (task 41).
+- Staging latency numbers (task 41), including the tray query's new `must_not terms` clause on Postgres.
+- First CI run of the new `dispatch-board-e2e` job (after the branch is pushed).
 - Task 36b (truck type, tanker endorsement, nearest expiry) is still open from Phase 5.
 
 ### Phase 8: Staging rollout

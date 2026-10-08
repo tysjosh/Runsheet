@@ -31,10 +31,14 @@ const SMALL: FixtureSize = {
   trayOrders: 4,
   drivers: 3,
 };
-/** N1: 60 lanes, 600 orders (480 on lanes + 120 in the tray). */
+/**
+ * N1: 60 lanes and 1,500 stops a day, plus 120 orders in the tray. N1's
+ * "600 orders" can't hold at 1,500 stops (one stop per order), so the
+ * fixture uses the larger figure, as the backend budgets do.
+ */
 const N1: FixtureSize = {
   lanes: 60,
-  stopsPerLane: 8,
+  stopsPerLane: 25,
   trayOrders: 120,
   drivers: 60,
 };
@@ -198,6 +202,27 @@ test.describe("pointer drags (R5.1, R6.1, R7.1, R7.2)", () => {
     });
     await expect.poll(() => stopOrder(page, "T01")).toEqual([]);
     await expect.poll(() => stopOrder(page, "T03")).toContain("1000");
+  });
+
+  test("stop dropped on the order tray is unassigned (R7.1)", async ({
+    page,
+  }) => {
+    const board = new FakeBoard(SMALL);
+    await boot(page, board);
+    const tray = page.getByRole("region", { name: "Order tray" });
+    await pointerDrag(page, grip(page, "stop:1001"), async () => {
+      const t = await centre(tray);
+      return { x: t.x, y: t.b.y + t.b.height - 20 };
+    });
+    await waitForCommands(board, 1);
+    expect(lastCommand(board)).toMatchObject({
+      type: "unassign_orders",
+      order_ids: ["1001"],
+      input_modality: "drag",
+    });
+    await expect.poll(() => stopOrder(page, "T01")).toEqual(["1000", "1002"]);
+    // The tray reloads after a tray-returning command (R3.1).
+    await expect(key(page, "order:1001")).toBeVisible();
   });
 
   test("auto-scrolls the lane list near its edge during a drag", async ({
@@ -461,7 +486,9 @@ test.describe("target size audit (SC 2.5.8)", () => {
 // ─── Task 39: drag frame time at the N1 size (K15) ──────────────────────────
 
 test.describe("performance (N1, K15)", () => {
-  test("60 lanes / 600 orders: drag frame time p95", async ({ page }, info) => {
+  test("60 lanes / 1,500 stops: drag frame time p95", async ({
+    page,
+  }, info) => {
     test.skip(info.project.name !== "chromium", "frame timing on Chromium");
     const board = new FakeBoard(N1);
     await board.install(page, ANA);
@@ -500,6 +527,9 @@ test.describe("performance (N1, K15)", () => {
       const y = grid.y + 40 + ((i * 37) % Math.max(1, grid.height - 80));
       await page.mouse.move(grid.x + 320 + ((i * 53) % 400), y, { steps: 3 });
     }
+    const split = await page.evaluate(
+      () => (window as unknown as { __frames: number[] }).__frames.length,
+    );
     const edge = { x: grid.x + 400, y: grid.y + grid.height - 6 };
     for (let i = 0; i < 40; i++) {
       await page.mouse.move(edge.x + (i % 2), edge.y);
@@ -507,20 +537,27 @@ test.describe("performance (N1, K15)", () => {
     }
     await page.keyboard.press("Escape");
     await page.mouse.up();
-    const frames = await page.evaluate(() => {
+    const all = await page.evaluate(() => {
       const w = window as unknown as { __frames: number[]; __stop: boolean };
       w.__stop = true;
       performance.measure("board-drag", "board-drag-start");
-      return w.__frames.slice(1);
+      return w.__frames;
     });
-    const sorted = [...frames].sort((x, y) => x - y);
-    const p = (q: number) =>
-      sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
+    const frames = all.slice(1);
+    const pct = (xs: number[], q: number) => {
+      const s = [...xs].sort((x, y) => x - y);
+      return Number(
+        s[Math.min(s.length - 1, Math.floor(q * s.length))].toFixed(1),
+      );
+    };
     const result = {
       frames: frames.length,
-      median_ms: Number(p(0.5).toFixed(1)),
-      p95_ms: Number(p(0.95).toFixed(1)),
-      max_ms: Number(sorted[sorted.length - 1].toFixed(1)),
+      median_ms: pct(frames, 0.5),
+      p95_ms: pct(frames, 0.95),
+      max_ms: pct(frames, 1),
+      // Hovering across lanes vs auto-scrolling (lanes mounting).
+      hover_p95_ms: pct(all.slice(1, split), 0.95),
+      scroll_p95_ms: pct(all.slice(split), 0.95),
       rendered_lane_rows: rendered,
       first_lanes_visible_ms: paintMs,
       validate_calls: board.validations,

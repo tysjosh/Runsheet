@@ -1508,7 +1508,7 @@ def candidate_results(
     # One deep copy per call instead of one per candidate (K15, N1 batch
     # validate budget): each probe copies only the lanes it can touch and
     # shares the rest with the scratch copy, never with ``draft``.
-    scratch = draft.model_copy(deep=True)
+    scratch = engine.clone(draft)
     sources = _probe_sources(draft, item)
     for truck_id in truck_ids:
         lane = draft.lanes.get(truck_id)
@@ -1521,14 +1521,14 @@ def candidate_results(
             continue
         scope = sources | {truck_id}
         probe = scratch.model_copy(
-            update={"lanes": {t: (l.model_copy(deep=True) if t in scope else l) for t, l in scratch.lanes.items()}}
+            update={"lanes": {t: (engine.clone(l) if t in scope else l) for t, l in scratch.lanes.items()}}
         )
         try:
             applied = engine.apply(probe, command, ctx, in_place=True)
             if not set(applied.touched) <= scope:
                 # A lane outside the scope may have changed in the scratch
                 # copy: re-copy it and probe this candidate on a full copy.
-                scratch = draft.model_copy(deep=True)
+                scratch = engine.clone(draft)
                 applied = engine.apply(draft, command, ctx)
         except engine.EngineError as exc:
             results[truck_id] = CandidateResult(outcome="block", reason=exc.reason)

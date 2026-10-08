@@ -12,6 +12,7 @@ import { CalendarClock } from "lucide-react";
 import {
   type KeyboardEvent,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -138,10 +139,14 @@ export function BoardGrid({
     return out;
   }, [heights]);
   const total = heights.reduce((s, h) => s + h, 0);
+  // K15: the window follows a deferred scroll position, so mounting the lanes
+  // that scroll in (each with up to 30 cards) is an interruptible render and
+  // doesn't hold up a frame while a drag auto-scrolls; overscan covers the lag.
+  const windowTop = useDeferredValue(scrollTop);
   const [first, last] = visibleRange(
     offsets,
     heights,
-    Math.max(0, scrollTop - AXIS_HEIGHT),
+    Math.max(0, windowTop - AXIS_HEIGHT),
     viewport,
   );
   const rendered = lanes.slice(first, last + 1);

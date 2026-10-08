@@ -29,7 +29,9 @@ import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TypeVar
+
+from pydantic import BaseModel
 
 from Agents.support.compartment_models import Compartment, DeliveryRequest
 from Agents.support.compartment_solver import (
@@ -469,8 +471,11 @@ def load_times(ctx: Any, truck_id: str, load: Load, previous: Optional[Load]) ->
     )
 
 
-def refresh_lane(lane: Lane, ctx: Any) -> None:
-    """Recompute load times, stop ETAs and allocations for a lane in place."""
+def refresh_lane(lane: Lane, ctx: Any, *, allocations: bool = True) -> None:
+    """Recompute load times, stop ETAs and allocations for a lane in place.
+
+    ``allocations=False`` recomputes times and ETAs only (best-fit trials).
+    """
     tenant_id = getattr(ctx, "tenant_id", "")
     previous: Optional[Load] = None
     for load in lane.loads:
@@ -479,7 +484,8 @@ def refresh_lane(lane: Lane, ctx: Any) -> None:
         load.planned_end = times.end
         for stop, stop_eta in zip(load.stops, times.stop_etas):
             stop.eta = stop_eta
-        load.allocations = compute_allocations(lane.truck_id, load, ctx, tenant_id)
+        if allocations:
+            load.allocations = compute_allocations(lane.truck_id, load, ctx, tenant_id)
         previous = load
 
 
@@ -607,17 +613,37 @@ def _place(ctx: Any, draft: BoardDraft, truck_id: str, stops: List[Stop], target
     return _best_fit(ctx, draft, truck_id, stops)
 
 
+def _trial_copy(lane: Lane) -> Lane:
+    """A best-fit trial of ``lane``: new lane, loads list, load and stop objects.
+
+    ``refresh_lane`` and stop insertion only assign load and stop fields or
+    change the loads and stops lists, so everything below a stop (snapshot,
+    location) and the lane's other fields stay shared. The original lane is
+    discarded once a trial replaces it (K15: a deep copy per trial was the
+    batch-validate cost at the N1 stop count).
+    """
+    loads = [
+        load.model_copy(update={"stops": [s.model_copy() for s in load.stops]})
+        for load in lane.loads
+    ]
+    return lane.model_copy(update={"loads": loads})
+
+
 def _best_fit(ctx: Any, draft: BoardDraft, truck_id: str, stops: List[Stop]) -> Tuple[str, str, int]:
     """K4.3: each not-started load in time order, then a new load; the first feasible
     candidate with the fewest added minutes wins (ties keep the earlier load)."""
     lane = draft.lanes[truck_id]
     best: Optional[Tuple[float, int, Lane]] = None
     candidates = [i for i, l in enumerate(lane.loads) if not load_started(lane, l.load_id, ctx)]
+    # Refresh once; every trial starts from the same refreshed lane. Trials
+    # need times only: ``apply`` refreshes the chosen lane in full, since the
+    # target lane is always touched.
+    base = _trial_copy(lane)
+    refresh_lane(base, ctx, allocations=False)
     for order_pos, pos in enumerate(candidates + [len(lane.loads)]):
-        trial = lane.model_copy(deep=True)
+        trial = _trial_copy(base)
         if pos == len(lane.loads):
             trial.loads.append(_new_load(ctx, trial))
-        refresh_lane(trial, ctx)
         before_end = trial.loads[pos].planned_end if pos < len(lane.loads) else None
         base_minutes = (
             eta.minutes_between(trial.loads[pos].planned_start, before_end)
@@ -627,7 +653,7 @@ def _best_fit(ctx: Any, draft: BoardDraft, truck_id: str, stops: List[Stop]) -> 
         for stop in stops:
             index = _best_index(ctx, truck_id, trial, pos, stop)
             trial.loads[pos].stops.insert(index, stop.model_copy(deep=True))
-        refresh_lane(trial, ctx)
+        refresh_lane(trial, ctx, allocations=False)
         load = trial.loads[pos]
         if not _feasible(ctx, truck_id, load):
             continue
@@ -665,18 +691,68 @@ def _require_expected(command: Any, touched: Iterable[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def apply(draft: BoardDraft, command: Any, ctx: Any, *, in_place: bool = False) -> ApplyResult:
+_M = TypeVar("_M", bound=BaseModel)
+
+
+def clone(model: _M) -> _M:
+    """A deep copy of a board model, rebuilt from its dump.
+
+    About three times faster than ``model_copy(deep=True)`` on lanes and
+    drafts (K15). The board models have no private, excluded or computed
+    fields, so the dump carries everything.
+    """
+    return type(model).model_validate(model.model_dump())
+
+
+class ScopeExceeded(Exception):
+    """A scoped ``apply`` touched a lane outside its scope (see ``apply``)."""
+
+
+def scoped_copy(draft: BoardDraft, scope: Iterable[str]) -> BoardDraft:
+    """Copy of ``draft`` that deep-copies everything except the lanes outside ``scope``.
+
+    Lanes outside the scope are the same objects as in ``draft`` (K15: one
+    full deep copy per command was most of the command cost at the N1 stop
+    count).
+    """
+    keep = set(scope)
+    work = clone(draft.model_copy(update={"lanes": {}}))
+    lanes = {t: (clone(l) if t in keep else l) for t, l in draft.lanes.items()}
+    return work.model_copy(update={"lanes": lanes})
+
+
+def apply(
+    draft: BoardDraft,
+    command: Any,
+    ctx: Any,
+    *,
+    in_place: bool = False,
+    scope: Optional[Iterable[str]] = None,
+) -> ApplyResult:
     """Apply one command to a copy of ``draft``. The input draft is never mutated.
 
     ``in_place=True`` skips the copy and works on ``draft`` itself; only for a
     caller that passes a scratch draft it owns (validation probes, K15).
+
+    ``scope`` copies only those lanes (``scoped_copy``). If the command then
+    touches a lane outside the scope, ``ScopeExceeded`` is raised: that lane is
+    shared with ``draft``, so ``draft`` may have changed and the caller must
+    discard it, reload and apply again without a scope.
     """
-    work = draft if in_place else draft.model_copy(deep=True)
+    if in_place:
+        work = draft
+    elif scope is not None:
+        scope = set(scope)
+        work = scoped_copy(draft, scope)
+    else:
+        work = clone(draft)
     rebuild_index(work)
     handler = _HANDLERS.get(type(command))
     if handler is None:
         raise EngineError("unsupported_command")
     result = handler(work, command, ctx)
+    if scope is not None and not in_place and not set(result.touched) <= scope:
+        raise ScopeExceeded()
     for truck_id in result.touched:
         lane = work.lanes.get(truck_id)
         if lane is not None:

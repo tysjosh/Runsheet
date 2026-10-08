@@ -717,3 +717,78 @@ def test_p6_two_commands_from_one_version_at_most_one_commits(schedule, second):
         assert h.draft().draft_version == 1 + len(ok)
 
     asyncio.run(scenario())
+
+
+# -- K15 copies (phase 7 review P7-1) ---------------------------------------
+
+
+async def test_drafted_orders_do_not_use_up_the_tray_page(h, monkeypatch):
+    from fuel.services import dispatch_board_service as svc
+
+    monkeypatch.setattr(svc, "TRAY_LIMIT", 3)
+    for o in ("d1", "d2", "d3", "u1", "u2"):
+        h.seed_order(o)
+    await h.lane_with("T1", "d1", "d2", "d3")
+    snap = await h.service.snapshot(T, TODAY, mode="active_gated", tz=TZ)
+    assert [o["order_id"] for o in snap["trays"]["orders"]] == ["u1", "u2"]
+    assert snap["trays"]["orders_truncated"] is False
+
+
+async def test_scoped_command_copy_leaves_the_read_draft_alone(h):
+    for o in ("o1", "o2", "o3"):
+        h.seed_order(o)
+    await h.lane_with("T1", "o1", "o2")
+    await h.lane_with("T2", "o3")
+    draft = h.draft()
+    before = draft.model_dump(mode="json")
+    load_id = draft.lanes["T1"].loads[0].load_id
+    cmd = h.command("move_stops", order_ids=["o3"], truck_id="T1", target={"load_id": load_id, "index": 0}, lanes=("T1", "T2"))
+    ctx = await h.service._context_for(draft, ["T1", "T2"], extra_orders=["o3"])
+    scoped = engine.apply(draft, cmd, ctx, scope=["T1", "T2"])
+    assert draft.model_dump(mode="json") == before
+    full = engine.apply(draft, cmd, ctx)
+    assert scoped.draft.model_dump(mode="json") == full.draft.model_dump(mode="json")
+    assert scoped.draft.lanes["T1"] is not draft.lanes["T1"]
+
+
+async def test_scoped_apply_outside_its_scope_raises(h):
+    for o in ("o1", "o2"):
+        h.seed_order(o)
+    await h.lane_with("T1", "o1")
+    await h.lane_with("T2", "o2")
+    draft = h.draft()
+    cmd = h.command("move_stops", order_ids=["o2"], truck_id="T1", target={"load_id": "new"}, lanes=("T1", "T2"))
+    ctx = await h.service._context_for(draft, ["T1", "T2"], extra_orders=["o2"])
+    with pytest.raises(engine.ScopeExceeded):
+        engine.apply(draft, cmd, ctx, scope=["T1"])
+
+
+async def test_command_outside_its_lane_estimate_reruns_on_a_fresh_full_copy(h, monkeypatch):
+    for o in ("o1", "o2"):
+        h.seed_order(o)
+    await h.lane_with("T1", "o1")
+    await h.lane_with("T2", "o2")
+    calls = []
+    real = engine.apply
+
+    def spy(draft, command, ctx, **kw):
+        calls.append(kw.get("scope"))
+        return real(draft, command, ctx, **kw)
+
+    monkeypatch.setattr(engine, "apply", spy)
+    # An estimate that misses the source lane (no current command does this).
+    monkeypatch.setattr(h.service, "_touched_estimate", lambda d, c: [c.truck_id])
+    result = await h.run("move_stops", order_ids=["o2"], truck_id="T1", target={"load_id": "new"}, lanes=("T1", "T2"))
+    assert [set(s) if s is not None else None for s in calls] == [{"T1"}, None]
+    assert {l["truck_id"] for l in result["lanes"]} == {"T1", "T2"}
+    draft = h.draft()
+    assert draft.order_index["o2"] == "T1"
+    assert draft.lanes["T2"].loads == []
+    assert len(committed_logs(h)) == 5  # 2 add_lane + 2 assign + this move, logged once
+
+
+def test_clone_is_an_equal_unshared_copy():
+    lane = engine.Lane(truck_id="T1", version=3, driver_id="d1")
+    draft = BoardDraft(tenant_id=T, service_date=TODAY, timezone=TZ, lanes={"T1": lane})
+    copy_ = engine.clone(draft)
+    assert copy_ == draft and copy_.lanes["T1"] is not lane

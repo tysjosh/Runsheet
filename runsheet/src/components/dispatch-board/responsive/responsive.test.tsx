@@ -133,6 +133,10 @@ describe("stacked layout below 1024 px (R20.2)", () => {
     expect(timeline).toHaveAccessibleDescription(
       "Timeline needs a screen at least 1,024 pixels wide.",
     );
+    // Shown as text too, not only to screen readers (review P7-5).
+    expect(
+      screen.getByText("Timeline needs a screen at least 1,024 pixels wide."),
+    ).not.toHaveClass("sr-only");
     expect(
       screen.getByRole("button", { name: "Sequence", pressed: true }),
     ).toBeInTheDocument();

@@ -190,12 +190,14 @@ export function BoardToolbar({
           >
             Sequence
           </button>
-          {zoomLocked && (
-            <span id="board-zoom-locked" className="sr-only">
-              Timeline needs a screen at least 1,024 pixels wide.
-            </span>
-          )}
         </fieldset>
+        {zoomLocked && (
+          // Visible, not only described: a disabled button can't take focus
+          // or show a tooltip on touch (R20.2).
+          <span id="board-zoom-locked" className="text-xs text-gray-600">
+            Timeline needs a screen at least 1,024 pixels wide.
+          </span>
+        )}
 
         <fieldset className="flex overflow-hidden rounded-md border border-gray-300">
           <legend className="sr-only">Density</legend>

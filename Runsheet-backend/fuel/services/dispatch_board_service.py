@@ -463,7 +463,12 @@ class DispatchBoardService:
 
         return dict(await asyncio.gather(*(one(t) for t in truck_ids)))
 
-    def _tray_query(self, tenant_id: str, service_date: date, tz: str, filters: SnapshotQuery) -> Dict[str, Any]:
+    def _tray_query(
+        self, tenant_id: str, service_date: date, tz: str, filters: SnapshotQuery, exclude: Sequence[str] = ()
+    ) -> Dict[str, Any]:
+        """``exclude``: orders already on this draft. Leaving them out of the
+        query keeps a full board from pushing unassigned orders past
+        ``TRAY_LIMIT`` (N1: 1,500 stops a day)."""
         day_start, _ = eta.shift_window(service_date, "all", tz)
         day_end = eta.local_at(service_date + timedelta(days=1), eta.SHIFT_TIMES["all"][0], tz)
         start_iso = day_start.astimezone(timezone.utc).isoformat()
@@ -489,8 +494,11 @@ class DispatchBoardService:
             filt.append({"range": {"delivery_window_start": {"gte": start_iso, "lt": end_iso}}})
         elif filters.window == "later":
             filt.append({"range": {"delivery_window_start": {"gte": end_iso}}})
+        query: Dict[str, Any] = {"filter": filt, "should": should, "minimum_should_match": 1}
+        if exclude:
+            query["must_not"] = [{"terms": {"order_id": list(exclude)}}]
         return {
-            "query": {"bool": {"filter": filt, "should": should, "minimum_should_match": 1}},
+            "query": {"bool": query},
             "sort": [{"delivery_window_start": {"order": "asc"}}, {"order_id": {"order": "asc"}}],
             "size": TRAY_LIMIT + 1,
         }
@@ -532,7 +540,7 @@ class DispatchBoardService:
         degraded: Set[str] = set()
         tenant_id = draft.tenant_id
         resp = await self._es.search_documents(
-            FUEL_ORDERS_CURRENT_INDEX, self._tray_query(tenant_id, draft.service_date, tz, filters), TRAY_LIMIT + 1
+            FUEL_ORDERS_CURRENT_INDEX, self._tray_query(tenant_id, draft.service_date, tz, filters, sorted(draft.order_index)), TRAY_LIMIT + 1
         )
         raw = [o for o in _hits(resp) if o.get("tenant_id") == tenant_id]
         truncated = len(raw) > TRAY_LIMIT or _total(resp) > TRAY_LIMIT
@@ -704,7 +712,9 @@ class DispatchBoardService:
         self.telemetry.metric(tm.COMMAND_MS, (_time.monotonic() - started) * 1000, tenant_id=tenant_id, type=ctype, result="committed")
         return result
 
-    async def _handle(self, tenant_id: str, user_id: str, service_date: date, command: Any, tz: str) -> Dict[str, Any]:
+    async def _handle(
+        self, tenant_id: str, user_id: str, service_date: date, command: Any, tz: str, *, scoped: bool = True
+    ) -> Dict[str, Any]:
         _today, past = self.check_service_date(service_date, tz)
         if past:
             raise AppException(
@@ -770,7 +780,13 @@ class DispatchBoardService:
             if contents is not None:
                 applied = engine.restore_lanes(draft, contents, ctx)
             else:
-                applied = engine.apply(draft, command, ctx)
+                # K15: copy only the lanes the pre-checks expect to change.
+                applied = engine.apply(draft, command, ctx, scope=touched if scoped else None)
+        except engine.ScopeExceeded:
+            # A lane outside the estimate changed and may be shared with
+            # ``draft``: start over from a fresh read with a full copy.
+            logger.info("dispatch board command left its lane estimate: type=%s", command.type)
+            return await self._handle(tenant_id, user_id, service_date, command, tz, scoped=False)
         except engine.EngineError as exc:
             if contents is not None and exc.reason == "order_on_two_lanes":
                 raise self._undo_stale("changed_by_other") from None
