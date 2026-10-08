@@ -24,6 +24,7 @@ from portal.api._authz import (
 )
 from portal.models import PortalMe, PortalMeasurementUnits, PortalMeEnvelope
 from portal.services.portal_payment_service import portal_connector
+from portal.services.supplier import supplier_name
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,21 @@ async def _email(user_id: str) -> str:
         return ""
 
 
+async def _open_balance(scope: PortalScope):
+    """PE4: ``OpenBalance`` for the customer, or ``None`` (UI sums itself)."""
+    from portal.services.scoped_readers import PortalInvoiceReader
+
+    try:
+        return await PortalInvoiceReader(_services["invoice_service"]).open_balance(scope)
+    except Exception as exc:  # noqa: BLE001 — the panel falls back, /me answers
+        logger.warning(
+            "Portal /me: open balance read failed for tenant=%s: %s",
+            scope.tenant_id,
+            type(exc).__name__,
+        )
+        return None
+
+
 async def _customer_display_name(scope: PortalScope) -> str:
     service = _services["customer_service"]
     if service is None:
@@ -103,10 +119,11 @@ async def get_portal_me(
         invoices_available and await portal_connector(scope.tenant_id) is not None
     )
     units = scope.tenant.measurement_units or {}
+    balance = await _open_balance(scope) if invoices_available else None
     me = PortalMe(
         email=await _email(scope.user_id),
         customer_display_name=await _customer_display_name(scope),
-        supplier_name=scope.tenant_id,
+        supplier_name=await supplier_name(scope.tenant_id),
         ordering_available=await _ordering_available(scope.tenant_id),
         invoices_available=invoices_available,
         payments_available=payments_available,
@@ -114,6 +131,9 @@ async def get_portal_me(
             volume=str(units.get("volume", "gal")),
             distance=str(units.get("distance", "mi")),
         ),
+        open_balance_cents=balance.cents if balance else None,
+        open_invoice_count=balance.count if balance else None,
+        overdue_count=balance.overdue if balance else None,
     )
     return PortalMeEnvelope(
         data=me, request_id=str(getattr(request.state, "request_id", "") or "")

@@ -37,6 +37,14 @@ export interface PortalMe {
   invoices_available: boolean;
   payments_available: boolean;
   measurement_units: PortalMeasurementUnits;
+  /**
+   * PE4: server-side open balance over open, partial and overdue invoices
+   * (null while invoicing is off). Optional so the UI keeps its client-side
+   * sum against an API that predates it.
+   */
+  open_balance_cents?: number | null;
+  open_invoice_count?: number | null;
+  overdue_count?: number | null;
 }
 
 export interface PortalSingle<T> {
@@ -54,6 +62,13 @@ export interface PortalList<T> {
 export interface PageParams {
   cursor?: string | null;
   limit?: number;
+}
+
+/** PE7: `active` = not delivered, not delivered-failed, not cancelled. */
+export type PortalOrderStatusGroup = "active" | "past";
+
+export interface PortalOrderFilters extends PageParams {
+  status_group?: PortalOrderStatusGroup;
 }
 
 export type PortalOrderStatusCode =
@@ -100,6 +115,9 @@ export interface PortalOrderRequest {
 export interface PortalTank {
   customer_tank_id: string;
   label: string;
+  /** PE2: staff-set customer-facing name and service address. */
+  display_name?: string | null;
+  service_address?: string | null;
   product_code: string;
   capacity_gallons: number;
   current_level_gallons: number;
@@ -113,6 +131,8 @@ export interface PortalTank {
   } | null;
   next_delivery: {
     order_id: string;
+    /** Portal order status code (added with PE2; optional for older APIs). */
+    status_code?: string | null;
     status_label: string;
     window_start: string | null;
     window_end: string | null;
@@ -160,6 +180,8 @@ export interface PortalInvoice {
     product_code: string | null;
     quantity_gallons: number | null;
     unit_price_cents: number | null;
+    /** PE3: the unit price in dollars at its stored precision ("2.9193"). */
+    unit_price_dollars?: string | null;
     subtotal_cents: number | null;
   }>;
   delivery: {
@@ -361,7 +383,7 @@ export function getPortalMe(): Promise<PortalSingle<PortalMe>> {
 
 /** GET /api/portal/orders — the customer's orders, newest first. */
 export function listPortalOrders(
-  params: PageParams = {},
+  params: PortalOrderFilters = {},
 ): Promise<PortalList<PortalOrder>> {
   return portalJson(`/portal/orders${buildQueryString(params)}`);
 }

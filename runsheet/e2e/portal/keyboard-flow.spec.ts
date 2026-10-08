@@ -39,19 +39,19 @@ async function cancelNewestRequest(page: Page): Promise<void> {
   );
   await page.waitForURL(/\/portal\/orders$/);
   await waitForPortal(page);
-  const cancel = page.getByRole("button", { name: /^Cancel request \S+$/ });
+  // D29: named by tank and date, never the order id.
+  const cancel = page.getByRole("button", { name: /^Cancel request for .+$/ });
   await expect(cancel.first()).toBeVisible();
   const before = await cancel.count();
   await activateWithKeyboard(page, cancel.first());
   await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: /^Request \S+ cancelled\.$|^This request changed\./ }),
+    page.getByRole("status").filter({
+      hasText: /^Request for .+ cancelled\.$|^This request changed\./,
+    }),
   ).toBeVisible({ timeout: 30_000 });
   await expect(cancel).toHaveCount(before - 1);
-  await expect(
-    page.getByRole("list", { name: "Your orders" }).locator("li:focus"),
-  ).toHaveCount(1);
+  // Focus is back on the row (a table row from 1024 px, a list item below).
+  await expect(page.locator("main tr:focus, main li:focus")).toHaveCount(1);
 }
 
 /** Keystrokes for a native date input in an en-US browser (MM DD YYYY). */
@@ -84,37 +84,53 @@ test.describe("customer portal keyboard-only flow", () => {
     );
     await page.waitForURL(/\/portal\/orders$/);
     await waitForPortal(page);
-    await activateWithKeyboard(
-      page,
-      page.getByRole("link", { name: "Request delivery" }),
-    );
-    await page.waitForURL(/\/portal\/orders\/new$/);
-    await waitForPortal(page);
+    // D24: Request delivery opens a dialog over the list.
+    const trigger = page
+      .getByRole("main")
+      .getByRole("button", { name: "Request delivery", exact: true });
+    await activateWithKeyboard(page, trigger);
+    const dialog = page.getByRole("dialog", { name: "Request a delivery" });
+    await expect(dialog).toBeVisible();
 
-    const noTanks = page.getByText("No tanks are set up for online ordering");
+    const noTanks = dialog.getByText("No tanks are set up yet.");
     if ((await noTanks.count()) === 0) {
-      const status = page.getByRole("status").filter({ hasText: PD10 });
+      await expect(
+        dialog.getByRole("radiogroup", { name: "Tank" }),
+      ).toBeVisible();
+      const status = dialog.getByRole("status").filter({ hasText: PD10 });
       const orderingOff = (await status.count()) > 0;
-
-      await page.getByLabel("Delivery date").focus();
-      await page.keyboard.type(dateKeystrokesInDays(3));
-      await page.getByLabel("PO number (optional)").focus();
-      await page.keyboard.type("QA-E2E-PORTAL");
-      const submit = page.getByRole("button", { name: /send request/i });
-      await activateWithKeyboard(page, submit);
+      const submit = dialog.getByRole("button", { name: /send request/i });
 
       if (orderingOff) {
+        // R14.12: the PD10 banner first, every field disabled, aria-disabled
+        // submit, nothing sent.
         await expect(status).toBeVisible();
+        await expect(dialog.getByLabel("Delivery date")).toBeDisabled();
+        await expect(dialog.getByLabel("PO number (optional)")).toBeDisabled();
         await expect(submit).toHaveAttribute("aria-disabled", "true");
-        await expect(page.getByLabel("PO number (optional)")).toHaveValue(
-          "QA-E2E-PORTAL",
-        );
+        await page.keyboard.press("Escape");
+        await expect(dialog).toBeHidden();
+        await expect(trigger).toBeFocused();
       } else {
+        await dialog.getByLabel("Delivery date").focus();
+        await page.keyboard.type(dateKeystrokesInDays(3));
+        await dialog.getByLabel("PO number (optional)").focus();
+        await page.keyboard.type("QA-E2E-PORTAL");
+        await activateWithKeyboard(page, submit);
         const sent = page.getByRole("heading", { name: "Request sent" });
         await expect(
           sent.or(page.getByRole("status").filter({ hasText: PD10 })),
         ).toBeVisible({ timeout: 30_000 });
-        if ((await sent.count()) > 0) await cancelNewestRequest(page);
+        if ((await sent.count()) > 0) {
+          await activateWithKeyboard(
+            page,
+            dialog.getByRole("button", { name: "Close" }).last(),
+          );
+          await expect(dialog).toBeHidden();
+          await cancelNewestRequest(page);
+        } else {
+          await page.keyboard.press("Escape");
+        }
       }
     }
 
@@ -126,7 +142,7 @@ test.describe("customer portal keyboard-only flow", () => {
     await page.waitForURL(/\/portal\/invoices$/);
     await waitForPortal(page);
     const invoiceLinks = page
-      .getByRole("table", { name: "Invoices" })
+      .getByRole("table", { name: "Your invoices" })
       .getByRole("link");
     test.skip(
       (await invoiceLinks.count()) === 0,

@@ -66,7 +66,8 @@ def test_list_excludes_drafts_and_labels_void(client, portal_on, portal_fakes, c
     # Unit price from the stored micros (2.966 $/gal -> 297 cents).
     assert first["line_items"] == [{
         "product_code": "PROPANE", "quantity_gallons": 100.0,
-        "unit_price_cents": 297, "subtotal_cents": 29660,
+        "unit_price_cents": 297, "unit_price_dollars": "2.966",
+        "subtotal_cents": 29660,
     }]
 
 
@@ -255,7 +256,7 @@ def test_pdf_is_attachment_with_projected_text(client, portal_on, portal_fakes, 
     assert len(reader.pages) == 2  # 30 line items per page
     text = _pdf_text(resp.content)
     for expected in ('INV/2026 "7";x', "Void", "Account A Main", "Customer A", T1,
-                     "$2.97", "$296.60", "PROPANE", "Page 2 of 2"):
+                     "$2.966", "$296.60", "PROPANE", "Page 2 of 2"):
         assert expected in text, expected
 
 

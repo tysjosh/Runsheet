@@ -26,6 +26,75 @@ All jobs passed except `dispatch-board-e2e`. Its "200 % zoom approximation and f
 
 The CI perf line on that run read p95 66.6 ms, but CI only reports it and does not assert it (the job's runner is slower). The test passed.
 
+### CI on `f6b0740` (run 37826128472): green
+
+`f6b074028c1864964fbc16b50c199bd93cdd4aa3` was pushed as a fast-forward `c5163ad..f6b0740` to `origin/production-readiness/go-live-blockers`, with no force push and nothing to `main`. Run `37826128472` ended `success`, with all 9 jobs green: git-hygiene, dispatch-board-e2e, dispatcher-ui, ui-revamp-e2e, driver-app, docker-image, backend-tests, endpoint-registry and migration-check.
+
+### Deploy (CodeBuild, detached worktree)
+
+- Gates:
+  - ECS: api:43 and ui:25 each had one `COMPLETED` deployment.
+  - CodeBuild: the last build was `SUCCEEDED` and none were in progress.
+  - Live UI: `ui:25` runs image `:3c5dc4a`, which is an ancestor of `f6b0740`.
+- The backend was not deployed because no backend files changed. It stays on api:43 (`:5665134`).
+- Deployed from `.worktrees/p2-deploy`, detached at `f6b0740` with a clean tree, using `bash -c "$(cat scripts/staging_aws.sh)" scripts/staging_aws.sh deploy-ui`.
+  - CodeBuild `runsheet-staging-image-build:17bd5e74-3ed8-4f82-bafd-95a6ba537ef8` built image **`runsheet-staging-ui:f6b0740`**.
+  - It registered **`runsheet-staging-ui:26`**, and the service reached stable (1 running, `COMPLETED`).
+- `HUBSPOT_PORTAL_ID` and `HUBSPOT_FORM_GUID` carried over. The HUBSPOT env blocks of ui:25 and ui:26 hash the same, and the values were not printed.
+- Rollback target: `runsheet-staging-ui:25` (`:3c5dc4a`). It was not needed.
+
+### Staging verification (demo-tenant, headless Chromium, 1280×800 and 1440×900)
+
+QA accounts `qa-p2-admin`, `qa-p2-dispatcher` and `qa-p2-driver` (`@demo.runsheet.test`) were created by one-shot tasks on api:43.
+- The precheck (task `f87f4759…`) found no rows and no core users.
+- Create (task `53513f91…`): the driver is bound to `QA-FF-DRV-01`. The password was generated locally into a gitignored scratch file and passed as a task override. It was never logged.
+
+Phase 2 pages, admin and dispatcher (`screenshots/phase2/staging/staging-{role}-pages.json`):
+
+| Page | First row 1280 / 1440 (budget 172) | Axe critical/serious |
+|---|---|---|
+| Dashboard | 145 / 145 | 0 |
+| Dispatch → Board, flag `disabled` (falls back to Jobs) | 172 / 172 | 0 |
+| Dispatch → Board, flag `shadow` | 136 / 136 (first grid row) | 0 |
+| Dispatch → Jobs | 172 / 172 | 0 |
+| Dispatch → Plans | 172 / 172 | 0 |
+| Orders | 172 / 172 | 0 |
+| Live | 145 / 145 | 0 |
+| Live → Approvals | no row (queue empty) | 0 |
+
+All pages returned 200 with a single `<h1>`, and there were no page errors. The driver lands on `/dashboard` and sees "No modules available for your role", the same as Phase 1, with axe 0.
+
+Dashboard click-throughs (admin):
+- Every title-row count lands on its target page: `5 jobs` → Jobs, `2 trucks out` → Live, `2 delayed` → Jobs `status=delayed`, `0 exceptions` → Jobs `status=failed`, `0 approvals` → Live Approvals.
+- The Needs attention rows open the right records: 2 tank rows open Fuel → Stations `station=QA-UAT-STN-02/03`, 2 delayed jobs open the JOB_30/JOB_36 detail, and 4 order rows open the order detail. Plan status opens Plans.
+- No link reached a not-found page.
+- The Delayed (2) and Tanks (2) chips filter in place. The script's "Orders" chip lookup also matched the sidebar button, so the Orders chip itself was not isolated.
+- The Today/Tomorrow toggle switches days.
+
+Approvals: the Live → Approvals tab renders with "Nothing needs your review". demo-tenant had no pending approvals, so inline Approve was not exercised on staging. It is covered by `Dashboard.test.tsx` and `LiveView.test.tsx`.
+
+Orders bulk confirm (dispatcher):
+- Created two placed orders, `QA-P2 Release Customer` (`ord_d69d…`, `ord_0760…`). The `order_intake_pipeline` flag (baseline `disabled`) was set to `shadow` for intake, then restored to `disabled`, and a re-read confirmed it.
+- Both orders were selected and Confirm was clicked. Two `PATCH /orders/:id/status` calls returned 200, the toast read "Confirmed 2 of 2 orders.", and the API then showed both `confirmed`.
+
+Board drag-and-drop smoke:
+- `dispatch_board` was set from its baseline `disabled` to `shadow`, then restored to `disabled`, and a re-read confirmed it.
+- A same-day QA order `ord_880d…` was created with intake shadow → restore and confirmed through the API.
+- On today's board, the tray showed only that card ("QA-P2 Release Cu… · Confirmed · Diesel #2 (on-road) · 400 gal"). It was dragged to lane `QA-UAT-TRUCK-02`.
+- In shadow the board is read-only: the drop sent no board command (0 POST calls), and the "Preview mode, changes are not saved." chip stayed. Toolbar text: "Plans can't be generated / Nothing can be published while the board is read-only."
+- A committed drop needs `active_gated`. Standing permissions only allow `disabled`/`shadow`, so committed drops on staging are **not verified** here. They are covered by the dispatch-board e2e (17 passed).
+
+Cleanup (dry run → delete → verify), via one-shot tasks on api:43:
+- QA orders:
+  - The dry run listed 3 `fuel_orders_current` rows (all `QA-P2`, demo-tenant) plus 9 `es_documents` rows (3 `fuel_orders_current`, 6 `fuel_order_events`). It excluded anything containing `QA-SWEEP`.
+  - The delete removed 9 + 3. The verify found 0 and 0, and the API returns 404 for the order.
+  - 6 `outbox_events` rows that reference these orders were kept, because they are younger than the approved 30-day prune window.
+- QA accounts: the dry run listed exactly the 3 qa-p2 rows and core users. The delete (task `f3e98d3d…`) removed 3 core users and 3 `auth_users` rows. The verify found 0 and 0.
+- Flags: `dispatch_board` and `order_intake_pipeline` are both back at their `disabled` baseline.
+- No `QA-SWEEP-*` record was touched.
+
+Screenshots: `screenshots/phase2/staging/` (1440×900 for each role and page, the dispatcher pages at 1280×800, and the board shadow and drag captures).
+
 ## Iteration 2: review fixes (commit `ba98b9f`)
 
 This iteration fixes every finding in `phase2-review.json` (verdict CHANGES_REQUESTED). The notes are added under tasks 2.1, 2.4, 2.6 and 2.7 in `spec/tasks.md`, and only Phase 2 text changed there.

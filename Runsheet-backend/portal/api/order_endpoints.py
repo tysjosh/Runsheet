@@ -11,7 +11,7 @@ Data comes only through ``portal.services`` (scoped readers and
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
@@ -61,11 +61,20 @@ async def list_portal_orders(
     request: Request,
     limit: int = Query(default=25, ge=1, le=50),
     cursor: Optional[str] = Query(default=None, max_length=256),
+    status_group: Optional[Literal["active", "past"]] = Query(
+        default=None,
+        description=(
+            "PE7: ``active`` (not delivered, not delivered-failed, not "
+            "cancelled) or ``past``. Omitted: every order."
+        ),
+    ),
     scope: PortalScope = Depends(require_portal_customer),
 ) -> PortalOrderListEnvelope:
     """The customer's orders, newest first (R4.11)."""
     service = get_portal_order_service()
-    page = await get_portal_readers().orders.list(scope, limit=limit, cursor=cursor)
+    page = await get_portal_readers().orders.list(
+        scope, limit=limit, cursor=cursor, status_group=status_group
+    )
     data = await service.project_all(scope, page.items)
     return PortalOrderListEnvelope(
         data=data, next_cursor=page.next_cursor, limit=limit, request_id=_request_id(request)

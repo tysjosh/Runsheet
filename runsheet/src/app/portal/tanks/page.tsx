@@ -1,47 +1,95 @@
 "use client";
 
-/** The customer's active tanks with forecast and next delivery (R7.1–R7.3). */
-
+/**
+ * The customer's tanks ranked by level status (R7.1–R7.3, R14.8), 2-up from
+ * 640 px, each with its own Request delivery (D24).
+ */
+import { Fuel } from "lucide-react";
+import { useMemo } from "react";
 import {
-  PortalLoadError,
+  PortalEmpty,
   PortalLoading,
+  PortalSectionError,
 } from "../../../components/portal/PageState";
 import { usePortalMe } from "../../../components/portal/PortalContext";
-import { pageHeading } from "../../../components/portal/styles";
-import TankCard from "../../../components/portal/TankCard";
+import PortalTitleRow from "../../../components/portal/PortalTitleRow";
+import RequestDeliveryDialog from "../../../components/portal/RequestDeliveryDialog";
+import { listSection, space } from "../../../components/portal/styles";
+import TankRow from "../../../components/portal/TankRow";
+import { sortTanks } from "../../../components/portal/tankLevel";
 import {
-  portalErrorMessage,
-  usePortalData,
-} from "../../../components/portal/usePortalData";
-import { listPortalTanks } from "../../../services/portalApi";
+  usePortalTanks,
+  useRequestDialog,
+} from "../../../components/portal/usePortalTanks";
 
 export default function PortalTanksPage() {
   const me = usePortalMe();
-  const tanks = usePortalData(() => listPortalTanks(), []);
+  const unit = me.measurement_units.volume;
+  const tanks = usePortalTanks();
+  const dialog = useRequestDialog();
+  const ranked = useMemo(
+    () =>
+      sortTanks(
+        tanks.tanks,
+        (t) => tanks.titles.get(t.customer_tank_id) ?? t.label,
+      ),
+    [tanks.tanks, tanks.titles],
+  );
 
   return (
-    <div className="space-y-6">
-      <h1 className={pageHeading}>Your tanks</h1>
+    <>
+      <PortalTitleRow title="Tanks" />
       {tanks.loading ? (
-        <PortalLoading label="Loading your tanks…" />
+        <div data-portal-first className={`${listSection} ${space.inset}`}>
+          <PortalLoading label="Loading your tanks…" />
+        </div>
       ) : tanks.error ? (
-        <PortalLoadError
-          message={portalErrorMessage(tanks.error, {
-            fallback: "We couldn't load your tanks.",
-          })}
-          onRetry={tanks.reload}
-        />
-      ) : (tanks.data?.data.length ?? 0) === 0 ? (
-        <p className="text-sm text-gray-700">No tanks are set up yet.</p>
+        <div data-portal-first>
+          <PortalSectionError message={tanks.error} onRetry={tanks.reload} />
+        </div>
+      ) : ranked.length === 0 ? (
+        <div data-portal-first className={listSection}>
+          <PortalEmpty
+            icon={<Fuel className="h-8 w-8" />}
+            title="No tanks are set up yet."
+            description={`Contact ${me.supplier_name} to add one.`}
+          />
+        </div>
       ) : (
-        <ul className="grid grid-cols-1 gap-4 md:grid-cols-2">
-          {tanks.data?.data.map((tank) => (
-            <li key={tank.customer_tank_id}>
-              <TankCard tank={tank} volumeUnit={me.measurement_units.volume} />
+        <ul
+          data-portal-first
+          className="grid grid-cols-1 divide-y divide-slate-100 sm:grid-cols-2 sm:gap-3 sm:divide-y-0"
+        >
+          {ranked.map((tank) => (
+            <li
+              key={tank.customer_tank_id}
+              className="sm:rounded-xl sm:border sm:border-border sm:bg-surface sm:px-3.5 md:px-0"
+            >
+              <TankRow
+                tank={tank}
+                title={tanks.titles.get(tank.customer_tank_id) ?? tank.label}
+                unit={unit}
+                headingLevel={2}
+                onRequest={(id) => dialog.openFor(id)}
+              />
             </li>
           ))}
         </ul>
       )}
-    </div>
+      <RequestDeliveryDialog
+        open={dialog.open}
+        onClose={dialog.close}
+        tanks={tanks.tanks}
+        titles={tanks.titles}
+        tanksLoading={tanks.loading}
+        tanksError={tanks.error}
+        onRetryTanks={tanks.reload}
+        orderingAvailable={me.ordering_available}
+        supplierName={me.supplier_name}
+        unit={unit}
+        initialTankId={dialog.tankId}
+        onCreated={tanks.reload}
+      />
+    </>
   );
 }

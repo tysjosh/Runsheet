@@ -137,7 +137,8 @@ describe("starting a payment", () => {
     const fetchMock = installFetch({ body: {} });
     render(<PaymentForm invoice={INV} paymentsAvailable />);
     const amount = screen.getByLabelText("Payment amount (USD)");
-    expect(amount).toHaveValue("1050.00");
+    // NumberField shows the grouped amount (R14.14).
+    expect(amount).toHaveValue("1,050.00");
     expect(amount).toHaveAttribute("inputmode", "decimal");
     fireEvent.change(amount, { target: { value: "0.50" } });
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));

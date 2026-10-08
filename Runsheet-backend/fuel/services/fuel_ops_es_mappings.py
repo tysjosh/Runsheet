@@ -80,6 +80,9 @@ CUSTOMER_TANKS_MAPPING = {
             "source_system":          {"type": "keyword"},
             "external_tank_id":       {"type": "keyword"},
             "customer_id":            {"type": "keyword"},
+            # Portal PE2: customer-facing name and service address.
+            "display_name":           {"type": "keyword"},
+            "service_address":        {"type": "keyword"},
             "last_refill_order_id":   {"type": "keyword"},
             "customer_type":          {"type": "keyword"},
             "fuel_type":              {"type": "keyword"},

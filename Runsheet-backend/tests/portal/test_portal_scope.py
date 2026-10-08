@@ -60,6 +60,10 @@ def test_me_shape_and_capabilities(client, portal_on, cA, portal_fakes):
         "invoices_available",
         "payments_available",
         "measurement_units",
+        # PE4 (null while the balance can't be read).
+        "open_balance_cents",
+        "open_invoice_count",
+        "overdue_count",
     }
     assert data["customer_display_name"] == "Customer A"
     assert data["supplier_name"] == T1

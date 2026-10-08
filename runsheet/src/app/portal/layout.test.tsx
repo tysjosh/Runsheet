@@ -6,7 +6,7 @@
  * transitive import from the portal layout fails this suite. `WebSocket` is
  * replaced with a spy that must never be constructed.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type React from "react";
 
 jest.mock("../../components/shell/Sidebar", () => {
@@ -14,6 +14,15 @@ jest.mock("../../components/shell/Sidebar", () => {
 });
 jest.mock("../../components/shell/TopBar", () => {
   throw new Error("staff shell module imported by the portal: TopBar");
+});
+jest.mock("../../components/shell/UserMenu", () => {
+  throw new Error("staff shell module imported by the portal: UserMenu");
+});
+jest.mock("../../components/shell/TenantSettings", () => {
+  throw new Error("staff shell module imported by the portal: TenantSettings");
+});
+jest.mock("../../components/shell/useHubTabs", () => {
+  throw new Error("staff shell module imported by the portal: useHubTabs");
 });
 jest.mock("../../components/shell/useNavCounts", () => {
   throw new Error("staff shell module imported by the portal: useNavCounts");
@@ -172,6 +181,9 @@ describe("portal layout (T-UI-SHELL)", () => {
     expect(screen.getByRole("banner")).toHaveTextContent(
       ME.customer_display_name,
     );
+    // The email, supplier and Sign out live in the account menu (D19).
+    fireEvent.click(screen.getByRole("button", { name: "Account menu" }));
+    expect(screen.getByText(ME.email)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Sign out" }),
     ).toBeInTheDocument();
@@ -189,6 +201,48 @@ describe("portal layout (T-UI-SHELL)", () => {
     expect(String(fetchMock.mock.calls[0][0])).toMatch(/\/portal\/me$/);
     expect(webSocketSpy).not.toHaveBeenCalled();
     expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it("puts the sections in a bottom tab bar on phones and in the top bar from 768 px", async () => {
+    existsMock.mockResolvedValue(true);
+    rolesMock.mockResolvedValue(["customer"]);
+    installFetch({ body: { data: ME, request_id: "r1" } });
+    const PortalLayout = loadLayout();
+    const { unmount } = render(
+      <PortalLayout>
+        <p>portal page</p>
+      </PortalLayout>,
+    );
+    await screen.findByText("portal page");
+    // No matchMedia in jsdom: the phone layout.
+    const phoneNav = screen.getByRole("navigation", { name: "Portal" });
+    expect(phoneNav).toHaveAttribute("data-portal-tabbar");
+    expect(phoneNav.closest("header")).toBeNull();
+    expect(phoneNav.querySelectorAll("a").length).toBe(4);
+    unmount();
+
+    const realMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("min-width: 768px"),
+      media: query,
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    })) as unknown as typeof window.matchMedia;
+    try {
+      installFetch({ body: { data: ME, request_id: "r1" } });
+      render(
+        <PortalLayout>
+          <p>portal page</p>
+        </PortalLayout>,
+      );
+      await screen.findByText("portal page");
+      const navs = screen.getAllByRole("navigation", { name: "Portal" });
+      expect(navs).toHaveLength(1);
+      expect(navs[0].closest("header")).not.toBeNull();
+      expect(navs[0]).not.toHaveAttribute("data-portal-tabbar");
+    } finally {
+      window.matchMedia = realMatchMedia;
+    }
   });
 
   it("hides the Invoices nav item when invoicing is off", async () => {

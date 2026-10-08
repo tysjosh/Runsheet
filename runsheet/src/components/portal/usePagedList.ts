@@ -56,11 +56,17 @@ export function usePagedList<T>(
   const refresh = useCallback(async () => {
     seq.current += 1;
     const mine = seq.current;
-    const page = await fetchPage(null);
-    if (mine !== seq.current) return;
-    setItems(page.data);
-    setCursor(page.next_cursor);
-    setError(null);
+    try {
+      const page = await fetchPage(null);
+      if (mine !== seq.current) return;
+      setItems(page.data);
+      setCursor(page.next_cursor);
+      setError(null);
+    } finally {
+      // A load-more this refresh superseded never clears its own flag (its
+      // `mine` is stale), so clear it here or "Loading…" sticks.
+      if (mine === seq.current) setLoadingMore(false);
+    }
   }, [fetchPage]);
 
   const loadMore = useCallback(() => {

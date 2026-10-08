@@ -31,6 +31,7 @@ from portal.services.projection import (
     project_payment_attempt,
 )
 from portal.services.scoped_readers import PortalInvoiceReader
+from portal.services.supplier import supplier_name
 from services.csv_export import (
     EXPORT_PAGE_SIZE,
     ExportColumn,
@@ -165,8 +166,8 @@ class PortalInvoiceService:
         try:
             content = render_invoice_pdf(
                 invoice,
-                # No tenant display name yet: the BOL precedent (B1, DV1).
-                supplier_name=scope.tenant_id,
+                # PE1: the tenant display name, falling back to the id.
+                supplier_name=await supplier_name(scope.tenant_id),
                 customer_display_name=customer_name,
             )
         except Exception as exc:  # noqa: BLE001

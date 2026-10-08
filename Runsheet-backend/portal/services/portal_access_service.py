@@ -469,6 +469,7 @@ class PortalAccessService:
         reset_emailer: Any = None,
         telemetry_service: Any = None,
         provision_user: Any = None,
+        invite_sender: Any = None,
     ) -> None:
         self._customers = customer_service
         self._uow_factory = uow_factory or default_portal_access_uow
@@ -478,6 +479,7 @@ class PortalAccessService:
         self._role_creator = role_creator
         self._link_minter = link_minter
         self._reset_emailer = reset_emailer
+        self._invite_sender = invite_sender
         self._telemetry = telemetry_service
         self._provision_user = provision_user
         # Per-instance memo when a role_creator is injected (tests); the
@@ -576,11 +578,51 @@ class PortalAccessService:
             return False
         return True
 
+    async def _send_invite(
+        self, email: str, tenant_id: str, link: str, customer_name: str
+    ) -> bool:
+        """PE5: the invite template through the email channel, or ``False``."""
+        from portal.services.invite_email import render_invite_email, send_invite_email
+        from portal.services.supplier import supplier_name
+
+        sender = self._invite_sender or send_invite_email
+        content = render_invite_email(
+            supplier_name=await supplier_name(tenant_id),
+            customer_name=customer_name,
+            link=link,
+        )
+        try:
+            return bool(await sender(email, content))
+        except Exception as exc:  # noqa: BLE001 — best effort, reset email follows
+            logger.warning("Portal invite email failed: %s", type(exc).__name__)
+            return False
+
     async def _link_and_email(
-        self, email: str, tenant_id: str, st_user_id: Optional[str]
+        self,
+        email: str,
+        tenant_id: str,
+        st_user_id: Optional[str],
+        *,
+        invite: bool = False,
+        customer_name: str = "",
     ) -> PortalUserLinkResponse:
+        """Mint the password-set link and email it.
+
+        For a user who hasn't signed in yet (``invite``), the link carries
+        ``invite=1`` (PE5) and goes out in the invite template when the email
+        channel is configured; otherwise, or when that send fails, SuperTokens'
+        reset email goes out as before.
+        """
         link = await self._mint_link(email, tenant_id)
-        sent = await self._send_email(st_user_id, email)
+        if link and invite:
+            from portal.services.invite_email import with_invite_flag
+
+            link = with_invite_flag(link)
+        sent = False
+        if link and invite:
+            sent = await self._send_invite(email, tenant_id, link, customer_name)
+        if not sent:
+            sent = await self._send_email(st_user_id, email)
         return PortalUserLinkResponse(
             password_set_link=link, link_error=link is None, email_sent=sent
         )
@@ -820,7 +862,11 @@ class PortalAccessService:
             raise
 
         delivery = await self._link_and_email(
-            email, tenant.tenant_id, getattr(result, "st_user_id", None)
+            email,
+            tenant.tenant_id,
+            getattr(result, "st_user_id", None),
+            invite=_display_status(grant) == "invited",
+            customer_name=str((customer or {}).get("display_name") or ""),
         )
         status = getattr(getattr(result, "status", None), "value", "updated")
         self._audit(
@@ -888,7 +934,7 @@ class PortalAccessService:
         customer: Optional[Mapping[str, Any]] = None,
     ) -> PortalUserLinkResponse:
         """Re-mint the link and re-send the email for an active grant."""
-        await self._authorize(tenant, customer_id, customer, "resend")
+        customer = await self._authorize(tenant, customer_id, customer, "resend")
         async with self._uow_factory() as uow:
             grant = await uow.get_grant(
                 tenant_id=tenant.tenant_id, customer_id=customer_id, grant_id=grant_id
@@ -916,7 +962,11 @@ class PortalAccessService:
             )
         email = str(grant["email"])
         delivery = await self._link_and_email(
-            email, tenant.tenant_id, (user or {}).get("st_user_id")
+            email,
+            tenant.tenant_id,
+            (user or {}).get("st_user_id"),
+            invite=_display_status(grant) == "invited",
+            customer_name=str((customer or {}).get("display_name") or ""),
         )
         self._audit(
             action="resend",

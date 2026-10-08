@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 from fuel.order_models import PORTAL_REVIEW_HOLD_REASON
@@ -49,6 +50,10 @@ ORDER_STATUS_MAP: Dict[str, Tuple[str, str]] = {
     "cancelled": ("cancelled", "Cancelled"),
 }
 
+#: PE2 field bounds (mirrored in ``fuel.customer_tank_models``).
+TANK_DISPLAY_NAME_MAX = 80
+TANK_SERVICE_ADDRESS_MAX = 200
+
 #: Statuses whose order is the tank's "next delivery" (PD17).
 OPEN_DELIVERY_STATUSES: Tuple[str, ...] = (
     "placed", "confirmed", "scheduled", "dispatched", "in_transit",
@@ -73,8 +78,24 @@ def order_status(status: Optional[str], hold_reason: Optional[str]) -> Tuple[str
     return ORDER_STATUS_MAP.get(status or "", ("on_hold", "On hold"))
 
 
-def tank_label(customer_tank_id: str, external_tank_id: Optional[str]) -> str:
-    """``external_tank_id`` when set, else ``"Tank …"`` + the id's last 6 chars."""
+def _clean_text(value: Any, limit: int) -> Optional[str]:
+    """A trimmed, non-empty string of at most ``limit`` chars, else ``None``."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return text[:limit] if text else None
+
+
+def tank_label(
+    customer_tank_id: str,
+    external_tank_id: Optional[str],
+    display_name: Optional[str] = None,
+) -> str:
+    """The staff-set ``display_name`` (PE2), else ``external_tank_id``, else
+    ``"Tank …"`` + the id's last 6 chars."""
+    named = _clean_text(display_name, TANK_DISPLAY_NAME_MAX)
+    if named:
+        return named
     if external_tank_id:
         return external_tank_id
     return f"Tank …{customer_tank_id[-6:]}"
@@ -159,9 +180,10 @@ def project_forecast(doc: Optional[Mapping[str, Any]]) -> Optional[PortalTankFor
 def project_next_delivery(order: Any) -> Optional[PortalNextDelivery]:
     if order is None:
         return None
-    _code, label = order_status(_get(order, "status"), _get(order, "hold_reason"))
+    code, label = order_status(_get(order, "status"), _get(order, "hold_reason"))
     return PortalNextDelivery(
         order_id=_get(order, "order_id"),
+        status_code=code,
         status_label=label,
         window_start=_get(order, "delivery_window_start"),
         window_end=_get(order, "delivery_window_end"),
@@ -184,9 +206,12 @@ def project_tank(
     last_reading_at = _parse_ts(_get(tank, "last_reading_at"))
     stale = last_reading_at is None or now - last_reading_at > timedelta(days=stale_days)
     tank_id = _get(tank, "customer_tank_id")
+    display_name = _clean_text(_get(tank, "display_name"), TANK_DISPLAY_NAME_MAX)
     return PortalTank(
         customer_tank_id=tank_id,
-        label=tank_label(tank_id, _get(tank, "external_tank_id")),
+        label=tank_label(tank_id, _get(tank, "external_tank_id"), display_name),
+        display_name=display_name,
+        service_address=_clean_text(_get(tank, "service_address"), TANK_SERVICE_ADDRESS_MAX),
         product_code=_get(tank, "fuel_product_code"),
         capacity_gallons=capacity,
         current_level_gallons=level,
@@ -285,19 +310,31 @@ def _date(value: Any) -> Optional[date]:
         return None
 
 
+def unit_price_dollars_text(micros: int) -> str:
+    """PE3: micros → dollars at stored precision, trailing zeros past the
+    cents dropped: 2_966_000 → ``"2.966"``, 2_910_000 → ``"2.91"``."""
+    value = Decimal(int(micros)) / Decimal(1_000_000)
+    whole, _, frac = f"{value:.6f}".partition(".")
+    return f"{whole}.{frac.rstrip('0').ljust(2, '0')}"
+
+
 def _line_item(line: Mapping[str, Any]) -> PortalInvoiceLineItem:
     unit_price_cents: Optional[int] = None
+    unit_price_dollars: Optional[str] = None
     try:
         micros = unit_price_micros_from_record(line)
         if micros is not None:
             unit_price_cents = legacy_unit_price_cents(micros)
+            unit_price_dollars = unit_price_dollars_text(micros)
     except ValueError:
         unit_price_cents = None
+        unit_price_dollars = None
     quantity = line.get("quantity_gallons")
     return PortalInvoiceLineItem(
         product_code=line.get("product_code"),
         quantity_gallons=float(quantity) if isinstance(quantity, (int, float)) and not isinstance(quantity, bool) else None,
         unit_price_cents=unit_price_cents,
+        unit_price_dollars=unit_price_dollars,
         subtotal_cents=_int(line.get("subtotal_cents")) if line.get("subtotal_cents") is not None else None,
     )
 

@@ -31,6 +31,14 @@ NEXT_DELIVERY_SCAN_SIZE = 200
 DELIVERY_HISTORY_DAYS = 730
 
 
+#: PE7 ``status_group`` → internal order statuses. ``past`` is finished work
+#: (delivered, not delivered, cancelled); ``active`` is everything else.
+ORDER_STATUS_GROUPS: Dict[str, Tuple[str, ...]] = {
+    "active": ("on_hold", "placed", "confirmed", "scheduled", "dispatched", "in_transit"),
+    "past": ("delivered", "failed", "cancelled"),
+}
+
+
 def _require_scope(scope: Any) -> Tuple[str, str]:
     """Both ids, non-empty, or a programming error (never a wider query)."""
     tenant_id = getattr(scope, "tenant_id", None)
@@ -117,20 +125,35 @@ class PortalOrderReader:
         # Defense in depth: the query already filtered on customer_id.
         return [o for o in orders if getattr(o, "customer_id", None) == customer_id]
 
-    async def list(self, scope: Any, *, limit: int, cursor: Optional[str] = None) -> Page:
-        """Newest first, keyset on ``(created_at, order_id)``."""
+    async def list(
+        self,
+        scope: Any,
+        *,
+        limit: int,
+        cursor: Optional[str] = None,
+        status_group: Optional[str] = None,
+    ) -> Page:
+        """Newest first, keyset on ``(created_at, order_id)``. ``status_group``
+        (PE7) narrows to active or past orders; the customer scope is
+        unchanged."""
         tenant_id, customer_id = _require_scope(scope)
         after = decode_cursor(cursor)
+        statuses = ORDER_STATUS_GROUPS[status_group] if status_group else None
         result = await self._repo.search(
             tenant_id,
             customer_id=customer_id,
+            statuses=list(statuses) if statuses else None,
             sort="created_at:desc",
             keyset=True,
             after=after,
             size=limit,
             with_total=False,
         )
-        return _page(result, self._own(result.get("orders") or [], customer_id), limit)
+        own = self._own(result.get("orders") or [], customer_id)
+        if statuses:
+            # Defense in depth, like the customer filter.
+            own = [o for o in own if getattr(o, "status", None) in statuses]
+        return _page(result, own, limit)
 
     async def get_or_none(self, scope: Any, order_id: str) -> Optional[Any]:
         """The order, or ``None`` when it is missing or another customer's."""
@@ -320,6 +343,28 @@ def invoice_not_found(invoice_id: str) -> AppException:
     )
 
 
+#: PE4: invoice statuses that make up the open balance.
+OPEN_BALANCE_STATUSES: Tuple[str, ...] = ("open", "partial", "overdue")
+OPEN_BALANCE_PAGE_SIZE = 200
+OPEN_BALANCE_SCAN_CAP = 2000
+
+
+@dataclass(frozen=True)
+class OpenBalance:
+    cents: int
+    count: int
+    overdue: int
+
+
+def _int_cents(value: Any) -> int:
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 class PortalInvoiceReader:
     """Customer-scoped reads over :class:`commerce.services.invoice_service.InvoiceService`.
 
@@ -411,6 +456,44 @@ class PortalInvoiceReader:
                 [str(last.get("created_at") or ""), str(result["next_cursor"])]
             )
         return Page(items, next_cursor)
+
+    async def open_balance(self, scope: Any) -> Optional[OpenBalance]:
+        """PE4: the customer's open balance over open, partial and overdue
+        invoices, summed here instead of in the browser.
+
+        Pages through the scoped list (both ids, like every read). Returns
+        ``None`` past :data:`OPEN_BALANCE_SCAN_CAP` invoices so the UI keeps
+        its "At least" wording rather than showing a wrong total.
+        """
+        tenant_id, customer_id = _require_scope(scope)
+        cents = count = overdue = 0
+        cursor: Optional[str] = None
+        seen = 0
+        while True:
+            result = await self._service.list(
+                tenant_id=tenant_id,
+                customer_id=customer_id,
+                statuses=list(OPEN_BALANCE_STATUSES),
+                cursor=cursor,
+                limit=OPEN_BALANCE_PAGE_SIZE,
+            )
+            raw = list(result.get("items") or [])
+            for doc in raw:
+                if not self._visible(doc, customer_id):
+                    continue
+                if doc.get("status") not in OPEN_BALANCE_STATUSES:
+                    continue
+                count += 1
+                cents += _int_cents(doc.get("remaining_cents"))
+                if doc.get("status") == "overdue":
+                    overdue += 1
+            seen += len(raw)
+            cursor = result.get("next_cursor")
+            if not cursor or not raw:
+                break
+            if seen >= OPEN_BALANCE_SCAN_CAP:
+                return None
+        return OpenBalance(cents=cents, count=count, overdue=overdue)
 
     async def count(
         self,

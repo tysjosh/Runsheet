@@ -48,6 +48,17 @@ VALID_DISTANCE_UNITS: Final[frozenset[str]] = frozenset({"mi", "km"})
 #: Redis key pattern for a tenant's settings document.
 TENANT_SETTINGS_KEY_PATTERN: Final[str] = "tenant:{tenant_id}:settings"
 
+#: Longest tenant display name accepted (customer portal PE1).
+DISPLAY_NAME_MAX: Final[int] = 120
+
+#: Redis key for a tenant's customer-facing display name (PE1). Kept apart
+#: from the settings document and written WITHOUT a TTL: the name is set
+#: rarely (``scripts/set_tenant_display_name.py``) and appears in customer
+#: text (portal, invoice PDF, invite email), so it must not silently revert
+#: to the tenant id after the settings document's 30-day idle expiry. A
+#: deleted tenant's key is removed by running the script with ``--clear``.
+TENANT_DISPLAY_NAME_KEY_PATTERN: Final[str] = "tenant:{tenant_id}:display_name"
+
 #: TTL applied to every tenant-settings Redis write. 30 days balances
 #: "tenant config must survive long idle periods" against "deleted
 #: tenants must not leak keys indefinitely". Every write refreshes the
@@ -101,6 +112,14 @@ class TenantSettings:
 # ---------------------------------------------------------------------------
 # Default helpers
 # ---------------------------------------------------------------------------
+
+
+def clean_display_name(value: Any) -> Optional[str]:
+    """Whitespace-collapsed display name of 1–``DISPLAY_NAME_MAX`` chars, or None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return text[:DISPLAY_NAME_MAX] or None
 
 
 def default_measurement_units_for_region(region: str) -> MeasurementUnits:
@@ -303,6 +322,65 @@ class TenantSettingsService:
         await self.set(tenant_id, updated)
         return updated
 
+    # -- Display name (PE1) ---------------------------------------------
+
+    @staticmethod
+    def _display_name_key(tenant_id: str) -> str:
+        return TENANT_DISPLAY_NAME_KEY_PATTERN.format(tenant_id=tenant_id)
+
+    async def get_display_name(self, tenant_id: str) -> Optional[str]:
+        """The tenant's display name, or ``None`` when unset or unreadable.
+
+        Never raises: the name is cosmetic, so callers fall back to the id.
+        """
+        if not tenant_id or self._redis is None:
+            return None
+        try:
+            raw = await self._redis.get(self._display_name_key(tenant_id))
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(
+                "TenantSettingsService: display name lookup failed for tenant=%s: %s",
+                tenant_id,
+                exc,
+            )
+            return None
+        if raw is None:
+            return None
+        try:
+            text = raw.decode() if isinstance(raw, bytes) else raw
+        except UnicodeDecodeError:
+            return None
+        return clean_display_name(text)
+
+    async def set_display_name(
+        self, tenant_id: str, display_name: Optional[str]
+    ) -> Optional[str]:
+        """Store (no TTL) or, for ``None``/blank, delete the display name.
+
+        Returns the stored name. Raises ``ValueError`` on a non-string or
+        a name longer than ``DISPLAY_NAME_MAX`` and ``RuntimeError`` when
+        no Redis client is configured.
+        """
+        if not tenant_id:
+            raise ValueError("tenant_id must be a non-empty string")
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("display_name must be a string or None")
+        if self._redis is None:
+            raise RuntimeError(
+                "TenantSettingsService: cannot write display name — no Redis client configured"
+            )
+        text = " ".join((display_name or "").split())
+        if len(text) > DISPLAY_NAME_MAX:
+            raise ValueError(f"display_name must be at most {DISPLAY_NAME_MAX} characters")
+        key = self._display_name_key(tenant_id)
+        if not text:
+            await self._redis.delete(key)
+            logger.info("Tenant display name cleared: tenant=%s", tenant_id)
+            return None
+        await self._redis.set(key, text)
+        logger.info("Tenant display name set: tenant=%s", tenant_id)
+        return text
+
     # -- Internal helpers -----------------------------------------------
 
     @staticmethod
@@ -374,7 +452,10 @@ class TenantSettingsService:
 
 
 __all__ = [
+    "DISPLAY_NAME_MAX",
     "DistanceUnit",
+    "TENANT_DISPLAY_NAME_KEY_PATTERN",
+    "clean_display_name",
     "MeasurementUnits",
     "Region",
     "TENANT_SETTINGS_KEY_PATTERN",

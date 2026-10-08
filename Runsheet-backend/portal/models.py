@@ -36,12 +36,17 @@ class PortalMe(_PortalModel):
 
     email: str
     customer_display_name: str
-    #: Falls back to the tenant id until tenants have a display name (B1, DV1).
+    #: The tenant's display name (PE1), falling back to the tenant id.
     supplier_name: str
     ordering_available: bool
     invoices_available: bool
     payments_available: bool
     measurement_units: PortalMeasurementUnits
+    #: PE4: the customer's open balance (open, partial and overdue invoices),
+    #: summed on the server. ``None`` while invoicing is off or unreadable.
+    open_balance_cents: Optional[int] = None
+    open_invoice_count: Optional[int] = None
+    overdue_count: Optional[int] = None
 
 
 class PortalMeEnvelope(_PortalModel):
@@ -273,6 +278,8 @@ class PortalTankForecast(_PortalModel):
 
 class PortalNextDelivery(_PortalModel):
     order_id: str
+    #: Portal status code (same vocabulary as ``PortalOrder.status_code``).
+    status_code: Optional[str] = None
     status_label: str
     window_start: Optional[datetime] = None
     window_end: Optional[datetime] = None
@@ -281,6 +288,9 @@ class PortalNextDelivery(_PortalModel):
 class PortalTank(_PortalModel):
     customer_tank_id: str
     label: str
+    #: PE2: the staff-set customer-facing name and service address.
+    display_name: Optional[str] = None
+    service_address: Optional[str] = None
     product_code: str
     capacity_gallons: float
     current_level_gallons: float
@@ -327,6 +337,11 @@ class PortalInvoiceLineItem(_PortalModel):
     product_code: Optional[str] = None
     quantity_gallons: Optional[float] = None
     unit_price_cents: Optional[int] = None
+    #: PE3: the unit price at its stored precision as a decimal string in
+    #: dollars (at least 2 decimals, e.g. ``"2.9193"``), so quantity × price
+    #: matches the subtotal on screen. The raw micros stay internal;
+    #: ``unit_price_cents`` stays for older clients.
+    unit_price_dollars: Optional[str] = None
     subtotal_cents: Optional[int] = None
 
 

@@ -19,7 +19,7 @@ export default function LiveRegion({
       aria-atomic="true"
       className={
         message
-          ? `rounded-lg border border-info-light bg-info-light px-4 py-3 text-sm text-info-dark ${className}`
+          ? `rounded-lg border border-blue-300 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-800 ${className}`
           : "sr-only"
       }
     >

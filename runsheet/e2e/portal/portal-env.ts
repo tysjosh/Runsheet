@@ -40,14 +40,43 @@ export const PORTAL_PAGES = [
   "/portal/orders/new",
   "/portal/invoices",
   "/portal/tanks",
+  "/portal/account",
 ] as const;
+
+/**
+ * Tab until `#password` has focus, at most 5 presses (V1 fix: the helper no
+ * longer assumes the field is exactly one Tab away). Fails with the name of
+ * whatever has focus instead.
+ */
+export async function tabToPassword(page: Page): Promise<number> {
+  for (let presses = 1; presses <= 5; presses += 1) {
+    await page.keyboard.press("Tab");
+    const onPassword = await page.evaluate(
+      () => document.activeElement?.id === "password",
+    );
+    if (onPassword) return presses;
+  }
+  const focused = await page.evaluate(() => {
+    const el = document.activeElement as HTMLElement | null;
+    if (!el) return "nothing";
+    return (
+      el.getAttribute("aria-label") ||
+      el.id ||
+      el.textContent?.trim() ||
+      el.tagName
+    );
+  });
+  throw new Error(
+    `Password field not reached after 5 Tab presses; focus is on "${focused}".`,
+  );
+}
 
 /** Sign in with the keyboard only: type, Tab between fields, Enter to submit. */
 export async function signInWithKeyboard(page: Page): Promise<void> {
   await page.goto("/signin");
   await page.getByLabel("Email address").focus();
   await page.keyboard.type(PORTAL_ENV.email);
-  await page.keyboard.press("Tab");
+  await tabToPassword(page);
   await expect(page.getByLabel(/^password/i)).toBeFocused();
   await page.keyboard.type(PORTAL_ENV.password);
   await page.keyboard.press("Enter");

@@ -1,0 +1,29 @@
+{
+ "results": [
+  {
+   "page": "dashboard",
+   "vp": "1280x800",
+   "status": 200,
+   "url": "/dashboard",
+   "h1": [
+    "No modules available for your role"
+   ],
+   "ready": false,
+   "firstRowTop": null,
+   "axe": null
+  },
+  {
+   "page": "dashboard",
+   "vp": "1440x900",
+   "status": 200,
+   "url": "/dashboard",
+   "h1": [
+    "No modules available for your role"
+   ],
+   "ready": false,
+   "firstRowTop": null,
+   "axe": []
+  }
+ ],
+ "errors": []
+}
