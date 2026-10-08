@@ -45,6 +45,9 @@ VALID_REGIONS: Final[frozenset[str]] = frozenset({"US", "NG"})
 VALID_VOLUME_UNITS: Final[frozenset[str]] = frozenset({"gal", "l"})
 VALID_DISTANCE_UNITS: Final[frozenset[str]] = frozenset({"mi", "km"})
 
+#: Longest tenant display name accepted (PE1).
+DISPLAY_NAME_MAX: Final[int] = 120
+
 #: Redis key pattern for a tenant's settings document.
 TENANT_SETTINGS_KEY_PATTERN: Final[str] = "tenant:{tenant_id}:settings"
 
@@ -89,18 +92,34 @@ class TenantSettings:
     region: Region = "US"
     measurement_units: MeasurementUnits = field(default_factory=MeasurementUnits)
     default_depot_id: Optional[str] = None
+    #: The tenant's customer-facing name (customer portal PE1), e.g. the
+    #: distributor's trading name. ``None`` until set; readers fall back to
+    #: the tenant id.
+    display_name: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "region": self.region,
             "measurement_units": self.measurement_units.to_dict(),
             "default_depot_id": self.default_depot_id,
         }
+        # Only when set, so existing payloads and equality checks are unchanged.
+        if self.display_name is not None:
+            out["display_name"] = self.display_name
+        return out
 
 
 # ---------------------------------------------------------------------------
 # Default helpers
 # ---------------------------------------------------------------------------
+
+
+def _clean_display_name(value: Any) -> Optional[str]:
+    """A trimmed display name of at most ``DISPLAY_NAME_MAX`` chars, or None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    return text[:DISPLAY_NAME_MAX] or None
 
 
 def default_measurement_units_for_region(region: str) -> MeasurementUnits:
@@ -271,6 +290,7 @@ class TenantSettingsService:
             region=new_region,
             measurement_units=units,
             default_depot_id=current.default_depot_id,
+            display_name=current.display_name,
         )
         await self.set(tenant_id, updated)
         return updated
@@ -299,6 +319,29 @@ class TenantSettingsService:
             region=current.region,
             measurement_units=current.measurement_units,
             default_depot_id=depot_id,
+            display_name=current.display_name,
+        )
+        await self.set(tenant_id, updated)
+        return updated
+
+    async def get_display_name(self, tenant_id: str) -> Optional[str]:
+        """The tenant's display name (PE1), or ``None`` when not set."""
+        settings = await self.get(tenant_id)
+        return settings.display_name
+
+    async def set_display_name(
+        self, tenant_id: str, display_name: Optional[str]
+    ) -> TenantSettings:
+        """Update only the display name; ``None`` or blank clears it."""
+        current = await self.get(tenant_id)
+        name = _clean_display_name(display_name)
+        if display_name is not None and not isinstance(display_name, str):
+            raise ValueError("display_name must be a string or None")
+        updated = TenantSettings(
+            region=current.region,
+            measurement_units=current.measurement_units,
+            default_depot_id=current.default_depot_id,
+            display_name=name,
         )
         await self.set(tenant_id, updated)
         return updated
@@ -345,6 +388,7 @@ class TenantSettingsService:
             region=region,
             measurement_units=MeasurementUnits(volume=volume, distance=distance),
             default_depot_id=depot_id,
+            display_name=_clean_display_name(data.get("display_name")),
         )
 
     @staticmethod
@@ -371,6 +415,14 @@ class TenantSettingsService:
                 raise ValueError(
                     "default_depot_id must be a non-empty string or None"
                 )
+        if settings.display_name is not None and (
+            not isinstance(settings.display_name, str)
+            or not settings.display_name.strip()
+            or len(settings.display_name) > DISPLAY_NAME_MAX
+        ):
+            raise ValueError(
+                f"display_name must be 1-{DISPLAY_NAME_MAX} characters or None"
+            )
 
 
 __all__ = [

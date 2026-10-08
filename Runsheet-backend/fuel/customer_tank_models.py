@@ -146,6 +146,21 @@ class CustomerTank(BaseModel):
         description="Tank identifier in source_system; unique within a tenant/source.",
     )
     customer_id: str = Field(..., min_length=1, description="Owning customer_id.")
+    display_name: Optional[str] = Field(
+        None,
+        max_length=80,
+        description=(
+            "Customer-facing tank name set by staff (portal PE2), e.g. "
+            "\"Farm off-road\". The customer portal shows it as the tank title."
+        ),
+    )
+    service_address: Optional[str] = Field(
+        None,
+        max_length=200,
+        description=(
+            "Customer-facing service address line for the tank (portal PE2)."
+        ),
+    )
     last_refill_order_id: Optional[str] = Field(
         None,
         description=(

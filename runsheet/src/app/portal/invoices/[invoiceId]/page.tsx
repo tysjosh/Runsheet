@@ -65,8 +65,7 @@ function Fact({ term, children }: { term: string; children: React.ReactNode }) {
 }
 
 function linePrice(line: PortalInvoice["line_items"][number]): string {
-  if (typeof line.unit_price_micros === "number")
-    return unitPrice(line.unit_price_micros);
+  if (line.unit_price_dollars) return unitPrice(line.unit_price_dollars);
   return money(line.unit_price_cents);
 }
 

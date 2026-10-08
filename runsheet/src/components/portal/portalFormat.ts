@@ -151,20 +151,14 @@ export function money(cents: number | null | undefined): string {
 }
 
 /**
- * A unit price from micros at its stored precision (PE3): at least 2 and at
- * most 4 decimals, so "1,187.4 gal × $2.9193" matches the subtotal.
+ * A unit price at its stored precision (PE3), from the API's decimal string:
+ * "2.9193" → "$2.9193", "2.91" → "$2.91". The decimals shown are the ones the
+ * server sent (at least 2), so "1,187.4 gal × $2.9193" matches the subtotal.
  */
-export function unitPrice(micros: number | null | undefined): string {
-  if (typeof micros !== "number" || !Number.isFinite(micros)) return EMPTY;
-  const dollars = micros / 1_000_000;
-  // Trailing zeros past the cents are dropped ($2.9100 → $2.91).
-  for (const decimals of [2, 3, 4]) {
-    const f = 10 ** decimals;
-    if (Math.abs(Math.round(dollars * f) - dollars * f) < 1e-6) {
-      return formatMoneyValue(dollars, { locale: "en-US", decimals });
-    }
-  }
-  return formatMoneyValue(dollars, { locale: "en-US", decimals: 4 });
+export function unitPrice(dollars: string | null | undefined): string {
+  if (!dollars || !/^-?\d+(\.\d+)?$/.test(dollars)) return EMPTY;
+  const decimals = Math.max(2, (dollars.split(".")[1] ?? "").length);
+  return formatMoneyValue(Number(dollars), { locale: "en-US", decimals });
 }
 
 /** "1,240" (whole) or "1,187.4" with `decimals: 1`. */

@@ -180,8 +180,8 @@ export interface PortalInvoice {
     product_code: string | null;
     quantity_gallons: number | null;
     unit_price_cents: number | null;
-    /** PE3: the stored unit price in micros (1/1,000,000 USD). */
-    unit_price_micros?: number | null;
+    /** PE3: the unit price in dollars at its stored precision ("2.9193"). */
+    unit_price_dollars?: string | null;
     subtotal_cents: number | null;
   }>;
   delivery: {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, List, Optional
 
 from portal.models import PortalInvoice, PortalInvoiceLineItem
@@ -24,6 +25,16 @@ def money(cents: Optional[int]) -> str:
     sign = "-" if cents < 0 else ""
     whole, rem = divmod(abs(int(cents)), 100)
     return f"{sign}${whole:,}.{rem:02d}"
+
+
+def unit_price(line: PortalInvoiceLineItem) -> str:
+    """PE3: the unit price at its stored precision, so gallons × price
+    matches the subtotal; falls back to the cents value."""
+    if not line.unit_price_dollars:
+        return money(line.unit_price_cents)
+    value = Decimal(line.unit_price_dollars)
+    whole, _, frac = f"{abs(value):,.6f}".partition(".")
+    return f"{'-' if value < 0 else ''}${whole}.{frac.rstrip('0').ljust(2, '0')}"
 
 
 def _text(value: Any) -> str:
@@ -105,7 +116,7 @@ def render_invoice_pdf(
         for line in page_lines:
             c.drawString(40, y, _text(line.product_code))
             c.drawRightString(330, y, _gallons(line.quantity_gallons))
-            c.drawRightString(450, y, money(line.unit_price_cents))
+            c.drawRightString(450, y, unit_price(line))
             c.drawRightString(572, y, money(line.subtotal_cents))
             y -= 14
 

@@ -1243,6 +1243,9 @@ class CustomerTankCreateRequest(BaseModel):
     source_system: Optional[str] = Field(default=None, min_length=1)
     external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: str = Field(..., min_length=1)
+    #: Portal PE2: customer-facing name and service address.
+    display_name: Optional[str] = Field(default=None, max_length=80)
+    service_address: Optional[str] = Field(default=None, max_length=200)
     customer_type: CustomerType
     fuel_type: FuelType
     fuel_product_code: str = Field(..., min_length=1)
@@ -1280,6 +1283,9 @@ class CustomerTankUpdateRequest(BaseModel):
     source_system: Optional[str] = Field(default=None, min_length=1)
     external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: Optional[str] = Field(default=None, min_length=1)
+    #: Portal PE2: customer-facing name and service address.
+    display_name: Optional[str] = Field(default=None, max_length=80)
+    service_address: Optional[str] = Field(default=None, max_length=200)
     customer_type: Optional[CustomerType] = None
     fuel_type: Optional[FuelType] = None
     fuel_product_code: Optional[str] = Field(default=None, min_length=1)

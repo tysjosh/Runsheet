@@ -88,7 +88,14 @@ class PortalOrderService:
 
     async def _labels(self, scope: Any) -> Dict[str, str]:
         tanks = await self.readers.tanks.list(scope)
-        return {t.customer_tank_id: tank_label(t.customer_tank_id, t.external_tank_id) for t in tanks}
+        return {
+            t.customer_tank_id: tank_label(
+                t.customer_tank_id,
+                t.external_tank_id,
+                getattr(t, "display_name", None),
+            )
+            for t in tanks
+        }
 
     async def project(self, scope: Any, order: Any) -> PortalOrder:
         return project_order(order, tank_labels=await self._labels(scope))

@@ -111,7 +111,7 @@ describe("invoice detail", () => {
             product_code: "DIESEL_2",
             quantity_gallons: 1187.4,
             unit_price_cents: 292,
-            unit_price_micros: 2_919_300,
+            unit_price_dollars: "2.9193",
             subtotal_cents: 346648,
           },
         ],

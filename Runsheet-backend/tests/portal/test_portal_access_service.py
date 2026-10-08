@@ -71,7 +71,8 @@ async def test_invite_creates_binding_grant_and_link(env):
     assert result.link_error is False and result.email_sent is True
     row = env.db.user(EMAIL)
     uid = row["st_user_id"]
-    assert result.password_set_link == f"https://reset.test/{uid}"
+    # PE5: a user who hasn't signed in yet gets the invite flag.
+    assert result.password_set_link == f"https://reset.test/{uid}?invite=1"
     assert row["roles"] == ["customer"] and row["customer_id"] == CUSTOMER_A
     assert row["tenant_id"] == T1 and row["driver_id"] is None and row["has_pii_access"] is False
     assert env.st.roles[uid] == ["customer"]
@@ -314,7 +315,8 @@ async def test_resend(env):
     env.st.calls.clear()
 
     sent = await env.service.resend(env.admin, CUSTOMER_A, grant.grant_id)
-    assert sent.password_set_link == f"https://reset.test/{uid}"
+    # PE5: still not signed in, so the resend is an invite too.
+    assert sent.password_set_link == f"https://reset.test/{uid}?invite=1"
     assert sent.link_error is False and sent.email_sent is True
     assert ("send_reset_email", uid) in env.st.calls
 

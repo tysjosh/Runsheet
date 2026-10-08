@@ -68,9 +68,10 @@ describe("portalFormat", () => {
   });
 
   it("unit price at its stored precision (PE3)", () => {
-    expect(unitPrice(2_919_300)).toBe("$2.9193");
-    expect(unitPrice(2_910_000)).toBe("$2.91");
-    expect(unitPrice(2_915_000)).toBe("$2.915");
+    expect(unitPrice("2.9193")).toBe("$2.9193");
+    expect(unitPrice("2.91")).toBe("$2.91");
+    expect(unitPrice("2.915")).toBe("$2.915");
+    expect(unitPrice(null)).toBe("—");
   });
 
   it("pluralises days", () => {
