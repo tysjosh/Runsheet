@@ -45,9 +45,9 @@ async function cancelNewestRequest(page: Page): Promise<void> {
   const before = await cancel.count();
   await activateWithKeyboard(page, cancel.first());
   await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: /^Request for .+ cancelled\.$|^This request changed\./ }),
+    page.getByRole("status").filter({
+      hasText: /^Request for .+ cancelled\.$|^This request changed\./,
+    }),
   ).toBeVisible({ timeout: 30_000 });
   await expect(cancel).toHaveCount(before - 1);
   // Focus is back on the row (a table row from 1024 px, a list item below).
@@ -94,7 +94,9 @@ test.describe("customer portal keyboard-only flow", () => {
 
     const noTanks = dialog.getByText("No tanks are set up yet.");
     if ((await noTanks.count()) === 0) {
-      await expect(dialog.getByRole("radiogroup", { name: "Tank" })).toBeVisible();
+      await expect(
+        dialog.getByRole("radiogroup", { name: "Tank" }),
+      ).toBeVisible();
       const status = dialog.getByRole("status").filter({ hasText: PD10 });
       const orderingOff = (await status.count()) > 0;
       const submit = dialog.getByRole("button", { name: /send request/i });
@@ -120,7 +122,10 @@ test.describe("customer portal keyboard-only flow", () => {
           sent.or(page.getByRole("status").filter({ hasText: PD10 })),
         ).toBeVisible({ timeout: 30_000 });
         if ((await sent.count()) > 0) {
-          await activateWithKeyboard(page, dialog.getByRole("button", { name: "Close" }).last());
+          await activateWithKeyboard(
+            page,
+            dialog.getByRole("button", { name: "Close" }).last(),
+          );
           await expect(dialog).toBeHidden();
           await cancelNewestRequest(page);
         } else {
