@@ -147,6 +147,10 @@ export type LoadErrorKind =
   | "not_found"
   | "module_disabled"
   | "forbidden"
+  /** The request never reached the API (offline, DNS, CORS-blocked 500). */
+  | "network"
+  /** The API answered 5xx. */
+  | "server"
   | "error";
 
 export interface LoadFailure {
@@ -155,6 +159,25 @@ export interface LoadFailure {
   status?: number;
   code?: string;
   moduleName?: string;
+  /** The error envelope's `details` (e.g. `reason`, `required_roles`). */
+  details?: Record<string, unknown>;
+}
+
+/** Browser fetch failures surface as a TypeError with engine-specific text. */
+const NETWORK_MESSAGES = [
+  "failed to fetch",
+  "networkerror",
+  "load failed",
+  "network request failed",
+];
+
+function isNetworkFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (typeof (err as ApiError).status === "number") return false;
+  const m = err.message.toLowerCase();
+  return (
+    err.name === "TypeError" && NETWORK_MESSAGES.some((n) => m.includes(n))
+  );
 }
 
 function moduleNameFor(code: string | undefined): string | undefined {
@@ -192,6 +215,16 @@ export function classifyLoadError(err: unknown, fallback: string): LoadFailure {
     err instanceof Error && typeof (err as ApiError).code === "string"
       ? (err as ApiError).code
       : undefined;
+  const details =
+    err instanceof Error && isObject((err as ApiError).details)
+      ? (err as ApiError).details
+      : undefined;
+  if (isNetworkFailure(err)) {
+    return {
+      kind: "network",
+      message: "Can't reach Runsheet. Check your connection and retry.",
+    };
+  }
 
   if (status === 404) {
     const moduleName = moduleNameFor(code);
@@ -201,7 +234,10 @@ export function classifyLoadError(err: unknown, fallback: string): LoadFailure {
     return { kind: "not_found", message, status, code };
   }
   if (status === 403) {
-    return { kind: "forbidden", message, status, code };
+    return { kind: "forbidden", message, status, code, details };
   }
-  return { kind: "error", message, status, code };
+  if (status !== undefined && status >= 500) {
+    return { kind: "server", message, status, code, details };
+  }
+  return { kind: "error", message, status, code, details };
 }

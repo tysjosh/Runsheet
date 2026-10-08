@@ -216,7 +216,7 @@ export default function Inventory() {
         <div className="flex items-center gap-1">
           <Button
             type="button"
-            variant="success"
+            variant="primary"
             size="sm"
             icon={<ArrowUpCircle className="w-3 h-3" />}
             onClick={() => {
@@ -228,7 +228,7 @@ export default function Inventory() {
           />
           <Button
             type="button"
-            variant="warning"
+            variant="secondary"
             size="sm"
             icon={<ArrowDownCircle className="w-3 h-3" />}
             onClick={() => {
@@ -323,7 +323,7 @@ export default function Inventory() {
           alerts.length > 0 ? (
             <Button
               type="button"
-              variant="warning"
+              variant="secondary"
               size="sm"
               onClick={() => setShowAlerts(!showAlerts)}
               icon={<AlertTriangle className="w-4 h-4" />}

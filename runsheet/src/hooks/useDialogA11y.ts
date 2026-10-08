@@ -43,6 +43,16 @@ export function useDialogA11y(
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // An open popup inside the dialog (listbox, menu) closes first; the
+        // dialog closes on the next Escape.
+        const t = e.target as Element | null;
+        if (
+          t?.closest?.(
+            '[aria-expanded="true"], [role="listbox"], [role="menu"]',
+          )
+        ) {
+          return;
+        }
         e.stopPropagation();
         onClose();
         return;

@@ -134,4 +134,56 @@ describe("LoadErrorState", () => {
     expect(screen.getByRole("button", { name: /Go back/ })).toBeInTheDocument();
     expect(screen.getByText(/We couldn't find invoice\./)).toBeInTheDocument();
   });
+  it("replaces a raw fetch failure with the R11 network copy and retry", () => {
+    const onRetry = jest.fn();
+    renderState({ kind: "network", message: "Failed to fetch" }, { onRetry });
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Can't reach Runsheet. Check your connection and retry.",
+    );
+    expect(screen.queryByText("Failed to fetch")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+  it("shows a role hint on 403 when the envelope names the roles", () => {
+    renderState({
+      kind: "forbidden",
+      message: "Your role can't view terminals.",
+      status: 403,
+      details: { required_roles: ["admin", "dispatcher"] },
+    });
+    expect(
+      screen.getByRole("heading", {
+        name: "You don't have access to this terminal",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        /Ask an administrator for the admin or dispatcher role\./,
+      ),
+    ).toBeInTheDocument();
+  });
+  it("uses the staff copy only when the API says platform_admin is required (OI-48)", () => {
+    const { unmount } = renderState(
+      {
+        kind: "forbidden",
+        message: "Admins only",
+        status: 403,
+        details: { reason: "role_missing" },
+      },
+      { staffOnly: true },
+    );
+    expect(
+      screen.queryByRole("heading", { name: "Runsheet staff access required" }),
+    ).toBeNull();
+    unmount();
+    renderState({
+      kind: "forbidden",
+      message: "x",
+      status: 403,
+      details: { reason: "platform_admin_required" },
+    });
+    expect(
+      screen.getByRole("heading", { name: "Runsheet staff access required" }),
+    ).toBeInTheDocument();
+  });
 });

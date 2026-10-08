@@ -370,7 +370,7 @@ export default function PriceBookEditor({
                   Add Rule
                 </Button>
                 <Button
-                  variant="success"
+                  variant="primary"
                   size="sm"
                   onClick={handleSaveBook}
                   disabled={saving}

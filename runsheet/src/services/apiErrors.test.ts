@@ -232,11 +232,34 @@ describe("classifyLoadError", () => {
     ).toBe("forbidden");
   });
 
-  it("maps other statuses to error with the message", () => {
+  it("maps 5xx to server with the message", () => {
     expect(classifyLoadError(new ApiError("boom", 500), "f")).toMatchObject({
-      kind: "error",
+      kind: "server",
       message: "boom",
       status: 500,
+    });
+  });
+  it("maps other statuses to error with the message", () => {
+    expect(classifyLoadError(new ApiError("bad", 409), "f")).toMatchObject({
+      kind: "error",
+      message: "bad",
+      status: 409,
+    });
+  });
+  it("maps a fetch TypeError to network with the R11 copy", () => {
+    expect(
+      classifyLoadError(new TypeError("Failed to fetch"), "f"),
+    ).toMatchObject({
+      kind: "network",
+      message: "Can't reach Runsheet. Check your connection and retry.",
+    });
+  });
+  it("keeps the envelope details on forbidden", () => {
+    const err = new ApiError("no", 403, "FORBIDDEN", {
+      reason: "platform_admin_required",
+    });
+    expect(classifyLoadError(err, "f").details).toEqual({
+      reason: "platform_admin_required",
     });
   });
 

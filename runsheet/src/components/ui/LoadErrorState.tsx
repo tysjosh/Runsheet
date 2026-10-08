@@ -6,8 +6,14 @@
  * forbidden, or a generic error banner with an optional retry.
  * Every variant offers a way back.
  *
- * A 403 shows the API's own message by default. Pages gated to Runsheet
- * staff (platform_admin) pass `staffOnly` to get the staff-access copy.
+ * A 403 shows "You don't have access to this …" with the API's message and,
+ * when the envelope names them, the roles that grant access (R11.3). The
+ * Runsheet-staff copy appears only when the API says the page needs
+ * platform_admin (`details.reason === "platform_admin_required"`), or for a
+ * `staffOnly` page whose 403 carries no reason (OI-48).
+ *
+ * A request that never reached the API (`kind: "network"`) shows "Can't reach
+ * Runsheet…" with Retry instead of the browser's "Failed to fetch" (R11.1).
  * Pages that already pad their content pass `embedded` to drop the outer
  * padding.
  */
@@ -32,6 +38,23 @@ export interface LoadErrorStateProps {
   embedded?: boolean;
 }
 
+export const NETWORK_COPY =
+  "Can't reach Runsheet. Check your connection and retry.";
+
+/** "Ask an administrator for the admin or dispatcher role." from the envelope. */
+function roleHint(details: Record<string, unknown> | undefined): string | null {
+  const raw = details?.required_roles ?? details?.required_role;
+  const roles = (Array.isArray(raw) ? raw : [raw]).filter(
+    (r): r is string => typeof r === "string" && r.length > 0,
+  );
+  if (roles.length === 0) return null;
+  const list =
+    roles.length === 1
+      ? roles[0]
+      : `${roles.slice(0, -1).join(", ")} or ${roles[roles.length - 1]}`;
+  return `Ask an administrator for the ${list.replace(/_/g, " ")} role.`;
+}
+
 function copyFor(
   failure: LoadFailure,
   entityLabel: string,
@@ -52,11 +75,16 @@ function copyFor(
         description:
           "This module is turned off for your workspace. Contact your Runsheet administrator if you need it.",
       };
-    case "forbidden":
-      if (!staffOnly) {
+    case "forbidden": {
+      const reason = failure.details?.reason;
+      const staffCopy =
+        reason === "platform_admin_required" ||
+        (staffOnly && reason === undefined);
+      if (!staffCopy) {
+        const hint = roleHint(failure.details);
         return {
           title: `You don't have access to this ${entityLabel.toLowerCase()}`,
-          description: failure.message,
+          description: hint ? `${failure.message} ${hint}` : failure.message,
         };
       }
       return {
@@ -64,6 +92,7 @@ function copyFor(
         description:
           "This page is only available to Runsheet staff accounts. Your account doesn't have access to it.",
       };
+    }
     default:
       return null;
   }
@@ -112,7 +141,7 @@ export function LoadErrorState({
           role="alert"
           className="bg-error-light border border-error-light text-error-dark p-4 rounded"
         >
-          {failure.message}
+          {failure.kind === "network" ? NETWORK_COPY : failure.message}
         </div>
         {actions}
       </div>

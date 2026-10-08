@@ -557,7 +557,7 @@ export default function AgentMonitoringDashboard() {
                 Reject
               </Button>
               <Button
-                variant="success"
+                variant="primary"
                 onClick={() => handleApprove(selectedApproval.action_id)}
                 disabled={loading}
               >

@@ -17,8 +17,19 @@ export interface ModalProps {
   title: string;
   children: React.ReactNode;
   footer?: React.ReactNode;
-  size?: "sm" | "md" | "lg" | "xl";
+  /** `custom`: no max-width class; pass one in `className`. */
+  size?: "sm" | "md" | "lg" | "xl" | "custom";
   className?: string;
+  /** Id of the element that describes the dialog (FormDialog's help text). */
+  describedById?: string;
+  /** Accessible name of the × button (default "Close modal"). */
+  closeLabel?: string;
+  /** Replaces the body's default padding/max-height classes. */
+  bodyClassName?: string;
+  /** Rendered between the header and the body (e.g. a stepper). */
+  subheader?: React.ReactNode;
+  /** Rendered over the panel (e.g. FormDialog's discard prompt). */
+  overlay?: React.ReactNode;
 }
 
 const sizeStyles = {
@@ -26,6 +37,7 @@ const sizeStyles = {
   md: "max-w-lg",
   lg: "max-w-2xl",
   xl: "max-w-4xl",
+  custom: "",
 };
 
 export const Modal: React.FC<ModalProps> = ({
@@ -36,6 +48,11 @@ export const Modal: React.FC<ModalProps> = ({
   footer,
   size = "md",
   className = "",
+  describedById,
+  closeLabel = "Close modal",
+  bodyClassName = "px-6 py-4 max-h-[calc(100vh-200px)] overflow-y-auto",
+  subheader,
+  overlay,
 }) => {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -67,8 +84,9 @@ export const Modal: React.FC<ModalProps> = ({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
+        aria-describedby={describedById}
         tabIndex={-1}
-        className={`bg-white rounded-xl shadow-xl w-full ${sizeStyles[size]} mx-4 ${className}`}
+        className={`relative flex flex-col bg-white rounded-xl shadow-xl w-full ${sizeStyles[size]} mx-4 ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -77,18 +95,19 @@ export const Modal: React.FC<ModalProps> = ({
             {title}
           </h2>
           <button
+            type="button"
             onClick={onClose}
             className="p-1 text-gray-500 hover:text-gray-600 rounded transition-colors"
-            aria-label="Close modal"
+            aria-label={closeLabel}
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
+        {subheader}
+
         {/* Body */}
-        <div className="px-6 py-4 max-h-[calc(100vh-200px)] overflow-y-auto">
-          {children}
-        </div>
+        <div className={bodyClassName}>{children}</div>
 
         {/* Footer */}
         {footer && (
@@ -96,6 +115,7 @@ export const Modal: React.FC<ModalProps> = ({
             {footer}
           </div>
         )}
+        {overlay}
       </div>
     </div>
   );
@@ -106,7 +126,7 @@ export interface ModalFooterProps {
   onConfirm?: () => void;
   cancelText?: string;
   confirmText?: string;
-  confirmVariant?: "primary" | "danger" | "success";
+  confirmVariant?: "primary" | "danger";
   loading?: boolean;
 }
 

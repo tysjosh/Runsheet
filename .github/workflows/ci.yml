@@ -600,6 +600,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Generated design tokens (design/tokens.json → styles/tokens.{css,ts})
+      # must match a fresh generation; edit tokens.json and rerun the script.
+      - name: Design tokens are up to date
+        working-directory: .
+        run: node scripts/build-tokens.mjs --check
+
       - name: TypeScript compilation check
         run: npx tsc --noEmit
 

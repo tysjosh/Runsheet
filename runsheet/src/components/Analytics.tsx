@@ -1,6 +1,6 @@
 import { Activity, BarChart3, Download, TrendingUp } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
-import { colors } from "@/styles/design-tokens";
+import { COLOR, SEMANTIC } from "@/styles/tokens";
 import { type AnalyticsMetrics, apiService } from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
 
@@ -188,19 +188,19 @@ export default function Analytics() {
       backgroundColor: "transparent",
       legend: {
         position: "bottom",
-        textStyle: { fontSize: 12, color: colors.gray[700] },
+        textStyle: { fontSize: 12, color: COLOR.slate[700] },
         alignment: "center",
       },
-      titleTextStyle: { fontSize: 14, bold: true, color: colors.gray[900] },
+      titleTextStyle: { fontSize: 14, bold: true, color: COLOR.slate[900] },
       hAxis: {
-        textStyle: { fontSize: 11, color: colors.gray[500] },
-        gridlines: { color: colors.gray[100], count: 5 },
-        baselineColor: colors.gray[200],
+        textStyle: { fontSize: 11, color: COLOR.slate[500] },
+        gridlines: { color: COLOR.slate[100], count: 5 },
+        baselineColor: COLOR.slate[200],
       },
       vAxis: {
-        textStyle: { fontSize: 11, color: colors.gray[500] },
-        gridlines: { color: colors.gray[100], count: 5 },
-        baselineColor: colors.gray[200],
+        textStyle: { fontSize: 11, color: COLOR.slate[500] },
+        gridlines: { color: COLOR.slate[100], count: 5 },
+        baselineColor: COLOR.slate[200],
       },
       chartArea: { left: 60, top: 20, width: "85%", height: "75%" },
     };
@@ -210,14 +210,14 @@ export default function Analytics() {
         return {
           ...baseOptions,
           curveType: "function",
-          colors: [colors.primary.DEFAULT],
+          colors: [SEMANTIC.primary],
           pointSize: 6,
           lineWidth: 3,
           pointShape: "circle",
           series: {
             0: {
               areaOpacity: 0.1,
-              color: colors.primary.DEFAULT,
+              color: SEMANTIC.primary,
             },
           },
         };
@@ -225,12 +225,12 @@ export default function Analytics() {
         return {
           ...baseOptions,
           colors: [
-            colors.primary.DEFAULT,
-            colors.gray[500],
-            colors.gray[400],
-            colors.gray[300],
-            colors.gray[200],
-            colors.gray[100],
+            SEMANTIC.primary,
+            COLOR.slate[500],
+            COLOR.slate[400],
+            COLOR.slate[300],
+            COLOR.slate[200],
+            COLOR.slate[100],
           ],
           pieSliceText: "percentage",
           pieSliceTextStyle: { fontSize: 11, color: "white", bold: true },
@@ -241,11 +241,11 @@ export default function Analytics() {
       case "bar":
         return {
           ...baseOptions,
-          colors: [colors.primary.DEFAULT],
+          colors: [SEMANTIC.primary],
           bar: { groupWidth: "65%" },
           series: {
             0: {
-              color: colors.primary.DEFAULT,
+              color: SEMANTIC.primary,
             },
           },
         };
