@@ -16,7 +16,7 @@ import {
 } from "../../services/dispatchBoardApi";
 import DispatchBoard from "./DispatchBoard";
 import { makeSnapshot } from "./state/testFixtures";
-import { todayIn } from "./viewState";
+import { todayIn, writeStoredZone } from "./viewState";
 
 /** The parts of a Jest mock these suites use (no `@types/jest` here). */
 export type Mocked<F extends (...args: any[]) => any> = F & {
@@ -87,4 +87,15 @@ export function resetBoardMocks() {
   mockValidate.mockReset();
   mockValidate.mockResolvedValue(emptyValidate());
   window.localStorage.clear();
+  pinTenantZone();
+}
+
+/**
+ * The fixtures' tenant zone, as if a previous visit had stored it. Without it
+ * the first fetch uses the browser zone's today, and between 00:00 and 05:00
+ * UTC on a UTC machine (CI) that is a different day from Chicago's, so the
+ * board refetches the tenant's day and tests expecting one fetch break.
+ */
+export function pinTenantZone(zone = "America/Chicago") {
+  writeStoredZone(window.localStorage, zone);
 }

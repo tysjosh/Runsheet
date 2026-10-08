@@ -260,6 +260,51 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
         json={},
     ),
 
+    # ---- Dispatch Board (dispatch-board K11, K13) ----
+    # The flag is unset in the smoke app, so every board route answers 404
+    # DISPATCH_BOARD_DISABLED; the smoke check is that none of them 500s.
+    "GET /api/fuel/board/status": RouteFixture(),
+    "GET /api/fuel/board/{service_date}": RouteFixture(
+        path_params={"service_date": "2026-10-08"},
+    ),
+    "GET /api/fuel/board/{service_date}/history": RouteFixture(
+        path_params={"service_date": "2026-10-08"},
+    ),
+    "POST /api/fuel/board/{service_date}/commands": RouteFixture(
+        method="POST",
+        path_params={"service_date": "2026-10-08"},
+        json={
+            "type": "add_lane",
+            "client_command_id": "00000000-0000-4000-8000-000000000001",
+            "expected_lane_versions": {"TRUCK-001": 0},
+            "truck_id": "TRUCK-001",
+        },
+    ),
+    "POST /api/fuel/board/{service_date}/validate": RouteFixture(
+        method="POST",
+        path_params={"service_date": "2026-10-08"},
+        json={"item": {"kind": "order", "ids": ["ORD-001"]}, "candidates": ["TRUCK-001"]},
+    ),
+    "POST /api/fuel/board/{service_date}/publish": RouteFixture(
+        method="POST",
+        path_params={"service_date": "2026-10-08"},
+        json={"truck_ids": ["TRUCK-001"], "dry_run": True},
+    ),
+    "GET /api/fuel/board/{service_date}/publish/{publish_id}": RouteFixture(
+        path_params={"service_date": "2026-10-08", "publish_id": "pub-001"},
+    ),
+    "POST /api/fuel/board/{service_date}/suggestions/{plan_id}/reject": RouteFixture(
+        method="POST",
+        path_params={"service_date": "2026-10-08", "plan_id": "plan-001"},
+        json={"reason": "smoke test"},
+    ),
+    "GET /api/ops/admin/feature-flags/{tenant_id}/dispatch-board": RouteFixture(
+        path_params={"tenant_id": "dev-tenant"},
+    ),
+    "POST /api/ops/admin/feature-flags/{tenant_id}/dispatch-board/{new_state}": RouteFixture(
+        method="POST",
+        path_params={"tenant_id": "dev-tenant", "new_state": "disabled"},
+    ),
     # ---- Driver endpoints (order-intake-pipeline) ----
     "GET /api/ops/drivers": RouteFixture(),
     "GET /api/ops/drivers/utilization": RouteFixture(),
