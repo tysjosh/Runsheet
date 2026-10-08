@@ -18,6 +18,11 @@ export interface ShellPage {
    * with the e2e fixtures in Phase 1).
    */
   axeTask: string | null;
+  /**
+   * False for pages with no list, table or board (not in design.md §6):
+   * chrome.spec checks their title row only, not a first data row.
+   */
+  listPage?: boolean;
 }
 
 export const SHELL_PAGES: ShellPage[] = [
@@ -139,8 +144,9 @@ export const SHELL_PAGES: ShellPage[] = [
     id: "analytics",
     path: "/dashboard/analytics",
     h1: "Analytics",
-    chromeTask: "3.7",
+    chromeTask: null,
     axeTask: null,
+    listPage: false,
   },
   {
     id: "settings-depots",

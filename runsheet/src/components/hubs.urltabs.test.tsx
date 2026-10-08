@@ -40,7 +40,6 @@ jest.mock("./compliance/KFactorCalibrationPage", () => mockStub("K-Factor"));
 jest.mock("./Analytics", () => mockStub("Overview"));
 jest.mock("./ops/SchedulingMetricsPage", () => mockStub("Scheduling metrics"));
 jest.mock("./ops/FuelEfficiencyChart", () => mockStub("Efficiency"));
-jest.mock("./ops/OpsMonitoringDashboard", () => mockStub("Ops monitoring"));
 jest.mock("./commerce/AccountsListPage", () => mockStub("Accounts"));
 jest.mock("./commerce/InvoicesListPage", () => mockStub("Invoices"));
 jest.mock("./commerce/PaymentsListPage", () => mockStub("Payments"));

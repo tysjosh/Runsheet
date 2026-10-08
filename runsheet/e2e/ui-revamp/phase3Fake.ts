@@ -82,5 +82,15 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
     return { data: STATION_SUMMARY, request_id: "e2e" };
   if (path === "/fuel/metrics/consumption")
     return { data: [], request_id: "e2e" };
+  if (path === "/ops/monitoring/poison-queue")
+    return {
+      data: {
+        queue_depth: 7,
+        oldest_event_age_seconds: 420,
+        pending_count: 5,
+        permanently_failed_count: 2,
+      },
+      request_id: "e2e",
+    };
   return undefined;
 }

@@ -43,6 +43,18 @@ for (const p of SHELL_PAGES) {
       await page.setViewportSize(vp);
       await page.goto(p.path);
       await expect(page.locator("h1")).toHaveText(p.h1);
+      if (p.listPage === false) {
+        // Not a list page (design.md §6): the content starts right under
+        // the 44 px title row (no toolbar or KPI band above it).
+        const panel = page.locator('[role="tabpanel"]').first();
+        await expect(panel).toBeVisible();
+        const top = Math.round((await panel.boundingBox())?.y ?? 999);
+        test
+          .info()
+          .annotations.push({ type: "contentTop", description: String(top) });
+        expect(top).toBeLessThanOrEqual(92);
+        return;
+      }
       if (p.ready)
         await page.locator(p.ready).first().waitFor({ timeout: 10_000 });
       const top = await firstRowTop(page);
