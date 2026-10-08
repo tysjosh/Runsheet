@@ -9,22 +9,21 @@
  * the default in every environment. Those wrappers and the UI that called them
  * were deleted rather than left as callable dead code.
  *
- * What remains is exactly the part of `/api/ops/*` that is deliberately
- * exempt from that gate, so operators can observe and manage a disabled
- * surface (audit reference: product-owner-audit-2026-05-08 recommendation #1):
+ * What remains is the one route the UI calls:
  *
- * - `GET  /ops/monitoring/poison-queue` (`platform_admin` only)
- * - `GET  /ops/metrics/prometheus`
+ * - `GET  /ops/monitoring/poison-queue` (`platform_admin` only), shown in
+ *   Settings → System health (UI revamp task 3.9)
  *
  * `/ops/monitoring/{ingestion,indexing}` were deleted on the backend (they
- * queried Elasticsearch indices dropped by migration 0007), and so were
- * their wrappers here.
- * - `POST /ops/admin/feature-flags/:tenantId/{enable,disable,rollback}`
+ * queried Elasticsearch indices dropped by migration 0007). The
+ * `/ops/metrics/prometheus` and `/ops/admin/feature-flags/*` routes still
+ * exist for scrapers and operators, but no UI called their wrappers, so the
+ * wrappers were removed (task 3.9).
  */
 
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
 import { apiErrorFromResponse } from "./apiErrors";
-import { buildQueryString, fetchWithTimeout } from "./utils";
+import { fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -83,84 +82,4 @@ async function opsRequest<T>(
 /** GET /ops/monitoring/poison-queue — poison queue stats (platform_admin) */
 export async function getPoisonQueueMonitoring(): Promise<PoisonQueueMetrics> {
   return opsRequest<PoisonQueueMetrics>("/ops/monitoring/poison-queue");
-}
-
-// ─── Prometheus Metrics Endpoint ──────────────────────────────────────────────
-
-/**
- * GET /ops/metrics/prometheus — Prometheus text-exposition metrics.
- *
- * Unlike the other ops endpoints this returns ``text/plain`` rather than
- * JSON, so it bypasses the shared ``opsRequest`` helper and returns the raw
- * exposition string for a dashboard "raw metrics" view or scrape preview.
- */
-export async function getPrometheusMetrics(): Promise<string> {
-  const url = `${API_BASE_URL}/ops/metrics/prometheus`;
-  const headers: Record<string, string> = {};
-  try {
-    // Session cookie + anti-CSRF token are attached by the SuperTokens SDK;
-    // an auth failure triggers a refresh-then-retry, else a redirect to
-    // sign-in (Req 8.4, 8.5).
-    const response = await fetchWithSession(fetchWithTimeout, url, { headers });
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new ApiError(
-        body || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
-    }
-    return await response.text();
-  } catch (error) {
-    if (error instanceof ApiTimeoutError || error instanceof ApiError) {
-      throw error;
-    }
-    throw new ApiError(
-      error instanceof Error ? error.message : "Unknown error",
-      0,
-    );
-  }
-}
-
-// ─── Feature Flag Admin Endpoints ─────────────────────────────────────────────
-
-export interface FeatureFlagResult {
-  tenant_id: string;
-  status: "enabled" | "disabled" | "rolled_back";
-  ws_clients_disconnected?: number;
-  purge_data?: boolean;
-}
-
-/** POST /ops/admin/feature-flags/:tenantId/enable — enable Ops Intelligence */
-export async function enableOpsFeatureFlag(
-  tenantId: string,
-): Promise<{ data: FeatureFlagResult; request_id: string }> {
-  return opsRequest<{ data: FeatureFlagResult; request_id: string }>(
-    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/enable`,
-    { method: "POST" },
-  );
-}
-
-/** POST /ops/admin/feature-flags/:tenantId/disable — disable Ops Intelligence */
-export async function disableOpsFeatureFlag(
-  tenantId: string,
-): Promise<{ data: FeatureFlagResult; request_id: string }> {
-  return opsRequest<{ data: FeatureFlagResult; request_id: string }>(
-    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/disable`,
-    { method: "POST" },
-  );
-}
-
-/**
- * POST /ops/admin/feature-flags/:tenantId/rollback — disable the flag and
- * optionally purge the tenant's data from every ops ES index.
- */
-export async function rollbackOpsFeatureFlag(
-  tenantId: string,
-  purgeData = false,
-): Promise<{ data: FeatureFlagResult; request_id: string }> {
-  const qs = buildQueryString({ purge_data: purgeData });
-  return opsRequest<{ data: FeatureFlagResult; request_id: string }>(
-    `/ops/admin/feature-flags/${encodeURIComponent(tenantId)}/rollback${qs}`,
-    { method: "POST" },
-  );
 }

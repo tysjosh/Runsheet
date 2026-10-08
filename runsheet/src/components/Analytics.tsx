@@ -1,9 +1,9 @@
-import { Activity, BarChart3, Download, TrendingUp } from "lucide-react";
+import { Activity, TrendingUp } from "lucide-react";
 import React, { useEffect, useMemo, useState } from "react";
-import { COLOR, SEMANTIC } from "@/styles/tokens";
+import { CHART, COLOR, SEMANTIC } from "@/styles/tokens";
+import { number } from "../lib/format";
 import { type AnalyticsMetrics, apiService } from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
-import { PageTitle } from "./ui/PageHeader";
 
 // Google Charts component
 declare global {
@@ -225,14 +225,8 @@ export default function Analytics() {
       case "pie":
         return {
           ...baseOptions,
-          colors: [
-            SEMANTIC.primary,
-            COLOR.slate[500],
-            COLOR.slate[400],
-            COLOR.slate[300],
-            COLOR.slate[200],
-            COLOR.slate[100],
-          ],
+          // Categorical chart order from the tokens (design.md §2.1).
+          colors: [...CHART],
           pieSliceText: "percentage",
           pieSliceTextStyle: { fontSize: 11, color: "white", bold: true },
           is3D: false,
@@ -257,32 +251,7 @@ export default function Analytics() {
 
   return (
     <div className="h-full overflow-y-auto bg-white">
-      {/* Header */}
-      <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <PageTitle className="text-2xl font-semibold text-primary">
-                Analytics Dashboard
-              </PageTitle>
-              <p className="text-gray-500">
-                Performance insights and operational metrics
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <button className="bg-primary hover:bg-primary-hover text-white px-6 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2">
-              <Download className="w-4 h-4" />
-              Export Report
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="p-8">
+      <div className="p-4">
         {/* Loading State */}
         {loading && (
           <LoadingSpinner message="Loading analytics..." fullHeight={false} />
@@ -290,12 +259,14 @@ export default function Analytics() {
 
         {/* Key Metrics */}
         {!loading && metrics && (
-          <div className="grid grid-cols-4 gap-6 mb-8">
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-4">
             {Object.entries(metrics).map(([key, metric], _index) => {
               return (
-                <div
+                <button
+                  type="button"
                   key={key}
-                  className={`p-6 rounded-2xl cursor-pointer transition-all border ${
+                  aria-pressed={selectedMetric === key}
+                  className={`text-left p-4 rounded-xl cursor-pointer transition-all border ${
                     selectedMetric === key
                       ? "bg-gray-50 border-primary shadow-sm"
                       : "bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
@@ -303,14 +274,14 @@ export default function Analytics() {
                   onClick={() => setSelectedMetric(key)}
                 >
                   <div className="flex items-start justify-between mb-4">
-                    <h3 className="text-sm font-medium text-gray-600">
+                    <span className="text-sm font-medium text-text-muted">
                       {metric.title}
-                    </h3>
+                    </span>
                     <div
-                      className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium ${
+                      className={`flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-semibold ${
                         metric.trend === "up"
-                          ? "text-success-dark bg-success-light"
-                          : "text-error-dark bg-error-light"
+                          ? "border-brand-300 bg-brand-100 text-brand-800"
+                          : "border-red-300 bg-red-100 text-red-800"
                       }`}
                     >
                       <TrendingUp
@@ -319,10 +290,10 @@ export default function Analytics() {
                       <span>{metric.change}</span>
                     </div>
                   </div>
-                  <div className="text-3xl font-semibold text-primary mb-1">
+                  <div className="text-2xl font-semibold tabular-nums text-text">
                     {metric.value}
                   </div>
-                </div>
+                </button>
               );
             })}
           </div>
@@ -337,8 +308,11 @@ export default function Analytics() {
               {/* Time Series Chart */}
               <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
                 <div className="flex items-center gap-3 mb-6">
-                  <div className="w-2 h-2 bg-primary rounded-full"></div>
-                  <h3 className="text-lg font-semibold text-primary">
+                  <div
+                    aria-hidden="true"
+                    className="h-4 w-1 rounded-full bg-primary"
+                  />
+                  <h3 className="text-sm font-semibold text-text">
                     {metrics[selectedMetric as keyof typeof metrics]?.title ??
                       "Analytics"}{" "}
                     Trend
@@ -355,8 +329,11 @@ export default function Analytics() {
               {/* Route Mix Pie Chart */}
               <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
                 <div className="flex items-center gap-3 mb-6">
-                  <div className="w-2 h-2 bg-primary rounded-full"></div>
-                  <h3 className="text-lg font-semibold text-primary">
+                  <div
+                    aria-hidden="true"
+                    className="h-4 w-1 rounded-full bg-primary"
+                  />
+                  <h3 className="text-sm font-semibold text-text">
                     Route Performance Mix
                   </h3>
                 </div>
@@ -374,8 +351,11 @@ export default function Analytics() {
         {!loading && chartData && (
           <div className="bg-white rounded-2xl p-6 mb-8 border border-gray-200 hover:border-gray-300 transition-colors">
             <div className="flex items-center gap-3 mb-6">
-              <div className="w-2 h-2 bg-primary rounded-full"></div>
-              <h3 className="text-lg font-semibold text-primary">
+              <div
+                aria-hidden="true"
+                className="h-4 w-1 rounded-full bg-primary"
+              />
+              <h3 className="text-sm font-semibold text-text">
                 Route Performance Comparison
               </h3>
             </div>
@@ -394,8 +374,11 @@ export default function Analytics() {
             {/* Fleet Utilization Gauge */}
             <div className="bg-white border border-gray-200 rounded-2xl p-6 hover:border-gray-300 transition-colors">
               <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-primary rounded-full"></div>
-                <h3 className="text-lg font-semibold text-primary">
+                <div
+                  aria-hidden="true"
+                  className="h-4 w-1 rounded-full bg-primary"
+                />
+                <h3 className="text-sm font-semibold text-text">
                   Fleet Utilization
                 </h3>
               </div>
@@ -431,8 +414,11 @@ export default function Analytics() {
             {/* Customer Satisfaction Gauge */}
             <div className="bg-white border border-gray-200 rounded-2xl p-6 hover:border-gray-300 transition-colors">
               <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-primary rounded-full"></div>
-                <h3 className="text-lg font-semibold text-primary">
+                <div
+                  aria-hidden="true"
+                  className="h-4 w-1 rounded-full bg-primary"
+                />
+                <h3 className="text-sm font-semibold text-text">
                   Customer Satisfaction
                 </h3>
               </div>
@@ -473,9 +459,7 @@ export default function Analytics() {
           <div className="bg-gray-50 border border-gray-200 rounded-2xl p-6">
             <div className="flex items-center gap-3 mb-6">
               <Activity className="w-5 h-5 text-primary" />
-              <h3 className="text-lg font-semibold text-primary">
-                Key Insights
-              </h3>
+              <h3 className="text-sm font-semibold text-text">Key Insights</h3>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-4">
@@ -506,13 +490,14 @@ export default function Analytics() {
                   <span className="text-sm font-medium text-gray-700">
                     Average route performance:{" "}
                     <span className="text-primary font-semibold">
-                      {(
+                      {number(
                         routePerformance.reduce(
                           (sum, route) =>
                             sum + (Number(route.performance) || 0),
                           0,
-                        ) / routePerformance.length
-                      ).toFixed(1)}
+                        ) / routePerformance.length,
+                        { decimals: 1 },
+                      )}
                       %
                     </span>
                   </span>

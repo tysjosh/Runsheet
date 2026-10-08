@@ -1,6 +1,6 @@
 "use client";
 
-import { Activity, BarChart3, Gauge, TrendingUp } from "lucide-react";
+import { BarChart3, Gauge, TrendingUp } from "lucide-react";
 import { lazy, Suspense } from "react";
 import ErrorBoundary from "./ErrorBoundary";
 import LoadingSpinner from "./LoadingSpinner";
@@ -15,9 +15,6 @@ const SchedulingMetricsPage = lazy(() => import("./ops/SchedulingMetricsPage"));
 // `require_ops_enabled` -> `LEGACY_NG_DELIVERY_DISABLED`. With that flag off
 // everywhere the tab could only ever throw, so the tab and the page were
 // removed rather than left as a guaranteed error surface.
-const OpsMonitoringDashboard = lazy(
-  () => import("./ops/OpsMonitoringDashboard"),
-);
 const FuelEfficiencyChart = lazy(() => import("./ops/FuelEfficiencyChart"));
 
 const TABS: Tab[] = [
@@ -36,20 +33,17 @@ const TABS: Tab[] = [
     label: "Fleet efficiency",
     icon: <Gauge className="w-4 h-4" />,
   },
-  // The poison queue is platform-wide and `/ops/monitoring/poison-queue` is
-  // `platform_admin` only, so tenant users don't get the tab at all. (Task 3.7
-  // moves it to Settings → System health.)
-  {
-    id: "ops-monitoring",
-    label: "Ops monitoring",
-    icon: <Activity className="w-4 h-4" />,
-  },
+  // Ops monitoring is retired from Analytics (D12): its useful remainder,
+  // poison-queue depth, is Settings → System health for platform_admin.
 ];
 
+const ALWAYS = () => true;
+
 export default function AnalyticsHub() {
+  // The hub is gated by the `analytics` module; its tabs have no gates of
+  // their own.
   const { tabs, active, setActive, shows } = useHubTabs(TABS, {
-    visible: (tab, roles) =>
-      tab.id !== "ops-monitoring" || Boolean(roles?.includes("platform_admin")),
+    visible: ALWAYS,
   });
   return (
     <PageChromeProvider>
@@ -80,23 +74,18 @@ export default function AnalyticsHub() {
             )}
             {shows("fleet-efficiency") && (
               <ErrorBoundary componentName="Fleet Efficiency">
-                <div className="p-6">
-                  <div className="mb-4">
-                    <h2 className="text-base font-semibold text-primary">
-                      Fleet Fuel Efficiency
+                <div className="p-4">
+                  <div className="mb-3">
+                    <h2 className="text-sm font-semibold text-text">
+                      Fleet fuel efficiency
                     </h2>
-                    <p className="text-sm text-gray-500 mt-0.5">
-                      Per-vehicle fuel economy (km/L) derived from consumption
-                      events and odometer readings. Higher is better.
+                    <p className="mt-0.5 text-xs text-text-muted">
+                      Per-vehicle fuel economy (km/L) from consumption events
+                      and odometer readings. Higher is better.
                     </p>
                   </div>
                   <FuelEfficiencyChart />
                 </div>
-              </ErrorBoundary>
-            )}
-            {shows("ops-monitoring") && (
-              <ErrorBoundary componentName="Ops Monitoring">
-                <OpsMonitoringDashboard />
               </ErrorBoundary>
             )}
           </Suspense>

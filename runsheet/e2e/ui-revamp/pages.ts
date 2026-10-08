@@ -109,8 +109,9 @@ export const SHELL_PAGES: ShellPage[] = [
     id: "fuel-stations",
     path: "/dashboard/fuel-ops?tab=stations",
     h1: "Fuel",
-    chromeTask: "3.2",
-    axeTask: "3.2",
+    ready: "tbody tr",
+    chromeTask: null,
+    axeTask: null,
   },
   {
     id: "compliance-certifications",

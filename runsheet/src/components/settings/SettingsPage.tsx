@@ -48,6 +48,7 @@ const FeatureFlagsAdmin = lazy(() => import("../admin/FeatureFlagsAdmin"));
 const NotificationMetricsDashboard = lazy(
   () => import("../admin/NotificationMetricsDashboard"),
 );
+const SystemHealthPanel = lazy(() => import("../admin/SystemHealthPanel"));
 
 export interface SettingsSection {
   /** URL value (`?tab=`). */
@@ -160,6 +161,16 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     label: "Notification metrics",
     group: "Data",
   },
+  // Poison-queue depth for Runsheet staff (D12, task 3.9). `system-health`
+  // requires platform_admin; the `admin` gate keeps it inside Settings' admin
+  // set (platform_admin is held alongside a tenant role).
+  {
+    id: "system",
+    moduleId: "system-health",
+    gate: "admin",
+    label: "System health",
+    group: "Platform",
+  },
 ];
 
 /** Old tab ids (Setup, Admin, design.md §4) that still resolve. */
@@ -169,6 +180,7 @@ export const SETTINGS_ALIASES: Record<string, string> = {
   "feature-flags": "flags",
   "agent-settings": "agents",
   "notification-settings": "notifications",
+  "system-health": "system",
 };
 
 export function sectionVisible(
@@ -290,6 +302,8 @@ function SectionBody({
       return <FeatureFlagsAdmin />;
     case "metrics":
       return <NotificationMetricsDashboard />;
+    case "system":
+      return <SystemHealthPanel />;
     default:
       return null;
   }

@@ -21,13 +21,7 @@
  */
 
 import { ApiError } from "./api";
-import {
-  disableOpsFeatureFlag,
-  enableOpsFeatureFlag,
-  getPoisonQueueMonitoring,
-  getPrometheusMetrics,
-  rollbackOpsFeatureFlag,
-} from "./opsApi";
+import { getPoisonQueueMonitoring } from "./opsApi";
 
 const API_BASE_URL = "http://localhost:8080/api";
 
@@ -71,77 +65,3 @@ describe("monitoring endpoints", () => {
 });
 
 // ─── Prometheus ──────────────────────────────────────────────────────────────
-
-describe("getPrometheusMetrics", () => {
-  it("returns the raw text exposition body", async () => {
-    mockFetchOnce({ ok: true, text: "# HELP foo\nfoo 1\n" });
-
-    const result = await getPrometheusMetrics();
-
-    expect(result).toBe("# HELP foo\nfoo 1\n");
-    const [url] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/metrics/prometheus`);
-  });
-
-  it("raises ApiError on a non-2xx response", async () => {
-    mockFetchOnce({ ok: false, status: 503, text: "unavailable" });
-
-    await expect(getPrometheusMetrics()).rejects.toThrow(ApiError);
-  });
-});
-
-// ─── Feature flags ────────────────────────────────────────────────────────────
-
-describe("feature flag admin", () => {
-  it("enableOpsFeatureFlag POSTs to the enable path", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: { tenant_id: "tenant-a", status: "enabled" },
-        request_id: "r",
-      },
-    });
-
-    await enableOpsFeatureFlag("tenant-a");
-
-    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(`${API_BASE_URL}/ops/admin/feature-flags/tenant-a/enable`);
-    expect(options.method).toBe("POST");
-  });
-
-  it("disableOpsFeatureFlag POSTs to the disable path", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: { tenant_id: "tenant-a", status: "disabled" },
-        request_id: "r",
-      },
-    });
-
-    await disableOpsFeatureFlag("tenant-a");
-
-    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(
-      `${API_BASE_URL}/ops/admin/feature-flags/tenant-a/disable`,
-    );
-    expect(options.method).toBe("POST");
-  });
-
-  it("rollbackOpsFeatureFlag appends purge_data as a query param", async () => {
-    mockFetchOnce({
-      ok: true,
-      body: {
-        data: { tenant_id: "tenant-a", status: "rolled_back" },
-        request_id: "r",
-      },
-    });
-
-    await rollbackOpsFeatureFlag("tenant-a", true);
-
-    const [url, options] = (global.fetch as jest.Mock).mock.calls[0];
-    expect(url).toBe(
-      `${API_BASE_URL}/ops/admin/feature-flags/tenant-a/rollback?purge_data=true`,
-    );
-    expect(options.method).toBe("POST");
-  });
-});

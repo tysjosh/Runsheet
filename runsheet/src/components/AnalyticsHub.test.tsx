@@ -1,6 +1,8 @@
 /**
- * The Ops Monitoring tab is `platform_admin` only (UI revamp task 0.2): the
- * poison-queue route behind it 403s for every tenant role.
+ * Analytics hub (UI revamp task 3.7): Ops Monitoring is retired from
+ * Analytics for every role, platform_admin included (D12; poison-queue depth
+ * lives in Settings → System health), and there is no time-range selector
+ * (D13, OI-50).
  */
 import { render, screen, waitFor } from "@testing-library/react";
 
@@ -21,23 +23,42 @@ afterEach(() => {
   jest.clearAllMocks();
 });
 
-describe("AnalyticsHub Ops Monitoring tab", () => {
-  it.each([[["dispatcher"]], [["driver"]], [["admin"]], [[]]])(
-    "is hidden for roles %j",
-    async (roles) => {
-      rolesMock.mockResolvedValue(roles);
-      render(<AnalyticsHub />);
-      await waitFor(() => expect(rolesMock).toHaveBeenCalled());
-      expect(screen.getByText("Overview")).toBeInTheDocument();
-      expect(screen.queryByText(/Ops monitoring/i)).not.toBeInTheDocument();
-    },
-  );
-
-  it("is shown for platform_admin", async () => {
-    rolesMock.mockResolvedValue(["platform_admin", "admin"]);
+describe("AnalyticsHub", () => {
+  it.each([
+    [["dispatcher"]],
+    [["driver"]],
+    [["admin"]],
+    [["platform_admin", "admin"]],
+    [[]],
+  ])("has no Ops Monitoring tab for roles %j", async (roles) => {
+    rolesMock.mockResolvedValue(roles);
     render(<AnalyticsHub />);
+    await waitFor(() => expect(rolesMock).toHaveBeenCalled());
     expect(
-      await screen.findByRole("tab", { name: /Ops monitoring/i }),
+      await screen.findByRole("tab", { name: /Overview/ }),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/Ops monitoring/i)).not.toBeInTheDocument();
+  });
+
+  it("shows Overview, Scheduling metrics and Fleet efficiency only", async () => {
+    rolesMock.mockResolvedValue(["admin"]);
+    render(<AnalyticsHub />);
+    await screen.findByRole("tab", { name: /Overview/ });
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual([
+      "Overview",
+      "Scheduling metrics",
+      "Fleet efficiency",
+    ]);
+  });
+
+  it("renders one h1 and no time-range selector", async () => {
+    rolesMock.mockResolvedValue(["admin"]);
+    render(<AnalyticsHub />);
+    await waitFor(() => expect(rolesMock).toHaveBeenCalled());
+    expect(screen.getAllByRole("heading", { level: 1 })).toHaveLength(1);
+    expect(
+      screen.queryByRole("combobox", { name: /time range|range/i }),
+    ).toBeNull();
+    expect(screen.queryByText(/Last 7 days|Last 30 days/i)).toBeNull();
   });
 });

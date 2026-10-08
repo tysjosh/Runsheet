@@ -244,10 +244,17 @@ describe("Settings is the home of Setup and Admin (UI revamp R10.4)", () => {
     }
   });
 
-  it("shows an admin every section except platform_admin-only Stripe", () => {
+  it("shows an admin every section except platform_admin-only Stripe and System health", () => {
     const admin = SETTINGS_SECTIONS.filter((s) => sectionVisible(s, ["admin"]));
     expect(admin.map((s) => s.id)).not.toContain("stripe");
-    expect(admin).toHaveLength(SETTINGS_SECTIONS.length - 1);
+    expect(admin.map((s) => s.id)).not.toContain("system");
+    expect(admin).toHaveLength(SETTINGS_SECTIONS.length - 2);
+    expect(
+      sectionVisible(
+        SETTINGS_SECTIONS.find((s) => s.id === "system") as never,
+        ["admin", "platform_admin"],
+      ),
+    ).toBe(true);
     expect(
       sectionVisible(
         SETTINGS_SECTIONS.find((s) => s.id === "stripe") as never,

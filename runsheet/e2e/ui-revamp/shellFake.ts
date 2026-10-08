@@ -18,6 +18,7 @@ import {
   PROFILE,
   TENANT,
 } from "./fixtures";
+import { phase3Response } from "./phase3Fake";
 
 export const ORIGIN = "http://localhost:8080";
 /** Id the redirect spec uses for detail routes (answered 404). */
@@ -216,6 +217,9 @@ export async function installShellFake(
       });
     if (path === "/search/universal")
       return json(200, { orders: [], customers: [], assets: [] });
+
+    const phase3 = phase3Response(path, url);
+    if (phase3 !== undefined) return json(200, phase3);
 
     unmatched.add(`${req.method()} ${path}`);
     return json(200, EMPTY_LIST);
