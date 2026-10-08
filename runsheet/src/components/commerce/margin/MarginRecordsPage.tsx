@@ -11,6 +11,7 @@ import { ApiError } from "../../../services/api";
 import {
   getMarginRecord,
   getMarginRecords,
+  isMarginDisabledError,
   type MarginFlag,
   type MarginRecord,
   type MarginRecordDetail,
@@ -81,6 +82,11 @@ function errorText(error: unknown): string {
   if (error instanceof ApiError && error.status === 422) {
     return "Check the filters: one of them is not valid.";
   }
+  // The feed was turned off, or the role changed, after the tab opened.
+  if (isMarginDisabledError(error))
+    return "Margin isn't turned on for this account.";
+  if (error instanceof ApiError && error.status === 403)
+    return "You don't have access to margin records. Margin is for tenant admins.";
   return "Margin records could not be loaded. Try again.";
 }
 

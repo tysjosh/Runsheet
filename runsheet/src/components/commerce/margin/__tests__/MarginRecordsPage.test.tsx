@@ -237,3 +237,34 @@ it("shows the detail drawer with the snapshot and Missing cost for a none versio
   expect(within(dialog).getAllByText("Missing cost").length).toBeGreaterThan(0);
   expect(dialog.textContent).not.toContain("$0.00");
 });
+
+describe("load-failure copy (Phase 3 margin feed-off bug)", () => {
+  // ApiError from the real module (marginApi is partially mocked above).
+  const { ApiError } = jest.requireActual("../../../../services/api");
+  it.each([
+    [
+      "the feed is off (404 COMMERCE_DISABLED)",
+      new ApiError("Margin feed is not enabled", 404, "COMMERCE_DISABLED"),
+      "Margin isn't turned on for this account.",
+    ],
+    [
+      "the caller isn't an admin (403)",
+      new ApiError("Caller lacks a required role", 403, "INSUFFICIENT_ROLE"),
+      "You don't have access to margin records. Margin is for tenant admins.",
+    ],
+    [
+      "a real server error (500)",
+      new ApiError("boom", 500, "INTERNAL_ERROR"),
+      "Margin records could not be loaded. Try again.",
+    ],
+    [
+      "an unrelated 404",
+      new ApiError("Not found", 404, "NOT_FOUND"),
+      "Margin records could not be loaded. Try again.",
+    ],
+  ])("says so when %s", async (_label, error, copy) => {
+    mockRecords.mockRejectedValue(error);
+    render(<MarginRecordsPage />);
+    expect(await screen.findByText(copy)).toBeInTheDocument();
+  });
+});

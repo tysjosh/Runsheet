@@ -10,9 +10,14 @@ import {
   Sliders,
   TrendingUp,
 } from "lucide-react";
+import { useSearchParams } from "next/navigation";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { canSee } from "../config/modules";
-import { getOpenMarginAlertCount } from "../services/marginApi";
+import {
+  getMarginAvailability,
+  getOpenMarginAlertCount,
+  type MarginAvailability,
+} from "../services/marginApi";
 import AccountDetailPage from "./commerce/AccountDetailPage";
 import AccountsListPage from "./commerce/AccountsListPage";
 import InvoiceDetailPage from "./commerce/InvoiceDetailPage";
@@ -21,7 +26,13 @@ import PaymentsListPage from "./commerce/PaymentsListPage";
 import PriceBookEditor from "./commerce/PriceBookEditor";
 import LoadingSpinner from "./LoadingSpinner";
 import { useHubTabs } from "./shell/useHubTabs";
-import { PageChromeProvider, PageHeader, type Tab, TabPanel } from "./ui";
+import {
+  LoadErrorState,
+  PageChromeProvider,
+  PageHeader,
+  type Tab,
+  TabPanel,
+} from "./ui";
 
 const ARAgingDashboard = lazy(() => import("./commerce/ARAgingDashboard"));
 // Price-protection contracts and pricing rules are commercial features
@@ -107,13 +118,66 @@ export interface CommerceHubProps {
   initialTab?: string;
 }
 
+/**
+ * Shown in place of the Margin tab's content when `?tab=margin` is opened but
+ * the tab isn't offered: the feed is off for the tenant (no Try again: there
+ * is nothing to retry), or the caller isn't a tenant admin (the standard
+ * no-access state).
+ */
+export function MarginUnavailable({
+  reason,
+}: {
+  reason: "disabled" | "forbidden";
+}) {
+  return (
+    <div className="p-4">
+      <LoadErrorState
+        embedded
+        entityLabel="Margin page"
+        homeHref="/dashboard/billing?tab=invoices"
+        homeLabel="Go to Invoices"
+        failure={
+          reason === "disabled"
+            ? {
+                kind: "module_disabled",
+                moduleName: "Margin",
+                status: 404,
+                code: "COMMERCE_DISABLED",
+                message: "Margin isn't turned on for this account.",
+              }
+            : {
+                kind: "forbidden",
+                status: 403,
+                message: "Margin is for tenant admins.",
+                details: { required_roles: ["admin"] },
+              }
+        }
+      />
+    </div>
+  );
+}
+
 export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
+  // Margin availability: probed once for admins (see getMarginAvailability).
+  // "disabled" hides the tab; until the probe answers the tab stays hidden so
+  // it doesn't flash in and out.
+  const [marginAvailability, setMarginAvailability] = useState<
+    MarginAvailability | "pending"
+  >("pending");
   const {
     roles,
     tabs: allowedTabs,
     active: effectiveTab,
     setActive,
-  } = useHubTabs(TABS, { fallback: initialTab });
+  } = useHubTabs(TABS, {
+    fallback: initialTab,
+    visible: (tab, r) =>
+      canSee(tab.id, { roles: r }) &&
+      (tab.id !== "margin" ||
+        marginAvailability === "enabled" ||
+        marginAvailability === "unknown"),
+  });
+  const rawTab = useSearchParams()?.get("tab") ?? initialTab ?? null;
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
     null,
   );
@@ -145,7 +209,32 @@ export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
     setActive("accounts");
   };
 
-  const marginVisible = canSee("margin", { roles });
+  const marginAllowed = canSee("margin", { roles });
+  useEffect(() => {
+    if (!marginAllowed) return;
+    let cancelled = false;
+    void getMarginAvailability().then((a) => {
+      if (!cancelled) setMarginAvailability(a);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [marginAllowed]);
+  const marginVisible =
+    marginAllowed &&
+    (marginAvailability === "enabled" || marginAvailability === "unknown");
+  // `?tab=margin` that can't be honoured: say why instead of silently
+  // showing the first tab.
+  const marginBlocked: "disabled" | "forbidden" | "pending" | null =
+    rawTab !== "margin" || roles === null
+      ? null
+      : !marginAllowed || marginAvailability === "forbidden"
+        ? "forbidden"
+        : marginAvailability === "disabled"
+          ? "disabled"
+          : marginAvailability === "pending"
+            ? "pending"
+            : null;
   const [openMarginAlerts, setOpenMarginAlerts] = useState(0);
   const refreshMarginAlerts = useCallback(async () => {
     try {
@@ -177,7 +266,10 @@ export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
   // Accounts is Tier 4, so it can be hidden while the hub itself stays visible
   // for Invoices and Reconciliation; `useHubTabs` falls back to the first
   // visible tab rather than an empty pane.
-  const shows = (id: string) => effectiveTab === id && canSee(id, { roles });
+  const shows = (id: string) =>
+    !marginBlocked &&
+    effectiveTab === id &&
+    allowedTabs.some((t) => t.id === id);
 
   return (
     <PageChromeProvider>
@@ -200,6 +292,12 @@ export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
           value={effectiveTab}
           className="flex-1 overflow-auto"
         >
+          {marginBlocked === "pending" && (
+            <LoadingSpinner message="Loading margin..." />
+          )}
+          {(marginBlocked === "disabled" || marginBlocked === "forbidden") && (
+            <MarginUnavailable reason={marginBlocked} />
+          )}
           {shows("accounts") &&
             (selectedAccountId ? (
               <AccountDetailPage

@@ -459,6 +459,40 @@ export function getMarginSettings(): Promise<MarginSettings> {
   return marginRequest("/settings");
 }
 
+/**
+ * Whether the margin feed is usable for this caller.
+ *
+ * The backend has no capability flag the UI can read, so this probes
+ * `GET /settings` (cheap, admin-only). The margin routes answer **404
+ * `COMMERCE_DISABLED`** while `COMMERCE_MARGIN_FEED_ENABLED` (or the commerce
+ * backbone) is off, *before* any role check, and **403** to non-admins when
+ * it is on. Only that exact 404 code counts as "disabled"; any other 404,
+ * 5xx or network failure is "unknown" so the pages show their own errors.
+ */
+export type MarginAvailability =
+  | "enabled"
+  | "disabled"
+  | "forbidden"
+  | "unknown";
+
+export const MARGIN_DISABLED_CODE = "COMMERCE_DISABLED";
+
+export function isMarginDisabledError(error: unknown): boolean {
+  const e = error as { status?: unknown; code?: unknown } | null;
+  return e?.status === 404 && e?.code === MARGIN_DISABLED_CODE;
+}
+
+export async function getMarginAvailability(): Promise<MarginAvailability> {
+  try {
+    await getMarginSettings();
+    return "enabled";
+  } catch (error) {
+    if (isMarginDisabledError(error)) return "disabled";
+    if ((error as { status?: unknown })?.status === 403) return "forbidden";
+    return "unknown";
+  }
+}
+
 export function updateMarginSettings(
   payload: MarginSettingsPayload,
 ): Promise<{ settings: MarginSettings; warnings: string[] }> {
