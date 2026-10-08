@@ -4,7 +4,7 @@
  */
 import "@testing-library/jest-dom";
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { FilterChips, fitChips } from "./FilterChips";
+import { FilterChips, fitChips, visibleChipIndexes } from "./FilterChips";
 
 const OPTIONS = ["All", "Placed", "Confirmed", "Scheduled", "Delivered"].map(
   (label) => ({ id: label.toLowerCase(), label, count: 3 }),
@@ -72,4 +72,25 @@ it("keeps the selected chip visible when it would overflow", () => {
     within(group).getByRole("button", { name: /^Delivered/ }),
   ).toHaveAttribute("aria-pressed", "true");
   restore();
+});
+
+it("swapping in a wide selected chip pushes out enough chips that nothing clips", () => {
+  const widths = [50, 50, 50, 50, 120];
+  const more = 60;
+  const avail = 250;
+  // Three leading chips fit without a selection.
+  expect(fitChips(widths, more, avail)).toBe(3);
+  const shown = visibleChipIndexes(widths, more, avail, 4);
+  expect(shown).toContain(4);
+  const used =
+    more + shown.reduce((s, i) => s + widths[i], 0) + 6 * shown.length;
+  expect(used).toBeLessThanOrEqual(avail);
+  expect(shown).toEqual([0, 4]);
+});
+
+it("keeps the leading order when the selection is already visible", () => {
+  expect(visibleChipIndexes([50, 50, 50, 50, 50], 60, 250, 1)).toEqual([
+    0, 1, 2,
+  ]);
+  expect(visibleChipIndexes([50, 50], 60, 250, 1)).toEqual([0, 1]);
 });

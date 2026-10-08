@@ -60,6 +60,36 @@ export function fitChips(
   return n;
 }
 
+/**
+ * Which chips are visible when they don't all fit: the selected chip always
+ * (it may sit past the fold), then leading chips in order while they fit
+ * beside it and the "More" button. Width-aware, so swapping a long selected
+ * label in pushes out as many chips as it needs rather than clipping
+ * (owner item 3.x-owner-3). Returns indices in display order.
+ */
+export function visibleChipIndexes(
+  widths: number[],
+  moreWidth: number,
+  avail: number,
+  selectedIndex: number,
+): number[] {
+  const all = widths.map((_, i) => i);
+  if (fitChips(widths, moreWidth, avail) === widths.length) return all;
+  const keep = new Set<number>();
+  let used = moreWidth;
+  if (selectedIndex >= 0) {
+    keep.add(selectedIndex);
+    used += GAP + widths[selectedIndex];
+  }
+  for (let i = 0; i < widths.length; i++) {
+    if (keep.has(i)) continue;
+    if (used + GAP + widths[i] > avail) break;
+    keep.add(i);
+    used += GAP + widths[i];
+  }
+  return all.filter((i) => keep.has(i));
+}
+
 function Dot({ status }: { status?: StatusKey }) {
   if (!status) return null;
   return (
@@ -96,6 +126,11 @@ export function FilterChips({
   const measureRef = useRef<HTMLDivElement>(null);
   const [fullWidth, setFullWidth] = useState<number | undefined>(undefined);
   const [fit, setFit] = useState(options.length);
+  const [layout, setLayout] = useState<{
+    widths: number[];
+    more: number;
+    avail: number;
+  } | null>(null);
 
   const measure = useCallback(() => {
     const row = rowRef.current;
@@ -115,6 +150,7 @@ export function FilterChips({
     }
     setFullWidth(Math.ceil(total));
     setFit(fitChips(widths, moreWidth, row.clientWidth));
+    setLayout({ widths, more: moreWidth, avail: row.clientWidth });
   }, [collapse, options.length]);
 
   // Re-measure when the labels or counts change, and on every resize.
@@ -133,14 +169,18 @@ export function FilterChips({
   // The visible set: the first `fit` chips, with the selected one swapped in.
   let shown = options;
   let hidden: FilterChipOption[] = [];
-  if (collapse && fit < options.length) {
-    const head = options.slice(0, fit);
-    const sel = options.find((o) => selected.has(o.id) && !head.includes(o));
-    if (sel && head.length > 0) head[head.length - 1] = sel;
-    else if (sel) head.push(sel);
-    const keep = new Set(head.map((o) => o.id));
-    shown = options.filter((o) => keep.has(o.id));
-    hidden = options.filter((o) => !keep.has(o.id));
+  if (
+    collapse &&
+    fit < options.length &&
+    layout &&
+    layout.widths.length === options.length
+  ) {
+    const selIndex = options.findIndex((o) => selected.has(o.id));
+    const keep = new Set(
+      visibleChipIndexes(layout.widths, layout.more, layout.avail, selIndex),
+    );
+    shown = options.filter((_, i) => keep.has(i));
+    hidden = options.filter((_, i) => !keep.has(i));
   }
 
   const chip = (o: FilterChipOption, interactive: boolean): ReactNode => {
