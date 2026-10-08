@@ -10,9 +10,19 @@
  * Validates: Requirements 3.1.4, 8.1.2
  */
 
-import { AlertTriangle, ChevronDown, ChevronUp } from "lucide-react";
-import { useCallback, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import Link from "next/link";
+import { useState } from "react";
+import {
+  type Column,
+  DataTable,
+  FilterChips,
+  StatusBadge,
+  type TableSort,
+  Toolbar,
+} from "@/components/ui";
+import { calendarDate, dateTime, number, pct } from "../../lib/format";
+import type { StatusKey } from "../../styles/tokens";
+import { STATUS } from "../../styles/tokens";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -85,12 +95,6 @@ function isOverloaded(driver: DriverUtilization, capacity: number): boolean {
   return driver.active_order_count > capacity;
 }
 
-function getRowHighlight(driver: DriverUtilization, capacity: number): string {
-  if (isOverloaded(driver, capacity)) return "bg-error-light";
-  if (isMedicalCardExpiring(driver)) return "bg-warning-light";
-  return "";
-}
-
 function isMedicalCardExpiring(driver: DriverUtilization): boolean {
   if (!driver.medical_card_expiry) return false;
   const expiry = new Date(driver.medical_card_expiry);
@@ -112,92 +116,57 @@ function getMedicalCardWarning(driver: DriverUtilization): string | null {
   return null;
 }
 
-function getStatusBadge(status: DriverStatus): string {
-  switch (status) {
-    case "active":
-      return "text-success-dark bg-success-light";
-    case "on_break":
-      return "text-warning-dark bg-warning-light";
-    case "off_duty":
-      return "text-warning-dark bg-warning-light";
-    case "inactive":
-      return "text-gray-700 bg-gray-100";
-    default:
-      return "text-gray-700 bg-gray-100";
-  }
-}
+/** Driver duty status → badge style and label (icon + text). */
+export const DUTY_STATUS: Record<
+  DriverStatus,
+  { status: StatusKey; label: string }
+> = {
+  active: { status: "ok", label: "Active" },
+  on_break: { status: "warning", label: "On break" },
+  off_duty: { status: "draft", label: "Off duty" },
+  inactive: { status: "cancelled", label: "Inactive" },
+};
 
-function getBarColor(percentage: number): string {
-  if (percentage > 100) return "bg-error";
-  if (percentage >= 60) return "bg-warning";
-  return "bg-success";
-}
-
-function formatDate(dateStr?: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-// Navigate into the Fleet module. There is no per-asset deep-link route yet —
-// the reusable <EntityLink> + asset detail surface land in task 5 — so for now
-// the truck links to the Fleet module. The dashboard reads `activeMenuItem`
-// from sessionStorage on mount (see app/dashboard/(today)/page.tsx), so we set it and
-// navigate there.
-function navigateToFleet(): void {
-  if (typeof window !== "undefined") {
-    window.sessionStorage.setItem("activeMenuItem", "fleet");
-  }
-}
+/** Canonical asset destination (Fleet → Trucks, row selected). */
+export const fleetAssetHref = (id: string) =>
+  `/dashboard/fleet?tab=trucks&asset=${encodeURIComponent(id)}`;
 
 const QUALIFICATION_CHIP: Record<
   NonNullable<DriverUtilization["qualification_status"]>,
-  { className: string; label: string }
+  { status: StatusKey; label: string }
 > = {
-  expired: { className: "text-error-dark bg-error-light", label: "Expired" },
-  expiring: {
-    className: "text-warning-dark bg-warning-light",
-    label: "Expiring",
-  },
-  valid: { className: "text-success-dark bg-success-light", label: "Valid" },
+  expired: { status: "critical", label: "Expired" },
+  expiring: { status: "warning", label: "Expiring" },
+  valid: { status: "ok", label: "Valid" },
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
+/**
+ * Fleet → Drivers → Utilization table (UI revamp task 3.1): DataTable with
+ * header sorting (`aria-sort` on `th`), status chips with counts in one
+ * toolbar, StatusBadge for duty and qualification, a utilization bar with
+ * the percentage as text, and an "Overloaded" badge instead of row tinting.
+ */
 export default function DriverUtilizationList({
   drivers,
   capacity = DEFAULT_CAPACITY,
   statusFilter = "",
   onStatusFilterChange,
 }: DriverUtilizationListProps) {
-  const [sortField, setSortField] = useState<SortField>("utilization");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+  const [sort, setSort] = useState<TableSort>({
+    key: "utilization",
+    direction: "desc",
+  });
 
-  const handleSort = useCallback(
-    (field: SortField) => {
-      if (sortField === field) {
-        setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
-      } else {
-        setSortField(field);
-        setSortOrder("desc");
-      }
-    },
-    [sortField],
-  );
-
-  // Filter by status
   const filtered = statusFilter
     ? drivers.filter((d) => d.status === statusFilter)
     : drivers;
 
-  // Sort
   const sorted = [...filtered].sort((a, b) => {
+    const field = sort.key as SortField;
     let cmp = 0;
-    switch (sortField) {
+    switch (field) {
       case "utilization":
         cmp = getUtilization(a, capacity) - getUtilization(b, capacity);
         break;
@@ -211,244 +180,199 @@ export default function DriverUtilizationList({
         cmp = (a.last_seen ?? "").localeCompare(b.last_seen ?? "");
         break;
       default:
-        cmp = ((a[sortField] as string) ?? "").localeCompare(
-          (b[sortField] as string) ?? "",
-        );
+        cmp = String(a[field] ?? "").localeCompare(String(b[field] ?? ""));
     }
-    return sortOrder === "asc" ? cmp : -cmp;
+    return sort.direction === "asc" ? cmp : -cmp;
   });
 
-  const COLUMNS: { key: SortField; label: string }[] = [
-    { key: "driver_id", label: "Driver ID" },
-    { key: "driver_name", label: "Name" },
-    { key: "status", label: "Status" },
-    { key: "active_order_count", label: "Active Orders" },
-    { key: "completed_today", label: "Completed Today" },
-    { key: "last_seen", label: "Last Seen" },
-    { key: "utilization", label: "Utilization" },
-  ];
-
-  const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return null;
-    return sortOrder === "asc" ? (
-      <ChevronUp className="w-3 h-3 inline ml-1" />
-    ) : (
-      <ChevronDown className="w-3 h-3 inline ml-1" />
-    );
-  };
-
-  const sortableHeader = (field: SortField, label: string) => (
-    <button
-      type="button"
-      onClick={() => handleSort(field)}
-      aria-sort={
-        sortField === field
-          ? sortOrder === "asc"
-            ? "ascending"
-            : "descending"
-          : "none"
-      }
-      className="flex items-center text-xs font-medium text-gray-600 uppercase tracking-wider"
-    >
-      {label}
-      <SortIcon field={field} />
-    </button>
-  );
+  const counts: Record<string, number> = { "": drivers.length };
+  for (const d of drivers) counts[d.status] = (counts[d.status] ?? 0) + 1;
 
   const columns: Column<DriverUtilization>[] = [
-    ...COLUMNS.map((col) => ({
-      key: col.key,
-      label: sortableHeader(col.key, col.label),
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      render: (driver: DriverUtilization) => {
-        switch (col.key) {
-          case "driver_id":
-            return (
-              <span className="text-sm font-medium text-primary">
-                {driver.driver_id}
-              </span>
-            );
-          case "driver_name":
-            return (
-              <span className="text-sm text-gray-700">
-                {driver.driver_name ?? "—"}
-              </span>
-            );
-          case "status":
-            return (
-              <span
-                className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(driver.status)}`}
-              >
-                {driver.status.replace("_", " ")}
-              </span>
-            );
-          case "active_order_count":
-            return (
-              <span className="text-sm text-gray-700">
-                {driver.active_order_count}
-              </span>
-            );
-          case "completed_today":
-            return (
-              <span className="text-sm text-gray-700">
-                {driver.completed_today}
-              </span>
-            );
-          case "last_seen":
-            return (
-              <span className="text-sm text-gray-600">
-                {formatDate(driver.last_seen)}
-              </span>
-            );
-          default: {
-            const utilPct = getUtilization(driver, capacity);
-            const barWidth = Math.min(utilPct, 100);
-            return (
-              <div className="flex items-center gap-2">
-                <div
-                  className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"
-                  role="progressbar"
-                  aria-valuenow={utilPct}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label={`Utilization ${utilPct}%`}
-                >
-                  <div
-                    className={`h-full rounded-full transition-all ${getBarColor(utilPct)}`}
-                    style={{ width: `${barWidth}%` }}
-                  />
-                </div>
-                <span className="text-xs text-gray-600 w-10 text-right">
-                  {utilPct}%
-                </span>
-              </div>
-            );
-          }
-        }
+    {
+      key: "driver_id",
+      header: "Driver ID",
+      sortable: true,
+      className: "font-medium text-text",
+      cell: (d) => d.driver_id,
+    },
+    {
+      key: "driver_name",
+      header: "Name",
+      sortable: true,
+      truncate: true,
+      title: (d) => d.driver_name ?? undefined,
+      className: "text-slate-700",
+      cell: (d) => d.driver_name ?? "—",
+    },
+    {
+      key: "status",
+      header: "Status",
+      sortable: true,
+      width: 110,
+      cell: (d) => {
+        const cfg = DUTY_STATUS[d.status] ?? DUTY_STATUS.inactive;
+        return <StatusBadge status={cfg.status} label={cfg.label} />;
       },
-    })),
+    },
+    {
+      key: "active_order_count",
+      header: "Active Orders",
+      sortable: true,
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (d) => (
+        <span className="inline-flex items-center gap-1.5">
+          {isOverloaded(d, capacity) && (
+            <StatusBadge status="critical" label="Overloaded" />
+          )}
+          {number(d.active_order_count)}
+        </span>
+      ),
+    },
+    {
+      key: "completed_today",
+      header: "Completed Today",
+      sortable: true,
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (d) => number(d.completed_today),
+    },
+    {
+      key: "last_seen",
+      header: "Last seen",
+      sortable: true,
+      className: "whitespace-nowrap text-slate-700",
+      cell: (d) => (d.last_seen ? dateTime(d.last_seen) : "—"),
+    },
+    {
+      key: "utilization",
+      header: "Utilization",
+      sortable: true,
+      width: 160,
+      cell: (d) => {
+        const utilPct = getUtilization(d, capacity);
+        const status: StatusKey =
+          utilPct > 100 ? "critical" : utilPct >= 60 ? "warning" : "ok";
+        return (
+          <div className="flex items-center gap-2">
+            <div
+              className="h-2 flex-1 overflow-hidden rounded-full bg-slate-200"
+              role="progressbar"
+              aria-valuenow={utilPct}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`Utilization ${utilPct}%`}
+            >
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${Math.min(utilPct, 100)}%`,
+                  backgroundColor: STATUS[status].dot,
+                }}
+              />
+            </div>
+            <span className="w-10 text-right text-xs tabular-nums text-slate-700">
+              {pct(utilPct)}
+            </span>
+          </div>
+        );
+      },
+    },
     {
       key: "medical_card",
-      label: "Medical Card",
-      render: (driver: DriverUtilization) => {
-        const medWarning = getMedicalCardWarning(driver);
-        if (medWarning) {
+      header: "Medical Card",
+      cell: (d) => {
+        const warning = getMedicalCardWarning(d);
+        if (warning)
           return (
-            <span
-              className={`inline-flex items-center gap-1 text-xs font-medium ${isMedicalCardExpired(driver) ? "text-error-dark" : "text-warning-dark"}`}
-            >
-              <AlertTriangle className="w-3 h-3" />
-              {medWarning}
-            </span>
+            <StatusBadge
+              status={isMedicalCardExpired(d) ? "critical" : "warning"}
+              label={warning}
+            />
           );
-        }
-        if (driver.medical_card_expiry) {
-          return (
-            <span className="text-xs text-gray-500">
-              {formatDate(driver.medical_card_expiry)}
-            </span>
-          );
-        }
-        return <span className="text-xs text-gray-500">—</span>;
+        return (
+          <span className="text-xs text-slate-700">
+            {d.medical_card_expiry ? calendarDate(d.medical_card_expiry) : "—"}
+          </span>
+        );
       },
     },
     {
       key: "assigned_truck",
-      label: "Truck",
-      render: (driver: DriverUtilization) => {
-        if (!driver.assigned_truck_id) {
-          return <span className="text-xs text-gray-500">—</span>;
-        }
-        return (
-          <a
-            href="/dashboard"
-            onClick={navigateToFleet}
-            className="text-sm font-medium text-info hover:underline"
-            title={`View ${driver.assigned_truck_id} in Fleet`}
+      header: "Truck",
+      cell: (d) =>
+        d.assigned_truck_id ? (
+          <Link
+            href={fleetAssetHref(d.assigned_truck_id)}
+            className="text-sm font-medium text-link hover:underline"
+            title={`View ${d.assigned_truck_id} in Fleet`}
           >
-            {driver.assigned_truck_id}
-          </a>
-        );
-      },
+            {d.assigned_truck_id}
+          </Link>
+        ) : (
+          <span className="text-xs text-text-muted">—</span>
+        ),
     },
     {
       key: "qualification",
-      label: "Qualification",
-      render: (driver: DriverUtilization) => {
-        const qs = driver.qualification_status;
-        if (!qs) {
+      header: "Qualification",
+      cell: (d) => {
+        const qs = d.qualification_status;
+        if (!qs)
           return (
             <span
-              className="text-xs text-gray-500"
+              className="text-xs text-text-muted"
               title="No qualification record"
             >
               Unlinked
             </span>
           );
-        }
         const chip = QUALIFICATION_CHIP[qs];
-        return (
-          <span
-            className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md text-xs font-medium ${chip.className}`}
-          >
-            {qs !== "valid" && <AlertTriangle className="w-3 h-3" />}
-            {chip.label}
-          </span>
-        );
+        return <StatusBadge status={chip.status} label={chip.label} />;
       },
     },
   ];
 
   return (
-    <div>
-      {/* Header */}
-      <div className="px-6 py-4 border-b border-gray-100">
-        <h2 className="text-lg font-semibold text-primary">
-          Driver Utilization
-        </h2>
-      </div>
-
-      {/* Status filter */}
+    <div className="flex h-full flex-col">
       {onStatusFilterChange && (
-        <div className="px-6 py-3 border-b border-gray-100">
-          <label htmlFor="driver-status-filter" className="sr-only">
-            Filter by status
-          </label>
-          <select
-            id="driver-status-filter"
-            value={statusFilter}
-            onChange={(e) =>
-              onStatusFilterChange(e.target.value as DriverStatus | "")
-            }
-            className="rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 focus:outline-none focus:ring-2 focus:ring-primary focus:border-transparent"
-            aria-label="Filter drivers by status"
-          >
-            {STATUS_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
-        </div>
+        <Toolbar
+          label="Driver utilization"
+          filters={
+            <FilterChips
+              label="Duty status"
+              options={STATUS_OPTIONS.map((o) => ({
+                id: o.value || "all",
+                label: o.value ? DUTY_STATUS[o.value].label : "All",
+                count: counts[o.value] ?? 0,
+                status: o.value ? DUTY_STATUS[o.value].status : undefined,
+              }))}
+              value={statusFilter || "all"}
+              onChange={(v) =>
+                onStatusFilterChange(v === "all" ? "" : (v as DriverStatus))
+              }
+            />
+          }
+        />
       )}
-
-      <Table<DriverUtilization>
-        ariaLabel="Driver utilization list"
-        columns={columns}
-        data={sorted}
-        getRowId={(driver) => driver.driver_id}
-        rowClassName={(driver) => getRowHighlight(driver, capacity)}
-        emptyState={
-          <div className="text-gray-500">
-            <p className="text-lg font-medium text-gray-500">
-              No drivers found
-            </p>
-            <p className="text-sm text-gray-500 mt-1">
-              Try adjusting your filters
-            </p>
-          </div>
-        }
-      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<DriverUtilization>
+          ariaLabel="Driver utilization"
+          columns={columns}
+          data={sorted}
+          getRowId={(d) => d.driver_id}
+          rowLabel={(d) => d.driver_name ?? d.driver_id}
+          sort={sort}
+          onSortChange={setSort}
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No drivers found</p>
+              <p className="mt-1 text-xs">Try adjusting your filters</p>
+            </div>
+          }
+        />
+      </div>
     </div>
   );
 }

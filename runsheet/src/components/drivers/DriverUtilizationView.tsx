@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiService } from "../../services/api";
-import LoadingSpinner from "../LoadingSpinner";
 import type {
   DriverStatus,
   DriverUtilization,
 } from "../ops/DriverUtilizationList";
 import DriverUtilizationList from "../ops/DriverUtilizationList";
+import { Skeleton } from "../ui";
 
 /**
  * Driver Utilization View — displays real-time driver availability and workload

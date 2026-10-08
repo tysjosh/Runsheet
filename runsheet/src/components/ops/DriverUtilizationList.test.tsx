@@ -39,9 +39,12 @@ function driverFixture(
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("DriverUtilizationList — render", () => {
-  it("renders the page title as Driver Utilization", () => {
+  it("labels the table Driver utilization and renders no heading of its own", () => {
     render(<DriverUtilizationList drivers={[driverFixture()]} />);
-    expect(screen.getByText("Driver Utilization")).toBeInTheDocument();
+    expect(
+      screen.getByRole("table", { name: "Driver utilization" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("heading")).toBeNull();
   });
 
   it("renders driver rows with correct fields", () => {
@@ -144,7 +147,7 @@ describe("DriverUtilizationList — status filter", () => {
     expect(screen.queryByText("drv-off")).not.toBeInTheDocument();
   });
 
-  it("calls onStatusFilterChange when filter select changes", () => {
+  it("calls onStatusFilterChange when a status chip is pressed", () => {
     const onFilter = jest.fn();
     render(
       <DriverUtilizationList
@@ -154,9 +157,7 @@ describe("DriverUtilizationList — status filter", () => {
       />,
     );
 
-    fireEvent.change(screen.getByLabelText(/filter drivers by status/i), {
-      target: { value: "on_break" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /On break/ }));
 
     expect(onFilter).toHaveBeenCalledWith("on_break");
   });
@@ -173,12 +174,19 @@ describe("DriverUtilizationList — sorting", () => {
       />,
     );
 
-    // Click Active Orders header to sort
-    fireEvent.click(screen.getByText("Active Orders"));
-
-    const rows = screen.getAllByRole("row");
-    // First data row (after header) should be the high one (desc by default)
-    expect(rows[1]).toHaveTextContent("drv-high");
+    // Header sort with aria-sort on the th; clicking twice flips the order.
+    const first = () => screen.getAllByRole("row")[1];
+    fireEvent.click(screen.getByRole("button", { name: /Active Orders/ }));
+    const th = screen.getByRole("columnheader", { name: /Active Orders/ });
+    const dir = th.getAttribute("aria-sort");
+    expect(dir === "ascending" || dir === "descending").toBe(true);
+    expect(first()).toHaveTextContent(
+      dir === "ascending" ? "drv-low" : "drv-high",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Active Orders/ }));
+    expect(first()).toHaveTextContent(
+      dir === "ascending" ? "drv-high" : "drv-low",
+    );
   });
 });
 
@@ -205,17 +213,11 @@ describe("DriverUtilizationList — Fleet truck link (Req 4.1, 13.1)", () => {
     );
     const link = screen.getByRole("link", { name: "TRK-100" });
     expect(link).toBeInTheDocument();
-    expect(link).toHaveAttribute("href", "/dashboard");
-  });
-
-  it("sets the Fleet module as active when the truck link is clicked", () => {
-    render(
-      <DriverUtilizationList
-        drivers={[driverFixture({ assigned_truck_id: "TRK-100" })]}
-      />,
+    // The canonical asset destination: Fleet → Trucks with the row selected.
+    expect(link).toHaveAttribute(
+      "href",
+      "/dashboard/fleet?tab=trucks&asset=TRK-100",
     );
-    fireEvent.click(screen.getByRole("link", { name: "TRK-100" }));
-    expect(window.sessionStorage.getItem("activeMenuItem")).toBe("fleet");
   });
 
   it("renders a dash when no truck is assigned", () => {
