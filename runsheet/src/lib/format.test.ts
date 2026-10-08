@@ -138,6 +138,15 @@ describe("dates in the tenant time zone", () => {
   });
 });
 
+describe("calendarDate", () => {
+  it("keeps a date-only string on its calendar day west of UTC", () => {
+    configureFormat({ locale: "en-US", timeZone: "America/Chicago" });
+    expect(format.calendarDate("2027-01-31")).toBe("Sun 31 Jan 2027");
+    expect(format.dateLong("2027-01-31")).toBe("Sat 30 Jan 2027");
+    expect(format.calendarDate(null)).toBe("—");
+  });
+});
+
 describe("duration", () => {
   it("renders a short span with at most two units", () => {
     expect(format.duration(45)).toBe("45 s");

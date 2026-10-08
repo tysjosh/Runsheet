@@ -187,6 +187,20 @@ export function dateLong(d: DateInput, opts: DateOpts = {}): string {
   return `${p.weekday} ${p.day} ${p.month} ${p.year}`;
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * A calendar date such as an expiry ("2027-01-31" → "Sun 31 Jan 2027").
+ * Date-only strings are calendar days, not instants, so they are formatted
+ * in UTC: `dateLong` would shift them back a day west of UTC. Timestamps
+ * fall through to `dateLong` in the tenant zone.
+ */
+export function calendarDate(d: DateInput, opts: DateOpts = {}): string {
+  if (typeof d === "string" && DATE_ONLY.test(d))
+    return dateLong(`${d}T00:00:00Z`, { ...opts, timeZone: "UTC" });
+  return dateLong(d, opts);
+}
+
 /** "08:30" (24 h). */
 export function time(d: DateInput, opts: DateOpts = {}): string {
   const v = toDate(d);
@@ -307,6 +321,7 @@ export const format = {
   parseNumber,
   date,
   dateLong,
+  calendarDate,
   time,
   dateTime,
   window,

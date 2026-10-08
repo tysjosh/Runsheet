@@ -9,6 +9,7 @@
  */
 import { MessageSquare } from "lucide-react";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { dateTime } from "../../lib/format";
 import { extractApiErrorMessage } from "../../services/apiErrors";
 import {
   type DriverActivityItem,
@@ -22,16 +23,7 @@ const PAGE_SIZE = 20;
 const MAX_PAGES = Math.floor(1000 / PAGE_SIZE);
 
 function formatTimestamp(iso: string | null): string {
-  if (!iso) return "—";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return iso ? dateTime(iso) : "—";
 }
 
 function typeLabel(item: DriverActivityItem): string {
@@ -58,22 +50,27 @@ export default function DriverActivitySection({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // Only the latest request may update state, so a slow earlier response
-  // (an old page or filter) can't overwrite a newer one.
+  // (an old page or filter) can't overwrite a newer one; the superseded
+  // request is also aborted so it stops using the network (OI-29).
   const requestSeq = useRef(0);
+  const inflight = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
     const seq = ++requestSeq.current;
+    inflight.current?.abort();
+    const controller = new AbortController();
+    inflight.current = controller;
     setLoading(true);
     setError(null);
     const params: DriverActivityParams = { page, size: PAGE_SIZE };
     if (typeFilter) params.type = typeFilter;
     try {
-      const res = await getJobDriverActivity(jobId, params);
+      const res = await getJobDriverActivity(jobId, params, controller.signal);
       if (seq !== requestSeq.current) return;
       setItems(res.data ?? []);
       setTotalPages(Math.min(res.pagination?.total_pages ?? 0, MAX_PAGES));
     } catch (err) {
-      if (seq !== requestSeq.current) return;
+      if (seq !== requestSeq.current || controller.signal.aborted) return;
       setItems([]);
       setError(
         err instanceof Error && err.message
@@ -88,6 +85,8 @@ export default function DriverActivitySection({
   useEffect(() => {
     load();
   }, [load]);
+  // Abort the last read on unmount.
+  useEffect(() => () => inflight.current?.abort(), []);
 
   return (
     <section

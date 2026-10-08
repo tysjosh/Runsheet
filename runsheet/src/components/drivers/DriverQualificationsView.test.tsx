@@ -8,14 +8,23 @@
  * ``total_expiring_soon``, which the backend never sends, so every card
  * showed 0. These tests pin the backend shape.
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 jest.mock("../../services/complianceApi", () => {
   const actual = jest.requireActual("../../services/complianceApi");
   return {
     ...actual,
     getDrivers: jest.fn(),
+    getDriver: jest.fn(),
     getDriversDashboard: jest.fn(),
+    createDriver: jest.fn(),
+    updateDriver: jest.fn(),
   };
 });
 
@@ -28,9 +37,12 @@ jest.mock("../../services/exportApi", () => ({
 }));
 
 import {
+  createDriver,
   type DQFDashboard,
+  getDriver,
   getDrivers,
   getDriversDashboard,
+  updateDriver,
 } from "../../services/complianceApi";
 import { downloadCsvExport } from "../../services/exportApi";
 import { getCurrentUserRoles } from "../../utils/auth";
@@ -64,13 +76,7 @@ const backendDashboard = {
   generated_at: "2026-10-05T00:00:00Z",
 } as DQFDashboard;
 
-function statValue(label: string): string | null {
-  const labelEl = screen.getByText(label);
-  // StatsBar grid: <div><div>{value}</div><div>{label}</div></div>
-  return labelEl.previousElementSibling?.textContent ?? null;
-}
-
-describe("DriverQualificationsView DQF dashboard", () => {
+describe("DriverQualificationsView DQF counts", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockRoles.mockResolvedValue(["admin"]);
@@ -82,16 +88,21 @@ describe("DriverQualificationsView DQF dashboard", () => {
       data: backendDashboard,
     } as Awaited<ReturnType<typeof getDriversDashboard>>);
   });
-
-  it("shows active, suspended, expired and expiring counts from the backend payload", async () => {
+  it("shows total, active, suspended and expired counts on the status chips", async () => {
     render(<DriverQualificationsView />);
-    fireEvent.click(screen.getByRole("button", { name: "DQF Dashboard" }));
-
-    await screen.findByText("Active Drivers");
-    expect(statValue("Active Drivers")).toBe("4");
-    expect(statValue("Suspended")).toBe("1");
-    expect(statValue("Expired")).toBe("3");
-    expect(statValue("Expiring Soon")).toBe("2");
+    expect(
+      await screen.findByRole("button", { name: /All\s*9/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Active\s*4/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Suspended\s*1/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Expired\s*3/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("2 expiring within 60 days")).toBeInTheDocument();
   });
 });
 
@@ -111,9 +122,7 @@ describe("DriverQualificationsView Export CSV (OI-57)", () => {
     const button = (await screen.findByText("Export CSV")).closest("button");
     if (!button) throw new Error("no Export CSV button");
     expect(button).toHaveTextContent("Export CSV: driver qualifications");
-    fireEvent.change(screen.getByLabelText("Status"), {
-      target: { value: "suspended" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: /Suspended/ }));
     fireEvent.click(button);
     await waitFor(() =>
       expect(mockDownload).toHaveBeenCalledWith("driver_qualifications", {
@@ -141,5 +150,150 @@ describe("DriverQualificationsView Export CSV (OI-57)", () => {
     await waitFor(() => expect(mockRoles).toHaveBeenCalled());
     await waitFor(() => expect(mockGetDrivers).toHaveBeenCalled());
     expect(screen.queryByText("Export CSV")).not.toBeInTheDocument();
+  });
+});
+
+const driver = {
+  driver_id: "QA-DRV-1",
+  tenant_id: "tenant-1",
+  full_name: "QA Driver One",
+  cdl_number: "QA123",
+  cdl_state: "TX",
+  cdl_class: "A",
+  cdl_expiry_date: "2027-01-31",
+  medical_card_expiry_date: "2026-11-15",
+  hazmat_endorsement_expiry_date: null,
+  tanker_endorsement_expiry_date: null,
+  last_drug_test_date: null,
+  last_mvr_date: null,
+  status: "active",
+  created_at: "",
+  updated_at: "",
+};
+
+describe("DriverQualificationsView list, detail and FormDialog (3.1)", () => {
+  const mockCreate = createDriver as jest.Mock;
+  const mockUpdate = updateDriver as jest.Mock;
+  const mockGetDriver = getDriver as jest.Mock;
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockRoles.mockResolvedValue(["dispatcher"]);
+    mockGetDrivers.mockResolvedValue({
+      data: [driver],
+      pagination: { page: 1, size: 20, total: 1, total_pages: 1 },
+    } as never);
+    mockGetDashboard.mockResolvedValue({
+      data: {
+        ...backendDashboard,
+        drivers: [
+          {
+            driver_id: "QA-DRV-1",
+            full_name: "QA Driver One",
+            status: "active",
+            qualifications: [
+              {
+                qualification_type: "medical_card",
+                expiry_date: "2026-11-15",
+                days_until_expiry: 12,
+                alert_level: "urgent",
+                status: "expiring_soon",
+              },
+              {
+                qualification_type: "cdl",
+                expiry_date: "2027-01-31",
+                days_until_expiry: 100,
+                alert_level: "ok",
+                status: "valid",
+              },
+            ],
+          },
+        ],
+      },
+    } as never);
+  });
+
+  it("shows calendar dates on their day and the qualification alerts", async () => {
+    render(<DriverQualificationsView />);
+    const row = (await screen.findByText("QA Driver One")).closest(
+      "tr",
+    ) as HTMLElement;
+    expect(row).toHaveTextContent("Sun 31 Jan 2027");
+    expect(await screen.findByText("Medical card · 12 d")).toBeInTheDocument();
+    expect(screen.queryByText(/^CDL ·/)).toBeNull();
+  });
+
+  it("opens the detail drawer from the row", async () => {
+    mockGetDriver.mockResolvedValue({ data: driver });
+    render(<DriverQualificationsView />);
+    fireEvent.click(await screen.findByText("QA Driver One"));
+    const drawer = await screen.findByRole("dialog", { name: "QA Driver One" });
+    expect(drawer).toHaveTextContent("Sun 15 Nov 2026");
+  });
+
+  it("adds a driver through the sectioned FormDialog with validation", async () => {
+    mockCreate.mockResolvedValue({ data: driver });
+    render(<DriverQualificationsView />);
+    await screen.findByText("QA Driver One");
+    fireEvent.click(screen.getByRole("button", { name: "Add driver" }));
+    const dialog = await screen.findByRole("dialog", { name: "Add driver" });
+    expect(
+      screen.getByRole("navigation", { name: "Sections" }),
+    ).toHaveTextContent(/Identity.*CDL.*Medical.*Endorsements/);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add driver" }));
+    expect(
+      await screen.findByText("Enter the driver's name."),
+    ).toBeInTheDocument();
+    expect(mockCreate).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/Full name/), {
+      target: { value: "QA Driver Two" },
+    });
+    fireEvent.change(screen.getByLabelText(/CDL number/), {
+      target: { value: "QA999" },
+    });
+    fireEvent.change(screen.getByLabelText(/CDL state/), {
+      target: { value: "ok" },
+    });
+    fireEvent.change(screen.getByLabelText(/CDL expiry/), {
+      target: { value: "2028-02-01" },
+    });
+    fireEvent.change(screen.getByLabelText(/Medical card expiry/), {
+      target: { value: "2027-03-01" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add driver" }));
+    await waitFor(() =>
+      expect(mockCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          full_name: "QA Driver Two",
+          cdl_state: "OK",
+          cdl_expiry_date: "2028-02-01",
+          hazmat_endorsement_expiry_date: null,
+        }),
+      ),
+    );
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+  });
+
+  it("edits a driver from the row menu", async () => {
+    mockUpdate.mockResolvedValue({ data: driver });
+    render(<DriverQualificationsView />);
+    await screen.findByText("QA Driver One");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Actions for QA Driver One" }),
+    );
+    fireEvent.click(screen.getByRole("menuitem", { name: "Edit driver" }));
+    const dialog = await screen.findByRole("dialog", { name: "Edit driver" });
+    expect(screen.getByLabelText(/Full name/)).toHaveValue("QA Driver One");
+    fireEvent.change(screen.getByLabelText(/Full name/), {
+      target: { value: "QA Driver Renamed" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Save changes" }),
+    );
+    await waitFor(() =>
+      expect(mockUpdate).toHaveBeenCalledWith(
+        "QA-DRV-1",
+        expect.objectContaining({ full_name: "QA Driver Renamed" }),
+      ),
+    );
   });
 });

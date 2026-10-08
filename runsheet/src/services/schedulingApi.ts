@@ -308,10 +308,13 @@ export interface DriverActivityParams {
 export async function getJobDriverActivity(
   jobId: string,
   params: DriverActivityParams = {},
+  /** Aborts the read when the caller moves on (page, filter or job change). */
+  signal?: AbortSignal,
 ): Promise<PaginatedResponse<DriverActivityItem>> {
   const qs = buildQueryString(params);
   return schedulingRequest<PaginatedResponse<DriverActivityItem>>(
     `/scheduling/jobs/${encodeURIComponent(jobId)}/driver-activity${qs}`,
+    signal ? { signal } : undefined,
   );
 }
 

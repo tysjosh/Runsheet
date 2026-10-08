@@ -6,7 +6,14 @@
  * the empty state, the error text from a 403 envelope, the type filter and
  * pagination.
  */
-import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 jest.mock("../../services/schedulingApi", () => ({
   getJobDriverActivity: jest.fn(),
@@ -90,10 +97,14 @@ describe("DriverActivitySection", () => {
     expect(
       within(rows[2]).getByText("Tank fill pipe damaged"),
     ).toBeInTheDocument();
-    expect(mockGetActivity).toHaveBeenCalledWith("JOB-1", {
-      page: 1,
-      size: 20,
-    });
+    expect(mockGetActivity).toHaveBeenCalledWith(
+      "JOB-1",
+      {
+        page: 1,
+        size: 20,
+      },
+      expect.any(AbortSignal),
+    );
   });
 
   it("shows a loading status while the request is in flight", () => {
@@ -143,11 +154,15 @@ describe("DriverActivitySection", () => {
     });
 
     expect(await screen.findByText("Tank fill pipe damaged")).toBeVisible();
-    expect(mockGetActivity).toHaveBeenLastCalledWith("JOB-1", {
-      page: 1,
-      size: 20,
-      type: "exception",
-    });
+    expect(mockGetActivity).toHaveBeenLastCalledWith(
+      "JOB-1",
+      {
+        page: 1,
+        size: 20,
+        type: "exception",
+      },
+      expect.any(AbortSignal),
+    );
   });
 
   it("pages through results with Next and Previous", async () => {
@@ -167,10 +182,14 @@ describe("DriverActivitySection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next page" }));
 
     expect(await screen.findByText("Tank fill pipe damaged")).toBeVisible();
-    expect(mockGetActivity).toHaveBeenLastCalledWith("JOB-1", {
-      page: 2,
-      size: 20,
-    });
+    expect(mockGetActivity).toHaveBeenLastCalledWith(
+      "JOB-1",
+      {
+        page: 2,
+        size: 20,
+      },
+      expect.any(AbortSignal),
+    );
     expect(screen.getByText("Page 2 of 2")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
   });
@@ -216,10 +235,42 @@ describe("DriverActivitySection", () => {
       fireEvent.click(next);
       expect(await screen.findByText(`Page ${i} of 50`)).toBeInTheDocument();
     }
-    expect(mockGetActivity).toHaveBeenLastCalledWith("JOB-1", {
-      page: 50,
-      size: 20,
-    });
+    expect(mockGetActivity).toHaveBeenLastCalledWith(
+      "JOB-1",
+      {
+        page: 50,
+        size: 20,
+      },
+      expect.any(AbortSignal),
+    );
     expect(screen.getByRole("button", { name: "Next page" })).toBeDisabled();
+  });
+
+  it("aborts the superseded request when the filter changes (OI-29)", async () => {
+    const signals: AbortSignal[] = [];
+    mockGetActivity.mockImplementation((_id, _p, signal) => {
+      if (signal) signals.push(signal);
+      return new Promise(() => {});
+    });
+    render(<DriverActivitySection jobId="JOB-1" />);
+    await waitFor(() => expect(signals).toHaveLength(1));
+    fireEvent.change(screen.getByLabelText("Activity type"), {
+      target: { value: "exception" },
+    });
+    await waitFor(() => expect(signals).toHaveLength(2));
+    expect(signals[0].aborted).toBe(true);
+    expect(signals[1].aborted).toBe(false);
+  });
+
+  it("aborts the in-flight request on unmount (OI-29)", async () => {
+    let seen: AbortSignal | undefined;
+    mockGetActivity.mockImplementation((_id, _p, signal) => {
+      seen = signal;
+      return new Promise(() => {});
+    });
+    const { unmount } = render(<DriverActivitySection jobId="JOB-1" />);
+    await waitFor(() => expect(seen).toBeDefined());
+    unmount();
+    expect(seen?.aborted).toBe(true);
   });
 });
