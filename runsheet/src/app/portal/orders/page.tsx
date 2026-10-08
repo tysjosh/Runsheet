@@ -1,14 +1,26 @@
 "use client";
 
-/** The customer's orders from every channel, newest first (R4.11, PD11). */
+/**
+ * The customer's orders from every channel, newest first (R4.11, PD11).
+ * Rows with `cancellable` get a "Cancel request" button (R4.10, PD8): no
+ * confirm step, like staff Decline. Success, or a 409 ORDER_NOT_CANCELLABLE,
+ * reloads the list in place, announces the outcome in a polite live region
+ * and puts focus back on the row (or the list if the row is gone). Other
+ * errors show in the standard alert banner.
+ */
 
 import Link from "next/link";
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   formatDateTime,
   formatVolume,
   formatWindow,
 } from "../../../components/portal/format";
+import LiveRegion from "../../../components/portal/LiveRegion";
+import {
+  REQUEST_CHANGED_MESSAGE,
+  requestCancelledMessage,
+} from "../../../components/portal/messages";
 import {
   PortalLoadError,
   PortalLoading,
@@ -24,9 +36,14 @@ import {
 import { usePagedList } from "../../../components/portal/usePagedList";
 import { portalErrorMessage } from "../../../components/portal/usePortalData";
 import {
+  cancelPortalOrder,
+  hasErrorCode,
   listPortalOrders,
   type PortalOrder,
 } from "../../../services/portalApi";
+
+const focusRing =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2";
 
 function quantityText(order: PortalOrder, unit: string): string {
   if (order.fill_to_full) return "Fill to full";
@@ -41,6 +58,59 @@ export default function PortalOrdersPage() {
     [],
   );
   const list = usePagedList(fetchPage, [fetchPage]);
+  const { refresh } = list;
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  const rowRefs = useRef(new Map<string, HTMLLIElement>());
+
+  // After a cancel reload, put focus back on the row, or on the list if the
+  // row is no longer on the first page.
+  useEffect(() => {
+    if (focusId === null) return;
+    (rowRefs.current.get(focusId) ?? listRef.current)?.focus();
+    setFocusId(null);
+  }, [focusId]);
+
+  const handleCancel = useCallback(
+    async (orderId: string) => {
+      if (pendingId !== null) return;
+      setPendingId(orderId);
+      setNotice(null);
+      setCancelError(null);
+      let message: string;
+      try {
+        await cancelPortalOrder(orderId);
+        message = requestCancelledMessage(orderId);
+      } catch (error) {
+        if (!hasErrorCode(error, "ORDER_NOT_CANCELLABLE")) {
+          setCancelError(
+            portalErrorMessage(error, {
+              fallback: "We couldn't cancel this request. Try again.",
+            }),
+          );
+          setPendingId(null);
+          return;
+        }
+        message = REQUEST_CHANGED_MESSAGE;
+      }
+      try {
+        await refresh();
+      } catch (error) {
+        setCancelError(
+          portalErrorMessage(error, {
+            fallback: "We couldn't reload your orders.",
+          }),
+        );
+      }
+      setNotice(message);
+      setPendingId(null);
+      setFocusId(orderId);
+    },
+    [pendingId, refresh],
+  );
 
   return (
     <div className="space-y-6">
@@ -50,6 +120,13 @@ export default function PortalOrdersPage() {
           Request delivery
         </Link>
       </div>
+
+      <LiveRegion message={notice} />
+      {cancelError && (
+        <p role="alert" className="text-sm text-gray-900">
+          {cancelError}
+        </p>
+      )}
 
       {list.loading ? (
         <PortalLoading label="Loading your orders…" />
@@ -63,9 +140,22 @@ export default function PortalOrdersPage() {
       ) : list.items.length === 0 ? (
         <p className="text-sm text-gray-700">No orders yet.</p>
       ) : (
-        <ul className="space-y-3">
+        <ul
+          ref={listRef}
+          tabIndex={-1}
+          aria-label="Your orders"
+          className={`space-y-3 ${focusRing}`}
+        >
           {list.items.map((order) => (
-            <li key={order.order_id} className={card}>
+            <li
+              key={order.order_id}
+              ref={(el) => {
+                if (el) rowRefs.current.set(order.order_id, el);
+                else rowRefs.current.delete(order.order_id);
+              }}
+              tabIndex={-1}
+              className={`${card} ${focusRing}`}
+            >
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="font-medium text-gray-900">
                   {order.tank?.label ?? "Tank"} · {order.product_code ?? "—"}
@@ -119,6 +209,19 @@ export default function PortalOrdersPage() {
                   </div>
                 )}
               </dl>
+              {order.cancellable && (
+                <div className="mt-3">
+                  <button
+                    type="button"
+                    className={`${secondaryButton} aria-disabled:cursor-not-allowed aria-disabled:opacity-60`}
+                    aria-label={`Cancel request ${order.order_id}`}
+                    aria-disabled={pendingId !== null ? true : undefined}
+                    onClick={() => void handleCancel(order.order_id)}
+                  >
+                    Cancel request
+                  </button>
+                </div>
+              )}
             </li>
           ))}
         </ul>

@@ -1,5 +1,6 @@
 /**
- * R10.4: keyboard-only sign-in → new delivery request → invoice PDF download.
+ * R10.4: keyboard-only sign-in → new delivery request → cancel it (R4.10)
+ * → invoice PDF download.
  * Runs on staging only (F5); skips without the portal env.
  *
  * Staging may have online ordering off (`order_intake_pipeline` disabled,
@@ -26,6 +27,33 @@ async function activateWithKeyboard(
   await page.keyboard.press("Enter");
 }
 
+/**
+ * R4.10: cancel the request this flow just sent (newest first, so the first
+ * Cancel button), by keyboard. This also removes the QA request again. The
+ * outcome is announced politely and focus stays in the list.
+ */
+async function cancelNewestRequest(page: Page): Promise<void> {
+  await activateWithKeyboard(
+    page,
+    page.getByRole("link", { name: "Orders", exact: true }),
+  );
+  await page.waitForURL(/\/portal\/orders$/);
+  await waitForPortal(page);
+  const cancel = page.getByRole("button", { name: /^Cancel request \S+$/ });
+  await expect(cancel.first()).toBeVisible();
+  const before = await cancel.count();
+  await activateWithKeyboard(page, cancel.first());
+  await expect(
+    page
+      .getByRole("status")
+      .filter({ hasText: /^Request \S+ cancelled\.$|^This request changed\./ }),
+  ).toBeVisible({ timeout: 30_000 });
+  await expect(cancel).toHaveCount(before - 1);
+  await expect(
+    page.getByRole("list", { name: "Your orders" }).locator("li:focus"),
+  ).toHaveCount(1);
+}
+
 /** Keystrokes for a native date input in an en-US browser (MM DD YYYY). */
 function dateKeystrokesInDays(days: number): string {
   const d = new Date();
@@ -38,7 +66,7 @@ function dateKeystrokesInDays(days: number): string {
 test.describe("customer portal keyboard-only flow", () => {
   skipWithoutPortalEnv();
 
-  test("sign in, request a delivery and download an invoice PDF", async ({
+  test("sign in, request a delivery, cancel it and download an invoice PDF", async ({
     page,
   }) => {
     await signInWithKeyboard(page);
@@ -82,11 +110,11 @@ test.describe("customer portal keyboard-only flow", () => {
           "QA-E2E-PORTAL",
         );
       } else {
+        const sent = page.getByRole("heading", { name: "Request sent" });
         await expect(
-          page
-            .getByRole("heading", { name: "Request sent" })
-            .or(page.getByRole("status").filter({ hasText: PD10 })),
+          sent.or(page.getByRole("status").filter({ hasText: PD10 })),
         ).toBeVisible({ timeout: 30_000 });
+        if ((await sent.count()) > 0) await cancelNewestRequest(page);
       }
     }
 

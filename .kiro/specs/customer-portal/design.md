@@ -802,7 +802,7 @@ ORM mirrors `PortalUserGrantORM` and `PortalPaymentAttemptORM` go in `persistenc
 ```
 portal/layout.tsx              client; session gate → /signin; non-customer → /dashboard; PortalShell
 portal/page.tsx                Overview: account name, capability notices, tank summary, open balance, recent requests
-portal/orders/page.tsx         list + "Request delivery" link
+portal/orders/page.tsx         list + "Request delivery" link + "Cancel request" on cancellable rows (R4.10)
 portal/orders/new/page.tsx     request form
 portal/invoices/page.tsx       list, filters, "Download CSV"
 portal/invoices/[invoiceId]/page.tsx       detail, "Download PDF", "Pay"

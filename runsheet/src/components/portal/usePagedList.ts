@@ -18,6 +18,7 @@ export function usePagedList<T>(
   hasMore: boolean;
   loadMore: () => void;
   reload: () => void;
+  refresh: () => Promise<void>;
 } {
   const [items, setItems] = useState<T[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
@@ -49,6 +50,18 @@ export function usePagedList<T>(
   useEffect(() => {
     reload();
   }, [reload]);
+  // Re-fetch the first page in place: `loading` stays false, so the list
+  // stays mounted and focus can stay inside it. Rejects on failure and leaves
+  // `items` and `error` unchanged; the caller reports the error.
+  const refresh = useCallback(async () => {
+    seq.current += 1;
+    const mine = seq.current;
+    const page = await fetchPage(null);
+    if (mine !== seq.current) return;
+    setItems(page.data);
+    setCursor(page.next_cursor);
+    setError(null);
+  }, [fetchPage]);
 
   const loadMore = useCallback(() => {
     if (!cursor || loadingMore) return;
@@ -77,5 +90,6 @@ export function usePagedList<T>(
     hasMore: cursor !== null,
     loadMore,
     reload,
+    refresh,
   };
 }

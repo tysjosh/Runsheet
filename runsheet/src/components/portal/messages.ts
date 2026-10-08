@@ -11,3 +11,12 @@ export const PAYMENTS_UNAVAILABLE_MESSAGE =
 /** R5.6: shown when an invoice page is opened while invoicing is off. */
 export const INVOICES_UNAVAILABLE_MESSAGE =
   "Invoices aren't available online right now.";
+
+/** Shown after a cancel answers 409 ORDER_NOT_CANCELLABLE and the list reloads (same text as staff Confirm/Decline). */
+export const REQUEST_CHANGED_MESSAGE =
+  "This request changed. Reloaded the latest version.";
+
+/** Announced after a customer cancels their own request (R4.10). */
+export function requestCancelledMessage(orderId: string): string {
+  return `Request ${orderId} cancelled.`;
+}
