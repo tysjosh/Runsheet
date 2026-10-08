@@ -16,7 +16,7 @@
  * every render, which is the one behavioural fix to the donor's placement.
  */
 
-import { DarkTheme, DefaultTheme, ThemeProvider } from '@react-navigation/native';
+import { ThemeProvider } from '@react-navigation/native';
 import NetInfo from '@react-native-community/netinfo';
 import { QueryClient, QueryClientProvider, focusManager, onlineManager } from '@tanstack/react-query';
 import { useFonts } from 'expo-font';
@@ -27,6 +27,7 @@ import { AppState, Platform, type AppStateStatus } from 'react-native';
 import 'react-native-reanimated';
 import '../global.css';
 
+import { HeaderBackButton } from '@/components/HeaderBackButton';
 import { useColorScheme } from '@/hooks/useColorScheme';
 import {
   demoPreviewEnabled,
@@ -42,7 +43,21 @@ import {
   subscribeToSession,
   type SessionIdentity,
 } from '@/lib/session';
+import { navigationTheme } from '@/lib/theme';
 import { driverWebSocket } from '@/lib/websocket';
+
+/**
+ * Stack header options shared by every pushed screen. Native iOS and Android
+ * back buttons already have system-sized (≥ 44 pt) hit areas; the web build's
+ * default back button is 30×30, so web gets a 44×44 one (UI revamp task 4.2).
+ */
+const stackScreenOptions =
+  Platform.OS === 'web'
+    ? {
+        headerLeft: ({ canGoBack }: { canGoBack?: boolean }) =>
+          canGoBack ? <HeaderBackButton /> : null,
+      }
+    : {};
 
 /** Query defaults carried from the donor layout verbatim. */
 const queryClient = new QueryClient({
@@ -159,8 +174,8 @@ export default function RootLayout() {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-        <Stack>
+      <ThemeProvider value={navigationTheme(colorScheme)}>
+        <Stack screenOptions={stackScreenOptions}>
           <Stack.Screen name="sign-in" options={{ headerShown: false }} />
           <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
           <Stack.Screen name="order/[orderId]" options={{ title: 'Delivery' }} />
@@ -169,6 +184,7 @@ export default function RootLayout() {
             name="order/[orderId]/exception"
             options={{ title: 'Report a problem' }}
           />
+          <Stack.Screen name="inspection/new" options={{ title: 'Vehicle inspection' }} />
           <Stack.Screen name="+not-found" />
         </Stack>
         <StatusBar style="auto" />

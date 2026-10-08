@@ -14,12 +14,12 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Platform,
-  Pressable,
   RefreshControl,
   ScrollView,
   View,
 } from 'react-native';
 
+import { ChoiceOption } from '@/components/ChoiceOption';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -30,15 +30,13 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Text } from '@/components/ui/text';
+import { dateTime } from '@/lib/format';
 import { loadThread, sendThreadMessage } from '@/lib/messages-api';
 import { queryKeys } from '@/lib/query-keys';
 import { loadAssignedWork } from '@/lib/work-api';
 
 function timeOf(timestamp: string): string {
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed)
-    ? new Date(parsed).toLocaleString()
-    : timestamp;
+  return Number.isFinite(Date.parse(timestamp)) ? dateTime(timestamp) : timestamp;
 }
 
 export default function MessagesScreen() {
@@ -114,12 +112,9 @@ export default function MessagesScreen() {
           />
         }
       >
-        <View className="gap-1">
-          <Text className="text-3xl font-bold">Dispatch</Text>
-          <Text className="text-muted-foreground">
-            Messages stay inside the order you are working
-          </Text>
-        </View>
+        <Text className="text-muted-foreground">
+          Messages stay inside the order you are working.
+        </Text>
 
         {orders.length === 0 ? (
           <Card>
@@ -133,33 +128,20 @@ export default function MessagesScreen() {
         ) : (
           <View className="gap-2">
             <Text className="font-semibold">Order</Text>
-            <View className="flex-row flex-wrap gap-2">
-              {orders.map((order) => {
-                const active = order.order_id === selectedOrderId;
-                return (
-                  <Pressable
-                    key={order.order_id}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: active }}
-                    onPress={() => setSelectedOrderId(order.order_id)}
-                    className={
-                      active
-                        ? 'rounded-full bg-primary px-4 py-2'
-                        : 'rounded-full border border-input px-4 py-2'
-                    }
-                  >
-                    <Text
-                      className={
-                        active
-                          ? 'text-sm font-semibold text-primary-foreground'
-                          : 'text-sm'
-                      }
-                    >
-                      {order.customer_name}
-                    </Text>
-                  </Pressable>
-                );
-              })}
+            <View
+              accessibilityRole="radiogroup"
+              accessibilityLabel="Order"
+              className="flex-row flex-wrap gap-2"
+            >
+              {orders.map((order) => (
+                <ChoiceOption
+                  key={order.order_id}
+                  variant="chip"
+                  label={order.customer_name}
+                  checked={order.order_id === selectedOrderId}
+                  onPress={() => setSelectedOrderId(order.order_id)}
+                />
+              ))}
             </View>
           </View>
         )}
@@ -218,6 +200,7 @@ export default function MessagesScreen() {
                 setMessage(null);
               }}
               placeholder="Message dispatch"
+              aria-label="Message dispatch"
               multiline
               editable={!send.isPending}
             />

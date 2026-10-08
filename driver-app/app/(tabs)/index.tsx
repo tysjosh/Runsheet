@@ -1,29 +1,35 @@
+/**
+ * Work — today's deliveries (UI revamp task 4.3, R13.3, D16).
+ *
+ * One large title ("Today"), the duty-status chip moved here from Profile, the
+ * offline queue chip, then the next stop as a large card with Navigate, Call
+ * and Arrive, then the remaining stops as compact rows. Data and refresh are
+ * unchanged: the same work query, the same POD sync and queue drain on pull.
+ */
+
 import { useNetInfo } from '@react-native-community/netinfo';
 import { useQuery } from '@tanstack/react-query';
-import { useRouter } from 'expo-router';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
 
+import {
+  DutyStatusChip,
+  DutyStatusSheet,
+  HosLimitBanner,
+  StartShiftCard,
+  useDutyStatus,
+} from '@/components/DutyStatusControl';
 import { PendingQueueChip } from '@/components/PendingQueueChip';
+import { NextStopCard, StopRow } from '@/components/WorkStops';
 import { Button } from '@/components/ui/button';
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Text } from '@/components/ui/text';
-import {
-  drainQueue,
-  queueDepth,
-  subscribeToQueue,
-  type QueueDepth,
-} from '@/lib/offline-queue';
+import { date } from '@/lib/format';
+import { drainQueue, queueDepth, subscribeToQueue, type QueueDepth } from '@/lib/offline-queue';
 import { syncPendingPodCaptures } from '@/lib/pod-api';
 import { queryKeys } from '@/lib/query-keys';
-import { formatGallons } from '@/lib/units';
 import { loadAssignedWork } from '@/lib/work-api';
+import { sortWork } from '@/lib/work-view';
 
 const EMPTY_DEPTH: QueueDepth = {
   pending: 0,
@@ -34,9 +40,10 @@ const EMPTY_DEPTH: QueueDepth = {
 };
 
 export default function AssignedWorkScreen() {
-  const router = useRouter();
   const network = useNetInfo();
   const [depth, setDepth] = useState<QueueDepth>(EMPTY_DEPTH);
+  const [dutyOpen, setDutyOpen] = useState(false);
+  const duty = useDutyStatus({ onLeave: () => setDutyOpen(false) });
   const work = useQuery({
     queryKey: queryKeys.work({
       statuses: ['dispatched', 'in_transit'],
@@ -54,33 +61,37 @@ export default function AssignedWorkScreen() {
     await syncPendingPodCaptures();
     await drainQueue();
     await work.refetch();
+    void duty.refetch();
     const latest = await queueDepth();
     setDepth(latest);
   };
 
-  const orders = work.data?.data ?? [];
+  const orders = useMemo(() => sortWork(work.data?.data ?? []), [work.data]);
+  const [next, ...rest] = orders;
   const isOnline = network.isConnected !== false;
 
   return (
     <ScrollView
       className="flex-1 bg-background"
-      contentContainerClassName="gap-5 p-5 pb-28"
+      contentContainerClassName="gap-4 p-5 pb-28"
       refreshControl={
-        <RefreshControl
-          refreshing={work.isRefetching}
-          onRefresh={() => void refresh()}
-        />
+        <RefreshControl refreshing={work.isRefetching} onRefresh={() => void refresh()} />
       }
     >
-      <View className="flex-row items-start justify-between gap-3">
-        <View className="flex-1 gap-1">
-          <Text className="text-3xl font-bold">Assigned work</Text>
-          <Text className="text-muted-foreground">
-            Deliveries dispatched to this driver
+      <View className="flex-row items-center justify-between gap-3">
+        <View className="flex-1">
+          <Text role="heading" aria-level={1} className="text-3xl font-bold">
+            Today
           </Text>
+          <Text className="text-muted-foreground">{date(new Date())}</Text>
         </View>
-        <PendingQueueChip counts={depth} isOnline={isOnline} />
+        <DutyStatusChip duty={duty} onPress={() => setDutyOpen(true)} />
       </View>
+
+      <PendingQueueChip counts={depth} isOnline={isOnline} className="self-start" />
+
+      <HosLimitBanner />
+      <StartShiftCard duty={duty} />
 
       {work.isLoading && (
         <Card>
@@ -91,7 +102,7 @@ export default function AssignedWorkScreen() {
       )}
 
       {work.isError && (
-        <Card className="border-red-300">
+        <Card className="border-destructive">
           <CardHeader>
             <CardTitle>Work list unavailable</CardTitle>
             <CardDescription>
@@ -110,55 +121,25 @@ export default function AssignedWorkScreen() {
         <Card>
           <CardHeader>
             <CardTitle>No active deliveries</CardTitle>
-            <CardDescription>
-              Pull down to check for newly dispatched work.
-            </CardDescription>
+            <CardDescription>Pull down to check for newly dispatched work.</CardDescription>
           </CardHeader>
         </Card>
       )}
 
-      {orders.map((order) => (
-        <Card key={order.order_id}>
-          <CardHeader>
-            <View className="flex-row items-start justify-between gap-3">
-              <View className="flex-1 gap-1">
-                <CardTitle>{order.customer_name}</CardTitle>
-                <CardDescription>{order.destination.address}</CardDescription>
-              </View>
-              <View className="rounded-full bg-primary/10 px-3 py-1">
-                <Text className="text-xs font-semibold uppercase text-primary">
-                  {order.status.replace('_', ' ')}
-                </Text>
-              </View>
-            </View>
-          </CardHeader>
-          <CardContent className="gap-4">
-            <View className="rounded-xl bg-muted p-4">
-              <Text className="font-semibold">
-                {order.product_grade} · {formatGallons(order.ordered_gallons)}
-              </Text>
-              <Text className="mt-1 text-sm text-muted-foreground">
-                Window: {new Date(order.delivery_window_start).toLocaleString()}
-              </Text>
-            </View>
+      {next && <NextStopCard order={next} />}
 
-            <Button
-              onPress={() =>
-                router.push({
-                  pathname: '/order/[orderId]',
-                  params: { orderId: order.order_id },
-                })
-              }
-            >
-              <Text>
-                {order.status === 'in_transit'
-                  ? 'Continue delivery'
-                  : 'Review and start'}
-              </Text>
-            </Button>
-          </CardContent>
-        </Card>
-      ))}
+      {rest.length > 0 && (
+        <View className="gap-2">
+          <Text role="heading" aria-level={2} className="text-lg font-semibold">
+            Later today · {rest.length}
+          </Text>
+          {rest.map((order) => (
+            <StopRow key={order.order_id} order={order} />
+          ))}
+        </View>
+      )}
+
+      <DutyStatusSheet duty={duty} visible={dutyOpen} onClose={() => setDutyOpen(false)} />
     </ScrollView>
   );
 }
