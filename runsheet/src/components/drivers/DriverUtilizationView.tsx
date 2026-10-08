@@ -24,9 +24,10 @@ export default function DriverUtilizationView() {
       // Session-aware fetch (SuperTokens cookie + anti-CSRF). Replaces the
       // legacy raw-fetch + Bearer-token path so Drivers matches every other
       // module's auth posture.
-      const data = (await apiService.getDriverUtilization(
-        statusFilter || undefined,
-      )) as DriverUtilization[];
+      // Every driver is read once and the status chips filter on the client,
+      // so the chip counts stay right whichever chip is pressed.
+      const data =
+        (await apiService.getDriverUtilization()) as DriverUtilization[];
 
       // Correlate each driver's compliance qualification status via the
       // profile read so the list can surface a qualification-status chip
@@ -53,7 +54,7 @@ export default function DriverUtilizationView() {
     } finally {
       setLoading(false);
     }
-  }, [statusFilter]);
+  }, []);
 
   useEffect(() => {
     loadData();

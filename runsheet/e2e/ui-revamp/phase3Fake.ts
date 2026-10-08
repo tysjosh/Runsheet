@@ -110,6 +110,74 @@ const NOTIFICATIONS = Array.from({ length: 22 }, (_, i) => ({
   failed_at: null,
 }));
 
+const loc = (name: string, i: number) => ({
+  id: `QA-LOC-${i}`,
+  name,
+  type: "depot",
+  coordinates: { lat: 29.7 + i * 0.01, lon: -95.3 - i * 0.01 },
+  address: name,
+});
+const TRUCK_STATUSES = ["on_time", "delayed", "stopped", "loading", "on_time"];
+export const TRUCKS = Array.from({ length: 22 }, (_, i) => ({
+  id: `QA-TRK-${String(100 + i)}`,
+  assetType: "vehicle",
+  assetSubtype: "fuel_truck",
+  name: `QA Tanker ${100 + i}`,
+  plateNumber: `QA-${String(100 + i)}`,
+  status: TRUCK_STATUSES[i % TRUCK_STATUSES.length],
+  currentLocation: loc(`QA Depot ${i % 3}`, i),
+  destination: loc(`QA Site ${i}`, i + 50),
+  route: {
+    id: `QA-RT-${i}`,
+    origin: loc(`QA Depot ${i % 3}`, i),
+    destination: loc(`QA Site ${i}`, i + 50),
+    waypoints: [],
+    distance: 20 + i,
+    estimatedDuration: 60,
+  },
+  estimatedArrival: iso(10 + (i % 6), i),
+  lastUpdate: iso(8, i),
+}));
+const INVENTORY = Array.from({ length: 22 }, (_, i) => ({
+  item_id: `QA-INV-${String(400 + i)}`,
+  name: `QA Part ${400 + i}`,
+  category: ["tires", "filters", "fluids", "fuel_equipment"][i % 4],
+  location: `QA Depot ${i % 3}`,
+  quantity: 1_000 + i * 37,
+  unit: "pieces",
+  status: ["in_stock", "low_stock", "in_stock", "out_of_stock"][i % 4],
+  min_threshold: 50,
+  max_capacity: 5_000,
+  updated_at: iso(7, i),
+}));
+const UTILIZATION = Array.from({ length: 22 }, (_, i) => ({
+  driver_id: `QA-DRV-${String(500 + i)}`,
+  driver_name: `QA Driver ${500 + i}`,
+  status: ["active", "on_break", "off_duty", "active"][i % 4],
+  active_order_count: i % 9,
+  completed_today: i % 5,
+  last_seen: iso(9, i),
+  medical_card_expiry: "2027-06-30",
+  assigned_truck_id: `QA-TRK-${String(100 + i)}`,
+}));
+const DRIVERS = UTILIZATION.map((u, i) => ({
+  driver_id: u.driver_id,
+  tenant_id: TENANT,
+  full_name: u.driver_name,
+  cdl_number: `QA${String(9000 + i)}`,
+  cdl_state: "TX",
+  cdl_class: "A",
+  cdl_expiry_date: "2027-01-31",
+  medical_card_expiry_date: "2026-11-15",
+  hazmat_endorsement_expiry_date: null,
+  tanker_endorsement_expiry_date: null,
+  last_drug_test_date: null,
+  last_mvr_date: null,
+  status: ["active", "suspended", "active", "expired"][i % 4],
+  created_at: iso(5, i),
+  updated_at: iso(5, i),
+}));
+
 function sized<T>(rows: T[], url: URL) {
   const size = Number(url.searchParams.get("size") ?? rows.length);
   const page = Number(url.searchParams.get("page") ?? 1);
@@ -132,6 +200,89 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
       status ? STATIONS.filter((s) => s.status === status) : STATIONS,
     );
   }
+  if (path === "/fleet/trucks")
+    return { data: TRUCKS, success: true, timestamp: iso(8) };
+  if (path === "/fleet/summary")
+    return {
+      data: {
+        totalTrucks: TRUCKS.length,
+        activeTrucks: 18,
+        onTimeTrucks: 9,
+        delayedTrucks: 4,
+        averageDelay: 6,
+        byType: { vehicle: TRUCKS.length },
+        bySubtype: { fuel_truck: TRUCKS.length },
+      },
+      success: true,
+      timestamp: iso(8),
+    };
+  if (/^\/fleet\/assets\/[^/]+\/compliance$/.test(path))
+    return { asset_id: path.split("/")[3], overall_status: "valid" };
+  if (path === "/inventory/items")
+    return { data: INVENTORY, success: true, timestamp: iso(8) };
+  if (path === "/inventory/summary")
+    return {
+      data: {
+        total_items: INVENTORY.length,
+        in_stock: INVENTORY.filter((x) => x.status === "in_stock").length,
+        low_stock: INVENTORY.filter((x) => x.status === "low_stock").length,
+        out_of_stock: INVENTORY.filter((x) => x.status === "out_of_stock")
+          .length,
+        total_value: 84_250.5,
+      },
+    };
+  if (path === "/inventory/alerts")
+    return { data: INVENTORY.filter((x) => x.status !== "in_stock") };
+  if (path === "/ops/drivers/utilization") return { items: UTILIZATION };
+  if (/^\/ops\/drivers\/[^/]+\/profile$/.test(path))
+    return {
+      driver_id: path.split("/")[3],
+      qualification: {
+        status: "resolved",
+        summary: { overall_status: "valid" },
+      },
+    };
+  if (path === "/compliance/drivers") return sized(DRIVERS, url);
+  if (path === "/compliance/drivers/dashboard")
+    return {
+      data: {
+        tenant_id: TENANT,
+        total_drivers: DRIVERS.length,
+        active_drivers: DRIVERS.filter((d) => d.status === "active").length,
+        suspended_drivers: DRIVERS.filter((d) => d.status === "suspended")
+          .length,
+        expired_drivers: DRIVERS.filter((d) => d.status === "expired").length,
+        expiring_drivers: 3,
+        expiring_within_7_days: 1,
+        expiring_within_30_days: 2,
+        expiring_within_60_days: 3,
+        drug_test_overdue: 0,
+        drivers: DRIVERS.slice(0, 5).map((d) => ({
+          driver_id: d.driver_id,
+          full_name: d.full_name,
+          status: d.status,
+          qualifications: [
+            {
+              qualification_type: "medical_card",
+              expiry_date: "2026-11-15",
+              days_until_expiry: 38,
+              alert_level: "warning",
+              status: "expiring_soon",
+            },
+          ],
+        })),
+        generated_at: iso(8),
+      },
+    };
+  if (path === "/compliance/asset-certifications/dashboard")
+    return {
+      data: {
+        tenant_id: TENANT,
+        total_expired: 1,
+        total_expiring_soon: 2,
+        assets: [],
+      },
+    };
   if (path === "/commerce/customers") {
     const status = url.searchParams.get("status");
     return sized(

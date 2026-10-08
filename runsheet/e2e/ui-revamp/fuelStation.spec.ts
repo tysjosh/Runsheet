@@ -61,3 +61,30 @@ for (const vp of VIEWPORTS) {
     expect(bad.map((v) => `${v.id}: ${v.nodes.length}`)).toEqual([]);
   });
 }
+
+// Review finding 5 (iteration 1): Fuel Stations sits at exactly 172 px, so
+// nothing may grow the chrome. The toolbar is a fixed 44 px row (chips that
+// don't fit collapse into "More"), and a partial load failure shows as a chip
+// inside it, not a banner above the table.
+test("fuel stations: toolbar stays one 44 px row with a load-failure notice at 1280", async ({
+  page,
+  context,
+}) => {
+  await signIn(context);
+  await installShellFake(page);
+  await page.route("**/api/fuel/metrics/summary**", (r) =>
+    r.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error_code: "INTERNAL_ERROR", message: "boom" }),
+    }),
+  );
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/dashboard/fuel-ops?tab=stations");
+  await page.locator("tbody tr").first().waitFor();
+  await expect(page.getByText("Some data didn't load")).toBeVisible();
+  const bar = page.locator('[data-chrome="toolbar"]').first();
+  expect(Math.round((await bar.boundingBox())?.height ?? 0)).toBe(44);
+  const top = await firstRowTop(page);
+  expect(top as number).toBeLessThanOrEqual(172);
+});

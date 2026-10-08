@@ -1,4 +1,4 @@
-import { Mail, MessageSquare, Phone, RefreshCw } from "lucide-react";
+import { Eye, Mail, MessageSquare, Phone, RefreshCw } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
   Button,
@@ -466,6 +466,18 @@ export default function NotificationHistoryTab() {
             setSelectedNotification(n);
             setRetryError("");
           }}
+          // Keyboard path to the detail (rows themselves aren't focusable).
+          rowMenu={(n) => [
+            {
+              id: "details",
+              label: "View details",
+              icon: <Eye className="h-3.5 w-3.5" />,
+              onSelect: () => {
+                setSelectedNotification(n);
+                setRetryError("");
+              },
+            },
+          ]}
           pagination={
             pagination.total_pages > 1
               ? {
