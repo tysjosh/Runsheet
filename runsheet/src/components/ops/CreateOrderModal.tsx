@@ -1,26 +1,34 @@
 "use client";
 
 /**
- * Create Order Modal — dispatcher keyboard intake form.
+ * Create order: the dispatcher's intake form, as a `FormDialog` (UI revamp
+ * R6, design.md §5 "Order create": md, ProductSelect, NumberField).
  *
- * Posts to `POST /api/orders`. Populates `intake_metadata.dispatcher_user_id`
- * from the JWT-derived user context. Validates client-side using the same
- * rules as the backend (`missing_volume`, `invalid_delivery_window`,
- * `will_call` allows null window).
+ * Posts to `POST /api/orders`. Validates client-side with the backend's rules
+ * (`missing_volume`, `invalid_delivery_window`, `will_call` allows no window).
+ * Envelope errors show inline (`details.fields` / FastAPI `details.errors`)
+ * or as the form-level banner from `message`. `initialValues` prefills the
+ * form (e.g. the Dashboard's low-tank "Create order").
  *
  * Validates: Requirements 2.4, 8.1.4
  */
-
-import { Loader2, X } from "lucide-react";
-import { useCallback, useState } from "react";
-import { ApiError } from "../../services/api";
+import { useEffect, useMemo, useState } from "react";
+import { listFuelProducts } from "../../services/fuelApi";
 import {
   type CallType,
   type CreateOrderPayload,
   createOrder,
 } from "../../services/ordersApi";
+import { PRODUCT_CODES } from "../../styles/tokens";
+import {
+  Field,
+  FormDialog,
+  FormSection,
+  INPUT_CLASS,
+  NumberField,
+  ProductSelect,
+} from "../ui";
 import CustomerPicker from "./CustomerPicker";
-import ProductPicker from "./ProductPicker";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +73,8 @@ export interface CreateOrderModalProps {
   onSuccess?: (orderId: string) => void;
   /** Dispatcher user ID from JWT context */
   dispatcherUserId?: string;
+  /** Prefill (e.g. product and suggested gallons from a low tank). */
+  initialValues?: Partial<CreateOrderFormValues>;
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -102,10 +112,9 @@ export function validateCreateOrderForm(
   }
 
   if (!values.product_code.trim()) {
-    errors.product_code = "Product code is required";
+    errors.product_code = "Product is required";
   }
 
-  // Volume validation: missing_volume
   if (!values.fill_to_full) {
     const gallons = parseFloat(values.gallons_requested);
     if (
@@ -114,11 +123,10 @@ export function validateCreateOrderForm(
       gallons <= 0
     ) {
       errors.gallons_requested =
-        "Gallons must be greater than 0 (or select Fill to Full)";
+        "Gallons must be greater than 0 (or select Fill to full)";
     }
   }
 
-  // Delivery window validation: invalid_delivery_window
   if (values.call_type === "one_off") {
     if (!values.delivery_window_start) {
       errors.delivery_window_start =
@@ -143,7 +151,7 @@ export function validateCreateOrderForm(
 
 // ─── Initial form state ──────────────────────────────────────────────────────
 
-const INITIAL_FORM: CreateOrderFormValues = {
+export const INITIAL_FORM: CreateOrderFormValues = {
   customer_id: "",
   customer_name: "",
   customer_phone: "",
@@ -162,504 +170,321 @@ const INITIAL_FORM: CreateOrderFormValues = {
   special_instructions: "",
 };
 
+export function toPayload(form: CreateOrderFormValues): CreateOrderPayload {
+  return {
+    customer_id: form.customer_id.trim(),
+    customer_name: form.customer_name.trim(),
+    customer_phone: form.customer_phone.trim() || undefined,
+    customer_email: form.customer_email.trim() || undefined,
+    ship_to_address: form.ship_to_address.trim(),
+    ship_to_lat: parseFloat(form.ship_to_lat),
+    ship_to_lon: parseFloat(form.ship_to_lon),
+    customer_tank_id: form.customer_tank_id.trim() || undefined,
+    product_code: form.product_code.trim(),
+    gallons_requested: form.fill_to_full
+      ? undefined
+      : parseFloat(form.gallons_requested),
+    fill_to_full: form.fill_to_full,
+    call_type: form.call_type,
+    delivery_window_start: form.delivery_window_start || undefined,
+    delivery_window_end: form.delivery_window_end || undefined,
+    po_number: form.po_number.trim() || undefined,
+    special_instructions: form.special_instructions.trim() || undefined,
+    client_event_id:
+      typeof crypto !== "undefined" && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  };
+}
+
+/** The tenant's product catalog codes, falling back to the full token set. */
+function useProductCodes(): string[] {
+  const [codes, setCodes] = useState<string[]>([...PRODUCT_CODES]);
+  useEffect(() => {
+    let cancelled = false;
+    listFuelProducts()
+      .then((res) => {
+        const list = (res?.items ?? [])
+          .map((p: { product_code?: string }) => p.product_code)
+          .filter(
+            (c: unknown): c is string => typeof c === "string" && c.length > 0,
+          );
+        if (!cancelled && list.length > 0) setCodes(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return codes;
+}
+
+const SECTIONS = [
+  { id: "customer", title: "Customer" },
+  { id: "location", title: "Delivery location" },
+  { id: "product", title: "Product and volume" },
+  { id: "schedule", title: "Scheduling" },
+  { id: "more", title: "Additional" },
+];
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function CreateOrderModal({
   isOpen,
   onClose,
   onSuccess,
-  dispatcherUserId,
+  initialValues,
 }: CreateOrderModalProps) {
-  const [form, setForm] = useState<CreateOrderFormValues>(INITIAL_FORM);
-  const [errors, setErrors] = useState<CreateOrderFormErrors>({});
-  const [submitting, setSubmitting] = useState(false);
-
-  const handleChange = useCallback(
-    (field: keyof CreateOrderFormValues, value: string | boolean) => {
-      setForm((prev) => ({ ...prev, [field]: value }));
-      // Clear field error on change
-      setErrors((prev) => ({
-        ...prev,
-        [field]: undefined,
-        general: undefined,
-      }));
-    },
-    [],
+  const products = useProductCodes();
+  const initial = useMemo(
+    () => ({ ...INITIAL_FORM, ...initialValues }),
+    [initialValues],
   );
-
-  const handleSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
-
-      const validationErrors = validateCreateOrderForm(form);
-      if (Object.keys(validationErrors).length > 0) {
-        setErrors(validationErrors);
-        return;
-      }
-
-      setSubmitting(true);
-      setErrors({});
-
-      try {
-        const payload: CreateOrderPayload = {
-          customer_id: form.customer_id.trim(),
-          customer_name: form.customer_name.trim(),
-          customer_phone: form.customer_phone.trim() || undefined,
-          customer_email: form.customer_email.trim() || undefined,
-          ship_to_address: form.ship_to_address.trim(),
-          ship_to_lat: parseFloat(form.ship_to_lat),
-          ship_to_lon: parseFloat(form.ship_to_lon),
-          customer_tank_id: form.customer_tank_id.trim() || undefined,
-          product_code: form.product_code.trim(),
-          gallons_requested: form.fill_to_full
-            ? undefined
-            : parseFloat(form.gallons_requested),
-          fill_to_full: form.fill_to_full,
-          call_type: form.call_type,
-          delivery_window_start: form.delivery_window_start || undefined,
-          delivery_window_end: form.delivery_window_end || undefined,
-          po_number: form.po_number.trim() || undefined,
-          special_instructions: form.special_instructions.trim() || undefined,
-          client_event_id:
-            typeof crypto !== "undefined" && crypto.randomUUID
-              ? crypto.randomUUID()
-              : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        };
-
-        const response = await createOrder(payload);
-        setForm(INITIAL_FORM);
-        if (response.order_id) onSuccess?.(response.order_id);
-        onClose();
-      } catch (err) {
-        if (err instanceof ApiError) {
-          setErrors({ general: err.message });
-        } else {
-          setErrors({
-            general:
-              err instanceof Error ? err.message : "Failed to create order",
-          });
-        }
-      } finally {
-        setSubmitting(false);
-      }
-    },
-    [form, onClose, onSuccess, dispatcherUserId],
-  );
-
   if (!isOpen) return null;
-
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="create-order-title"
+    <FormDialog<
+      CreateOrderFormValues & Record<string, unknown>,
+      { order_id?: string | null }
     >
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto mx-4">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2
-            id="create-order-title"
-            className="text-lg font-semibold text-primary"
-          >
-            Create Order
-          </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
-            aria-label="Close modal"
-          >
-            <X className="w-5 h-5 text-gray-500" />
-          </button>
-        </div>
-
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {errors.general && (
-            <div
-              role="alert"
-              className="rounded-lg bg-error-light border border-error-light px-4 py-3 text-sm text-error-dark"
+      open
+      size="md"
+      title="Create order"
+      submitLabel="Create order"
+      initialValues={initial}
+      sections={SECTIONS}
+      validate={(v) => {
+        const { general: _g, ...fields } = validateCreateOrderForm(v);
+        return fields;
+      }}
+      onSubmit={(v) => createOrder(toPayload(v))}
+      successMessage="Order created"
+      onSaved={(res) => {
+        if (res?.order_id) onSuccess?.(res.order_id);
+      }}
+      onClose={onClose}
+    >
+      {({ values, set, errors }) => (
+        <>
+          <FormSection id="customer" title="Customer">
+            <Field
+              label="Customer ID"
+              required
+              error={errors.customer_id}
+              span={1}
+              id="co-customer-id"
             >
-              {errors.general}
-            </div>
-          )}
-
-          {/* Customer section */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">
-              Customer
-            </legend>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label
-                  htmlFor="co-customer-id"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Customer ID *
-                </label>
-                <CustomerPicker
-                  id="co-customer-id"
-                  aria-label="Customer ID"
-                  value={form.customer_id || null}
-                  onChange={(value) => handleChange("customer_id", value)}
-                  allowClear
-                />
-                {errors.customer_id && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.customer_id}
-                  </p>
-                )}
-              </div>
-              <div>
-                <label
-                  htmlFor="co-customer-name"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Customer Name *
-                </label>
-                <input
-                  id="co-customer-name"
-                  type="text"
-                  value={form.customer_name}
-                  onChange={(e) =>
-                    handleChange("customer_name", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-                {errors.customer_name && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.customer_name}
-                  </p>
-                )}
-              </div>
-              <div>
-                <label
-                  htmlFor="co-phone"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Phone
-                </label>
-                <input
-                  id="co-phone"
-                  type="tel"
-                  value={form.customer_phone}
-                  onChange={(e) =>
-                    handleChange("customer_phone", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="co-email"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Email
-                </label>
-                <input
-                  id="co-email"
-                  type="email"
-                  value={form.customer_email}
-                  onChange={(e) =>
-                    handleChange("customer_email", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-              </div>
-            </div>
-          </fieldset>
-
-          {/* Delivery location */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">
-              Delivery Location
-            </legend>
-            <div>
-              <label
-                htmlFor="co-address"
-                className="block text-xs text-gray-600 mb-1"
-              >
-                Ship-to Address *
-              </label>
+              <CustomerPicker
+                id="co-customer-id"
+                aria-label="Customer ID"
+                value={values.customer_id || null}
+                onChange={(value) => set("customer_id", value)}
+                allowClear
+              />
+            </Field>
+            <Field
+              label="Customer name"
+              required
+              error={errors.customer_name}
+              span={1}
+            >
+              <input
+                id="co-customer-name"
+                type="text"
+                value={values.customer_name}
+                onChange={(e) => set("customer_name", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field label="Phone" span={1}>
+              <input
+                id="co-phone"
+                type="tel"
+                value={values.customer_phone}
+                onChange={(e) => set("customer_phone", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field label="Email" span={1}>
+              <input
+                id="co-email"
+                type="email"
+                value={values.customer_email}
+                onChange={(e) => set("customer_email", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="location" title="Delivery location">
+            <Field
+              label="Ship-to address"
+              required
+              error={errors.ship_to_address}
+            >
               <input
                 id="co-address"
                 type="text"
-                value={form.ship_to_address}
-                onChange={(e) =>
-                  handleChange("ship_to_address", e.target.value)
-                }
-                className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
+                value={values.ship_to_address}
+                onChange={(e) => set("ship_to_address", e.target.value)}
+                className={INPUT_CLASS}
               />
-              {errors.ship_to_address && (
-                <p className="text-xs text-error mt-1">
-                  {errors.ship_to_address}
-                </p>
-              )}
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label
-                  htmlFor="co-lat"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Latitude *
-                </label>
-                <input
-                  id="co-lat"
-                  type="number"
-                  step="any"
-                  value={form.ship_to_lat}
-                  onChange={(e) => handleChange("ship_to_lat", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-                {errors.ship_to_lat && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.ship_to_lat}
-                  </p>
-                )}
-              </div>
-              <div>
-                <label
-                  htmlFor="co-lon"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Longitude *
-                </label>
-                <input
-                  id="co-lon"
-                  type="number"
-                  step="any"
-                  value={form.ship_to_lon}
-                  onChange={(e) => handleChange("ship_to_lon", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-                {errors.ship_to_lon && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.ship_to_lon}
-                  </p>
-                )}
-              </div>
-              <div>
-                <label
-                  htmlFor="co-tank-id"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Tank ID
-                </label>
-                <input
-                  id="co-tank-id"
-                  type="text"
-                  value={form.customer_tank_id}
-                  onChange={(e) =>
-                    handleChange("customer_tank_id", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-              </div>
-            </div>
-          </fieldset>
-
-          {/* Product & Volume */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">
-              Product & Volume
-            </legend>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label
-                  htmlFor="co-product"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Product Code *
-                </label>
-                <ProductPicker
-                  id="co-product"
-                  aria-label="Product Code"
-                  value={form.product_code || null}
-                  onChange={(value) => handleChange("product_code", value)}
-                  allowClear
-                />
-                {errors.product_code && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.product_code}
-                  </p>
-                )}
-              </div>
-              <div>
-                <label
-                  htmlFor="co-gallons"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Gallons Requested
-                </label>
-                <input
-                  id="co-gallons"
-                  type="number"
-                  step="any"
-                  value={form.gallons_requested}
-                  onChange={(e) =>
-                    handleChange("gallons_requested", e.target.value)
-                  }
-                  disabled={form.fill_to_full}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none disabled:bg-gray-100"
-                />
-                {errors.gallons_requested && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.gallons_requested}
-                  </p>
-                )}
-              </div>
-              <div className="flex items-end pb-2">
-                <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={form.fill_to_full}
-                    onChange={(e) =>
-                      handleChange("fill_to_full", e.target.checked)
-                    }
-                    className="rounded border-gray-300"
-                  />
-                  Fill to Full
-                </label>
-              </div>
-            </div>
-          </fieldset>
-
-          {/* Scheduling */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">
-              Scheduling
-            </legend>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label
-                  htmlFor="co-call-type"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Call Type *
-                </label>
-                <select
-                  id="co-call-type"
-                  value={form.call_type}
-                  onChange={(e) => handleChange("call_type", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                >
-                  <option value="one_off">One Off</option>
-                  <option value="will_call">Will Call</option>
-                  <option value="auto_fill">Auto Fill</option>
-                  <option value="keep_full">Keep Full</option>
-                </select>
-              </div>
-              <div>
-                <label
-                  htmlFor="co-window-start"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Window Start {form.call_type === "one_off" ? "*" : ""}
-                </label>
-                <input
-                  id="co-window-start"
-                  type="datetime-local"
-                  value={form.delivery_window_start}
-                  onChange={(e) =>
-                    handleChange("delivery_window_start", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-                {errors.delivery_window_start && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.delivery_window_start}
-                  </p>
-                )}
-              </div>
-              <div>
-                <label
-                  htmlFor="co-window-end"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Window End {form.call_type === "one_off" ? "*" : ""}
-                </label>
-                <input
-                  id="co-window-end"
-                  type="datetime-local"
-                  value={form.delivery_window_end}
-                  onChange={(e) =>
-                    handleChange("delivery_window_end", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-                {errors.delivery_window_end && (
-                  <p className="text-xs text-error mt-1">
-                    {errors.delivery_window_end}
-                  </p>
-                )}
-              </div>
-            </div>
-          </fieldset>
-
-          {/* Optional fields */}
-          <fieldset className="space-y-3">
-            <legend className="text-sm font-medium text-gray-700">
-              Additional
-            </legend>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label
-                  htmlFor="co-po"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  PO Number
-                </label>
-                <input
-                  id="co-po"
-                  type="text"
-                  value={form.po_number}
-                  onChange={(e) => handleChange("po_number", e.target.value)}
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="co-instructions"
-                  className="block text-xs text-gray-600 mb-1"
-                >
-                  Special Instructions
-                </label>
-                <input
-                  id="co-instructions"
-                  type="text"
-                  value={form.special_instructions}
-                  onChange={(e) =>
-                    handleChange("special_instructions", e.target.value)
-                  }
-                  className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-primary focus:outline-none"
-                />
-              </div>
-            </div>
-          </fieldset>
-
-          {/* Actions */}
-          <div className="flex items-center justify-end gap-3 pt-4 border-t border-gray-100">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-700 border border-gray-200 rounded-lg hover:bg-gray-50"
+            </Field>
+            <Field
+              label="Latitude"
+              required
+              error={errors.ship_to_lat}
+              span={1}
             >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-              aria-label="Submit order"
+              <input
+                id="co-lat"
+                type="text"
+                inputMode="decimal"
+                value={values.ship_to_lat}
+                onChange={(e) => set("ship_to_lat", e.target.value)}
+                className={`${INPUT_CLASS} tabular-nums`}
+              />
+            </Field>
+            <Field
+              label="Longitude"
+              required
+              error={errors.ship_to_lon}
+              span={1}
             >
-              {submitting && <Loader2 className="w-4 h-4 animate-spin" />}
-              Create Order
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+              <input
+                id="co-lon"
+                type="text"
+                inputMode="decimal"
+                value={values.ship_to_lon}
+                onChange={(e) => set("ship_to_lon", e.target.value)}
+                className={`${INPUT_CLASS} tabular-nums`}
+              />
+            </Field>
+            <Field label="Tank ID" span={1}>
+              <input
+                id="co-tank-id"
+                type="text"
+                value={values.customer_tank_id}
+                onChange={(e) => set("customer_tank_id", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="product" title="Product and volume">
+            <Field
+              label="Product"
+              required
+              error={errors.product_code}
+              id="co-product"
+            >
+              <ProductSelect
+                id="co-product"
+                aria-label="Product"
+                value={values.product_code || null}
+                options={products}
+                onChange={(code) => set("product_code", code)}
+              />
+            </Field>
+            <Field
+              label="Gallons requested"
+              required={!values.fill_to_full}
+              error={errors.gallons_requested}
+              span={1}
+              id="co-gallons"
+            >
+              <NumberField
+                id="co-gallons"
+                unit="gal"
+                min={0}
+                value={
+                  values.gallons_requested.trim() === ""
+                    ? null
+                    : Number(values.gallons_requested)
+                }
+                onChange={(n) =>
+                  set(
+                    "gallons_requested",
+                    n === null || Number.isNaN(n) ? "" : String(n),
+                  )
+                }
+                disabled={values.fill_to_full}
+              />
+            </Field>
+            <div className="col-span-2 flex items-end pb-1.5 sm:col-span-1">
+              <label className="flex cursor-pointer items-center gap-2 text-sm text-text">
+                <input
+                  type="checkbox"
+                  checked={values.fill_to_full}
+                  onChange={(e) => set("fill_to_full", e.target.checked)}
+                  className="h-4 w-4 rounded border-slate-400 accent-[var(--rs-primary)]"
+                />
+                Fill to full
+              </label>
+            </div>
+          </FormSection>
+          <FormSection id="schedule" title="Scheduling">
+            <Field label="Call type" required>
+              <select
+                id="co-call-type"
+                value={values.call_type}
+                onChange={(e) => set("call_type", e.target.value as CallType)}
+                className={INPUT_CLASS}
+              >
+                <option value="one_off">One off</option>
+                <option value="will_call">Will call</option>
+                <option value="auto_fill">Auto fill</option>
+                <option value="keep_full">Keep full</option>
+              </select>
+            </Field>
+            <Field
+              label="Window start"
+              required={values.call_type === "one_off"}
+              error={errors.delivery_window_start}
+              span={1}
+            >
+              <input
+                id="co-window-start"
+                type="datetime-local"
+                value={values.delivery_window_start}
+                onChange={(e) => set("delivery_window_start", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field
+              label="Window end"
+              required={values.call_type === "one_off"}
+              error={errors.delivery_window_end}
+              span={1}
+            >
+              <input
+                id="co-window-end"
+                type="datetime-local"
+                value={values.delivery_window_end}
+                onChange={(e) => set("delivery_window_end", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="more" title="Additional">
+            <Field label="PO number" span={1}>
+              <input
+                id="co-po"
+                type="text"
+                value={values.po_number}
+                onChange={(e) => set("po_number", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field label="Special instructions" span={1}>
+              <input
+                id="co-instructions"
+                type="text"
+                value={values.special_instructions}
+                onChange={(e) => set("special_instructions", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          </FormSection>
+        </>
+      )}
+    </FormDialog>
   );
 }

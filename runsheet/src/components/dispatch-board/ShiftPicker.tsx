@@ -14,12 +14,12 @@ export interface ShiftPickerProps {
 
 export function ShiftPicker({ value, shifts, onChange }: ShiftPickerProps) {
   return (
-    <label className="flex items-center gap-2 text-sm text-gray-700">
-      <span>Shift</span>
+    <label className="flex shrink-0 items-center gap-1.5 text-xs font-medium text-text-muted">
+      <span className="max-xl:sr-only">Shift</span>
       <select
         value={value}
         onChange={(e) => onChange(e.target.value as ShiftView)}
-        className="min-h-9 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm"
+        className="h-7 max-w-28 rounded-lg border border-slate-300 bg-surface px-1.5 text-xs font-semibold text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
       >
         <option value="all">All day</option>
         {shifts.map((s) => (

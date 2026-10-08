@@ -7,7 +7,10 @@
  */
 import { GripVertical, Lock } from "lucide-react";
 import { type KeyboardEvent, type MouseEvent, memo, useRef } from "react";
+import { productName } from "../../../lib/format";
 import type { LaneView, Stop } from "../../../services/dispatchBoardApi";
+import { STATUS, type StatusKey } from "../../../styles/tokens";
+import { ProductCap, STATUS_ICONS, statusKeyFor } from "../../ui";
 import { focusKey, useBoard } from "../BoardContext";
 import { matchClass, matchSuffix, stopMatch } from "../boardMatch";
 import { formatTime } from "../boardTime";
@@ -20,6 +23,11 @@ import { stopMenu } from "../menus";
 import { worstCheck } from "../state/announce";
 import { quantityText } from "../trays/OrderCard";
 import { AXIS_HEIGHT, CARD_WIDTH, HEADER_WIDTH } from "./layout";
+
+/** Display status of a stop on a load: its order status, else Planned. */
+export function stopStatus(stop: Stop): StatusKey {
+  return statusKeyFor(stop.snapshot.status) ?? "planned";
+}
 
 export interface StopCardProps {
   lane: LaneView;
@@ -86,6 +94,8 @@ export const StopCard = memo(function StopCard({
   );
   const eta = formatTime(stop.eta, api.timezone);
   const density = api.view.density;
+  const statusKey = stopStatus(stop);
+  const status = STATUS[statusKey];
 
   const name = [
     onShelf
@@ -157,9 +167,15 @@ export const StopCard = memo(function StopCard({
           : undefined),
         width: CARD_WIDTH[density],
         ...CELL_SCROLL_MARGIN,
+        // Status hue (100 bg, 300 border, 800 text); icon + label below, so
+        // colour is never the only signal (R8.4).
+        backgroundColor: selected ? undefined : status.bg,
+        borderColor: selected ? undefined : status.border,
+        color: status.fg,
       }}
-      className={`flex h-full gap-0.5 overflow-hidden rounded-md border bg-white p-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-primary ${
-        selected ? "border-primary bg-primary-soft" : "border-gray-300"
+      data-status={statusKey}
+      className={`flex h-full gap-0.5 overflow-hidden rounded-md border p-1 text-xs outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+        selected ? "border-2 border-primary bg-primary-soft" : ""
       } ${dragging ? "opacity-50" : ""} ${over ? "ring-2 ring-primary" : ""} ${matchClass(state)}`}
     >
       {!pinned && !locked ? (
@@ -167,33 +183,88 @@ export const StopCard = memo(function StopCard({
           ref={grip}
           aria-hidden="true"
           data-drag-handle=""
-          className="flex min-h-6 min-w-6 shrink-0 cursor-grab touch-none items-start justify-center pt-0.5 text-gray-400 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+          className="flex min-h-6 min-w-6 shrink-0 cursor-grab touch-none items-start justify-center pt-0.5 opacity-70 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
         >
           <GripVertical className="h-3.5 w-3.5" />
         </span>
       ) : (
-        <span aria-hidden="true" className="shrink-0 pt-0.5 text-gray-500">
+        <span aria-hidden="true" className="shrink-0 pt-0.5">
           {pinned && <Lock className="h-3.5 w-3.5" />}
         </span>
       )}
-      <div aria-hidden="true" className="min-w-0 flex-1 leading-tight">
-        <div className="truncate font-medium text-gray-900">#{id}</div>
-        <div className="truncate text-gray-700">
-          {stop.snapshot.product_code ?? "—"} · {quantityText(stop.snapshot)}
-        </div>
-        {density === "comfortable" && (
-          <div className="truncate text-gray-600">
-            {pinned ? "Started" : eta ? `ETA ${eta}` : "No ETA"}
-          </div>
-        )}
-        {worst && density === "comfortable" && (
-          <CheckChip
-            outcome={worst.outcome}
-            label={worst.message}
-            className="mt-0.5"
-          />
-        )}
+      <StopFace
+        id={id}
+        productCode={stop.snapshot.product_code}
+        quantity={quantityText(stop.snapshot)}
+        statusKey={statusKey}
+        density={density}
+        pinned={pinned}
+        eta={eta}
+        worstOutcome={worst?.outcome ?? null}
+        worstMessage={worst?.message ?? null}
+      />
+    </div>
+  );
+});
+
+/**
+ * The card's visible text, memoised on plain values: the board re-renders
+ * every card on each drag frame (they read the board context), so the face
+ * (status icon, product cap and name, ETA) only re-renders when what it
+ * shows changes. Keeps the N1 drag budget with the added colour and caps.
+ */
+const StopFace = memo(function StopFace({
+  id,
+  productCode,
+  quantity,
+  statusKey,
+  density,
+  pinned,
+  eta,
+  worstOutcome,
+  worstMessage,
+}: {
+  id: string;
+  productCode: string | null;
+  quantity: string;
+  statusKey: StatusKey;
+  density: "comfortable" | "compact";
+  pinned: boolean;
+  eta: string | null;
+  worstOutcome: "pass" | "warn" | "block" | "info" | null;
+  worstMessage: string | null;
+}) {
+  const status = STATUS[statusKey];
+  const StatusIcon = STATUS_ICONS[status.icon];
+  return (
+    <div aria-hidden="true" className="min-w-0 flex-1 leading-tight">
+      <div className="flex items-center gap-1 truncate font-semibold">
+        {StatusIcon && <StatusIcon className="h-3 w-3 shrink-0" />}
+        <span className="truncate">#{id}</span>
       </div>
+      <div className="flex min-w-0 items-center gap-1 text-slate-800">
+        {productCode && <ProductCap code={productCode} decorative />}
+        <span className="truncate">
+          {density === "comfortable" && productCode
+            ? `${productName(productCode)} · `
+            : ""}
+          {quantity}
+        </span>
+      </div>
+      {density === "comfortable" && (
+        <div className="truncate">
+          {status.label}
+          {" · "}
+          {pinned ? "Started" : eta ? `ETA ${eta}` : "No ETA"}
+        </div>
+      )}
+      {worstOutcome && worstMessage && density === "comfortable" && (
+        <CheckChip
+          outcome={worstOutcome}
+          label={worstMessage}
+          className="mt-0.5"
+        />
+      )}
     </div>
   );
 });
@@ -221,7 +292,7 @@ export function GhostCard({
       }}
       className="flex h-full flex-col gap-0.5 rounded-md border border-dashed border-primary bg-white/80 p-1 text-xs"
     >
-      <span className="truncate font-medium text-gray-900">#{orderId}</span>
+      <span className="truncate font-medium text-slate-900">#{orderId}</span>
       <CheckChip outcome="checking" />
     </div>
   );

@@ -1,5 +1,6 @@
 /**
- * Export CSV on the scheduling job board: role gate and current filters.
+ * Export CSV on Dispatch → Jobs: role gate and current filters (the date
+ * range lives in the toolbar's Filters popover).
  */
 import {
   act,
@@ -9,6 +10,10 @@ import {
   waitFor,
 } from "@testing-library/react";
 
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ push: jest.fn(), replace: jest.fn() }),
+  useSearchParams: () => new URLSearchParams(),
+}));
 jest.mock("../../services/schedulingApi", () => ({
   getJobs: jest.fn(async () => ({ data: [], request_id: "r" })),
   transitionStatus: jest.fn(),
@@ -27,7 +32,7 @@ jest.mock("../../utils/auth", () => ({
 import { downloadCsvExport } from "../../services/exportApi";
 import { getJobs } from "../../services/schedulingApi";
 import { getCurrentUserRoles } from "../../utils/auth";
-import SchedulingJobBoardPage from "./SchedulingJobBoard";
+import SchedulingJobBoardPage from "./JobsView";
 
 const mockDownload = downloadCsvExport as jest.MockedFunction<
   typeof downloadCsvExport
@@ -56,6 +61,7 @@ it("exports the current filters for a dispatcher", async () => {
   mockRoles.mockResolvedValue(["dispatcher"]);
   render(<SchedulingJobBoardPage />);
   await screen.findByRole("button", { name: /^Export CSV ?: jobs$/ });
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
   fireEvent.change(screen.getByLabelText("Start date"), {
     target: { value: "2026-10-01" },
   });

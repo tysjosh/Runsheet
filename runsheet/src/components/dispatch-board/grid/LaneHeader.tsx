@@ -12,9 +12,17 @@
  * count, "Ana is editing", "Checking…"); the gauge shows the selected load
  * and, during a drag, the server's post-drop fill.
  */
+
+import { TriangleAlert } from "lucide-react";
 import { useRef } from "react";
+import {
+  date as formatDate,
+  number as formatNumber,
+} from "../../../lib/format";
+import { identityFor, initials } from "../../../lib/identity";
 import type { LaneState, LaneView } from "../../../services/dispatchBoardApi";
-import { Badge } from "../../ui";
+import type { StatusKey } from "../../../styles/tokens";
+import { IdentityAvatar, StatusBadge } from "../../ui";
 import { focusKey, useBoard } from "../BoardContext";
 import { laneMatch, matchClass } from "../boardMatch";
 import { CheckChip } from "../CheckChip";
@@ -27,20 +35,34 @@ import { isLanePending } from "../state/boardReducer";
 import { hosHours } from "../trays/DriverTray";
 import { HEADER_WIDTH } from "./layout";
 
+/** Lane state as a StatusBadge: hue + icon + label (R8.4, colour never alone). */
 export const LANE_STATE_LABEL: Record<
   LaneState,
-  {
-    label: string;
-    variant: "neutral" | "success" | "warning" | "info" | "error";
-  }
+  { label: string; status: StatusKey }
 > = {
-  draft: { label: "Draft", variant: "neutral" },
-  published: { label: "Published", variant: "success" },
-  modified: { label: "Modified", variant: "warning" },
-  publishing: { label: "Publishing", variant: "info" },
-  failed: { label: "Publish failed", variant: "error" },
-  recovering: { label: "Recovering", variant: "error" },
+  draft: { label: "Draft", status: "draft" },
+  published: { label: "Published", status: "dispatched" },
+  modified: { label: "Modified", status: "warning" },
+  publishing: { label: "Publishing", status: "in_transit" },
+  failed: { label: "Publish failed", status: "exception" },
+  recovering: { label: "Recovering", status: "critical" },
 };
+
+/** "Darnell Price" → "D. Price" (the chip truncates; the full name is the tooltip). */
+export function shortName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length < 2) return name.trim();
+  return `${parts[0][0].toUpperCase()}. ${parts[parts.length - 1]}`;
+}
+
+const EXPIRY_LABEL: Record<string, string> = {
+  cdl: "CDL",
+  medical_card: "Med card",
+  hazmat: "Hazmat",
+  tanker: "Tanker",
+};
+/** Qualification expiries shown in the lane header when within 30 days. */
+const EXPIRY_SOON_DAYS = 30;
 
 /** R2.8: the asset subtype as words ("tank_wagon" → "tank wagon"). */
 export function truckTypeText(type: string): string {
@@ -97,9 +119,15 @@ export function laneSummary(
 export interface LaneHeaderProps {
   lane: LaneView;
   etasUnavailable: boolean;
+  /** Identity colour from `assignLaneIdentities` (falls back to the hash). */
+  identity?: string;
 }
 
-export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
+export function LaneHeader({
+  lane,
+  etasUnavailable,
+  identity,
+}: LaneHeaderProps) {
   const api = useBoard();
   const truckRef = useRef<HTMLButtonElement>(null);
   const driverRef = useRef<HTMLButtonElement>(null);
@@ -175,6 +203,34 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
       : driverName
         ? `Driver ${driverName}`
         : "No driver";
+  // Visible chip text: initials + surname so it fits (accessible name stays full).
+  const driverChip = placingDriver
+    ? driverLabel
+    : suggested
+      ? `Pair ${shortName(suggested.name)}`
+      : driverName
+        ? shortName(driverName)
+        : "No driver";
+  const noDriver = !placingDriver && !suggested && !driverName;
+  const stripe = identity ?? identityFor(lane.truck_id).hex;
+  const quals: { key: string; text: string; warn: boolean }[] = [];
+  if (lane.driver?.tanker_endorsement)
+    quals.push({ key: "tanker", text: "Tanker ✓", warn: false });
+  if (lane.driver?.hazmat_endorsement)
+    quals.push({ key: "hazmat", text: "Hazmat ✓", warn: false });
+  const expiry = lane.driver?.nearest_expiry;
+  if (expiry) {
+    const days =
+      (Date.parse(`${expiry.expires_on}T00:00:00Z`) -
+        Date.parse(`${api.serviceDate}T00:00:00Z`)) /
+      86_400_000;
+    if (Number.isFinite(days) && days <= EXPIRY_SOON_DAYS)
+      quals.push({
+        key: "expiry",
+        text: `${EXPIRY_LABEL[expiry.kind] ?? expiry.kind} ${days < 0 ? "expired" : "exp"} ${formatDate(`${expiry.expires_on}T12:00:00Z`, { timeZone: "UTC" })}`,
+        warn: true,
+      });
+  }
   const onDriver = () => {
     if (placingDriver) {
       api.placeOn({ target: "driver-slot", truckId: lane.truck_id });
@@ -208,14 +264,21 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
 
   return (
     <div
-      className={`sticky left-0 z-10 flex shrink-0 flex-col border-r border-gray-200 bg-white px-2 ${
+      className={`sticky left-0 z-10 flex shrink-0 flex-col border-r border-slate-200 bg-white pl-3 pr-2 ${
         // Compact (72 px): 24 px truck and driver rows plus the gauge fit
         // without clipping the driver slot (R4.3, N5).
         compact ? "gap-0.5 py-0.5" : "gap-1 py-1"
       } ${matchClass(lookup)}`}
       style={{ width: HEADER_WIDTH }}
     >
-      <div className="flex items-center gap-1">
+      {/* Truck identity stripe (decorative; the name and avatar carry it). */}
+      <span
+        aria-hidden="true"
+        data-identity={stripe}
+        className="absolute inset-y-1 left-0 w-[5px] rounded-r"
+        style={{ backgroundColor: stripe }}
+      />
+      <div className="flex min-w-0 items-center gap-1">
         <div role="rowheader" tabIndex={-1} className="min-w-0">
           <button
             ref={truckRef}
@@ -224,21 +287,26 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
             aria-haspopup={placeLabel ? undefined : "menu"}
             aria-label={placeLabel ?? `Truck ${lane.truck_id} actions`}
             onClick={onTruck}
-            className={`${compact ? "min-h-6" : "min-h-7"} rounded-md px-1 text-left text-sm font-semibold text-gray-900 outline-none hover:bg-gray-50 focus-visible:ring-2 focus-visible:ring-primary ${
+            className={`${compact ? "min-h-6" : "min-h-7"} inline-flex max-w-full items-center gap-1.5 rounded-md px-1 text-left text-sm font-semibold text-slate-900 outline-none hover:bg-slate-50 focus-visible:ring-2 focus-visible:ring-primary ${
               overLane || placeLabel ? "ring-2 ring-primary" : ""
             }`}
           >
-            <span>Truck {lane.truck_id}</span>
+            <span
+              aria-hidden="true"
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[9px] font-bold text-white"
+              style={{ backgroundColor: stripe }}
+            >
+              {initials(lane.truck_id)}
+            </span>
+            <span className="truncate">Truck {lane.truck_id}</span>
             {lane.truck_type && (
-              <span className="ml-1 text-xs font-normal text-gray-600">
+              <span className="truncate text-xs font-normal text-slate-600">
                 {truckTypeText(lane.truck_type)}
               </span>
             )}
           </button>
         </div>
-        <Badge variant={state.variant} size="sm">
-          {state.label}
-        </Badge>
+        <StatusBadge status={state.status} label={state.label} />
         {candidate ? (
           <CheckChip
             outcome={candidate.outcome}
@@ -265,17 +333,40 @@ export function LaneHeader({ lane, etasUnavailable }: LaneHeaderProps) {
           {...driverRoving}
           aria-label={driverLabel}
           onClick={onDriver}
-          className={`min-h-6 max-w-40 truncate rounded-md border px-1.5 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-primary ${
-            suggested && !placingDriver
-              ? "border-primary text-primary"
-              : "border-gray-300 text-gray-800"
+          title={driverLabel}
+          className={`inline-flex min-h-6 min-w-0 max-w-40 shrink-0 items-center gap-1 rounded-md border px-1 text-left text-xs outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+            noDriver
+              ? "border-red-300 bg-red-50 font-semibold text-red-800"
+              : suggested && !placingDriver
+                ? "border-primary text-brand-800"
+                : "border-slate-300 text-slate-800"
           } ${overDriver || placingDriver ? "ring-2 ring-primary" : ""}`}
         >
-          {driverLabel}
+          {noDriver ? (
+            <TriangleAlert aria-hidden="true" className="h-3 w-3 shrink-0" />
+          ) : (
+            !placingDriver && (
+              <IdentityAvatar
+                id={suggested?.driver_id ?? lane.driver_id ?? ""}
+                label={suggested?.name ?? driverName ?? ""}
+                size="xs"
+                className="h-4 w-4 text-[8px]"
+              />
+            )
+          )}
+          <span className="truncate">{driverChip}</span>
         </button>
+        {quals.map((q) => (
+          <span
+            key={q.key}
+            className={`shrink-0 text-[11px] ${q.warn ? "font-medium text-amber-800" : "text-slate-600"}`}
+          >
+            {q.text}
+          </span>
+        ))}
         {hos !== null && (
           <span className="text-[11px] text-gray-600">
-            HOS {hos.toFixed(1)} h
+            HOS {formatNumber(hos, { decimals: 1 })} h
           </span>
         )}
         {retryable && (

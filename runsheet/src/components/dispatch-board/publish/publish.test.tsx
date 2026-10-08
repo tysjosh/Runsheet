@@ -346,7 +346,9 @@ describe("PublishDialog content (R12.2, R12.3, R13.7)", () => {
 
   it("Publish all ready opens the review with the lanes that look ready", async () => {
     await renderBoard(boardSnap({ lanes: lanes() }));
-    fireEvent.click(screen.getByRole("button", { name: "Publish all ready" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Publish (all|\d+) ready$/ }),
+    );
     await waitFor(() => expect(mockPreview.mock.calls).toHaveLength(1));
     expect(mockPreview.mock.calls[0][1]).toEqual({
       lanes: [
@@ -367,7 +369,7 @@ describe("PublishDialog content (R12.2, R12.3, R13.7)", () => {
       "shadow",
     );
     expect(
-      screen.getByRole("button", { name: "Publish all ready" }),
+      screen.getByRole("button", { name: /^Publish (all|\d+) ready$/ }),
     ).toBeDisabled();
   });
 });

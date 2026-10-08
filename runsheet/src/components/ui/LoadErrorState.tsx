@@ -27,7 +27,8 @@ export interface LoadErrorStateProps {
   /** Singular label for the thing being loaded, e.g. "Terminal". */
   entityLabel: string;
   entityId?: string;
-  onBack: () => void;
+  /** Omit inside a widget (dashboard card): only Retry is shown. */
+  onBack?: () => void;
   backLabel?: string;
   homeHref?: string;
   homeLabel?: string;
@@ -120,9 +121,11 @@ export function LoadErrorState({
           Try again
         </Button>
       )}
-      <Button variant="ghost" onClick={onBack}>
-        ← {backLabel ?? "Go back"}
-      </Button>
+      {onBack && (
+        <Button variant="ghost" onClick={onBack}>
+          ← {backLabel ?? "Go back"}
+        </Button>
+      )}
       {homeHref && (
         <Link
           href={homeHref}

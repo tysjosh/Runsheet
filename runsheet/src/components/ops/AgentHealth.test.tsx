@@ -4,7 +4,7 @@
  * The behaviour being pinned: the autonomous agents are process-wide, so pausing
  * one stops it for every tenant, and the backend restricts it to
  * `platform_admin` via `agent_platform_admin_dependency` (`Agents/api_authz.py`,
- * staging F8). This panel renders inside `OperationsControlView` and
+ * staging F8). This panel renders inside Live → Agents (`live/LiveView`) and
  * `/ops/command`, which are both `admin` + `dispatcher` surfaces — so tenant
  * admins and dispatchers see the panel. They must not see a pause button that
  * can only return 403.

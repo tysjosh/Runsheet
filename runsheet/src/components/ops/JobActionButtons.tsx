@@ -14,7 +14,7 @@ import { Modal, ModalFooter } from "../ui";
  * cancelled → []
  * failed → []
  */
-const VALID_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
+export const VALID_TRANSITIONS: Record<JobStatus, JobStatus[]> = {
   scheduled: ["assigned", "cancelled"],
   assigned: ["in_progress", "cancelled"],
   in_progress: ["completed", "failed", "cancelled"],
@@ -30,7 +30,7 @@ interface TransitionButton {
   className: string;
 }
 
-const TRANSITION_BUTTONS: Record<string, TransitionButton> = {
+export const TRANSITION_BUTTONS: Record<string, TransitionButton> = {
   assigned: {
     targetStatus: "assigned",
     label: "Assign",

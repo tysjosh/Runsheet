@@ -27,6 +27,7 @@ import { canSee, moduleDescriptor } from "../../config/modules";
 import { NAV_SECTIONS, navIdForSegment } from "../../config/nav";
 import { getCurrentUserRoles } from "../../utils/auth";
 import {
+  type CreateOrderPrefill,
   DashboardChromeProvider,
   dashboardActiveItem,
   dashboardHref,
@@ -97,6 +98,14 @@ function Shell({ children }: { children: React.ReactNode }) {
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const [aiChatOpen, setAiChatOpen] = useState(false);
   const [createOrderOpen, setCreateOrderOpen] = useState(false);
+  const [createOrderPrefill, setCreateOrderPrefill] = useState<{
+    n: number;
+    values?: CreateOrderPrefill;
+  }>({ n: 0 });
+  const openCreateOrder = (values?: CreateOrderPrefill) => {
+    setCreateOrderPrefill((p) => ({ n: p.n + 1, values }));
+    setCreateOrderOpen(true);
+  };
   // `null` until the session's claims resolve. Every visibility decision below
   // treats that as "no roles", so nothing role-gated renders early.
   const [roles, setRoles] = useState<readonly string[] | null>(null);
@@ -149,7 +158,7 @@ function Shell({ children }: { children: React.ReactNode }) {
   };
 
   const chrome = {
-    openCreateOrder: () => setCreateOrderOpen(true),
+    openCreateOrder,
     openAIChat: () => setAiChatOpen(true),
   };
 
@@ -215,7 +224,7 @@ function Shell({ children }: { children: React.ReactNode }) {
                   : "/dashboard/orders",
               )
             }
-            onNewOrder={() => setCreateOrderOpen(true)}
+            onNewOrder={() => openCreateOrder()}
             onProfile={() => router.push("/dashboard/profile")}
             onSignOut={signOut}
           />
@@ -248,6 +257,8 @@ function Shell({ children }: { children: React.ReactNode }) {
       <ErrorBoundary componentName="Create Order">
         <Suspense fallback={null}>
           <CreateOrderModal
+            key={createOrderPrefill.n}
+            initialValues={createOrderPrefill.values}
             isOpen={createOrderOpen}
             onClose={() => setCreateOrderOpen(false)}
             onSuccess={(orderId) => {

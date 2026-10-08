@@ -9,6 +9,8 @@
 import { Plus } from "lucide-react";
 import { type KeyboardEvent, useRef } from "react";
 import type { LaneView, Load } from "../../../services/dispatchBoardApi";
+import { STATUS, type StatusKey } from "../../../styles/tokens";
+import { STATUS_ICONS } from "../../ui";
 import { focusKey, useBoard } from "../BoardContext";
 import { CheckChip } from "../CheckChip";
 import { resultReason } from "../dialogs/AssignToMenu";
@@ -17,7 +19,34 @@ import { previewLabel } from "../dnd/dragData";
 import { useRovingItem } from "../keyboard/roving";
 import { loadMenu } from "../menus";
 import { CARD_WIDTH, CHIP_WIDTH, type LoadBox } from "./layout";
-import { CELL_SCROLL_MARGIN, GhostCard, StopCard } from "./StopCard";
+import {
+  CELL_SCROLL_MARGIN,
+  GhostCard,
+  StopCard,
+  stopStatus,
+} from "./StopCard";
+
+const LOAD_STATUS_ORDER: StatusKey[] = [
+  "exception",
+  "delayed",
+  "in_transit",
+  "dispatched",
+  "planned",
+];
+
+/**
+ * A load's display status from its stops: the most urgent of exception,
+ * delayed, in transit, dispatched; Delivered once every stop is; Draft on an
+ * unpublished lane; else Planned.
+ */
+export function loadStatus(lane: LaneView, load: Load): StatusKey {
+  const statuses = load.stops.map(stopStatus);
+  if (statuses.length > 0 && statuses.every((s) => s === "delivered"))
+    return "delivered";
+  for (const s of LOAD_STATUS_ORDER.slice(0, 4))
+    if (statuses.includes(s)) return s;
+  return lane.state === "draft" ? "draft" : "planned";
+}
 
 export interface LoadBlockProps {
   lane: LaneView;
@@ -58,6 +87,10 @@ function LoadChip({
   });
   const placingLoad = api.placeItem?.kind === "load";
   const terminal = load.terminal_id ?? "No terminal";
+  const statusKey = loadStatus(lane, load);
+  const status = STATUS[statusKey];
+  const StatusIcon = STATUS_ICONS[status.icon];
+  const selectedLoad = api.isSelected("load", load.load_id);
   const openMenu = () =>
     api.showMenu({
       label: `Load ${number} actions`,
@@ -104,15 +137,27 @@ function LoadChip({
           e.preventDefault();
           openMenu();
         }}
-        style={{ width: CHIP_WIDTH, ...CELL_SCROLL_MARGIN }}
-        className={`flex h-full cursor-grab flex-col items-start justify-center rounded-md border bg-gray-50 px-1.5 text-left text-[11px] leading-tight outline-none focus-visible:ring-2 focus-visible:ring-primary ${
-          api.isSelected("load", load.load_id)
-            ? "border-primary bg-primary-soft"
-            : "border-gray-300"
+        style={{
+          width: CHIP_WIDTH,
+          ...CELL_SCROLL_MARGIN,
+          backgroundColor: selectedLoad ? undefined : status.bg,
+          borderColor: selectedLoad ? undefined : status.border,
+          borderStyle: statusKey === "draft" ? "dashed" : "solid",
+          color: status.fg,
+        }}
+        data-status={statusKey}
+        className={`flex h-full max-w-full cursor-grab flex-col items-start justify-center gap-0.5 overflow-hidden rounded-md border px-1.5 text-left text-[11px] leading-tight outline-none focus-visible:ring-2 focus-visible:ring-primary ${
+          selectedLoad ? "border-2 border-primary bg-primary-soft" : ""
         } ${over ? "ring-2 ring-primary" : ""}`}
       >
-        <span className="font-semibold text-gray-900">Load {number}</span>
-        <span className="truncate text-gray-600">{terminal}</span>
+        <span className="flex items-center gap-1 font-semibold">
+          {StatusIcon && (
+            <StatusIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
+          )}
+          Load {number}
+        </span>
+        <span className="max-w-full truncate">{status.label}</span>
+        <span className="max-w-full truncate text-slate-700">{terminal}</span>
       </button>
     </div>
   );
