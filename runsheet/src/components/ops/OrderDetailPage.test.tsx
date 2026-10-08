@@ -17,6 +17,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 // Mock next/navigation
@@ -703,5 +704,96 @@ describe("OrderDetailPage — customer-portal requests (UI-4, PD24)", () => {
     ).toBeInTheDocument();
     expect(mockGetOrder).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("button", { name: "Confirm" })).toBeNull();
+  });
+});
+
+describe("OrderDetailPage — actions on FormDialog (Phase 3 review 3)", () => {
+  async function openAction(name: string) {
+    mockGetOrder.mockResolvedValue(orderFixture({ status: "confirmed" }));
+    mockGetOrderEvents.mockResolvedValue(eventsResponse());
+    render(<OrderDetailPage />);
+    fireEvent.click(await screen.findByRole("button", { name }));
+  }
+
+  it("Change status submits the chosen status and reason", async () => {
+    mockUpdateOrderStatus.mockResolvedValue({} as never);
+    await openAction("Change status");
+    const dialog = await screen.findByRole("dialog", { name: "Change status" });
+    fireEvent.change(within(dialog).getByLabelText("New status"), {
+      target: { value: "scheduled" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("Reason"), {
+      target: { value: "QA move" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Update status" }),
+    );
+    await waitFor(() =>
+      expect(mockUpdateOrderStatus).toHaveBeenCalledWith("ord_test123", {
+        new_status: "scheduled",
+        reason: "QA move",
+      }),
+    );
+    await waitFor(() => expect(dialog).not.toBeInTheDocument());
+    expect(
+      await screen.findByText("Status changed to Scheduled"),
+    ).toBeInTheDocument();
+  });
+
+  it("Place on hold needs a reason and keeps the API error inline", async () => {
+    const { ApiError } = jest.requireMock("../../services/api") as {
+      ApiError: new (m: string, s: number) => Error;
+    };
+    mockHoldOrder.mockRejectedValue(
+      new ApiError("Order cannot be held in this state", 409),
+    );
+    await openAction("Place on hold");
+    const dialog = await screen.findByRole("dialog", { name: "Place on hold" });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Place on hold" }),
+    );
+    expect(
+      await within(dialog).findByText("Enter a reason."),
+    ).toBeInTheDocument();
+    expect(mockHoldOrder).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByLabelText(/Hold reason/), {
+      target: { value: "Credit check" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Place on hold" }),
+    );
+    expect(
+      await within(dialog).findByText("Order cannot be held in this state"),
+    ).toBeInTheDocument();
+    expect(mockHoldOrder).toHaveBeenCalledWith("ord_test123", {
+      hold_reason: "Credit check",
+    });
+  });
+
+  it("Cancel order sends the trimmed reason", async () => {
+    mockCancelOrder.mockResolvedValue({} as never);
+    await openAction("Cancel order");
+    const dialog = await screen.findByRole("dialog", { name: "Cancel order" });
+    fireEvent.change(within(dialog).getByLabelText(/Cancellation reason/), {
+      target: { value: "  Customer called  " },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Confirm cancel" }),
+    );
+    await waitFor(() =>
+      expect(mockCancelOrder).toHaveBeenCalledWith("ord_test123", {
+        reason: "Customer called",
+      }),
+    );
+  });
+
+  it("Assign driver requires a driver", async () => {
+    await openAction("Assign driver");
+    const dialog = await screen.findByRole("dialog", { name: "Assign driver" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Assign" }));
+    expect(
+      await within(dialog).findByText("Choose a driver."),
+    ).toBeInTheDocument();
+    expect(mockAssignDriver).not.toHaveBeenCalled();
   });
 });
