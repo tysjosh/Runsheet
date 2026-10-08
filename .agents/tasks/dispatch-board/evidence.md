@@ -487,7 +487,7 @@ cwd `.worktrees/dispatch-board/runsheet` unless named.
 - No review loop ran in this step, so no freeze decision was needed.
 
 #### Review fix (phase7-review.json, CHANGES_REQUESTED)
-All five findings fixed. No staging, AWS, deploy or CodeBuild action; the flag default is untouched.
+All five findings fixed in commit `bba20e9`. No staging, AWS, deploy or CodeBuild action; the flag default is untouched.
 
 | Finding | Fix | Tests |
 |---|---|---|
