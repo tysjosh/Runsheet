@@ -1,16 +1,26 @@
+"use client";
+
+/**
+ * Fleet → Inventory (UI revamp task 3.1, design.md §5 "Inventory item": md).
+ *
+ * One toolbar (search, status chips with the summary counts, a Filters
+ * popover for category, low-stock alert count), a DataTable with a row menu
+ * (Restock, Consume, Edit, History, Delete), and every flow on the shared
+ * dialogs: create, edit and stock adjustment are FormDialogs; delete is a
+ * confirm Modal; history is a Drawer. The 5-card stats band became the chip
+ * counts plus the stock value in the title row.
+ */
 import {
   AlertTriangle,
   ArrowDownCircle,
   ArrowUpCircle,
   Clock,
-  Filter,
-  Package,
   Pencil,
   Plus,
   Trash2,
-  X,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { dateLong, dateTime, humanize, money, number } from "../lib/format";
 import { apiService, type InventoryItem } from "../services/api";
 import {
   adjustStock,
@@ -23,50 +33,69 @@ import {
   type InventoryItem as InvApiItem,
   type InventoryCategory,
   type InventorySummary,
-  type StockAdjustment,
   type StockMovementEvent,
 } from "../services/inventoryApi";
-
-import LoadingSpinner from "./LoadingSpinner";
+import type { StatusKey } from "../styles/tokens";
 import {
-  Badge,
-  type BadgeVariant,
   Button,
   type Column,
-  EmptyState,
-  FilterBar,
-  PageHeader,
-  Pagination,
-  StatsBar,
-  Table,
+  DataTable,
+  Drawer,
+  Field,
+  FilterChips,
+  FilterPopover,
+  FormDialog,
+  INPUT_CLASS,
+  Modal,
+  NumberField,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "./ui";
+import { notify } from "./ui/toast/notify";
 
-const INVENTORY_STATUSES: { value: InventoryItem["status"]; label: string }[] =
-  [
-    { value: "in_stock", label: "In Stock" },
-    { value: "low_stock", label: "Low Stock" },
-    { value: "out_of_stock", label: "Out of Stock" },
-  ];
+/** Stock status → badge style and label (icon + text, not colour alone). */
+export const INVENTORY_STATUS: Record<
+  InventoryItem["status"],
+  { status: StatusKey; label: string }
+> = {
+  in_stock: { status: "ok", label: "In stock" },
+  low_stock: { status: "warning", label: "Low stock" },
+  out_of_stock: { status: "critical", label: "Out of stock" },
+};
+const STATUS_IDS = Object.keys(INVENTORY_STATUS) as InventoryItem["status"][];
+
+const CATEGORY_OPTIONS: { value: InventoryCategory; label: string }[] = [
+  { value: "tires", label: "Tires" },
+  { value: "engine_parts", label: "Engine parts" },
+  { value: "brake_parts", label: "Brake parts" },
+  { value: "fluids", label: "Fluids" },
+  { value: "filters", label: "Filters" },
+  { value: "electrical", label: "Electrical" },
+  { value: "fuel_equipment", label: "Fuel equipment" },
+  { value: "safety", label: "Safety" },
+  { value: "general", label: "General" },
+];
+
+const PAGE_SIZE = 20;
 
 export default function Inventory() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [filterCategory, setFilterCategory] = useState("all");
   const [filterStatus, setFilterStatus] = useState("all");
   const [page, setPage] = useState(1);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
-  const [adjustingItem, setAdjustingItem] = useState<InventoryItem | null>(
-    null,
-  );
-  const [adjustType, setAdjustType] = useState<"restock" | "consume">(
-    "restock",
-  );
-  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [adjusting, setAdjusting] = useState<{
+    item: InventoryItem;
+    type: "restock" | "consume";
+  } | null>(null);
+  const [creating, setCreating] = useState(false);
   const [deletingItem, setDeletingItem] = useState<InventoryItem | null>(null);
   const [historyItem, setHistoryItem] = useState<InventoryItem | null>(null);
-
-  // Dashboard state
   const [summary, setSummary] = useState<InventorySummary | null>(null);
   const [alerts, setAlerts] = useState<InvApiItem[]>([]);
   const [showAlerts, setShowAlerts] = useState(false);
@@ -74,30 +103,25 @@ export default function Inventory() {
   const loadInventoryData = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadError(null);
       const response = await apiService.getInventory();
       setInventory(response.data);
     } catch (error) {
-      console.error("Failed to load inventory data:", error);
+      setLoadError(
+        error instanceof Error ? error.message : "Failed to load inventory",
+      );
     } finally {
       setLoading(false);
     }
   }, []);
 
   const loadDashboardData = useCallback(async () => {
-    try {
-      const [summaryRes, alertsRes] = await Promise.allSettled([
-        getSummary(),
-        getAlerts(),
-      ]);
-      if (summaryRes.status === "fulfilled") {
-        setSummary(summaryRes.value.data);
-      }
-      if (alertsRes.status === "fulfilled") {
-        setAlerts(alertsRes.value.data);
-      }
-    } catch (error) {
-      console.error("Failed to load dashboard data:", error);
-    }
+    const [summaryRes, alertsRes] = await Promise.allSettled([
+      getSummary(),
+      getAlerts(),
+    ]);
+    if (summaryRes.status === "fulfilled") setSummary(summaryRes.value.data);
+    if (alertsRes.status === "fulfilled") setAlerts(alertsRes.value.data);
   }, []);
 
   useEffect(() => {
@@ -105,46 +129,23 @@ export default function Inventory() {
     loadDashboardData();
   }, [loadInventoryData, loadDashboardData]);
 
-  const getStatusVariant = (status: string): BadgeVariant => {
-    switch (status) {
-      case "in_stock":
-        return "success";
-      case "low_stock":
-        return "warning";
-      case "out_of_stock":
-        return "error";
-      default:
-        return "neutral";
-    }
+  const reloadAll = () => {
+    loadInventoryData();
+    loadDashboardData();
   };
 
-  const getStatusText = (status: string) => {
-    switch (status) {
-      case "in_stock":
-        return "In Stock";
-      case "low_stock":
-        return "Low Stock";
-      case "out_of_stock":
-        return "Out of Stock";
-      default:
-        return status;
-    }
-  };
-
-  const PAGE_SIZE = 20;
-
-  const filteredInventory = inventory.filter((item) => {
-    const matchesSearch =
-      item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      item.category.toLowerCase().includes(searchTerm.toLowerCase());
-    const matchesCategory =
-      filterCategory === "all" ||
-      item.category.toLowerCase() === filterCategory;
-    const matchesStatus =
-      filterStatus === "all" || item.status === filterStatus;
-    return matchesSearch && matchesCategory && matchesStatus;
-  });
-
+  const q = searchTerm.trim().toLowerCase();
+  const matchesBase = (item: InventoryItem) =>
+    (!q ||
+      item.name.toLowerCase().includes(q) ||
+      item.category.toLowerCase().includes(q)) &&
+    (filterCategory === "all" ||
+      item.category.toLowerCase() === filterCategory);
+  const filteredInventory = inventory.filter(
+    (item) =>
+      matchesBase(item) &&
+      (filterStatus === "all" || item.status === filterStatus),
+  );
   const totalPages = Math.max(
     1,
     Math.ceil(filteredInventory.length / PAGE_SIZE),
@@ -153,1193 +154,854 @@ export default function Inventory() {
     (page - 1) * PAGE_SIZE,
     page * PAGE_SIZE,
   );
-  const inventoryColumns: Column<InventoryItem>[] = [
+
+  // Chip counts: the summary endpoint's totals when nothing narrows the
+  // list, otherwise the loaded rows under the current search and category.
+  const narrowed = q !== "" || filterCategory !== "all";
+  const statusCounts: Record<string, number> = narrowed
+    ? {
+        all: inventory.filter(matchesBase).length,
+        ...Object.fromEntries(
+          STATUS_IDS.map((s) => [
+            s,
+            inventory.filter((i) => matchesBase(i) && i.status === s).length,
+          ]),
+        ),
+      }
+    : {
+        all: summary?.total_items ?? inventory.length,
+        in_stock:
+          summary?.in_stock ??
+          inventory.filter((i) => i.status === "in_stock").length,
+        low_stock:
+          summary?.low_stock ??
+          inventory.filter((i) => i.status === "low_stock").length,
+        out_of_stock:
+          summary?.out_of_stock ??
+          inventory.filter((i) => i.status === "out_of_stock").length,
+      };
+
+  const categories = Array.from(
+    new Set(inventory.map((item) => item.category.toLowerCase())),
+  );
+
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setCreating(true)}
+      >
+        Add item
+      </Button>
+    ),
+    [],
+  );
+  const counts = useMemo(
+    () =>
+      summary?.total_value != null ? (
+        <span className="whitespace-nowrap text-xs text-text-muted">
+          Stock value {money(summary.total_value, { decimals: 0 })}
+        </span>
+      ) : null,
+    [summary],
+  );
+  const embedded = usePageChrome({ actions, counts });
+
+  const columns: Column<InventoryItem>[] = [
     {
       key: "item",
-      label: "Item",
-      render: (item) => (
-        <div>
-          <div className="font-medium text-primary">{item.name}</div>
-          <div className="text-sm text-gray-500">{item.id}</div>
-        </div>
+      header: "Item",
+      truncate: true,
+      title: (i) => `${i.name} (${i.id})`,
+      cell: (i) => (
+        <span className="block min-w-0">
+          <span className="block truncate font-medium text-text">{i.name}</span>
+          <span className="block truncate font-mono text-xs text-text-muted">
+            {i.id}
+          </span>
+        </span>
       ),
     },
     {
       key: "category",
-      label: "Category",
-      render: (item) => (
-        <span className="text-sm text-gray-700">{item.category}</span>
-      ),
+      header: "Category",
+      className: "text-slate-700",
+      cell: (i) => humanize(i.category),
     },
     {
       key: "location",
-      label: "Location",
-      render: (item) => (
-        <span className="text-sm text-gray-700">{item.location}</span>
-      ),
+      header: "Location",
+      truncate: true,
+      title: (i) => i.location,
+      className: "text-slate-700",
+      cell: (i) => i.location,
     },
     {
       key: "quantity",
-      label: "Quantity",
-      render: (item) => (
-        <div className="text-sm font-semibold text-primary">
-          {item.quantity.toLocaleString()} {item.unit}
-        </div>
-      ),
+      header: "Quantity",
+      align: "right",
+      className: "tabular-nums font-semibold text-text whitespace-nowrap",
+      cell: (i) => `${number(i.quantity)} ${i.unit}`,
     },
     {
       key: "status",
-      label: "Status",
-      render: (item) => (
-        <Badge variant={getStatusVariant(item.status)} size="sm">
-          {getStatusText(item.status)}
-        </Badge>
-      ),
+      header: "Status",
+      width: 120,
+      cell: (i) => {
+        const cfg = INVENTORY_STATUS[i.status];
+        return cfg ? (
+          <StatusBadge status={cfg.status} label={cfg.label} />
+        ) : (
+          humanize(i.status)
+        );
+      },
     },
     {
       key: "lastUpdated",
-      label: "Last Updated",
-      render: (item) => (
-        <span className="text-sm text-gray-600">
-          {new Date(item.lastUpdated).toLocaleDateString("en-US", {
-            month: "short",
-            day: "numeric",
-            year: "numeric",
-          })}
-        </span>
-      ),
-    },
-    {
-      key: "actions",
-      label: "Actions",
-      render: (item) => (
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            icon={<ArrowUpCircle className="w-3 h-3" />}
-            onClick={() => {
-              setAdjustingItem(item);
-              setAdjustType("restock");
-            }}
-            aria-label={`Restock ${item.name}`}
-            title="Restock"
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            icon={<ArrowDownCircle className="w-3 h-3" />}
-            onClick={() => {
-              setAdjustingItem(item);
-              setAdjustType("consume");
-            }}
-            aria-label={`Consume ${item.name}`}
-            title="Consume"
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            icon={<Pencil className="w-3 h-3" />}
-            onClick={() => setEditingItem(item)}
-            aria-label={`Edit ${item.name}`}
-            title="Edit"
-          />
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            icon={<Clock className="w-3 h-3" />}
-            onClick={() => setHistoryItem(item)}
-            aria-label={`View history for ${item.name}`}
-            title="History"
-          />
-          <Button
-            type="button"
-            variant="danger"
-            size="sm"
-            icon={<Trash2 className="w-3 h-3" />}
-            onClick={() => setDeletingItem(item)}
-            aria-label={`Delete ${item.name}`}
-            title="Delete"
-          />
-        </div>
-      ),
+      header: "Updated",
+      className: "text-slate-700 whitespace-nowrap",
+      cell: (i) => dateLong(i.lastUpdated),
     },
   ];
-
-  const categories = [
-    "all",
-    ...Array.from(
-      new Set(inventory.map((item) => item.category.toLowerCase())),
-    ),
-  ];
-
-  const handleEditSaved = (updatedItem: InventoryItem) => {
-    setInventory((prev) =>
-      prev.map((item) => (item.id === updatedItem.id ? updatedItem : item)),
-    );
-    setEditingItem(null);
-  };
-
-  const handleAdjustComplete = () => {
-    setAdjustingItem(null);
-    loadInventoryData();
-    loadDashboardData();
-  };
-
-  const handleCreateComplete = () => {
-    setShowCreateModal(false);
-    loadInventoryData();
-    loadDashboardData();
-  };
-
-  const handleDeleteConfirm = async () => {
-    if (!deletingItem) return;
-    try {
-      await deleteItem(deletingItem.id);
-      setDeletingItem(null);
-      loadInventoryData();
-      loadDashboardData();
-    } catch (error) {
-      console.error("Failed to delete item:", error);
-    }
-  };
-
-  if (loading) {
-    return <LoadingSpinner message="Loading inventory..." />;
-  }
 
   return (
-    <div className="h-full flex flex-col bg-white">
-      {/* Header */}
-      <PageHeader
-        title="Inventory Management"
-        subtitle="Track and manage inventory levels"
-        icon={<Package className="w-5 h-5" />}
-        badge={
-          alerts.length > 0 ? (
-            <Button
-              type="button"
-              variant="secondary"
-              size="sm"
-              onClick={() => setShowAlerts(!showAlerts)}
-              icon={<AlertTriangle className="w-4 h-4" />}
-            >
-              {alerts.length} Alert{alerts.length !== 1 ? "s" : ""}
-            </Button>
-          ) : undefined
+    <div className="flex h-full flex-col bg-surface">
+      <Toolbar
+        label="Inventory"
+        search={
+          <input
+            type="search"
+            value={searchTerm}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setPage(1);
+            }}
+            placeholder="Search name or category"
+            aria-label="Search inventory"
+            className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+          />
         }
-        actions={
-          <Button
-            variant="primary"
-            size="md"
-            icon={<Plus className="w-4 h-4" />}
-            onClick={() => setShowCreateModal(true)}
-          >
-            Add Item
-          </Button>
-        }
-      />
-
-      {/* Search and Filters */}
-      <FilterBar
-        searchPlaceholder="Search inventory..."
-        searchValue={searchTerm}
-        onSearchChange={(value) => {
-          setSearchTerm(value);
-          setPage(1);
-        }}
         filters={
           <>
-            <div className="relative">
-              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
-              <select
-                value={filterCategory}
-                onChange={(e) => {
-                  setFilterCategory(e.target.value);
-                  setPage(1);
-                }}
-                className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-                aria-label="Category"
-              >
-                {categories.map((category) => (
-                  <option key={category} value={category}>
-                    {category === "all"
-                      ? "All Categories"
-                      : category.charAt(0).toUpperCase() + category.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <select
+            <FilterChips
+              label="Stock status"
+              collapse
+              options={[
+                { id: "all", label: "All", count: statusCounts.all },
+                ...STATUS_IDS.map((id) => ({
+                  id,
+                  label: INVENTORY_STATUS[id].label,
+                  count: statusCounts[id],
+                  status: INVENTORY_STATUS[id].status,
+                })),
+              ]}
               value={filterStatus}
-              onChange={(e) => {
-                setFilterStatus(e.target.value);
+              onChange={(v) => {
+                setFilterStatus(v as string);
                 setPage(1);
               }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Status"
+            />
+            <FilterPopover
+              count={filterCategory === "all" ? 0 : 1}
+              label="Inventory filters"
+              onClear={() => {
+                setFilterCategory("all");
+                setPage(1);
+              }}
             >
-              <option value="all">All Statuses</option>
-              {INVENTORY_STATUSES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+              <Field label="Category" id="inv-filter-category">
+                <Select
+                  id="inv-filter-category"
+                  value={filterCategory}
+                  onChange={(v) => {
+                    setFilterCategory(v);
+                    setPage(1);
+                  }}
+                  options={[
+                    { value: "all", label: "All categories" },
+                    ...categories.map((c) => ({
+                      value: c,
+                      label: humanize(c),
+                    })),
+                  ]}
+                />
+              </Field>
+            </FilterPopover>
+          </>
+        }
+        end={
+          <>
+            {alerts.length > 0 && (
+              <button
+                type="button"
+                aria-expanded={showAlerts}
+                onClick={() => setShowAlerts((v) => !v)}
+                className="inline-flex h-7 items-center gap-1 whitespace-nowrap rounded-full border border-amber-300 bg-amber-50 px-2 text-xs font-semibold text-amber-900 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+              >
+                <AlertTriangle aria-hidden="true" className="h-3 w-3" />
+                {alerts.length} low-stock alert{alerts.length === 1 ? "" : "s"}
+              </button>
+            )}
+            {!embedded && counts}
+            {!embedded && actions}
           </>
         }
       />
-
-      {/* Summary Stats Bar */}
-      <StatsBar
-        variant="grid"
-        stats={[
-          {
-            label: "Total Items",
-            value: summary?.total_items ?? inventory.length,
-          },
-          {
-            label: "In Stock",
-            value:
-              summary?.in_stock ??
-              inventory.filter((i) => i.status === "in_stock").length,
-            color: "success",
-          },
-          {
-            label: "Low Stock",
-            value:
-              summary?.low_stock ??
-              inventory.filter((i) => i.status === "low_stock").length,
-            color: "warning",
-          },
-          {
-            label: "Out of Stock",
-            value:
-              summary?.out_of_stock ??
-              inventory.filter((i) => i.status === "out_of_stock").length,
-            color: "error",
-          },
-          {
-            label: "Total Value",
-            value:
-              summary?.total_value != null
-                ? `$${summary.total_value.toLocaleString()}`
-                : "—",
-          },
-        ]}
-      />
-
-      {/* Alerts Panel (collapsible) */}
-      {showAlerts && alerts.length > 0 && (
-        <div className="border-b border-warning-light bg-warning-light px-8 py-4">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-warning-dark">
-              Low Stock Alerts
-            </h3>
-            <button
-              onClick={() => setShowAlerts(false)}
-              className="text-warning hover:text-warning-dark"
-            >
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="space-y-2 max-h-40 overflow-y-auto">
-            {alerts.map((alert) => (
-              <div
-                key={alert.item_id}
-                className="flex items-center justify-between bg-white rounded-lg px-3 py-2 border border-warning-light"
-              >
-                <div>
-                  <span className="text-sm font-medium text-gray-800">
-                    {alert.name}
-                  </span>
-                  <span className="text-xs text-gray-500 ml-2">
-                    {alert.category} · {alert.location}
-                  </span>
-                </div>
-                <Badge variant={getStatusVariant(alert.status)} size="sm">
-                  {alert.quantity} / {alert.min_threshold} min
-                </Badge>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="flex-1 overflow-y-auto">
-        <Table
-          columns={inventoryColumns}
-          data={paginatedInventory}
-          getRowId={(item) => item.id}
-          emptyState={
-            <EmptyState
-              icon={<Package />}
-              title="No inventory items found"
-              description="Try adjusting your search or filter criteria"
-            />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<InventoryItem>
+          ariaLabel="Inventory items"
+          columns={columns}
+          data={loading || loadError ? [] : paginatedInventory}
+          loading={loading}
+          error={
+            loadError
+              ? { message: loadError, onRetry: loadInventoryData }
+              : null
           }
-        />
-        <Pagination
-          currentPage={page}
-          totalPages={totalPages}
-          totalItems={filteredInventory.length}
-          onPageChange={setPage}
+          getRowId={(i) => i.id}
+          rowLabel={(i) => i.name}
+          rowMenu={(i) => [
+            {
+              id: "restock",
+              label: "Restock",
+              icon: <ArrowUpCircle className="h-3.5 w-3.5" />,
+              onSelect: () => setAdjusting({ item: i, type: "restock" }),
+            },
+            {
+              id: "consume",
+              label: "Consume",
+              icon: <ArrowDownCircle className="h-3.5 w-3.5" />,
+              onSelect: () => setAdjusting({ item: i, type: "consume" }),
+            },
+            {
+              id: "edit",
+              label: "Edit item",
+              icon: <Pencil className="h-3.5 w-3.5" />,
+              onSelect: () => setEditingItem(i),
+            },
+            {
+              id: "history",
+              label: "Stock history",
+              icon: <Clock className="h-3.5 w-3.5" />,
+              onSelect: () => setHistoryItem(i),
+            },
+            {
+              id: "delete",
+              label: "Delete item",
+              icon: <Trash2 className="h-3.5 w-3.5" />,
+              onSelect: () => setDeletingItem(i),
+            },
+          ]}
+          pagination={
+            totalPages > 1
+              ? {
+                  page,
+                  totalPages,
+                  totalItems: filteredInventory.length,
+                  onPageChange: setPage,
+                }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No inventory items found</p>
+              <p className="mt-1 text-xs">
+                Try adjusting your search or filters
+              </p>
+            </div>
+          }
         />
       </div>
 
-      {/* Edit Inventory Modal */}
+      <Drawer
+        open={showAlerts && alerts.length > 0}
+        onClose={() => setShowAlerts(false)}
+        title="Low-stock alerts"
+        width={420}
+      >
+        <ul className="space-y-2">
+          {alerts.map((a) => {
+            const cfg =
+              INVENTORY_STATUS[a.status as InventoryItem["status"]] ??
+              INVENTORY_STATUS.low_stock;
+            return (
+              <li
+                key={a.item_id}
+                className="flex items-center justify-between gap-3 rounded-lg border border-slate-200 px-3 py-2"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-medium text-text">
+                    {a.name}
+                  </span>
+                  <span className="block truncate text-xs text-text-muted">
+                    {humanize(a.category)} · {a.location}
+                  </span>
+                </span>
+                <StatusBadge
+                  status={cfg.status}
+                  label={`${number(a.quantity)} / ${number(a.min_threshold)} min`}
+                />
+              </li>
+            );
+          })}
+        </ul>
+      </Drawer>
+
       {editingItem && (
-        <EditInventoryModal
+        <EditItemDialog
           item={editingItem}
           onClose={() => setEditingItem(null)}
-          onSaved={handleEditSaved}
+          onSaved={(updated) => {
+            setInventory((prev) =>
+              prev.map((i) => (i.id === updated.id ? updated : i)),
+            );
+            setEditingItem(null);
+            loadDashboardData();
+          }}
         />
       )}
-
-      {/* Stock Adjustment Modal */}
-      {adjustingItem && (
-        <StockAdjustmentModal
-          item={adjustingItem}
-          type={adjustType}
-          onClose={() => setAdjustingItem(null)}
-          onComplete={handleAdjustComplete}
+      {adjusting && (
+        <StockAdjustmentDialog
+          item={adjusting.item}
+          type={adjusting.type}
+          onClose={() => setAdjusting(null)}
+          onComplete={() => {
+            setAdjusting(null);
+            reloadAll();
+          }}
         />
       )}
-
-      {/* Create Item Modal */}
-      {showCreateModal && (
-        <CreateInventoryModal
-          onClose={() => setShowCreateModal(false)}
-          onCreated={handleCreateComplete}
+      {creating && (
+        <CreateItemDialog
+          onClose={() => setCreating(false)}
+          onCreated={() => {
+            setCreating(false);
+            reloadAll();
+          }}
         />
       )}
-
-      {/* Delete Confirmation Modal */}
       {deletingItem && (
-        <DeleteConfirmModal
+        <DeleteItemDialog
           item={deletingItem}
           onClose={() => setDeletingItem(null)}
-          onConfirm={handleDeleteConfirm}
+          onDeleted={() => {
+            setDeletingItem(null);
+            reloadAll();
+          }}
         />
       )}
-
-      {/* Stock History Modal */}
-      {historyItem && (
-        <StockHistoryModal
-          item={historyItem}
-          onClose={() => setHistoryItem(null)}
-        />
-      )}
+      <Drawer
+        open={historyItem !== null}
+        onClose={() => setHistoryItem(null)}
+        title={historyItem ? `Stock history · ${historyItem.name}` : "History"}
+        width={640}
+      >
+        {historyItem && <StockHistory item={historyItem} />}
+      </Drawer>
     </div>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Stock Adjustment Modal                                              */
-/* ------------------------------------------------------------------ */
+// ─── Stock adjustment ────────────────────────────────────────────────────────
 
-interface StockAdjustmentModalProps {
-  item: InventoryItem;
-  type: "restock" | "consume";
-  onClose: () => void;
-  onComplete: () => void;
-}
+const RESTOCK_REASONS = [
+  { value: "restock", label: "Restock" },
+  { value: "return", label: "Return" },
+  { value: "correction", label: "Correction" },
+];
+const CONSUME_REASONS = [
+  { value: "used_for_maintenance", label: "Used for maintenance" },
+  { value: "damaged", label: "Damaged" },
+  { value: "expired", label: "Expired" },
+  { value: "correction", label: "Correction" },
+];
 
-function StockAdjustmentModal({
+function StockAdjustmentDialog({
   item,
   type,
   onClose,
   onComplete,
-}: StockAdjustmentModalProps) {
-  const [quantity, setQuantity] = useState("");
-  const [reason, setReason] = useState(
-    type === "restock" ? "restock" : "used_for_maintenance",
-  );
-  const [referenceId, setReferenceId] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [success, setSuccess] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const parsedQty = parseInt(quantity, 10);
-    if (Number.isNaN(parsedQty) || parsedQty <= 0) {
-      setError("Quantity must be a positive number.");
-      return;
-    }
-
-    setError("");
-    setSubmitting(true);
-    try {
-      const adjustment: StockAdjustment = {
-        quantity_change: type === "consume" ? -parsedQty : parsedQty,
-        reason,
-        ...(referenceId.trim() && { reference_id: referenceId.trim() }),
-      };
-      await adjustStock(item.id, adjustment);
-      setSuccess(true);
-      setTimeout(() => {
-        onComplete();
-      }, 800);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to adjust stock");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">
-            {type === "restock" ? "Restock Item" : "Consume Stock"}
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-          {success && (
-            <p className="text-sm text-success bg-success-light px-3 py-2 rounded-lg">
-              Stock adjusted successfully!
-            </p>
-          )}
-
-          {/* Item info */}
-          <div className="bg-gray-50 px-3 py-2 rounded-lg">
-            <p className="text-sm font-medium text-primary">{item.name}</p>
-            <p className="text-xs text-gray-500">
-              Current: {item.quantity} {item.unit} · {item.location}
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Quantity to {type === "restock" ? "add" : "deduct"}
-            </label>
-            <input
-              type="number"
-              value={quantity}
-              onChange={(e) => setQuantity(e.target.value)}
-              min="1"
-              placeholder="Enter quantity"
-              className={inputClass}
-              required
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Reason
-            </label>
-            <select
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              className={inputClass}
-            >
-              {type === "restock" ? (
-                <>
-                  <option value="restock">Restock</option>
-                  <option value="return">Return</option>
-                  <option value="correction">Correction</option>
-                </>
-              ) : (
-                <>
-                  <option value="used_for_maintenance">
-                    Used for Maintenance
-                  </option>
-                  <option value="damaged">Damaged</option>
-                  <option value="expired">Expired</option>
-                  <option value="correction">Correction</option>
-                </>
-              )}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Reference ID (optional)
-            </label>
-            <input
-              type="text"
-              value={referenceId}
-              onChange={(e) => setReferenceId(e.target.value)}
-              placeholder="e.g. PO-12345 or JOB-456"
-              className={inputClass}
-            />
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting || success}
-              className={`px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 ${
-                type === "restock"
-                  ? "bg-success hover:bg-success-dark"
-                  : "bg-warning hover:bg-warning-dark"
-              }`}
-            >
-              {submitting
-                ? "Processing..."
-                : type === "restock"
-                  ? "Restock"
-                  : "Consume"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Edit Inventory Modal                                                */
-/* ------------------------------------------------------------------ */
-
-interface EditInventoryModalProps {
+}: {
   item: InventoryItem;
+  type: "restock" | "consume";
   onClose: () => void;
-  onSaved: (updatedItem: InventoryItem) => void;
+  onComplete: () => void;
+}) {
+  type V = { quantity: number | null; reason: string; reference_id: string };
+  return (
+    <FormDialog<V>
+      open
+      size="sm"
+      title={type === "restock" ? "Restock item" : "Consume stock"}
+      help={`${item.name} · current ${number(item.quantity)} ${item.unit} · ${item.location}`}
+      submitLabel={type === "restock" ? "Restock" : "Consume"}
+      successMessage="Stock adjusted"
+      initialValues={{
+        quantity: null,
+        reason: type === "restock" ? "restock" : "used_for_maintenance",
+        reference_id: "",
+      }}
+      validate={(v) =>
+        v.quantity == null || Number.isNaN(v.quantity) || v.quantity <= 0
+          ? { quantity: "Enter a quantity above 0." }
+          : {}
+      }
+      onSubmit={(v) =>
+        adjustStock(item.id, {
+          quantity_change:
+            type === "consume"
+              ? -(v.quantity as number)
+              : (v.quantity as number),
+          reason: v.reason,
+          ...(v.reference_id.trim() && {
+            reference_id: v.reference_id.trim(),
+          }),
+        })
+      }
+      onSaved={onComplete}
+      onClose={onClose}
+    >
+      {({ values, set, errors }) => (
+        <>
+          <Field
+            label={`Quantity to ${type === "restock" ? "add" : "deduct"}`}
+            required
+            error={errors.quantity}
+            id="adj-qty"
+          >
+            <NumberField
+              id="adj-qty"
+              unit={item.unit}
+              min={1}
+              value={values.quantity}
+              onChange={(n) => set("quantity", n)}
+            />
+          </Field>
+          <Field label="Reason" id="adj-reason">
+            <Select
+              id="adj-reason"
+              value={values.reason}
+              onChange={(r) => set("reason", r)}
+              options={type === "restock" ? RESTOCK_REASONS : CONSUME_REASONS}
+            />
+          </Field>
+          <Field label="Reference ID">
+            <input
+              id="adj-ref"
+              type="text"
+              value={values.reference_id}
+              onChange={(e) => set("reference_id", e.target.value)}
+              placeholder="e.g. PO-12345 or JOB-456"
+              className={INPUT_CLASS}
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
+  );
 }
 
-function EditInventoryModal({
+// ─── Edit ────────────────────────────────────────────────────────────────────
+
+function EditItemDialog({
   item,
   onClose,
   onSaved,
-}: EditInventoryModalProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [form, setForm] = useState({
-    quantity: String(item.quantity),
-    status: item.status,
-    location: item.location,
-  });
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const parsedQuantity = parseInt(form.quantity, 10);
-    if (Number.isNaN(parsedQuantity) || parsedQuantity < 0) {
-      setError("Quantity must be a non-negative number.");
-      return;
-    }
-    if (!form.location.trim()) {
-      setError("Location is required.");
-      return;
-    }
-
-    setError("");
-    setSubmitting(true);
-    try {
-      const response = await apiService.updateInventoryItem(item.id, {
-        quantity: parsedQuantity,
-        status: form.status,
-        location: form.location.trim(),
-      });
-      onSaved(response.data);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to update inventory item",
-      );
-    } finally {
-      setSubmitting(false);
-    }
+}: {
+  item: InventoryItem;
+  onClose: () => void;
+  onSaved: (updated: InventoryItem) => void;
+}) {
+  type V = {
+    quantity: number | null;
+    status: InventoryItem["status"];
+    location: string;
   };
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">
-            Edit Inventory Item
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
+    <FormDialog<V, InventoryItem>
+      open
+      size="md"
+      title="Edit inventory item"
+      help={`${item.name} · ${item.id} · ${humanize(item.category)}`}
+      submitLabel="Save changes"
+      successMessage="Item saved"
+      initialValues={{
+        quantity: item.quantity,
+        status: item.status,
+        location: item.location,
+      }}
+      validate={(v) => {
+        const e: Record<string, string | undefined> = {};
+        if (v.quantity == null || Number.isNaN(v.quantity) || v.quantity < 0)
+          e.quantity = "Enter a quantity of 0 or more.";
+        if (!v.location.trim()) e.location = "Enter a location.";
+        return e;
+      }}
+      onSubmit={async (v) => {
+        const response = await apiService.updateInventoryItem(item.id, {
+          quantity: v.quantity as number,
+          status: v.status,
+          location: v.location.trim(),
+        });
+        return response.data;
+      }}
+      onSaved={onSaved}
+      onClose={onClose}
+    >
+      {({ values, set, errors }) => (
+        <>
+          <Field
+            label="Quantity"
+            required
+            error={errors.quantity}
+            span={1}
+            id="edit-qty"
           >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          {/* Read-only item info */}
-          <div className="bg-gray-50 px-3 py-2 rounded-lg">
-            <p className="text-sm font-medium text-primary">{item.name}</p>
-            <p className="text-xs text-gray-500">
-              {item.id} · {item.category}
-            </p>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Quantity ({item.unit})
-            </label>
-            <input
-              type="number"
-              value={form.quantity}
-              onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-              min="0"
-              className={inputClass}
-              required
+            <NumberField
+              id="edit-qty"
+              unit={item.unit}
+              min={0}
+              value={values.quantity}
+              onChange={(n) => set("quantity", n)}
             />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Status
-            </label>
-            <select
-              value={form.status}
-              onChange={(e) =>
-                setForm({
-                  ...form,
-                  status: e.target.value as InventoryItem["status"],
-                })
-              }
-              className={inputClass}
-            >
-              {INVENTORY_STATUSES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Location
-            </label>
+          </Field>
+          <Field label="Status" span={1} id="edit-status">
+            <Select
+              id="edit-status"
+              value={values.status}
+              onChange={(s) => set("status", s as InventoryItem["status"])}
+              options={STATUS_IDS.map((s) => ({
+                value: s,
+                label: INVENTORY_STATUS[s].label,
+              }))}
+            />
+          </Field>
+          <Field label="Location" required error={errors.location}>
             <input
+              id="edit-location"
               type="text"
-              value={form.location}
-              onChange={(e) => setForm({ ...form, location: e.target.value })}
+              value={values.location}
+              onChange={(e) => set("location", e.target.value)}
               placeholder="e.g. Warehouse A"
-              className={inputClass}
-              required
+              className={INPUT_CLASS}
             />
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <Button type="button" onClick={onClose} variant="ghost">
-              Cancel
-            </Button>
-            <Button type="submit" disabled={submitting} loading={submitting}>
-              {submitting ? "Saving..." : "Save Changes"}
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Create Inventory Item Modal                                         */
-/* ------------------------------------------------------------------ */
+// ─── Create ──────────────────────────────────────────────────────────────────
 
-const CATEGORY_OPTIONS: { value: InventoryCategory; label: string }[] = [
-  { value: "tires", label: "Tires" },
-  { value: "engine_parts", label: "Engine Parts" },
-  { value: "brake_parts", label: "Brake Parts" },
-  { value: "fluids", label: "Fluids" },
-  { value: "filters", label: "Filters" },
-  { value: "electrical", label: "Electrical" },
-  { value: "fuel_equipment", label: "Fuel Equipment" },
-  { value: "safety", label: "Safety" },
-  { value: "general", label: "General" },
-];
-
-interface CreateInventoryModalProps {
-  onClose: () => void;
-  onCreated: () => void;
-}
-
-function CreateInventoryModal({
+function CreateItemDialog({
   onClose,
   onCreated,
-}: CreateInventoryModalProps) {
+}: {
+  onClose: () => void;
+  onCreated: () => void;
+}) {
+  type V = {
+    name: string;
+    category: InventoryCategory;
+    unit: string;
+    location: string;
+    quantity: number | null;
+    min_threshold: number | null;
+    max_capacity: number | null;
+    unit_cost: number | null;
+    supplier: string;
+  };
+  return (
+    <FormDialog<V>
+      open
+      size="md"
+      title="Add inventory item"
+      submitLabel="Create item"
+      successMessage="Item created"
+      initialValues={{
+        name: "",
+        category: "general",
+        unit: "pieces",
+        location: "",
+        quantity: 0,
+        min_threshold: 5,
+        max_capacity: 100,
+        unit_cost: null,
+        supplier: "",
+      }}
+      validate={(v) => {
+        const e: Record<string, string | undefined> = {};
+        if (!v.name.trim()) e.name = "Enter a name.";
+        if (!v.unit.trim()) e.unit = "Enter a unit.";
+        if (!v.location.trim()) e.location = "Enter a location.";
+        if (v.max_capacity != null && v.max_capacity < 1)
+          e.max_capacity = "Capacity is at least 1.";
+        return e;
+      }}
+      onSubmit={(v) => {
+        const payload: CreateInventoryItemPayload = {
+          name: v.name.trim(),
+          category: v.category,
+          quantity: v.quantity ?? 0,
+          unit: v.unit.trim(),
+          min_threshold: v.min_threshold ?? 0,
+          max_capacity: v.max_capacity ?? 100,
+          location: v.location.trim(),
+          unit_cost: v.unit_cost,
+          supplier: v.supplier.trim() || null,
+        };
+        return createItem(payload);
+      }}
+      onSaved={onCreated}
+      onClose={onClose}
+    >
+      {({ values, set, errors }) => (
+        <>
+          <Field label="Name" required error={errors.name}>
+            <input
+              id="inv-name"
+              type="text"
+              value={values.name}
+              onChange={(e) => set("name", e.target.value)}
+              placeholder="e.g. Bridgestone R260 tire"
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field label="Category" span={1} id="inv-category">
+            <Select
+              id="inv-category"
+              value={values.category}
+              onChange={(c) => set("category", c as InventoryCategory)}
+              options={CATEGORY_OPTIONS}
+            />
+          </Field>
+          <Field label="Unit" required error={errors.unit} span={1}>
+            <input
+              id="inv-unit"
+              type="text"
+              value={values.unit}
+              onChange={(e) => set("unit", e.target.value)}
+              placeholder="pieces, liters, sets"
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field label="Location" required error={errors.location}>
+            <input
+              id="inv-location"
+              type="text"
+              value={values.location}
+              onChange={(e) => set("location", e.target.value)}
+              placeholder="e.g. Houston Terminal"
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field label="Initial quantity" span={1} id="inv-qty">
+            <NumberField
+              id="inv-qty"
+              min={0}
+              value={values.quantity}
+              onChange={(n) => set("quantity", n)}
+            />
+          </Field>
+          <Field label="Low-stock threshold" span={1} id="inv-min">
+            <NumberField
+              id="inv-min"
+              min={0}
+              value={values.min_threshold}
+              onChange={(n) => set("min_threshold", n)}
+            />
+          </Field>
+          <Field
+            label="Max capacity"
+            error={errors.max_capacity}
+            span={1}
+            id="inv-max"
+          >
+            <NumberField
+              id="inv-max"
+              min={1}
+              value={values.max_capacity}
+              onChange={(n) => set("max_capacity", n)}
+            />
+          </Field>
+          <Field label="Unit cost" span={1} id="inv-cost">
+            <NumberField
+              id="inv-cost"
+              unit="$"
+              decimals={2}
+              min={0}
+              value={values.unit_cost}
+              onChange={(n) => set("unit_cost", n)}
+            />
+          </Field>
+          <Field label="Supplier">
+            <input
+              id="inv-supplier"
+              type="text"
+              value={values.supplier}
+              onChange={(e) => set("supplier", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
+  );
+}
+
+// ─── Delete ──────────────────────────────────────────────────────────────────
+
+function DeleteItemDialog({
+  item,
+  onClose,
+  onDeleted,
+}: {
+  item: InventoryItem;
+  onClose: () => void;
+  onDeleted: () => void;
+}) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({
-    name: "",
-    category: "general" as InventoryCategory,
-    quantity: "0",
-    unit: "pieces",
-    min_threshold: "5",
-    max_capacity: "100",
-    location: "",
-    unit_cost: "",
-    supplier: "",
-  });
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.name.trim()) {
-      setError("Name is required.");
-      return;
-    }
-    if (!form.location.trim()) {
-      setError("Location is required.");
-      return;
-    }
-
-    setError("");
+  const confirm = async () => {
     setSubmitting(true);
+    setError("");
     try {
-      const payload: CreateInventoryItemPayload = {
-        name: form.name.trim(),
-        category: form.category,
-        quantity: parseInt(form.quantity, 10) || 0,
-        unit: form.unit.trim(),
-        min_threshold: parseInt(form.min_threshold, 10) || 0,
-        max_capacity: parseInt(form.max_capacity, 10) || 100,
-        location: form.location.trim(),
-        unit_cost: form.unit_cost ? parseFloat(form.unit_cost) : null,
-        supplier: form.supplier.trim() || null,
-      };
-      await createItem(payload);
-      onCreated();
+      await deleteItem(item.id);
+      notify({ type: "success", message: `Deleted ${item.name}` });
+      onDeleted();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create item");
+      setError(err instanceof Error ? err.message : "Failed to delete item");
     } finally {
       setSubmitting(false);
     }
   };
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">
-            Add Inventory Item
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Name *
-            </label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })}
-              placeholder="e.g. Bridgestone R260 Tire"
-              className={inputClass}
-              required
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Category *
-              </label>
-              <select
-                value={form.category}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    category: e.target.value as InventoryCategory,
-                  })
-                }
-                className={inputClass}
-              >
-                {CATEGORY_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Unit *
-              </label>
-              <input
-                type="text"
-                value={form.unit}
-                onChange={(e) => setForm({ ...form, unit: e.target.value })}
-                placeholder="pieces, liters, sets"
-                className={inputClass}
-                required
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Location *
-            </label>
-            <input
-              type="text"
-              value={form.location}
-              onChange={(e) => setForm({ ...form, location: e.target.value })}
-              placeholder="e.g. Houston Terminal, Dallas Depot"
-              className={inputClass}
-              required
-            />
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Initial Qty
-              </label>
-              <input
-                type="number"
-                value={form.quantity}
-                onChange={(e) => setForm({ ...form, quantity: e.target.value })}
-                min="0"
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Min Threshold
-              </label>
-              <input
-                type="number"
-                value={form.min_threshold}
-                onChange={(e) =>
-                  setForm({ ...form, min_threshold: e.target.value })
-                }
-                min="0"
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Max Capacity
-              </label>
-              <input
-                type="number"
-                value={form.max_capacity}
-                onChange={(e) =>
-                  setForm({ ...form, max_capacity: e.target.value })
-                }
-                min="1"
-                className={inputClass}
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Unit Cost
-              </label>
-              <input
-                type="number"
-                value={form.unit_cost}
-                onChange={(e) =>
-                  setForm({ ...form, unit_cost: e.target.value })
-                }
-                min="0"
-                step="0.01"
-                placeholder="Optional"
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Supplier
-              </label>
-              <input
-                type="text"
-                value={form.supplier}
-                onChange={(e) => setForm({ ...form, supplier: e.target.value })}
-                placeholder="Optional"
-                className={inputClass}
-              />
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <Button type="button" onClick={onClose} variant="ghost">
-              Cancel
-            </Button>
-            <Button type="submit" disabled={submitting} loading={submitting}>
-              {submitting ? "Creating..." : "Create Item"}
-            </Button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/* Delete Confirmation Modal                                           */
-/* ------------------------------------------------------------------ */
-
-interface DeleteConfirmModalProps {
-  item: InventoryItem;
-  onClose: () => void;
-  onConfirm: () => void;
-}
-
-function DeleteConfirmModal({
-  item,
-  onClose,
-  onConfirm,
-}: DeleteConfirmModalProps) {
-  const [submitting, setSubmitting] = useState(false);
-
-  const handleConfirm = async () => {
-    setSubmitting(true);
-    await onConfirm();
-    setSubmitting(false);
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4">
-        <div className="px-6 py-5">
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-10 h-10 bg-error-light rounded-full flex items-center justify-center">
-              <Trash2 className="w-5 h-5 text-error" />
-            </div>
-            <h2 className="text-lg font-semibold text-primary">Delete Item</h2>
-          </div>
-          <p className="text-sm text-gray-600 mb-1">
-            Are you sure you want to delete this inventory item?
-          </p>
-          <div className="bg-gray-50 px-3 py-2 rounded-lg mt-3">
-            <p className="text-sm font-medium text-primary">{item.name}</p>
-            <p className="text-xs text-gray-500">
-              {item.id} · {item.category} · {item.location}
-            </p>
-          </div>
-          <p className="text-xs text-error mt-3">
-            This action cannot be undone.
-          </p>
-        </div>
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-100">
-          <button
-            type="button"
-            onClick={onClose}
-            disabled={submitting}
-            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-          >
+    <Modal
+      isOpen
+      onClose={onClose}
+      title="Delete item?"
+      size="sm"
+      footer={
+        <div className="flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={submitting}>
             Cancel
-          </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={submitting}
-            className="px-4 py-2 text-sm text-white bg-error rounded-lg hover:bg-error-dark disabled:opacity-50"
-          >
-            {submitting ? "Deleting..." : "Delete"}
-          </button>
+          </Button>
+          <Button variant="danger" onClick={confirm} loading={submitting}>
+            Delete item
+          </Button>
         </div>
-      </div>
-    </div>
+      }
+    >
+      {error && (
+        <p
+          role="alert"
+          className="mb-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-800"
+        >
+          {error}
+        </p>
+      )}
+      <p className="text-sm text-slate-700">
+        <span className="font-medium text-text">{item.name}</span> ({item.id},{" "}
+        {humanize(item.category)}, {item.location}) will be removed. This can't
+        be undone.
+      </p>
+    </Modal>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Stock History Modal                                                  */
-/* ------------------------------------------------------------------ */
+// ─── History ─────────────────────────────────────────────────────────────────
 
-interface StockHistoryModalProps {
-  item: InventoryItem;
-  onClose: () => void;
-}
-
-function StockHistoryModal({ item, onClose }: StockHistoryModalProps) {
+function StockHistory({ item }: { item: InventoryItem }) {
   const [events, setEvents] = useState<StockMovementEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
   useEffect(() => {
     let cancelled = false;
-    async function load() {
+    (async () => {
       setLoading(true);
       setError("");
       try {
         const result = await getItemHistory(item.id, 1, 50);
-        if (!cancelled) {
-          setEvents(result.data ?? []);
-        }
+        if (!cancelled) setEvents(result.data ?? []);
       } catch (err) {
-        if (!cancelled) {
+        if (!cancelled)
           setError(
             err instanceof Error ? err.message : "Failed to load history",
           );
-        }
       } finally {
         if (!cancelled) setLoading(false);
       }
-    }
-    load();
+    })();
     return () => {
       cancelled = true;
     };
   }, [item.id]);
-
-  const historyColumns: Column<StockMovementEvent>[] = [
+  const columns: Column<StockMovementEvent>[] = [
     {
       key: "timestamp",
-      label: "Timestamp",
-      render: (event) => (
-        <span className="text-xs text-gray-600">
-          {new Date(event.event_timestamp).toLocaleString()}
-        </span>
-      ),
+      header: "When",
+      className: "whitespace-nowrap text-slate-700",
+      cell: (e) => dateTime(e.event_timestamp),
     },
     {
       key: "change",
-      label: "Change",
-      render: (event) => (
+      header: "Change",
+      align: "right",
+      className: "tabular-nums font-semibold",
+      cell: (e) => (
         <span
-          className={`text-xs font-semibold ${
-            event.quantity_change > 0
-              ? "text-success"
-              : event.quantity_change < 0
-                ? "text-error"
-                : "text-gray-600"
-          }`}
+          className={
+            e.quantity_change > 0
+              ? "text-green-800"
+              : e.quantity_change < 0
+                ? "text-red-800"
+                : "text-slate-700"
+          }
         >
-          {event.quantity_change > 0 ? "+" : ""}
-          {event.quantity_change}
+          {e.quantity_change > 0 ? "+" : e.quantity_change < 0 ? "−" : ""}
+          {number(Math.abs(e.quantity_change))}
         </span>
       ),
     },
     {
       key: "reason",
-      label: "Reason",
-      render: (event) => (
-        <span className="text-xs text-gray-600">{event.reason}</span>
-      ),
+      header: "Reason",
+      className: "text-slate-700",
+      cell: (e) => humanize(e.reason),
     },
     {
       key: "reference",
-      label: "Reference",
-      render: (event) => (
-        <span className="text-xs text-gray-500 font-mono">
-          {event.reference_id || "-"}
-        </span>
-      ),
+      header: "Reference",
+      className: "font-mono text-xs text-text-muted",
+      cell: (e) => e.reference_id || "—",
     },
     {
-      key: "quantityAfter",
-      label: "Result Qty",
-      render: (event) => (
-        <span className="text-xs text-gray-700 font-medium">
-          {event.quantity_after}
-        </span>
-      ),
+      key: "after",
+      header: "Result",
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (e) => number(e.quantity_after),
     },
   ];
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[80vh] flex flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div>
-            <h2 className="text-lg font-semibold text-primary">
-              Stock History
-            </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              {item.name} — Current qty: {item.quantity} {item.unit}
-            </p>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close history modal"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-4">
-          {loading && (
-            <div className="flex items-center justify-center py-16">
-              <div className="w-6 h-6 border-2 border-gray-300 border-t-primary rounded-full animate-spin" />
-            </div>
-          )}
-
-          {error && (
-            <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          {!loading && !error && events.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-16 text-gray-500">
-              <Clock className="w-8 h-8 mb-2" />
-              <p className="text-sm">No stock movements recorded</p>
-            </div>
-          )}
-
-          {!loading && !error && events.length > 0 && (
-            <Table
-              variant="compact"
-              columns={historyColumns}
-              data={events}
-              getRowId={(event) => event.event_id}
-            />
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="flex justify-end px-6 py-4 border-t border-gray-100">
-          <Button onClick={onClose}>Close</Button>
-        </div>
-      </div>
-    </div>
+    <>
+      <p className="mb-3 text-xs text-text-muted">
+        Current quantity {number(item.quantity)} {item.unit}
+      </p>
+      <DataTable<StockMovementEvent>
+        ariaLabel="Stock movements"
+        rowHeight="compact"
+        columns={columns}
+        data={loading || error ? [] : events}
+        loading={loading}
+        error={error ? { message: error } : null}
+        getRowId={(e) => e.event_id}
+        emptyState={
+          <p className="text-sm text-text-muted">No stock movements recorded</p>
+        }
+      />
+    </>
   );
 }
