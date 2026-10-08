@@ -17,6 +17,7 @@ Endpoints registered:
 * ``/ws/plan-execution``     — PlanExecutionWSManager (Req 3.6, 3.9)
 * ``/ws/fuel-planning``      — FuelPlanningWSManager (Req 1.6.4)
 * ``/ws/commerce/invoices``  — CommerceInvoiceWSManager
+* ``/ws/dispatch-board``     — DispatchBoardWSManager (dispatch-board K10)
 
 Auth helpers (:func:`_authenticate_tenant` / :func:`_authenticate_driver`)
 authenticate the WebSocket handshake against a **SuperTokens session** and
@@ -317,6 +318,37 @@ async def _authenticate_driver(websocket: WebSocket) -> Optional[Tuple[str, str]
     tenant_id = claims.get("tenant_id") or ""
     driver_id = claims.get("driver_id") or ""
     return (tenant_id, driver_id) if (tenant_id and driver_id) else None
+
+
+#: Roles that may open the board socket (dispatch-board K10.1, exact match).
+DISPATCH_BOARD_ROLES = ("admin", "dispatcher")
+
+
+async def _authenticate_dispatcher(
+    websocket: WebSocket,
+) -> Optional[Tuple[str, str, list]]:
+    """Authenticate the handshake and return ``(tenant_id, user_id, roles)``.
+
+    ``user_id`` is the SuperTokens ``sub`` claim. Returns ``None`` when ``sub``
+    or ``tenant_id`` is missing or empty, or when the roles include neither
+    ``admin`` nor ``dispatcher`` (exact match), so the caller closes with
+    ``4001``. Unlike the other sockets this one checks roles, because it
+    carries draft content (dispatch-board K10.1).
+    """
+    claims = await _resolve_ws_claims(websocket)
+    if not claims:
+        return None
+    tenant_id = claims.get("tenant_id") or ""
+    user_id = claims.get("sub") or ""
+    roles = claims.get("roles") or []
+    if not isinstance(roles, (list, tuple)):
+        return None
+    roles = [r for r in roles if isinstance(r, str)]
+    if not (isinstance(tenant_id, str) and tenant_id and isinstance(user_id, str) and user_id):
+        return None
+    if not any(r in DISPATCH_BOARD_ROLES for r in roles):
+        return None
+    return tenant_id, user_id, roles
 
 
 # ---------------------------------------------------------------------------
@@ -623,3 +655,48 @@ def register_websocket_routes(app: FastAPI) -> None:
         ep = "/ws/commerce/invoices"
         handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
         await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
+
+    @app.websocket("/ws/dispatch-board")
+    async def dispatch_board_websocket(websocket: WebSocket):
+        """Dispatch Board lane events and presence (dispatch-board K10).
+
+        ``?service_date=YYYY-MM-DD``. Admin or dispatcher only; the board flag
+        is read after authentication and ``disabled`` (also unset or
+        unreadable) closes with ``4001`` like a failed authentication.
+        """
+        auth = await _authenticate_dispatcher(websocket)
+        if not auth:
+            return await _reject(websocket)
+        tenant_id, user_id, _roles = auth
+        container = _container(websocket.app)
+        mgr = getattr(container, "dispatch_board_ws_manager", None)
+        flags = getattr(container, "ops_feature_flags", None)
+        if mgr is None or flags is None:
+            return await _reject(websocket)
+        try:
+            mode = await flags.get_overlay_state("dispatch_board", tenant_id)
+        except Exception as exc:  # noqa: BLE001 — unreadable flag → closed
+            _logger().warning("Dispatch board socket flag read failed: %s", type(exc).__name__)
+            mode = "disabled"
+        if mode not in ("shadow", "active_gated", "active_auto"):
+            return await _reject(websocket)
+        from datetime import date as _date
+
+        raw_date = websocket.query_params.get("service_date", "") or ""
+        try:
+            service_date = _date.fromisoformat(raw_date).isoformat()
+        except ValueError:
+            return await websocket.close(code=1008, reason="Invalid service_date")
+        board = getattr(container, "dispatch_board_service", None)
+        name = "Another dispatcher"
+        if board is not None:
+            try:
+                name = await board.resolve_actor_name(tenant_id, user_id)
+            except Exception as exc:  # noqa: BLE001 — presence name only
+                _logger().debug("Dispatch board socket name lookup failed: %s", type(exc).__name__)
+        await mgr.connect_board(
+            websocket, tenant_id=tenant_id, user_id=user_id, service_date=service_date, name=name
+        )
+        ep = "/ws/dispatch-board"
+        handler = lambda ws, raw: mgr.handle_client_message(ws, raw)
+        await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler, check_connected=True)

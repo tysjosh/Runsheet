@@ -19,6 +19,8 @@ Implements :class:`FuelOrderRepository` with:
 * ``get_current`` — the authoritative stored document (no hybrid read).
 * ``claim_assignment`` / ``release_assignment`` — run-link CAS and release
   by claim-id ownership (loading-plan-executor K5, FREEZE rule 2).
+* ``relink_dispatched_assignment`` — from-link CAS that moves a dispatched
+  order to another run, truck and driver (dispatch-board K8.3).
 * ``append_event`` — append an immutable event to ``fuel_order_events``.
 * ``get_events_for_order`` — retrieve the event timeline for an order.
 
@@ -35,6 +37,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from fuel.order_models import FuelOrder, FuelOrderEvent
@@ -521,6 +524,103 @@ class FuelOrderRepository:
                 run_id,
             )
         return bool(applied)
+
+    async def relink_dispatched_assignment(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        from_run_id: str,
+        from_asset_id: str,
+        from_driver_id: Optional[str],
+        to_run_id: str,
+        to_asset_id: str,
+        to_driver_id: Optional[str],
+        claim_id: str,
+    ) -> Literal["relinked", "already_relinked", "refused"]:
+        """Move a ``dispatched`` order to another run, truck and driver (CAS).
+
+        Dispatch-board K8.3 and freeze rule 2. One ``atomic_update`` on the
+        current-state document that writes ``assigned_run_id``,
+        ``assigned_asset_id``, ``assigned_driver_id``, ``assigned_claim_id``,
+        ``last_event_timestamp`` and ``updated_at`` only when the tenant
+        matches, the status is ``dispatched`` and all three current links equal
+        the ``from_*`` values. ``already_relinked`` when they already equal
+        ``to_*``; ``refused`` otherwise. Never changes ``status``.
+
+        ``last_event_timestamp`` always moves to a server time strictly later
+        than the stored one, so a driver write built from a read taken before
+        the relink fails the K5a guard (dispatch-board K8.6). The same call
+        with ``from`` and ``to`` swapped is the rollback relink.
+        """
+        self._require_tenant(tenant_id)
+        for name, value in (
+            ("order_id", order_id),
+            ("from_run_id", from_run_id),
+            ("from_asset_id", from_asset_id),
+            ("to_run_id", to_run_id),
+            ("to_asset_id", to_asset_id),
+            ("claim_id", claim_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+
+        want_from = (from_run_id, from_asset_id, _link(from_driver_id))
+        want_to = (to_run_id, to_asset_id, _link(to_driver_id))
+        verdict: Dict[str, Any] = {"outcome": "refused", "status": None}
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            verdict["status"] = current.get("status")
+            if current.get("tenant_id") != tenant_id:
+                verdict["status"] = None
+                return None
+            if current.get("status") != "dispatched":
+                return None
+            links = (
+                _link(current.get("assigned_run_id")),
+                _link(current.get("assigned_asset_id")),
+                _link(current.get("assigned_driver_id")),
+            )
+            if links == want_to:
+                verdict["outcome"] = "already_relinked"
+                return None
+            if links != want_from:
+                return None
+            now = utcnow()
+            stored_ts = _ts(current.get("last_event_timestamp"))
+            if stored_ts is not None and now <= stored_ts:
+                now = stored_ts + timedelta(microseconds=1)
+            stamp = now.isoformat()
+            verdict["outcome"] = "relinked"
+            return {
+                **current,
+                "assigned_run_id": to_run_id,
+                "assigned_asset_id": to_asset_id,
+                "assigned_driver_id": _link(to_driver_id),
+                "assigned_claim_id": claim_id,
+                "last_event_timestamp": stamp,
+                "updated_at": stamp,
+            }
+
+        stored, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if stored is not None and applied:
+            # No guarded upsert follows a relink, so mirror the links here.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_upsert,
+            )
+            await mirror_current_state_upsert("fuel_order", stored)
+            return "relinked"
+        if stored is not None and verdict["outcome"] == "already_relinked":
+            return "already_relinked"
+        logger.info(
+            "FuelOrderRepository.relink_dispatched_assignment: refused for "
+            "order=%s observed_status=%s (from-link or status no longer match)",
+            order_id,
+            verdict["status"],
+        )
+        return "refused"
 
     # ------------------------------------------------------------------
     # Create

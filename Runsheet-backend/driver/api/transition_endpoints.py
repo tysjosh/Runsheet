@@ -81,9 +81,13 @@ from driver.services.order_transition_service import (
     get_work_ref_resolver,
 )
 from driver.services.pod_otp_service import POD_OTP_FIELD
-from errors.exceptions import internal_error, invalid_request
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, internal_error, invalid_request
+from fuel.order_repository import (
+    OrderChangedConcurrentlyError,
+    OrderWriteDiscardedError,
+)
 from fuel.order_state_machine import VALID_STATUS_TRANSITIONS
-from fuel.services.order_service import transition_order_guarded
 from middleware.rate_limiter import driver_rate_key, limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
@@ -238,7 +242,10 @@ async def transition_order_status(
             },
         )
 
-    ref = await _require_resolver().resolve_order(order_id, tenant)
+    # Dispatch-board decision P1-5: the base read is the stored current-state
+    # document (``get_current``), the same one the guarded write below compares
+    # against, so a stale relational projection can't refuse every retry.
+    ref = await _require_resolver().resolve_order(order_id, tenant, authoritative=True)
     order: Dict[str, Any] = dict(ref.order_doc or {})
     request_id = _get_request_id(request)
 
@@ -249,44 +256,91 @@ async def transition_order_status(
         await _store(idempotency, tenant.tenant_id, result)
         return result
 
-    evaluation = await _require_gate_stack().evaluate(
-        tenant_id=ref.tenant_id,
-        driver_id=ref.driver_id,
-        order=order,
-        target_status=target_status,
-    )
-
-    # R17.25, R17.26 — the Hours-of-Service gate's own record travels onto the
-    # resulting order event: the acting driver, the reading ``recorded_at``, the
-    # freshness state, the gate outcome, and the override identifier when one
-    # cleared the gate. ``None`` for an ungated transition and for a tenant that
-    # has not enabled gating, so nothing is written where no gate ran (R17.19).
-    hos_record = evaluation.hos_audit_record()
-
-    async def _reread() -> Dict[str, Any]:
-        # Through the resolver again, so the ownership check (R4.2) holds on
-        # the fresh read too.
-        fresh = await _require_resolver().resolve_order(order_id, tenant)
-        return dict(fresh.order_doc or {})
-
-    # Guarded with one re-read retry (OI-41). The gates ran on the first read
-    # and are not re-evaluated on the retry; a second refusal is 409
-    # ORDER_CHANGED_CONCURRENTLY, which the offline queue retries.
-    updated = await transition_order_guarded(
-        _require_order_service(),
-        _reread,
-        target_status,
-        order=order,
-        reason=body.reason,
-        notes=body.notes,
-        actor_user_id=ref.driver_id,
-        client_event_timestamp=body.event_timestamp,
-        event_payload_extra={"hos_gate": hos_record} if hos_record else None,
-    )
+    # Guarded write with one re-read retry (OI-41, dispatch-board K8.6 and
+    # freeze rule 10). The write lands only if the order still carries the
+    # status and ``last_event_timestamp`` this request read, so a concurrent
+    # executor write, relink or dispatcher write is never overwritten. On a
+    # refusal the order is re-read from the stored document (P1-5) through the
+    # resolver, so ownership (R4.2) holds, and the gates run again on the fresh
+    # read: a relink onto a board run whose plan is being re-issued must meet
+    # gate 0 (R13.11). A second refusal is 409 ORDER_CHANGED_CONCURRENTLY, not
+    # stored for idempotency, so the offline queue's retry runs again.
+    for attempt in (1, 2):
+        evaluation = await _require_gate_stack().evaluate(
+            tenant_id=ref.tenant_id,
+            driver_id=ref.driver_id,
+            order=order,
+            target_status=target_status,
+        )
+        # R17.25, R17.26 - the Hours-of-Service gate's own record travels onto
+        # the resulting order event. ``None`` for an ungated transition and for
+        # a tenant that has not enabled gating (R17.19).
+        hos_record = evaluation.hos_audit_record()
+        try:
+            updated = await _require_order_service().apply_status_transition(
+                order=order,
+                new_status=target_status,
+                reason=body.reason,
+                notes=body.notes,
+                actor_user_id=ref.driver_id,
+                client_event_timestamp=body.event_timestamp,
+                event_payload_extra={"hos_gate": hos_record} if hos_record else None,
+                guard_stored_state=True,
+            )
+            break
+        except (OrderChangedConcurrentlyError, OrderWriteDiscardedError) as exc:
+            if attempt == 2:
+                logger.info(
+                    "Driver transition refused: order=%s changed since it was read",
+                    order_id,
+                )
+                _record_guard_refusal(ref.tenant_id, type(exc).__name__)
+                raise AppException(
+                    error_code=ErrorCode.ORDER_CHANGED_CONCURRENTLY,
+                    message="The order changed. Refresh and try again.",
+                    status_code=409,
+                    details={"order_id": order_id},
+                ) from None
+            logger.info(
+                "Driver transition: order=%s changed concurrently (%s); re-reading once",
+                order_id,
+                type(exc).__name__,
+            )
+            ref = await _require_resolver().resolve_order(order_id, tenant, authoritative=True)
+            order = dict(ref.order_doc or {})
+            if order.get("status") == target_status:
+                result = _envelope(order, status_changed=False, request_id=request_id)
+                await _store(idempotency, tenant.tenant_id, result)
+                return result
 
     result = _envelope(updated, status_changed=True, request_id=request_id)
     await _store(idempotency, tenant.tenant_id, result)
     return result
+
+
+#: Counts guarded-write refusals. Since decision P1-5 the base read is
+#: ``get_current`` (``read_source=documents``), the document the guard
+#: compares against, so a refusal means a real concurrent write and a retry
+#: on a fresh read succeeds. A sustained count for one order or tenant is the
+#: stuck-retry case this metric exists to surface (Phase 0 review issue 1,
+#: Phase 1 review P1-5).
+GUARD_REFUSAL_METRIC = "driver.transition.guard_refused.count"
+
+
+def _record_guard_refusal(tenant_id: str, reason: str) -> None:
+    try:
+        from telemetry.service import get_telemetry_service
+
+        service = get_telemetry_service()
+        if service is None:
+            return
+        service.record_metric(
+            GUARD_REFUSAL_METRIC,
+            1.0,
+            {"tenant_id": tenant_id, "reason": reason, "read_source": "documents"},
+        )
+    except Exception as exc:  # metrics never fail the request
+        logger.debug("guard refusal metric not recorded: %s", type(exc).__name__)
 
 
 async def _store(

@@ -28,6 +28,7 @@ __all__ = [
     "DriverDailyResetJob",
     "run_daily_reset_cycle",
     "RESET_CHECK_INTERVAL_SECONDS",
+    "get_tenant_timezone",
 ]
 
 # ---------------------------------------------------------------------------
@@ -58,6 +59,11 @@ def _get_tenant_timezone(tenant_id: str, tenant_settings: Optional[Any] = None) 
         if tz and isinstance(tz, str):
             return tz
     return DEFAULT_TIMEZONE
+
+
+#: Public name for the tenant time-zone rule, used by the Dispatch Board
+#: (dispatch-board K2.5) so both surfaces resolve the same zone.
+get_tenant_timezone = _get_tenant_timezone
 
 
 def _is_midnight_window(tz_name: str, last_reset_date: Optional[str]) -> bool:

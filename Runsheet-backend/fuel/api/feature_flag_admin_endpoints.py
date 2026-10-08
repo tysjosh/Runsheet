@@ -1,5 +1,7 @@
 """
-Admin endpoints for the Order Intake Pipeline feature flag rollout.
+Admin endpoints for the Order Intake Pipeline feature flag rollout, and the
+Dispatch Board flag pair (``/feature-flags/{tenant_id}/dispatch-board``,
+dispatch-board K13) that mirrors it.
 
 Provides a single endpoint to flip the ``overlay.order_intake_pipeline``
 flag state within 60 seconds:
@@ -205,9 +207,134 @@ async def set_order_intake_pipeline_state(
     }
 
 
+#: The overlay flag key for the Dispatch Board (dispatch-board K13).
+DISPATCH_BOARD_FLAG_KEY = "dispatch_board"
+
+
+@router.get("/feature-flags/{tenant_id}/dispatch-board")
+async def get_dispatch_board_state(
+    tenant_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> dict:
+    """Return the Dispatch Board flag state for a tenant (K13).
+
+    One of ``disabled``, ``shadow``, ``active_gated``, ``active_auto``
+    (``disabled`` when never set). Same scope and role checks as the
+    order-intake pair: ``admin`` in the target tenant.
+    """
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("admin",),
+        operation="Reading the Dispatch Board flag",
+    )
+
+    if _feature_flag_service is None:
+        from errors.exceptions import elasticsearch_unavailable
+
+        raise elasticsearch_unavailable(
+            message="Feature flag service not configured",
+            details={"service": "feature_flag_service"},
+        )
+
+    state = await _feature_flag_service.get_overlay_state(DISPATCH_BOARD_FLAG_KEY, tenant_id)
+    return {
+        "data": {
+            "tenant_id": tenant_id,
+            "flag_key": DISPATCH_BOARD_FLAG_KEY,
+            "state": state,
+        },
+        "request_id": getattr(request.state, "request_id", ""),
+    }
+
+
+@router.post("/feature-flags/{tenant_id}/dispatch-board/{new_state}")
+async def set_dispatch_board_state(
+    tenant_id: str,
+    new_state: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> dict:
+    """Set the Dispatch Board flag for a tenant (K13).
+
+    ``disabled`` is the kill switch: the board tab hides within one ``/status``
+    poll and every board endpoint answers 404. Drafts and published plans are
+    left as they are.
+    """
+    require_tenant_scope(
+        tenant,
+        tenant_id,
+        required_roles=("admin",),
+        operation="Setting the Dispatch Board flag",
+    )
+
+    if new_state not in VALID_STATES:
+        # No echo of the submitted value (N3; review P1-4).
+        raise invalid_request(
+            message=f"Invalid state. Must be one of: {', '.join(sorted(VALID_STATES))}",
+            details={"valid_states": sorted(VALID_STATES)},
+        )
+
+    if _feature_flag_service is None:
+        from errors.exceptions import elasticsearch_unavailable
+        raise elasticsearch_unavailable(
+            message="Feature flag service not configured",
+            details={"service": "feature_flag_service"},
+        )
+
+    previous_state = await _feature_flag_service.set_overlay_state(
+        DISPATCH_BOARD_FLAG_KEY,
+        tenant_id,
+        new_state,
+        tenant.user_id,
+    )
+
+    logger.info(
+        "Dispatch board flag changed: tenant_id=%s, previous=%s, new=%s, user_id=%s",
+        tenant_id,
+        previous_state,
+        new_state,
+        tenant.user_id,
+    )
+
+    ws_notified = 0
+    if _orders_ws_manager is not None:
+        try:
+            await _orders_ws_manager.broadcast(
+                event_type="feature_flag_changed",
+                data={
+                    "flag_key": DISPATCH_BOARD_FLAG_KEY,
+                    "tenant_id": tenant_id,
+                    "previous_state": previous_state,
+                    "new_state": new_state,
+                },
+                tenant_id=tenant_id,
+            )
+            ws_notified = 1
+        except Exception as exc:
+            logger.warning(
+                "Failed to broadcast dispatch board flag change for tenant=%s: %s",
+                tenant_id,
+                type(exc).__name__,
+            )
+
+    return {
+        "data": {
+            "tenant_id": tenant_id,
+            "flag_key": DISPATCH_BOARD_FLAG_KEY,
+            "previous_state": previous_state,
+            "new_state": new_state,
+            "ws_broadcast": ws_notified > 0,
+        },
+        "request_id": getattr(request.state, "request_id", ""),
+    }
+
+
 __all__ = [
     "router",
     "configure_feature_flag_admin",
     "ORDER_INTAKE_PIPELINE_FLAG_KEY",
+    "DISPATCH_BOARD_FLAG_KEY",
     "VALID_STATES",
 ]

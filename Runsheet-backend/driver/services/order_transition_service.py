@@ -89,9 +89,11 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
+    AppException,
     asset_out_of_service,
     driver_not_dispatch_eligible,
     hos_limit_reached,
@@ -128,6 +130,28 @@ _ENFORCING_OVERLAY_STATES = frozenset({"active_gated", "active_auto"})
 #: ``ExceptionReportService`` broadcasts ``exception_escalation`` on and
 #: ``InspectionService`` broadcasts ``asset_out_of_service`` on.
 HOS_BLOCK_EVENT: str = "hos_block"
+
+#: Gate 0 (dispatch-board K8.6). Board plans are ``mvp_load_plans`` documents
+#: whose id and run id start with ``bp-`` and that carry
+#: ``source: "dispatch_board"`` (K7.3a).
+BOARD_RUN_PREFIX = "bp-"
+BOARD_PLANS_INDEX = "mvp_load_plans"
+BOARD_PLAN_SOURCE = "dispatch_board"
+#: ``completed`` passes so a plan closed after its last check-in never strands
+#: an order (K8.6).
+_BOARD_PLAN_STARTABLE_STATUSES = frozenset({"dispatched", "completed"})
+
+#: ``get_document(index, doc_id) -> Optional[dict]``.
+BoardPlanReader = Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
+
+
+def _board_route_updating(order_id: Optional[str]) -> AppException:
+    return AppException(
+        error_code=ErrorCode.BOARD_ROUTE_UPDATING,
+        message="Your dispatcher is updating this route. Try again in a moment.",
+        status_code=409,
+        details=_details(order_id=order_id),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -239,12 +263,17 @@ class DriverTransitionGateStack:
         feature_flag_service=None,
         hos_advisory_service=None,
         scheduling_ws_manager=None,
+        board_plan_reader: Optional[BoardPlanReader] = None,
     ) -> None:
         self._driver_qualification_service = driver_qualification_service
         self._inspection_service = inspection_service
         self._feature_flag_service = feature_flag_service
         self._hos_advisory_service = hos_advisory_service
         self._scheduling_ws_manager = scheduling_ws_manager
+        # Gate 0 (dispatch-board K8.6, freeze rule 11 (a)): the document
+        # store's ``get_document``. ``None`` makes gate 0 fail closed for
+        # board runs, never skip.
+        self._board_plan_reader = board_plan_reader
 
     # -- public entry point --------------------------------------------
 
@@ -288,6 +317,14 @@ class DriverTransitionGateStack:
         asset_id = doc.get("assigned_asset_id") or None
         order_id = doc.get("order_id") or doc.get("id") or None
         day = local_date or datetime.now(timezone.utc).date().isoformat()
+
+        # 0 — board plan dispatched (dispatch-board K8.6). Raises or returns;
+        #     agent runs never reach a read, so it records no outcome.
+        await self._gate_board_plan_dispatched(
+            tenant_id=tenant_id,
+            run_id=str(doc.get("assigned_run_id") or ""),
+            order_id=order_id,
+        )
 
         outcomes: list[GateOutcome] = []
 
@@ -333,6 +370,52 @@ class DriverTransitionGateStack:
                 skipped,
             )
         return evaluation
+
+    # -- gate 0: board plan dispatched (dispatch-board K8.6) ------------
+
+    async def _gate_board_plan_dispatched(
+        self, *, tenant_id: str, run_id: str, order_id: Optional[str]
+    ) -> None:
+        """Refuse ``in_transit`` while the order's board plan is being re-published.
+
+        Board runs use ``run_id == plan_id`` with the ``bp-`` prefix (K7.3a).
+        For such a run the plan is read; a ``dispatch_board`` plan whose status
+        is neither ``dispatched`` nor ``completed`` answers 409
+        ``BOARD_ROUTE_UPDATING``. A missing reader (wiring) or a failed read
+        fails **closed** for board runs (freeze rule 11 (a)): refusing costs the
+        driver one automatic retry, allowing could break a redispatch rollback.
+        Agent runs carry no prefix and are never read or refused.
+        """
+        if not run_id.startswith(BOARD_RUN_PREFIX):
+            return
+        if self._board_plan_reader is None:
+            logger.warning(
+                "Board-plan gate has no reader; refusing in_transit for "
+                "tenant=%s order=%s run=%s",
+                tenant_id,
+                order_id,
+                run_id,
+            )
+            raise _board_route_updating(order_id)
+        try:
+            plan = await self._board_plan_reader(BOARD_PLANS_INDEX, run_id)
+        except Exception as exc:  # noqa: BLE001 - fail closed on any read error
+            logger.warning(
+                "Board-plan gate read failed; refusing in_transit for "
+                "tenant=%s order=%s run=%s: %s",
+                tenant_id,
+                order_id,
+                run_id,
+                type(exc).__name__,
+            )
+            raise _board_route_updating(order_id) from None
+        if not isinstance(plan, dict) or plan.get("tenant_id") != tenant_id:
+            return
+        if plan.get("source") != BOARD_PLAN_SOURCE:
+            return
+        if plan.get("status") in _BOARD_PLAN_STARTABLE_STATUSES:
+            return
+        raise _board_route_updating(order_id)
 
     # -- gate 1: out of service (unconditional, R8.5/R8.6) --------------
 
@@ -779,6 +862,7 @@ def configure_transition_endpoints(
     feature_flag_service=None,
     hos_advisory_service=None,
     scheduling_ws_manager=None,
+    board_plan_reader: Optional[BoardPlanReader] = None,
 ) -> DriverTransitionGateStack:
     """Wire the driver transition surface. Called from ``bootstrap/driver.py``.
 
@@ -805,6 +889,9 @@ def configure_transition_endpoints(
         scheduling_ws_manager: The dispatcher channel the ``hos_block`` event is
             broadcast on (R17.22). ``None`` leaves the frame undelivered and
             logged; the 409 the driver receives is unchanged.
+        board_plan_reader: The document store's ``get_document``, read by
+            gate 0 for ``bp-`` runs only (dispatch-board K8.6). ``None`` makes
+            gate 0 refuse ``in_transit`` on board runs (freeze rule 11 (a)).
 
     Returns:
         The composed gate stack, also retrievable via :func:`get_gate_stack`.
@@ -819,6 +906,7 @@ def configure_transition_endpoints(
         feature_flag_service=feature_flag_service,
         hos_advisory_service=hos_advisory_service,
         scheduling_ws_manager=scheduling_ws_manager,
+        board_plan_reader=board_plan_reader,
     )
 
     if order_repository is not None:

@@ -225,6 +225,147 @@ async def _seed_fuel_ops_feature_flag_defaults(
         )
 
 
+def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_client, plan_execution_service=None) -> None:
+    """Build the Dispatch Board services and configure ``/api/fuel/board`` (K11).
+
+    The router is also included by ``main.py`` at import time (so the endpoint
+    registry lists it); mounting through the idempotent helper keeps one copy.
+    The board flag defaults to ``disabled`` (K13), so wiring changes nothing
+    until a tenant is switched on.
+    """
+    from fuel.api.dispatch_board_endpoints import (
+        configure_dispatch_board_endpoints,
+        router as dispatch_board_router,
+    )
+    from fuel.services.contract_lift_service import ContractLiftService
+    from fuel.services.dispatch_board_service import DispatchBoardService
+    from fuel.services.dispatch_board_telemetry import BoardTelemetry
+    from fuel.services.dispatch_validation import DispatchValidationService, Lazy
+    from fuel.services.terminal_wait_resolver import build_wait_time_resolver
+    from fuel.terminal_models import TerminalWaitReportRepository
+
+    def _from_container(name: str):
+        return Lazy(lambda: container.get(name) if container.has(name) else None)
+
+    validation = DispatchValidationService(
+        es_service=es_service,
+        order_repository=_from_container("order_repository"),
+        driver_repository=_from_container("driver_repository"),
+        qualification_service=_from_container("driver_qualification_service"),
+        hos_advisory_service=_from_container("hos_advisory_service"),
+        asset_certification_service=_from_container("asset_certification_service"),
+        dyed_diesel_enforcer=_from_container("dyed_diesel_enforcer"),
+        terminal_wait_resolver=build_wait_time_resolver(
+            redis_client=redis_client,
+            wait_report_repository=TerminalWaitReportRepository(es_service=es_service),
+        ),
+        contract_lift_service=ContractLiftService(redis_client=redis_client),
+        tenant_config=redis_client,
+    )
+    from fuel.services.dispatch_board_order_listener import BoardOrderListener
+    from fuel.services.dispatch_board_suggestions import BoardSuggestionService
+    from fuel.services.dispatch_board_ws_manager import get_dispatch_board_ws_manager
+
+    feature_flags = container.ops_feature_flags if container.has("ops_feature_flags") else None
+    board_ws_manager = get_dispatch_board_ws_manager()
+    board_service = DispatchBoardService(
+        es_service=es_service,
+        validation=validation,
+        driver_repository=container.get("driver_repository") if container.has("driver_repository") else None,
+        ws_manager=board_ws_manager,
+        telemetry=BoardTelemetry(
+            telemetry=container.get("telemetry_service") if container.has("telemetry_service") else None,
+            activity_log=container.get("activity_log_service") if container.has("activity_log_service") else None,
+        ),
+    )
+    # K9: agent suggestions (gated on the agents' overlay modes).
+    suggestion_service = BoardSuggestionService(
+        es_service=es_service,
+        feature_flags=feature_flags,
+        board_service=board_service,
+        approval_queue=container.get("approval_queue_service") if container.has("approval_queue_service") else None,
+    )
+    board_service.set_suggestion_reader(suggestion_service)
+    container.dispatch_validation_service = validation
+    container.dispatch_board_service = board_service
+    container.dispatch_board_ws_manager = board_ws_manager
+    container.dispatch_board_suggestion_service = suggestion_service
+    publish_service = _build_board_publish(container, es_service, board_service, plan_execution_service, _from_container)
+    if publish_service is not None:
+        container.dispatch_board_publish_service = publish_service
+    # K10.4: mark lanes stale when an order on them changes status.
+    if container.has("order_service"):
+        listener = BoardOrderListener(
+            es_service=es_service,
+            broadcast=board_service._broadcast,  # noqa: SLF001 - shared board fan-out
+            timezone_for=board_service.timezone_for,
+            clock=board_service.now,
+        )
+        listener.subscribe(container.get("order_service"))
+        container.dispatch_board_order_listener = listener
+    else:
+        logger.warning("Dispatch Board order listener not subscribed: order_service missing")
+    configure_dispatch_board_endpoints(
+        board_service=board_service,
+        feature_flag_service=feature_flags,
+        publish_service=publish_service,
+        suggestion_service=suggestion_service,
+    )
+    mount_router(app, dispatch_board_router)
+    logger.info("Dispatch Board endpoints configured and router registered")
+
+
+async def _invalidate_driver_work(tenant_id: str, order_id: str) -> None:
+    """Drop every cached driver work bundle of an order (dispatch-board K8.4 phase 5).
+
+    Resolves the work service at call time: ``bootstrap/driver.py`` configures
+    it after this module, and a missing service is a no-op.
+    """
+    from driver.api.work_endpoints import get_work_service
+
+    service = get_work_service()
+    if service is None:
+        logger.debug("Driver work service not configured; cache invalidation skipped")
+        return
+    await service.invalidate(tenant_id, order_id)
+
+
+def _build_board_publish(container: ServiceContainer, es_service, board_service, plan_execution_service, from_container):
+    """Publish and redispatch services (dispatch-board K7, K8; plan tasks 15-16).
+
+    Needs the executor, the dispatch service and the order repository; without
+    them the publish route keeps answering 503 ``service_not_configured``.
+    """
+    needed = ("loading_plan_executor", "plan_dispatch_service", "order_repository")
+    if not all(container.has(name) for name in needed):
+        logger.warning(
+            "Dispatch Board publish not wired; missing: %s",
+            ", ".join(name for name in needed if not container.has(name)),
+        )
+        return None
+    from fuel.services.dispatch_board_publish import BoardPublishService, BoardRedispatchService
+
+    redispatch = BoardRedispatchService(
+        es_service=es_service,
+        order_repository=container.get("order_repository"),
+        executor=container.get("loading_plan_executor"),
+        dispatch_service=container.get("plan_dispatch_service"),
+        execution_service=plan_execution_service,
+        driver_ws_manager=from_container("driver_ws_manager"),
+        orders_ws_manager=from_container("orders_ws_manager"),
+        work_cache_invalidator=_invalidate_driver_work,
+        telemetry=board_service.telemetry,
+        clock=board_service.now,
+    )
+    return BoardPublishService(
+        es_service=es_service,
+        board_service=board_service,
+        executor=container.get("loading_plan_executor"),
+        dispatch_service=container.get("plan_dispatch_service"),
+        redispatch_service=redispatch,
+    )
+
+
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
@@ -1125,6 +1266,19 @@ async def initialize(app, container: ServiceContainer) -> None:
     # the idempotent helper: including it again would duplicate every MVP route.
     mount_router(app, mvp_router)
     logger.info("MVP endpoints configured and router registered")
+
+    # Dispatch Board (dispatch-board K11, plan task 13). Built after the
+    # dispatch service and executor above (Phase 2 publish needs both). The
+    # validators come from earlier bootstrap modules, except HOS, which
+    # ``bootstrap/driver.py`` builds after this module: every collaborator is
+    # resolved at call time through ``Lazy`` so a later registration is seen.
+    try:
+        _wire_dispatch_board(
+            app, container, es_service, _agent_redis_client,
+            plan_execution_service=plan_execution_service,
+        )
+    except Exception as exc:
+        logger.error("Dispatch Board not wired: %s", type(exc).__name__, exc_info=True)
 
     # ---- Fuel Ops Hardening endpoints (Phase 3 Task 3.6 et al.) ----
     # Register the fuel-domain router that owns the customer-tanks CRUD
@@ -2208,6 +2362,13 @@ async def shutdown(app, container: ServiceContainer) -> None:
                     getattr(agent, "agent_id", "<unknown>"),
                     exc,
                 )
+
+    # Shut down the Dispatch Board WS manager (dispatch-board K10)
+    if container.has("dispatch_board_ws_manager"):
+        try:
+            await container.dispatch_board_ws_manager.shutdown()
+        except Exception as exc:
+            logger.exception("Dispatch board WS manager shutdown failed: %s", exc)
 
     # Shut down agent WS manager
     if container.has("agent_ws_manager"):

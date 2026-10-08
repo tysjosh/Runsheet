@@ -155,8 +155,19 @@ class FuelPlanDispatchService:
         tenant_id: str,
         plan_doc: Mapping[str, Any],
         actor_user_id: str,
+        driver_id: Optional[str] = None,
+        notify: bool = True,
     ) -> PlanDispatchResult:
-        """Validate, link, transition, and notify one loading plan."""
+        """Validate, link, transition, and notify one loading plan.
+
+        ``driver_id`` (dispatch-board K7.4): when given, that driver is read
+        in the tenant and must be ``active`` instead of being resolved from
+        the truck's ``assigned_truck_id``. ``notify=False`` skips only the
+        realtime ``send_assignment`` call; the caller sends the same payload
+        from the returned :class:`PlanDispatchResult` (freeze rule 8).
+        Existing callers pass neither and behave as before.
+        """
+        explicit_driver_id = driver_id
         plan_id = str(plan_doc.get("plan_id") or "").strip()
         truck_id = str(plan_doc.get("truck_id") or "").strip()
         if not plan_id or not truck_id:
@@ -176,7 +187,12 @@ class FuelPlanDispatchService:
                 truck_id=truck_id,
             )
 
-        driver = await self._resolve_driver(tenant_id, truck_id)
+        if explicit_driver_id is not None:
+            driver = await self._resolve_explicit_driver(
+                tenant_id, explicit_driver_id, truck_id
+            )
+        else:
+            driver = await self._resolve_driver(tenant_id, truck_id)
         driver_id = str(driver.get("driver_id") or "")
         run_id = self._run_id(plan_doc, routes, plan_id)
         orders = await self._resolve_orders(tenant_id, plan_doc, routes)
@@ -397,7 +413,7 @@ class FuelPlanDispatchService:
                 plan_id=plan_id,
             ) from None
 
-        if self._driver_ws_manager is not None:
+        if notify and self._driver_ws_manager is not None:
             try:
                 await self._driver_ws_manager.send_assignment(
                     driver_id,
@@ -485,6 +501,34 @@ class FuelPlanDispatchService:
                 },
             )
         return drivers[0]
+
+    async def _resolve_explicit_driver(
+        self, tenant_id: str, driver_id: str, truck_id: str
+    ) -> Dict[str, Any]:
+        """Read the named driver in the tenant; it must be ``active`` (K7.4).
+
+        A foreign-tenant id reads as missing, so it gets the same refusal as
+        an inactive driver and reveals nothing about the other tenant.
+        """
+        driver: Dict[str, Any] = {}
+        if str(driver_id or "").strip():
+            found = await self._driver_repository.get(tenant_id, driver_id)
+            driver = self._as_dict(found) if found is not None else {}
+        if (
+            not driver
+            or driver.get("tenant_id", tenant_id) != tenant_id
+            or driver.get("status") != "active"
+        ):
+            raise AppException(
+                error_code=ErrorCode.DRIVER_UNAVAILABLE,
+                message="The driver chosen for this plan is not available",
+                status_code=409,
+                details={
+                    "reason": "board_driver_unavailable",
+                    "truck_id": truck_id,
+                },
+            )
+        return driver
 
     async def _resolve_orders(
         self,

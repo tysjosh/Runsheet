@@ -678,6 +678,10 @@ def _recompute_etas(
     return etas
 
 
+#: Public name used by the Dispatch Board ETA module (dispatch-board K3.6).
+recompute_etas = _recompute_etas
+
+
 def _return_to_depot_hours(
     stops: List[Dict[str, Any]],
     depot: Dict[str, Any],
