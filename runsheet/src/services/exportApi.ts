@@ -49,7 +49,8 @@ export function filenameFromContentDisposition(
   return name ? name : fallback;
 }
 
-function saveBlob(blob: Blob, filename: string): void {
+/** Save a downloaded Blob through a temporary `<a download>`. */
+export function saveBlob(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
