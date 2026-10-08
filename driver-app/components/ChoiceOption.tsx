@@ -36,6 +36,9 @@ export function ChoiceOption({
   const a11y = {
     accessibilityRole: 'radio' as const,
     accessibilityState: { checked, selected: checked, disabled },
+    // react-native-web does not map `accessibilityState.checked` for radios;
+    // `aria-checked` is what reaches the DOM (and native maps it too).
+    'aria-checked': checked,
     disabled,
     onPress,
     testID,

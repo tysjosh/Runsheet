@@ -86,8 +86,12 @@ export function ProductChip({
   return (
     <View className={cn('flex-row items-center gap-2', className)}>
       <ProductCap code={code} size={size} decorative />
-      <Text className="shrink font-semibold">{productName(code)}</Text>
-      {suffix ? <Text className="text-muted-foreground">{suffix}</Text> : null}
+      {/* One text run, so a long name and its gallons wrap as a sentence. */}
+      <Text className="flex-1 font-semibold">
+        {productName(code)}
+        {suffix ? '  ' : null}
+        {suffix ? <Text className="font-normal text-muted-foreground">{suffix}</Text> : null}
+      </Text>
     </View>
   );
 }

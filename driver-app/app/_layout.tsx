@@ -107,6 +107,14 @@ export default function RootLayout() {
     return () => subscription.remove();
   }, []);
 
+  // Night theme (D6). Native NativeWind applies `.dark:root` from the system
+  // scheme itself; on web the selector needs the `dark` class on <html>.
+  useEffect(() => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      document.documentElement.classList.toggle('dark', colorScheme === 'dark');
+    }
+  }, [colorScheme]);
+
   useEffect(() => {
     const unsubscribeSession = subscribeToSession(setIdentity);
     void (async () => {

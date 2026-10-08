@@ -179,7 +179,7 @@ describe('Route', () => {
     expect(chips.every((c) => c.props.accessibilityRole === 'radio')).toBe(true);
     expect(chips.filter((c) => c.props.accessibilityState.checked)).toHaveLength(1);
     await screen.findByText('Compartment C-1');
-    expect(screen.getAllByText('Diesel #2 (on-road)').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/^Diesel #2 \(on-road\)/).length).toBeGreaterThan(0);
     expect(screen.queryByText('Active route')).toBeNull();
   });
 

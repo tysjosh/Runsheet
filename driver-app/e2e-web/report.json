@@ -1,0 +1,122 @@
+[
+  {
+    "theme": "light",
+    "screen": "01-sign-in",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "02-work",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "03-duty-status",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "04-route",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "05-dispatch",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "06-profile",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "07-delivery",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "08-pod",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "09-exception",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "light",
+    "screen": "10-inspection",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "01-sign-in",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "02-work",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "03-duty-status",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "04-route",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "05-dispatch",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "06-profile",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "07-delivery",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "08-pod",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "09-exception",
+    "violations": [],
+    "undersized": []
+  },
+  {
+    "theme": "dark",
+    "screen": "10-inspection",
+    "violations": [],
+    "undersized": []
+  }
+]

@@ -12,7 +12,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { useRouter } from 'expo-router';
-import { ChevronRight, MapPin, Navigation, Phone } from 'lucide-react-native';
+import { ChevronRight, MapPin } from 'lucide-react-native';
 import { Pressable, View } from 'react-native';
 
 import { ProductCap, ProductChip } from '@/components/ProductChip';
@@ -95,24 +95,22 @@ export function NextStopCard({ order }: { order: FuelOrder }) {
 
         <View className="flex-row gap-2">
           <Button
-            className="flex-1 flex-row gap-2 px-2"
+            className="flex-1 px-2"
             size="default"
             disabled={!navigateUrl}
             accessibilityLabel={`Navigate to ${order.destination.address}`}
             onPress={() => void openHandoff(navigateUrl)}
           >
-            <Navigation size={20} color={palette.onPrimary} />
             <Text>Navigate</Text>
           </Button>
           {callUrl && (
             <Button
-              className="flex-1 flex-row gap-2 px-2"
+              className="flex-1 px-2"
               size="default"
               variant="outline"
               accessibilityLabel={`Call ${order.customer_name}`}
               onPress={() => void openHandoff(callUrl)}
             >
-              <Phone size={20} color={palette.text} />
               <Text>Call</Text>
             </Button>
           )}

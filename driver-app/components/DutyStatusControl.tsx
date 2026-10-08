@@ -340,8 +340,8 @@ export function DutyStatusSheet({
           className="flex-1"
           onPress={onClose}
         />
+        {/* RN's Modal provides the dialog role and focus containment. */}
         <View
-          accessibilityViewIsModal
           className="max-h-[88%] rounded-t-3xl bg-background"
           style={{ paddingBottom: insets.bottom + 16 }}
         >

@@ -28,7 +28,6 @@ export default function TabLayout() {
       screenOptions={{
         tabBarActiveTintColor: palette.tint,
         tabBarInactiveTintColor: palette.icon,
-        tabBarLabelStyle: { fontSize: 13, fontWeight: '600' },
         headerShown: false,
         tabBarButton: HapticTab,
         tabBarBackground: TabBarBackground,

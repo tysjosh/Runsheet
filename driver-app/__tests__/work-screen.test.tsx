@@ -85,7 +85,7 @@ it('shows one title, and the in-transit order as the next stop with product chip
   expect(within(card).getByText('Midwest Grain Cooperative')).toBeTruthy();
   expect(within(card).getByText('Window 08:30–10:30')).toBeTruthy();
   // Manifest lines summed by grade, product name not code, whole gallons.
-  await waitFor(() => expect(within(card).getByText('Diesel #2 (on-road)')).toBeTruthy());
+  await waitFor(() => expect(within(card).getByText(/^Diesel #2 \(on-road\)/)).toBeTruthy());
   expect(within(card).getByText('4,200 gal')).toBeTruthy();
   expect(within(card).queryByText('DIESEL_2')).toBeNull();
   expect(within(card).getByText('In transit')).toBeTruthy();
@@ -114,7 +114,7 @@ it('Arrive opens the existing Route check-in for the next pending stop', async (
   renderWithQuery(<AssignedWorkScreen />);
   const card = await screen.findByTestId('next-stop');
   await waitFor(() => expect(workApi.loadWorkDetail).toHaveBeenCalledWith('ord-1'));
-  await waitFor(() => within(card).getByText('Diesel #2 (on-road)'));
+  await waitFor(() => within(card).getByText(/^Diesel #2 \(on-road\)/));
   fireEvent.press(within(card).getByLabelText(/Arrive at Midwest Grain Cooperative/));
   expect(mockPush).toHaveBeenCalledWith({
     pathname: '/route',

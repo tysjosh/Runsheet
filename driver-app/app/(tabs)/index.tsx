@@ -11,6 +11,7 @@ import { useNetInfo } from '@react-native-community/netinfo';
 import { useQuery } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { RefreshControl, ScrollView, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
   DutyStatusChip,
@@ -41,6 +42,7 @@ const EMPTY_DEPTH: QueueDepth = {
 
 export default function AssignedWorkScreen() {
   const network = useNetInfo();
+  const insets = useSafeAreaInsets();
   const [depth, setDepth] = useState<QueueDepth>(EMPTY_DEPTH);
   const [dutyOpen, setDutyOpen] = useState(false);
   const duty = useDutyStatus({ onLeave: () => setDutyOpen(false) });
@@ -74,6 +76,9 @@ export default function AssignedWorkScreen() {
     <ScrollView
       className="flex-1 bg-background"
       contentContainerClassName="gap-4 p-5 pb-28"
+      // Work has no stack header (its title is the large "Today"), so it keeps
+      // clear of the status bar itself.
+      contentContainerStyle={{ paddingTop: insets.top + 20 }}
       refreshControl={
         <RefreshControl refreshing={work.isRefetching} onRefresh={() => void refresh()} />
       }
