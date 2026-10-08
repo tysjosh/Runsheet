@@ -20,7 +20,7 @@ import { expect, test } from "@playwright/test";
 import { VIEWPORTS } from "./pages";
 import { installShellFake, signIn } from "./shellFake";
 
-const PAGES = [
+const PAGES: { id: string; path: string; ready: string; roles?: string[] }[] = [
   { id: "dashboard", path: "/dashboard", ready: "[data-feed-row]" },
   {
     id: "dispatch-board",
@@ -45,6 +45,18 @@ const PAGES = [
     ready: "tbody tr",
   },
   { id: "settings", path: "/dashboard/settings?tab=company", ready: "h1" },
+  {
+    id: "fuel-stations",
+    path: "/dashboard/fuel-ops?tab=stations",
+    ready: "tbody tr",
+  },
+  { id: "analytics", path: "/dashboard/analytics", ready: "h1" },
+  {
+    id: "settings-system",
+    path: "/dashboard/settings?tab=system",
+    ready: "dl",
+    roles: ["admin", "platform_admin"],
+  },
 ];
 
 const BOARD_1024 = { width: 1024, height: 768 } as const;
@@ -63,7 +75,7 @@ for (const p of PAGES) {
         `no ${process.platform} baseline recorded`,
       );
       await page.clock.setFixedTime(new Date("2026-10-08T14:00:00Z"));
-      await signIn(context);
+      await signIn(context, p.roles);
       await installShellFake(page);
       await page.setViewportSize(vp);
       await page.goto(p.path);
