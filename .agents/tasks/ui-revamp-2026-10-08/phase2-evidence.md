@@ -2,6 +2,49 @@
 
 Branch `production-readiness/ui-phase2` in `.worktrees/ui-phase2`, created from `origin/production-readiness/go-live-blockers` @ `3c5dc4a` (Phase 1, live as ui:25). Code commit `d48decb`. Not pushed, not merged, not deployed (none of that was in scope for this step).
 
+## Iteration 2: review fixes (commit `ba98b9f`)
+
+This iteration fixes every finding in `phase2-review.json` (verdict CHANGES_REQUESTED). The notes are added under tasks 2.1, 2.4, 2.6 and 2.7 in `spec/tasks.md`, and only Phase 2 text changed there.
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 (HIGH) | The board "delayed" count link led nowhere | `href: LINKS.jobs("delayed")` in both modes. The count comes from `/scheduling/jobs/delayed`, and the board has no `delayed` status. A board-on test asserts the href. The deviation from design §7.1 is recorded in task 2.1. |
+| 2 (HIGH) | Jobs chips filtered page 1 on the client | A status chip is sent as the API `status` and passed to Export CSV. Delayed reads `getDelayedJobs()`, and type/truck/date apply to that complete set. The list pages on the server (50 per page, `DataTable` pagination). Chip counts are tenant totals from one `size: 1` read per status. Search narrows the page on screen; the placeholder reads "Search this page". Export is hidden on Delayed because the export route can't filter it. New test with 137 completed / 160 jobs checks counts, the server `status`, and page 2. A new export test checks `status: "failed"`. |
+| 3 | The exceptions count and Live disagreed | `exceptionsLink()` sends you to today's board filtered to the counted stops' statuses (`status=failed,rejected`). With one exception it opens that stop, and with none it opens Jobs → Failed. The board Filters panel now shows deep-linked statuses it doesn't list as pressed chips, so you can clear them (`dispatch-board/FilterChips.test.tsx`). |
+| 4 | Chip strips clipped (R4.3) | New `FilterChips collapse`. The strip asks for its full width and shrinks with the toolbar. Chips that don't fit move into a "More · n" menu (radio items with counts), last option first, and the selected chip always stays visible. Used on Orders and Jobs. Unit tests: `ui/FilterChips.test.tsx`. Screenshots: Orders shows `All · Placed · On hold · Confirmed · More · 6`, Jobs shows `All · Scheduled · Assigned · In progress · More · 4`. Nothing is cut mid-chip. |
+| 5 | The autonomy chip linked dispatchers to an admin tab | It is a link only when `getCurrentUserRoles()` includes admin. Otherwise it is text with the same icon and label. A test covers a dispatcher. |
+| 6 | Live was measured on the exceptions list | Recorded as a deviation in task 2.6. Live puts the map on the left and stacked panels on the right, with "Exceptions and delays" above "Active jobs", so the exceptions list is the page's first data row. |
+| 7 | Fixture `ULSD` hid product rendering | The `FakeBoard` e2e fake uses catalog codes per order id (`DIESEL_2`, `GASOLINE_REG`, `HEATING_OIL`, `OFF_ROAD_DIESEL`) for tray orders, stops and unassigned stops. The shared unit fixtures are unchanged. The board aria snapshot line now reads `DIESEL_2`. Baselines were re-recorded with `--update-snapshots=all`. The board screenshots now show D / R / 2 / OFF caps and names. |
+| 8 | Live truck avatars all read "Q1" | `initials()` keeps the distinguishing number: `QA-TRK-104` → "04", `TRK-7` → "T7", `T07` → "07" (board lanes read "01"…"06"). Names are unchanged ("Darnell Price" → "DP"). Unit tests were extended. |
+
+### Iteration 2 verification
+
+All commands ran from `.worktrees/ui-phase2/runsheet`. Load average was 4–9 (other agents running).
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm run lint` | 0 errors, 1 warning (pre-existing `noConfusingVoidType`, `DispatchBoard.tsx:327`) |
+| `npx jest -w 4` | 138 suites, 1796 passed, 1 skipped. The first run at default parallelism had 2 timeouts (keyboard undo, PriceProtectionContracts), and both pass alone. The `-w 4` run is fully green. |
+| `npm run build` | exit 0 |
+| Fresh checkout (`git worktree add --detach … ba98b9f`) | `tsc` 0, `next build` 0, jest for dispatch, ui, dashboard, live and lib: 41 suites, 512 passed. Temp worktree removed. |
+| ui-revamp e2e (`--update-snapshots`, then `visual --update-snapshots=all`, then `visual` with no update) | 128 passed. Visual: 17 passed against the new baselines. |
+| Chrome budget | Passes on Dashboard, Board (1024/1280/1440), Jobs, Plans, Orders and Live at 1280×800 and 1440×900. The layout above the first row didn't change, so first-row positions match iteration 1 (145 / 168 / 172). |
+| Axe | 0 critical/serious on all six Phase 2 pages (whole-page axe specs pass) and in the board a11y tests |
+| Dispatch board e2e (`PW_BOARD_PROD=1`) | Full run: 16 passed, 2 skipped (iPad), 1 failed. The failure was the aria snapshot, which still expected `ULSD`. The snapshot was updated and that test plus perf were rerun: 2 passed. |
+| N1 perf (60 lanes / 1,500 stops) | Full run: p95 17.7 ms, scroll 17.6, hover 33.2 (not asserted, load). Rerun: p95 17.6, hover 17.6, scroll 17.5. The budget is 20. The iteration 1 scroll 33.0 didn't recur. |
+| Token contrast / CVD | `styles/tokens.test.ts` passes in the jest run. Tokens are unchanged. |
+| Backend gate | Not needed. No backend files changed: Jobs uses the existing `status`/`page`/`size` params and `/jobs/delayed`. |
+
+Screenshots in `screenshots/phase2/` were refreshed from this run.
+
+Still open (unchanged from iteration 1):
+- Linux baselines have not been recorded (needs CI/Docker).
+- The order tray repeats "Orders (n)" as a tab and as a heading with Sort. This is pre-existing tray code and not a numbered finding. It's a candidate for 3.x polish.
+- Accessible names of stops and cards still carry the raw product code, for the board's screen-reader and e2e contracts.
+
+## Iteration 1
+
 Iteration 1 (no `phase2-review.json` yet). Tasks 2.1–2.7 are ticked in `spec/tasks.md`, each with a short "Done" note and its deviations. Only Phase 2 checkboxes and notes were changed. The Phase 3P sections were not touched.
 
 ## What changed, by task
