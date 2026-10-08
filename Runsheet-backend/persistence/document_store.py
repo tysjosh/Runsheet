@@ -698,6 +698,11 @@ class PostgresDocumentStore:
         reject_control_characters(query)
         model = self._model()
         body = dict(query or {})
+        # Elasticsearch accepts a comma-separated index list ("a,b"); the driver
+        # work read searches fuel_stations and customer_tanks that way. Matching
+        # the literal string here returned nothing, so every stop lost its
+        # coordinates on Postgres (dispatch-board task 41).
+        indices = [name.strip() for name in index.split(",") if name.strip()] or [index]
         _assert_body_understood(index, body)
         # ES takes ``size`` from the body when present, from the argument
         # otherwise. The facade normalises this by writing it into the body; we
@@ -714,19 +719,21 @@ class PostgresDocumentStore:
         # filter on — including ``fuel_orders_current.pod_otp``, the delivery
         # one-time code, which ES cannot filter on at all. See
         # persistence.document_field_policy.
-        assert_searchable(
-            index,
-            [
-                *collect_query_fields(body.get("query")),
-                *collect_sort_fields(body.get("sort")),
-                *collect_aggregation_fields(aggs),
-            ],
-        )
+        searched_fields = [
+            *collect_query_fields(body.get("query")),
+            *collect_sort_fields(body.get("sort")),
+            *collect_aggregation_fields(aggs),
+        ]
+        for name in indices:
+            assert_searchable(name, searched_fields)
 
         predicate = build_predicate(
             model.document, body.get("query"), id_column=model.doc_id, now=now
         )
-        scope = [model.index_name == index, predicate]
+        index_scope = (
+            model.index_name == indices[0] if len(indices) == 1 else model.index_name.in_(indices)
+        )
+        scope = [index_scope, predicate]
 
         # ``search_after`` narrows the rows, so it belongs in the scope of the page
         # but NOT in the total: Elasticsearch reports the total for the query, not
@@ -763,7 +770,7 @@ class PostgresDocumentStore:
                 for row in rows:
                     document = dict(row.document or {})
                     hit: Dict[str, Any] = {
-                        "_index": index,
+                        "_index": row.index_name,
                         "_id": row.doc_id,
                         "_score": None,
                         "_source": apply_source_filter(document, source_spec),

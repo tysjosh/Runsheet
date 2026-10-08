@@ -124,6 +124,31 @@ async def test_documents_are_scoped_to_their_index(store, index_name):
     await store.delete_index(other)
 
 
+async def test_comma_separated_index_list_searches_every_index(store, index_name):
+    """ES accepts ``"a,b"``. The driver work read searches fuel_stations and
+    customer_tanks that way; matching the literal string returned no stop
+    coordinates on Postgres (dispatch-board task 41)."""
+    other = f"{index_name}_other"
+    await store.index_document(index_name, "s1", {"tenant_id": TENANT, "station_id": "X1"})
+    await store.index_document(other, "t1", {"tenant_id": TENANT, "customer_tank_id": "X2"})
+    await store.index_document(other, "t9", {"tenant_id": TENANT, "customer_tank_id": "X9"})
+    query = {
+        "query": {"bool": {
+            "filter": [{"term": {"tenant_id": TENANT}}],
+            "should": [{"terms": {"station_id": ["X1", "X2"]}}, {"terms": {"customer_tank_id": ["X1", "X2"]}}],
+            "minimum_should_match": 1,
+        }},
+        "size": 10,
+    }
+    response = await store.search_documents(f"{index_name},{other}", query)
+    hits = {(h["_index"], h["_id"]) for h in response["hits"]["hits"]}
+    assert hits == {(index_name, "s1"), (other, "t1")}
+    assert response["hits"]["total"]["value"] == 2
+    multi = await store.multi_search([{"index": f"{index_name},{other}", "query": query}])
+    assert len(multi["responses"][0]["hits"]["hits"]) == 2
+    await store.delete_index(other)
+
+
 async def test_bulk_index_reports_documents_it_cannot_key(store, index_name):
     """The ES path warns and lets the cluster mint an id, which is unreachable.
 
