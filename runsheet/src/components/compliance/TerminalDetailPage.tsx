@@ -1,8 +1,15 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, LoadErrorState } from "@/components/ui";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  LoadErrorState,
+  PageHeader,
+  ProductChip,
+  Skeleton,
+  StatusBadge,
+} from "@/components/ui";
+import { duration, number } from "../../lib/format";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import {
   getTerminal,
@@ -10,7 +17,6 @@ import {
   type Terminal,
   type TerminalWaitSummary,
 } from "../../services/fuelApi";
-import { PageTitle } from "../ui/PageHeader";
 
 interface TerminalDetailPageProps {
   terminalId: string;
@@ -51,17 +57,10 @@ export default function TerminalDetailPage({
     fetchTerminal();
   }, [fetchTerminal]);
 
-  const statusVariant = (status: string): "success" | "warning" | "default" => {
-    if (status === "active") return "success";
-    if (status === "inactive") return "warning";
-    return "default";
-  };
-
   if (loading) {
     return (
-      <div role="status" className="flex justify-center py-12">
-        <span className="sr-only">Loading terminal details...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      <div className="p-4">
+        <Skeleton rows={6} label="Loading terminal details" />
       </div>
     );
   }
@@ -82,96 +81,92 @@ export default function TerminalDetailPage({
 
   if (!terminal) return null;
 
-  return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex items-center gap-4 mb-2">
-          <Button
-            variant="ghost"
-            onClick={() => (onBack ? onBack() : router.back())}
-          >
-            ← Back
-          </Button>
-        </div>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <PageTitle className="text-2xl font-bold">
-              {terminal.name}
-            </PageTitle>
-            {terminal.branded && <Badge variant="info">Branded</Badge>}
-          </div>
-          <Badge variant={statusVariant(terminal.status)}>
-            {terminal.status}
-          </Badge>
-        </div>
-      </header>
+  const back = () => (onBack ? onBack() : router.back());
+  const statusKey =
+    terminal.status === "active"
+      ? "ok"
+      : terminal.status === "inactive"
+        ? "warning"
+        : "draft";
 
-      <section aria-labelledby="info-heading" className="mb-8">
-        <h2 id="info-heading" className="text-lg font-semibold mb-3">
-          Terminal Information
-        </h2>
-        <div className="border rounded p-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Operator</p>
-              <p className="font-medium">{terminal.operator}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Supplier Brand</p>
-              <p className="font-medium">{terminal.supplier_brand || "—"}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Address</p>
-              <p className="font-medium">{terminal.address || "—"}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Timezone</p>
-              <p className="font-medium">{terminal.timezone || "—"}</p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Location</p>
-              <p className="font-mono text-sm">
-                {terminal.location_lat}, {terminal.location_lon}
-              </p>
-            </div>
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Supported Products</p>
-              <div className="flex flex-wrap gap-1.5">
-                {terminal.supported_products?.length ? (
-                  terminal.supported_products.map((p) => (
-                    <Badge key={p} variant="default" size="sm">
-                      {p}
-                    </Badge>
-                  ))
-                ) : (
-                  <span className="text-gray-500">—</span>
-                )}
-              </div>
-            </div>
+  return (
+    <div className="flex h-full flex-col">
+      <PageHeader
+        host
+        title={terminal.name}
+        back={{ label: "Back", onClick: back }}
+        badge={
+          <span className="flex items-center gap-1.5">
+            <StatusBadge
+              status={statusKey}
+              label={
+                terminal.status.charAt(0).toUpperCase() +
+                terminal.status.slice(1)
+              }
+            />
+            {terminal.branded && (
+              <span className="rounded-full border border-blue-300 bg-blue-100 px-2 text-xs font-semibold text-blue-800">
+                Branded
+              </span>
+            )}
+          </span>
+        }
+      />
+      <div className="flex-1 overflow-auto p-4">
+        <section aria-labelledby="info-heading">
+          <h2
+            id="info-heading"
+            className="mb-2 text-sm font-semibold text-text"
+          >
+            Terminal information
+          </h2>
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-3 rounded-lg border border-slate-200 p-4 text-sm md:grid-cols-2">
+            <Row label="Operator">{terminal.operator}</Row>
+            <Row label="Supplier brand">{terminal.supplier_brand || "—"}</Row>
+            <Row label="Address">{terminal.address || "—"}</Row>
+            <Row label="Timezone">{terminal.timezone || "—"}</Row>
+            <Row label="Location">
+              <span className="font-mono text-xs">
+                {number(terminal.location_lat, { decimals: 5 })},{" "}
+                {number(terminal.location_lon, { decimals: 5 })}
+              </span>
+            </Row>
+            <Row label="Supported products">
+              <span className="flex flex-wrap gap-1.5">
+                {terminal.supported_products?.length
+                  ? terminal.supported_products.map((p) => (
+                      <ProductChip key={p} code={p} />
+                    ))
+                  : "—"}
+              </span>
+            </Row>
             {wait && (
-              <div>
-                <p className="text-sm text-gray-600 mb-1">
-                  Avg Wait (rolling 2h)
-                </p>
-                <p className="font-medium">
+              <Row label="Average wait (last 2 h)">
+                <span className="inline-flex items-center gap-2">
                   {wait.avg_wait_minutes != null
-                    ? `${Math.round(wait.avg_wait_minutes)} min`
+                    ? duration(wait.avg_wait_minutes * 60)
                     : "—"}
                   {wait.wait_warning_exceeded && (
-                    <Badge variant="warning" size="sm" className="ml-2">
-                      Wait warning
-                    </Badge>
+                    <StatusBadge status="warning" label="Wait warning" />
                   )}
-                </p>
-              </div>
+                </span>
+              </Row>
             )}
-            <div>
-              <p className="text-sm text-gray-600 mb-1">Terminal ID</p>
-              <p className="font-mono text-sm">{terminal.terminal_id}</p>
-            </div>
-          </div>
-        </div>
-      </section>
+            <Row label="Terminal ID">
+              <span className="font-mono text-xs">{terminal.terminal_id}</span>
+            </Row>
+          </dl>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd className="font-medium text-text">{children}</dd>
     </div>
   );
 }
