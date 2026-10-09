@@ -46,11 +46,11 @@ function routeExists(urlPath: string): boolean {
 }
 
 describe("REDIRECTS", () => {
-  it("has the 22 design.md §4 rows (row 5 waits for task 3.6) plus /ops", () => {
+  it("has all 23 design.md §4 rows plus /ops", () => {
     const rows = REDIRECTS.map((r) => r.row).sort((a, b) => a - b);
     expect(rows).toEqual([
-      0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23,
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+      21, 22, 23,
     ]);
   });
 
@@ -83,11 +83,10 @@ describe("REDIRECTS", () => {
     for (const r of nextRedirects()) expect(r.permanent).toBe(true);
   });
 
-  it("leaves /ops/command alone until task 3.6", () => {
-    expect(REDIRECTS.some((r) => r.source.startsWith("/ops/command"))).toBe(
-      false,
-    );
-    expect(routeExists("/ops/command")).toBe(true);
+  it("retires /ops/command to Live → Approvals (task 3.6)", () => {
+    const row = REDIRECTS.find((r) => r.source === "/ops/command");
+    expect(row?.destination).toBe("/dashboard/control?tab=approvals");
+    expect(routeExists("/ops/command")).toBe(false);
   });
 });
 

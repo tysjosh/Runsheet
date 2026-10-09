@@ -5,6 +5,8 @@ import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { humanize } from "../lib/format";
+import { approveAction, rejectAction } from "../services/agentApi";
 import {
   applyChatStreamEvent,
   type ChatStreamMessage,
@@ -12,9 +14,26 @@ import {
   parseSseChunk,
 } from "../services/chatStream";
 import ReportViewer from "./ReportViewer";
+import { StatusBadge } from "./ui/StatusBadge";
+
+/**
+ * Inline confirmation for a medium-risk action (ported from the retired
+ * `/ops/command` console, task 3.6, R3.5). Approve and Reject go through the
+ * same approvals endpoints as Live → Approvals, so the queue and the chat
+ * never disagree.
+ */
+export interface ConfirmationData {
+  actionId: string;
+  toolName: string;
+  riskLevel: string;
+  summary: string;
+  status: "pending" | "submitting" | "approved" | "rejected";
+  error?: string;
+}
 
 interface ChatMessage extends ChatStreamMessage {
-  role: "user" | "assistant" | "tool-indicator";
+  role: "user" | "assistant" | "tool-indicator" | "confirmation";
+  confirmationData?: ConfirmationData;
 }
 
 interface AIChatProps {
@@ -187,6 +206,28 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
         buffer = parsed.rest;
 
         for (const event of parsed.events) {
+          // Inline confirmation for medium-risk actions (R3.5).
+          if (event.type === "confirmation") {
+            const action = event.action;
+            if (!action) continue;
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `confirm-${action.action_id || Date.now()}`,
+                role: "confirmation",
+                content: "",
+                timestamp: new Date(),
+                confirmationData: {
+                  actionId: action.action_id || "",
+                  toolName: action.tool_name || "",
+                  riskLevel: action.risk_level || "medium",
+                  summary: action.summary || action.impact_summary || "",
+                  status: "pending",
+                },
+              },
+            ]);
+            continue;
+          }
           setMessages((prev) => applyChatStreamEvent(prev, event));
 
           if (event.type === "tool_result") {
@@ -226,6 +267,51 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
       });
     } finally {
       clearTimeout(timeoutId);
+    }
+  };
+
+  const updateConfirmation = (
+    messageId: string,
+    patch: Partial<ConfirmationData>,
+  ) =>
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === messageId && m.confirmationData
+          ? { ...m, confirmationData: { ...m.confirmationData, ...patch } }
+          : m,
+      ),
+    );
+
+  const decide = async (
+    messageId: string,
+    data: ConfirmationData,
+    decision: "approved" | "rejected",
+  ) => {
+    updateConfirmation(messageId, { status: "submitting", error: undefined });
+    try {
+      if (decision === "approved") await approveAction(data.actionId);
+      else await rejectAction(data.actionId, "Rejected from Copilot");
+      updateConfirmation(messageId, { status: decision });
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `confirm-result-${Date.now()}`,
+          role: "assistant",
+          content:
+            decision === "approved"
+              ? "Action approved. Executing now..."
+              : "Action rejected. The operation has been cancelled.",
+          timestamp: new Date(),
+        },
+      ]);
+    } catch (err) {
+      updateConfirmation(messageId, {
+        status: "pending",
+        error:
+          err instanceof Error && err.message
+            ? err.message
+            : "Couldn't record the decision. Try again.",
+      });
     }
   };
 
@@ -402,7 +488,15 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
               key={msg.id}
               className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
             >
-              {msg.role === "tool-indicator" ? (
+              {msg.role === "confirmation" && msg.confirmationData ? (
+                <ConfirmationCard
+                  data={msg.confirmationData}
+                  onDecide={(decision) =>
+                    msg.confirmationData &&
+                    decide(msg.id, msg.confirmationData, decision)
+                  }
+                />
+              ) : msg.role === "tool-indicator" ? (
                 <div className="max-w-[85%] my-1">
                   <span
                     className="inline-block px-2 py-1 text-xs text-white rounded border"
@@ -712,5 +806,80 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
         />
       )}
     </>
+  );
+}
+
+function ConfirmationCard({
+  data,
+  onDecide,
+}: {
+  data: ConfirmationData;
+  onDecide: (decision: "approved" | "rejected") => void;
+}) {
+  const high = data.riskLevel === "high";
+  const busy = data.status === "submitting";
+  const done = data.status === "approved" || data.status === "rejected";
+  return (
+    <section
+      aria-label={`Confirm ${humanize(data.toolName || "action")}`}
+      data-testid="copilot-confirmation"
+      className="w-full max-w-[85%] rounded-lg border border-amber-300 bg-amber-50 px-3 py-2"
+    >
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-xs font-semibold text-amber-900">
+          Needs your confirmation
+        </span>
+        <StatusBadge
+          status={high ? "critical" : "warning"}
+          label={`${humanize(data.riskLevel)} risk`}
+        />
+      </div>
+      <p className="text-xs font-medium text-text">
+        {humanize(data.toolName || "action")}
+      </p>
+      {data.summary && (
+        <p className="mt-0.5 text-xs text-slate-700">{data.summary}</p>
+      )}
+      {data.error && (
+        <p role="alert" className="mt-1 text-xs text-red-800">
+          {data.error}
+        </p>
+      )}
+      {done ? (
+        <p role="status" className="mt-2">
+          <StatusBadge
+            status={data.status === "approved" ? "ok" : "cancelled"}
+            label={data.status === "approved" ? "Approved" : "Rejected"}
+          />
+        </p>
+      ) : (
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onDecide("approved")}
+            className="h-7 flex-1 rounded-lg bg-primary px-3 text-xs font-semibold text-on-primary hover:bg-primary-hover disabled:opacity-50"
+          >
+            Approve
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onDecide("rejected")}
+            className="h-7 flex-1 rounded-lg border border-slate-300 bg-surface px-3 text-xs font-semibold text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+          >
+            Reject
+          </button>
+          {data.actionId && (
+            <a
+              href={`/dashboard/control?tab=approvals&id=${encodeURIComponent(data.actionId)}`}
+              className="text-xs font-semibold text-link hover:underline"
+            >
+              Open in Approvals
+            </a>
+          )}
+        </div>
+      )}
+    </section>
   );
 }

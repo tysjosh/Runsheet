@@ -111,11 +111,6 @@ const ROUTE_TITLES: Array<[route: string, load: () => unknown, title: string]> =
       () => require("./dashboard/settings/depots/[id]/layout"),
       "Depot",
     ],
-    [
-      "/ops/command",
-      () => require("./ops/command/(console)/layout"),
-      "Command Interface",
-    ],
     ["/privacy", () => require("./privacy/page"), "Privacy"],
     [
       "/request-pilot",
@@ -156,7 +151,7 @@ describe("per-route page titles", () => {
   it("covers every route except the landing page", () => {
     // Staff routes after the UI revamp consolidation (design.md §4); `/`
     // deliberately keeps the root `title.default`.
-    expect(ROUTE_TITLES).toHaveLength(27);
+    expect(ROUTE_TITLES).toHaveLength(26);
   });
 
   it.each(ROUTE_TITLES)("%s has its own title", (_route, load, expected) => {

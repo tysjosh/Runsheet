@@ -23,6 +23,7 @@ const EXPECT: Record<
   2: { h1: "Job not found", api: `/scheduling/jobs/${MISSING_ID}` },
   3: { heading: /job|cargo/i },
   4: { h1: "Live" },
+  5: { h1: "Live", tab: "Approvals" },
   6: { h1: "Fuel", tab: "Stations" },
   7: { heading: /depot/i },
   8: { heading: /tank/i },

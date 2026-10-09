@@ -5,8 +5,8 @@
  * forwards the query string. `e2e/ui-revamp/redirects.spec.ts` checks every
  * row lands on the destination's `<h1>`.
  *
- * Row 5 (`/ops/command` → Live → Approvals) is added by task 3.6, once the
- * Copilot panel has the console's inline confirmation (R3.5).
+ * Row 5 (`/ops/command` → Live → Approvals) was added by task 3.6, after
+ * the Copilot panel took over the console's inline confirmation (R3.5).
  */
 export interface RedirectRow {
   /** design.md §4 row number (0 for the `/ops` stub). */
@@ -35,6 +35,12 @@ export const REDIRECTS: RedirectRow[] = [
     source: "/ops/scheduling",
     destination: "/dashboard/dispatch?tab=jobs",
     lives: "Dispatch → Jobs",
+  },
+  {
+    row: 5,
+    source: "/ops/command",
+    destination: "/dashboard/control?tab=approvals",
+    lives: "Live → Approvals; chat in Copilot",
   },
   {
     row: 4,
