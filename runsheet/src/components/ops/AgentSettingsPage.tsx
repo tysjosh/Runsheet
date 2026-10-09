@@ -46,10 +46,10 @@ import {
   ThumbsDown,
   ThumbsUp,
   Trash2,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import { Button, type Column, Modal, Table } from "@/components/ui";
+import { dateTime, pct } from "../../lib/format";
 import type {
   AgentHealthEntry,
   AutonomyLevel,
@@ -130,45 +130,27 @@ function DeleteConfirmDialog({
   deleting,
 }: DeleteConfirmDialogProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">Delete Memory</h2>
-          <button
-            onClick={onCancel}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close delete confirmation"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="px-6 py-4">
-          <p className="text-sm text-gray-600">
-            Are you sure you want to delete memory{" "}
-            <span className="font-medium text-primary">{memoryId}</span>? This
-            action cannot be undone.
-          </p>
-        </div>
-        <div className="flex justify-end gap-3 px-6 py-4 border-t border-gray-100">
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={deleting}
-            className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-          >
+    <Modal
+      isOpen
+      onClose={onCancel}
+      title="Delete memory"
+      size="sm"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onCancel} disabled={deleting}>
             Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={deleting}
-            className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
-          >
-            {deleting ? "Deleting..." : "Delete"}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+          <Button variant="danger" loading={deleting} onClick={onConfirm}>
+            Delete
+          </Button>
+        </>
+      }
+    >
+      <p className="px-6 py-4 text-sm text-slate-700">
+        Delete memory <span className="font-medium text-text">{memoryId}</span>?
+        This can't be undone.
+      </p>
+    </Modal>
   );
 }
 
@@ -737,7 +719,7 @@ function MemorySection() {
                     </span>
                   ))}
                   <span className="text-[10px] text-gray-500">
-                    {new Date(memory.created_at).toLocaleString()}
+                    {dateTime(memory.created_at)}
                   </span>
                 </div>
               </div>
@@ -917,7 +899,7 @@ function FeedbackSection() {
       label: "Created",
       headerClassName: "text-gray-500 normal-case tracking-normal",
       className: "text-xs text-gray-500",
-      render: (entry) => new Date(entry.created_at).toLocaleString(),
+      render: (entry) => dateTime(entry.created_at),
     },
   ];
 
@@ -944,17 +926,22 @@ function FeedbackSection() {
                 const rate =
                   stats.approval_rate ??
                   (stats.total_feedback > 0 ? 1 - stats.rejection_rate : 0);
-                return Number.isFinite(rate) ? (rate * 100).toFixed(1) : "0.0";
-              })()}%
+                return pct(Number.isFinite(rate) ? rate : 0, {
+                  fraction: true,
+                  decimals: 1,
+                });
+              })()}
             </p>
           </div>
           <div className="bg-error-light rounded-lg p-4">
             <p className="text-xs text-gray-500 mb-1">Rejection Rate</p>
             <p className="text-xl font-semibold text-error-dark">
-              {Number.isFinite(stats.rejection_rate)
-                ? (stats.rejection_rate * 100).toFixed(1)
-                : "0.0"}
-              %
+              {pct(
+                Number.isFinite(stats.rejection_rate)
+                  ? stats.rejection_rate
+                  : 0,
+                { fraction: true, decimals: 1 },
+              )}
             </p>
           </div>
         </div>
@@ -1100,45 +1087,29 @@ export default function AgentSettingsPage() {
   }, []);
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50">
-      {/* Header */}
-      <div className="px-6 pt-6 pb-4">
-        <div className="flex items-center gap-3 mb-1">
-          <div className="w-9 h-9 bg-gray-700 rounded-lg flex items-center justify-center">
-            <Settings className="w-5 h-5 text-white" />
-          </div>
-          <div>
-            <h2 className="text-lg font-semibold text-primary">
-              Agent Settings
-            </h2>
-            <p className="text-xs text-gray-500">
-              Configure autonomy levels, manage agent memory, and review
-              feedback
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Content */}
-      <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
-        <div className="space-y-8">
+    <div className="flex h-full flex-1 flex-col bg-surface">
+      {/* Compact header (task 3.8): the Settings title row names the
+          section, so no hero icon or subtitle band. */}
+      <h2 className="sr-only">Agent Settings</h2>
+      <div className="flex-1 min-h-0 overflow-auto p-4">
+        <div className="space-y-4">
           {/* Autonomy Configuration */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="rounded-lg border border-slate-200 bg-surface p-4">
             <AutonomySection isAdmin={isAdmin} />
           </div>
 
           {/* Agent Health & Control */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="rounded-lg border border-slate-200 bg-surface p-4">
             <AgentHealthSection canControlAgents={isPlatformAdmin} />
           </div>
 
           {/* Memory Management */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="rounded-lg border border-slate-200 bg-surface p-4">
             <MemorySection />
           </div>
 
           {/* Feedback */}
-          <div className="bg-white border border-gray-200 rounded-lg p-6">
+          <div className="rounded-lg border border-slate-200 bg-surface p-4">
             <FeedbackSection />
           </div>
         </div>
