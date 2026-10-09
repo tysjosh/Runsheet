@@ -1,8 +1,29 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
-import { type Column, EntityLink, Table } from "@/components/ui";
+/**
+ * Compliance → Meters (UI revamp task 3.5): one toolbar (truck filter in the
+ * Filters popover, refresh), a DataTable of registered meters with a
+ * calibration StatusBadge, a meter's delivery audit trail in a Drawer, and
+ * "Register meter" as an md FormDialog (design.md §5).
+ */
+import { History, Plus, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Button,
+  type Column,
+  DataTable,
+  Drawer,
+  EntityLink,
+  Field,
+  FilterPopover,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
+} from "@/components/ui";
+import { calendarDate, dateTime, gallons, humanize } from "../../lib/format";
 import {
   type CreateMeterPayload,
   createMeter,
@@ -14,174 +35,141 @@ import {
 import AssetPicker from "../ops/AssetPicker";
 import { PageTitle } from "../ui/PageHeader";
 
-// ─── Sub-view types ──────────────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
-type ViewMode = "list" | "add" | "audit-trail";
+const DAY_MS = 86_400_000;
 
-// ─── Badge helpers ───────────────────────────────────────────────────────────
-
-function calibrationStatusBadge(expiryDate: string): {
-  label: string;
-  className: string;
-} {
-  const now = new Date();
-  const expiry = new Date(expiryDate);
-  const diffMs = expiry.getTime() - now.getTime();
-  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffDays < 0) {
-    return { label: "Expired", className: "bg-error-light text-error-dark" };
-  }
-  if (diffDays <= 30) {
-    return {
-      label: `Expiring (${diffDays}d)`,
-      className: "bg-warning-light text-warning-dark",
-    };
-  }
-  return { label: "Valid", className: "bg-success-light text-success-dark" };
+/** Calibration status from the expiry date (calendar day, UTC). */
+export function calibrationStatus(
+  expiryDate: string,
+  now: Date = new Date(),
+): { status: "ok" | "warning" | "critical"; label: string } {
+  const expiry = new Date(
+    /^\d{4}-\d{2}-\d{2}$/.test(expiryDate) ? `${expiryDate}T23:59:59Z` : expiryDate,
+  );
+  const diffDays = Math.ceil((expiry.getTime() - now.getTime()) / DAY_MS);
+  if (diffDays < 0) return { status: "critical", label: "Expired" };
+  if (diffDays <= 30)
+    return { status: "warning", label: `Expiring (${diffDays}d)` };
+  return { status: "ok", label: "Valid" };
 }
 
 function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
+  return dateStr ? calendarDate(dateStr) : "—";
 }
 
-function varianceBadge(flag: string | null): {
-  label: string;
-  className: string;
-} | null {
-  if (!flag) return null;
-  return { label: flag, className: "bg-error-light text-error-dark" };
-}
+// ─── Columns ─────────────────────────────────────────────────────────────────
 
-// ─── Table columns ───────────────────────────────────────────────────────────
-
-function getMeterColumns(
-  onViewAuditTrail: (meter: MeterRegistration) => void,
-): Column<MeterRegistration>[] {
-  return [
-    {
-      key: "meter_number",
-      label: "Meter Number",
-      render: (meter) => (
-        <span className="font-medium">{meter.meter_number}</span>
-      ),
+const meterColumns: Column<MeterRegistration>[] = [
+  {
+    key: "meter_number",
+    header: "Meter",
+    width: 150,
+    className: "font-medium text-text",
+    cell: (meter) => meter.meter_number,
+  },
+  {
+    key: "truck_id",
+    header: "Truck",
+    width: 160,
+    // The meter's subject is its truck, navigable to the Fleet module as a
+    // canonical asset (Req 11.3, 13.1).
+    cell: (meter) => (
+      <EntityLink type="asset" id={meter.truck_id} stopPropagation />
+    ),
+  },
+  {
+    key: "status",
+    header: "Calibration",
+    width: 150,
+    cell: (meter) => {
+      const s = calibrationStatus(meter.calibration_expiry_date);
+      return <StatusBadge status={s.status} label={s.label} />;
     },
-    {
-      key: "truck_id",
-      label: "Truck ID",
-      // The meter's subject is its truck, navigable to the Fleet module as a
-      // canonical asset (Req 11.3, 13.1).
-      render: (meter) => <EntityLink type="asset" id={meter.truck_id} />,
-    },
-    {
-      key: "calibration_certificate_number",
-      label: "Calibration Cert #",
-      render: (meter) => meter.calibration_certificate_number,
-    },
-    {
-      key: "calibration_date",
-      label: "Calibration Date",
-      render: (meter) => formatDate(meter.calibration_date),
-    },
-    {
-      key: "calibration_expiry_date",
-      label: "Expiry Date",
-      render: (meter) => formatDate(meter.calibration_expiry_date),
-    },
-    {
-      key: "status",
-      label: "Status",
-      render: (meter) => {
-        const status = calibrationStatusBadge(meter.calibration_expiry_date);
-        return (
-          <span
-            className={`inline-block px-2 py-1 rounded text-xs font-medium ${status.className}`}
-          >
-            {status.label}
-          </span>
-        );
-      },
-    },
-    {
-      key: "weights_measures_authority",
-      label: "W&M Authority",
-      render: (meter) => meter.weights_measures_authority,
-    },
-    {
-      key: "actions",
-      label: "Actions",
-      render: (meter) => (
-        <button
-          type="button"
-          onClick={() => onViewAuditTrail(meter)}
-          className="text-info hover:underline text-sm"
-        >
-          Audit Trail
-        </button>
-      ),
-    },
-  ];
-}
+  },
+  {
+    key: "calibration_expiry_date",
+    header: "Expires",
+    width: 150,
+    cell: (meter) => formatDate(meter.calibration_expiry_date),
+  },
+  {
+    key: "calibration_certificate_number",
+    header: "Certificate",
+    truncate: true,
+    className: "font-mono text-xs",
+    cell: (meter) => meter.calibration_certificate_number,
+  },
+  {
+    key: "weights_measures_authority",
+    header: "W&M authority",
+    truncate: true,
+    title: (meter) => meter.weights_measures_authority,
+    cell: (meter) => meter.weights_measures_authority,
+  },
+];
 
 const auditTrailColumns: Column<MeterAuditEntry>[] = [
   {
+    key: "timestamp",
+    header: "Time",
+    width: 160,
+    cell: (entry) => dateTime(entry.timestamp),
+  },
+  {
     key: "delivery_id",
-    label: "Delivery ID",
-    render: (entry) => <span className="font-medium">{entry.delivery_id}</span>,
+    header: "Delivery",
+    truncate: true,
+    className: "font-medium",
+    cell: (entry) => entry.delivery_id,
   },
   {
     key: "invoice_id",
-    label: "Invoice ID",
-    render: (entry) => entry.invoice_id,
+    header: "Invoice",
+    truncate: true,
+    cell: (entry) => entry.invoice_id,
   },
   {
     key: "gross_gallons",
-    label: "Gross Gallons",
-    render: (entry) => entry.gross_gallons.toFixed(1),
+    header: "Gross",
+    align: "right",
+    width: 110,
+    className: "tabular-nums",
+    cell: (entry) => gallons(entry.gross_gallons, { decimals: 1 }),
   },
   {
     key: "net_gallons",
-    label: "Net Gallons",
-    render: (entry) => entry.net_gallons.toFixed(1),
+    header: "Net",
+    align: "right",
+    width: 110,
+    className: "tabular-nums",
+    cell: (entry) => gallons(entry.net_gallons, { decimals: 1 }),
   },
   {
     key: "variance",
-    label: "Variance",
-    render: (entry) => {
-      const vBadge = varianceBadge(entry.variance_flag);
-      return vBadge ? (
-        <span
-          className={`inline-block px-2 py-1 rounded text-xs font-medium ${vBadge.className}`}
-        >
-          {vBadge.label}
-        </span>
+    header: "Variance",
+    width: 150,
+    cell: (entry) =>
+      entry.variance_flag ? (
+        <StatusBadge status="critical" label={humanize(entry.variance_flag)} />
       ) : (
-        <span className="text-success text-xs font-medium">OK</span>
-      );
-    },
-  },
-  {
-    key: "timestamp",
-    label: "Timestamp",
-    render: (entry) => formatDate(entry.timestamp),
+        <StatusBadge status="ok" label="OK" />
+      ),
   },
 ];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function MeterAuditPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [meters, setMeters] = useState<MeterRegistration[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-
-  // Filters
+  const [reload, setReload] = useState(0);
   const [truckIdFilter, setTruckIdFilter] = useState<string>("");
+  const [registering, setRegistering] = useState(false);
 
-  // Audit trail state
   const [selectedMeter, setSelectedMeter] = useState<MeterRegistration | null>(
     null,
   );
@@ -190,8 +178,6 @@ export default function MeterAuditPage() {
   const [auditError, setAuditError] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
   const [auditTotalPages, setAuditTotalPages] = useState(1);
-
-  // ─── Fetch meters ────────────────────────────────────────────────────────
 
   const fetchMeters = useCallback(async () => {
     setLoading(true);
@@ -202,7 +188,6 @@ export default function MeterAuditPage() {
         size: 20,
       };
       if (truckIdFilter) filters.truck_id = truckIdFilter;
-
       const response = await getMeters(filters);
       setMeters(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
@@ -211,15 +196,12 @@ export default function MeterAuditPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, truckIdFilter]);
+    // `reload` refetches after a registration.
+  }, [page, truckIdFilter, reload]);
 
   useEffect(() => {
-    if (viewMode === "list") {
-      fetchMeters();
-    }
-  }, [fetchMeters, viewMode]);
-
-  // ─── Fetch audit trail ───────────────────────────────────────────────────
+    fetchMeters();
+  }, [fetchMeters]);
 
   const fetchAuditTrail = useCallback(async () => {
     if (!selectedMeter) return;
@@ -242,36 +224,56 @@ export default function MeterAuditPage() {
   }, [selectedMeter, auditPage]);
 
   useEffect(() => {
-    if (viewMode === "audit-trail" && selectedMeter) {
-      fetchAuditTrail();
-    }
-  }, [fetchAuditTrail, viewMode, selectedMeter]);
+    if (selectedMeter) fetchAuditTrail();
+  }, [fetchAuditTrail, selectedMeter]);
 
-  // ─── Handlers ────────────────────────────────────────────────────────────
-
-  function handleViewAuditTrail(meter: MeterRegistration) {
+  const openAudit = (meter: MeterRegistration) => {
     setSelectedMeter(meter);
     setAuditPage(1);
     setAuditEntries([]);
-    setViewMode("audit-trail");
-  }
+  };
 
-  // ─── Render: Listing View ────────────────────────────────────────────────
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setRegistering(true)}
+      >
+        Register meter
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
 
-  function renderList() {
-    return (
-      <>
-        {/* Filters */}
-        <div className="flex flex-wrap gap-4 mb-6 items-end">
-          <div>
-            <label
-              htmlFor="truck-id-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Truck ID
-            </label>
-            {/* Filter by a real fleet vehicle; blank (cleared) = all trucks. */}
-            <div className="w-48">
+  const selectedStatus = selectedMeter
+    ? calibrationStatus(selectedMeter.calibration_expiry_date)
+    : null;
+
+  return (
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Meter Registry & Audit
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
+        </div>
+      )}
+      <Toolbar
+        label="Meters"
+        filters={
+          <FilterPopover
+            count={truckIdFilter ? 1 : 0}
+            label="Meter filters"
+            onClear={() => {
+              setTruckIdFilter("");
+              setPage(1);
+            }}
+          >
+            <Field label="Truck" id="truck-id-filter">
+              {/* Filter by a real fleet vehicle; blank (cleared) = all. */}
               <AssetPicker
                 id="truck-id-filter"
                 assetType="vehicle"
@@ -283,445 +285,286 @@ export default function MeterAuditPage() {
                 }}
                 allowClear
               />
-            </div>
-          </div>
-        </div>
-
-        {/* Loading state */}
-        {loading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading meters...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Error state */}
-        {!loading && error && (
-          <div
-            role="alert"
-            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-          >
-            {error}
-          </div>
-        )}
-
-        {/* Meters table */}
-        {!loading && !error && (
-          <>
-            <Table<MeterRegistration>
-              ariaLabel="Registered meters"
-              columns={getMeterColumns(handleViewAuditTrail)}
-              data={meters}
-              getRowId={(meter) => meter.meter_id}
-              emptyState={
-                <span className="text-gray-500">No meters registered.</span>
-              }
-            />
-
-            {/* Pagination */}
-            <nav
-              aria-label="Pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
-          </>
-        )}
-      </>
-    );
-  }
-
-  // ─── Render: Audit Trail View ────────────────────────────────────────────
-
-  function renderAuditTrail() {
-    if (!selectedMeter) return null;
-
-    const status = calibrationStatusBadge(
-      selectedMeter.calibration_expiry_date,
-    );
-
-    return (
-      <div>
-        {/* Meter summary header */}
-        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-            <div>
-              <span className="text-gray-500 block">Meter Number</span>
-              <span className="font-bold">{selectedMeter.meter_number}</span>
-            </div>
-            <div>
-              <span className="text-gray-500 block">Truck ID</span>
-              <span className="font-medium">
-                <EntityLink type="asset" id={selectedMeter.truck_id} />
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-500 block">Calibration Expiry</span>
-              <span className="font-medium">
-                {formatDate(selectedMeter.calibration_expiry_date)}
-              </span>
-            </div>
-            <div>
-              <span className="text-gray-500 block">Status</span>
-              <span
-                className={`inline-block px-2 py-1 rounded text-xs font-medium ${status.className}`}
-              >
-                {status.label}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {/* Loading state */}
-        {auditLoading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading audit trail...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Error state */}
-        {!auditLoading && auditError && (
-          <div
-            role="alert"
-            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-          >
-            {auditError}
-          </div>
-        )}
-
-        {/* Audit trail table */}
-        {!auditLoading && !auditError && (
-          <>
-            <Table<MeterAuditEntry>
-              ariaLabel="Meter delivery audit trail"
-              columns={auditTrailColumns}
-              data={auditEntries}
-              getRowId={(entry) => entry.audit_id}
-              emptyState={
-                <span className="text-gray-500">
-                  No audit entries found for this meter.
-                </span>
-              }
-            />
-
-            {/* Audit trail pagination */}
-            <nav
-              aria-label="Audit trail pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={auditPage <= 1}
-                onClick={() => setAuditPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {auditPage} of {auditTotalPages}
-              </span>
-              <button
-                type="button"
-                disabled={auditPage >= auditTotalPages}
-                onClick={() => setAuditPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
-          </>
-        )}
-      </div>
-    );
-  }
-
-  // ─── Render: Register Meter Form ─────────────────────────────────────────
-
-  function renderForm() {
-    return (
-      <RegisterMeterForm
-        onSubmit={async (data) => {
-          setLoading(true);
-          setError(null);
-          try {
-            await createMeter(data);
-            setViewMode("list");
-          } catch (err) {
-            setError(
-              err instanceof Error ? err.message : "Failed to register meter",
-            );
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onCancel={() => setViewMode("list")}
-        loading={loading}
+            </Field>
+          </FilterPopover>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
       />
-    );
-  }
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<MeterRegistration>
+          ariaLabel="Registered meters"
+          columns={meterColumns}
+          data={loading || error ? [] : meters}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchMeters } : null}
+          getRowId={(meter) => meter.meter_id}
+          rowLabel={(meter) => `Meter ${meter.meter_number}`}
+          onRowClick={openAudit}
+          rowMenu={(meter) => [
+            {
+              id: "audit",
+              label: "Audit trail",
+              icon: <History className="h-3.5 w-3.5" />,
+              onSelect: () => openAudit(meter),
+            },
+          ]}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <span className="text-text-muted">No meters registered.</span>
+          }
+        />
+      </div>
 
-  // ─── Main Render ─────────────────────────────────────────────────────────
+      <Drawer
+        open={selectedMeter !== null}
+        onClose={() => setSelectedMeter(null)}
+        title={
+          selectedMeter
+            ? `Audit trail · ${selectedMeter.meter_number}`
+            : "Audit trail"
+        }
+        width={820}
+      >
+        {selectedMeter && selectedStatus && (
+          <dl className="grid grid-cols-2 gap-3 border-b border-slate-200 px-4 py-3 text-sm md:grid-cols-4">
+            <div>
+              <dt className="text-xs text-text-muted">Meter</dt>
+              <dd className="font-semibold">{selectedMeter.meter_number}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-text-muted">Truck</dt>
+              <dd>
+                <EntityLink type="asset" id={selectedMeter.truck_id} />
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-text-muted">Calibration expires</dt>
+              <dd>{formatDate(selectedMeter.calibration_expiry_date)}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-text-muted">Status</dt>
+              <dd>
+                <StatusBadge
+                  status={selectedStatus.status}
+                  label={selectedStatus.label}
+                />
+              </dd>
+            </div>
+          </dl>
+        )}
+        <DataTable<MeterAuditEntry>
+          ariaLabel="Meter delivery audit trail"
+          columns={auditTrailColumns}
+          data={auditLoading || auditError ? [] : auditEntries}
+          loading={auditLoading}
+          error={
+            auditError
+              ? { message: auditError, onRetry: fetchAuditTrail }
+              : null
+          }
+          getRowId={(entry) => entry.audit_id}
+          pagination={
+            auditTotalPages > 1
+              ? {
+                  page: auditPage,
+                  totalPages: auditTotalPages,
+                  onPageChange: setAuditPage,
+                }
+              : undefined
+          }
+          emptyState={
+            <span className="text-text-muted">
+              No audit entries found for this meter.
+            </span>
+          }
+        />
+      </Drawer>
 
-  return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <PageTitle className="text-2xl font-bold">
-              Meter Registry & Audit
-            </PageTitle>
-            <p className="text-gray-600 mt-1">
-              Manage registered meters, track calibration status, and view
-              per-meter delivery audit trails.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {viewMode !== "list" && (
-              <button
-                type="button"
-                onClick={() => {
-                  setViewMode("list");
-                  setSelectedMeter(null);
-                }}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
-                Back to List
-              </button>
-            )}
-            {viewMode === "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("add")}
-                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
-              >
-                Register Meter
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Error state (top-level) */}
-      {error && viewMode === "list" && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
+      {registering && (
+        <RegisterMeterDialog
+          onClose={() => setRegistering(false)}
+          onSaved={() => setReload((n) => n + 1)}
+        />
       )}
-
-      {/* View content */}
-      {viewMode === "list" && renderList()}
-      {viewMode === "add" && renderForm()}
-      {viewMode === "audit-trail" && renderAuditTrail()}
     </div>
   );
 }
 
-// ─── Register Meter Form Sub-Component ───────────────────────────────────────
+// ─── Register meter dialog ───────────────────────────────────────────────────
 
-interface RegisterMeterFormProps {
-  onSubmit: (data: CreateMeterPayload) => Promise<void>;
-  onCancel: () => void;
-  loading: boolean;
+type MeterValues = {
+  meter_number: string;
+  truck_id: string;
+  calibration_certificate_number: string;
+  weights_measures_authority: string;
+  calibration_date: string;
+  calibration_expiry_date: string;
+};
+
+export function validateMeter(v: MeterValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.meter_number.trim()) errors.meter_number = "Enter the meter number.";
+  if (!v.truck_id) errors.truck_id = "Pick a truck.";
+  if (!v.calibration_certificate_number.trim())
+    errors.calibration_certificate_number = "Enter the certificate number.";
+  if (!v.weights_measures_authority.trim())
+    errors.weights_measures_authority = "Enter the authority.";
+  if (!v.calibration_date)
+    errors.calibration_date = "Enter the calibration date.";
+  if (!v.calibration_expiry_date)
+    errors.calibration_expiry_date = "Enter the expiry date.";
+  else if (
+    v.calibration_date &&
+    v.calibration_expiry_date <= v.calibration_date
+  )
+    errors.calibration_expiry_date =
+      "Expiry must be after the calibration date.";
+  return errors;
 }
 
-function RegisterMeterForm({
-  onSubmit,
-  onCancel,
-  loading,
-}: RegisterMeterFormProps) {
-  const [meterNumber, setMeterNumber] = useState("");
-  const [truckId, setTruckId] = useState("");
-  const [calibrationCertNumber, setCalibrationCertNumber] = useState("");
-  const [calibrationDate, setCalibrationDate] = useState("");
-  const [calibrationExpiryDate, setCalibrationExpiryDate] = useState("");
-  const [weightsMeasuresAuthority, setWeightsMeasuresAuthority] = useState("");
-  // The truck picker isn't a native input, so its "required" rule is enforced
-  // here rather than via the browser's constraint validation.
-  const [truckError, setTruckError] = useState<string | null>(null);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!truckId) {
-      setTruckError("Truck ID is required.");
-      return;
-    }
-
+function RegisterMeterDialog({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const submit = async (v: MeterValues) => {
     const data: CreateMeterPayload = {
-      meter_number: meterNumber,
-      truck_id: truckId,
-      calibration_certificate_number: calibrationCertNumber,
-      calibration_date: calibrationDate,
-      calibration_expiry_date: calibrationExpiryDate,
-      weights_measures_authority: weightsMeasuresAuthority,
+      meter_number: v.meter_number.trim(),
+      truck_id: v.truck_id,
+      calibration_certificate_number: v.calibration_certificate_number.trim(),
+      calibration_date: v.calibration_date,
+      calibration_expiry_date: v.calibration_expiry_date,
+      weights_measures_authority: v.weights_measures_authority.trim(),
     };
-
-    await onSubmit(data);
+    await createMeter(data);
   };
-
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+    <FormDialog<MeterValues, void>
+      open
+      size="md"
+      title="Register meter"
+      submitLabel="Register meter"
+      successMessage="Meter registered"
+      initialValues={{
+        meter_number: "",
+        truck_id: "",
+        calibration_certificate_number: "",
+        weights_measures_authority: "",
+        calibration_date: "",
+        calibration_expiry_date: "",
+      }}
+      validate={validateMeter}
+      onSubmit={submit}
+      onSaved={onSaved}
+      onClose={onClose}
     >
-      <h2 className="text-lg font-bold mb-4">Register New Meter</h2>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Meter Number */}
-        <div>
-          <label
-            htmlFor="meter-number"
-            className="block text-sm font-medium mb-1"
-          >
-            Meter Number
-          </label>
-          <input
-            id="meter-number"
-            type="text"
+      {({ values, set, errors }) => (
+        <>
+          <Field
+            label="Meter number"
             required
-            value={meterNumber}
-            onChange={(e) => setMeterNumber(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. MTR-001"
-          />
-        </div>
-
-        {/* Truck ID */}
-        <div>
-          <label
-            htmlFor="meter-truck-id"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.meter_number}
           >
-            Truck ID
-          </label>
-          <AssetPicker
-            id="meter-truck-id"
-            assetType="vehicle"
-            aria-label="Truck ID"
-            value={truckId || null}
-            onChange={(value) => {
-              setTruckId(value);
-              setTruckError(null);
-            }}
-          />
-          {truckError && (
-            <p className="text-xs text-error mt-1">{truckError}</p>
-          )}
-        </div>
-
-        {/* Calibration Certificate Number */}
-        <div>
-          <label
-            htmlFor="meter-cert-number"
-            className="block text-sm font-medium mb-1"
-          >
-            Calibration Certificate #
-          </label>
-          <input
-            id="meter-cert-number"
-            type="text"
+            <input
+              id="meter-number"
+              type="text"
+              value={values.meter_number}
+              onChange={(e) => set("meter_number", e.target.value)}
+              className={INPUT_CLASS}
+              placeholder="e.g. MTR-001"
+            />
+          </Field>
+          <Field label="Truck" required span={1} error={errors.truck_id}>
+            <AssetPicker
+              id="meter-truck-id"
+              assetType="vehicle"
+              aria-label="Truck ID"
+              value={values.truck_id || null}
+              onChange={(value) => set("truck_id", value)}
+            />
+          </Field>
+          <Field
+            label="Calibration certificate"
             required
-            value={calibrationCertNumber}
-            onChange={(e) => setCalibrationCertNumber(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. CAL-2024-0001"
-          />
-        </div>
-
-        {/* Weights & Measures Authority */}
-        <div>
-          <label
-            htmlFor="meter-wm-authority"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.calibration_certificate_number}
           >
-            Weights & Measures Authority
-          </label>
-          <input
-            id="meter-wm-authority"
-            type="text"
+            <input
+              id="meter-cert-number"
+              type="text"
+              value={values.calibration_certificate_number}
+              onChange={(e) =>
+                set("calibration_certificate_number", e.target.value)
+              }
+              className={INPUT_CLASS}
+              placeholder="e.g. CAL-2024-0001"
+            />
+          </Field>
+          <Field
+            label="Weights & Measures authority"
             required
-            value={weightsMeasuresAuthority}
-            onChange={(e) => setWeightsMeasuresAuthority(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. TX Dept of Agriculture"
-          />
-        </div>
-
-        {/* Calibration Date */}
-        <div>
-          <label
-            htmlFor="meter-calibration-date"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.weights_measures_authority}
           >
-            Calibration Date
-          </label>
-          <input
-            id="meter-calibration-date"
-            type="date"
+            <input
+              id="meter-wm-authority"
+              type="text"
+              value={values.weights_measures_authority}
+              onChange={(e) =>
+                set("weights_measures_authority", e.target.value)
+              }
+              className={INPUT_CLASS}
+              placeholder="e.g. TX Dept of Agriculture"
+            />
+          </Field>
+          <Field
+            label="Calibration date"
             required
-            value={calibrationDate}
-            onChange={(e) => setCalibrationDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-
-        {/* Calibration Expiry Date */}
-        <div>
-          <label
-            htmlFor="meter-expiry-date"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.calibration_date}
           >
-            Calibration Expiry Date
-          </label>
-          <input
-            id="meter-expiry-date"
-            type="date"
+            <input
+              id="meter-calibration-date"
+              type="date"
+              value={values.calibration_date}
+              onChange={(e) => set("calibration_date", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field
+            label="Calibration expiry"
             required
-            value={calibrationExpiryDate}
-            onChange={(e) => setCalibrationExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-      </div>
-
-      <div className="flex gap-3 mt-6">
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
-        >
-          {loading ? "Registering..." : "Register Meter"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 border rounded hover:bg-gray-50"
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
+            span={1}
+            error={errors.calibration_expiry_date}
+          >
+            <input
+              id="meter-expiry-date"
+              type="date"
+              value={values.calibration_expiry_date}
+              onChange={(e) => set("calibration_expiry_date", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }
