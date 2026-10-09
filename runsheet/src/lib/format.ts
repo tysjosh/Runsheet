@@ -37,7 +37,12 @@ export function formatConfig(): Readonly<FormatConfig> {
 }
 
 type NumOpts = { decimals?: number; locale?: string };
-type DateOpts = { timeZone?: string; locale?: string };
+type DateOpts = {
+  timeZone?: string;
+  locale?: string;
+  /** 12-hour clock without a leading zero ("9:20 AM"); default 24 h. Additive (3.11). */
+  hour12?: boolean;
+};
 type DateInput = Date | string | number | null | undefined;
 
 const isNum = (v: unknown): v is number =>
@@ -201,10 +206,18 @@ export function calendarDate(d: DateInput, opts: DateOpts = {}): string {
   return dateLong(d, opts);
 }
 
-/** "08:30" (24 h). */
+/** "08:30" (24 h), or "9:20 AM" with `hour12: true`. */
 export function time(d: DateInput, opts: DateOpts = {}): string {
   const v = toDate(d);
   if (!v) return EMPTY;
+  if (opts.hour12) {
+    const q = parts(
+      v,
+      { hour: "numeric", minute: "2-digit", hour12: true },
+      { ...opts, locale: "en-US" },
+    );
+    return `${q.hour}:${q.minute} ${q.dayPeriod}`;
+  }
   const p = parts(
     v,
     { hour: "2-digit", minute: "2-digit", hourCycle: "h23" },
@@ -218,6 +231,13 @@ export function dateTime(d: DateInput, opts: DateOpts = {}): string {
   const v = toDate(d);
   if (!v) return EMPTY;
   return `${date(v, opts)}, ${time(v, opts)}`;
+}
+
+/** The zone's short name for an instant ("CDT"); "" when unknown. Additive (3.11). */
+export function zoneName(d: DateInput, opts: DateOpts = {}): string {
+  const v = toDate(d);
+  if (!v) return "";
+  return parts(v, { timeZoneName: "short" }, opts).timeZoneName ?? "";
 }
 
 function dayKey(d: Date, opts: DateOpts): string {
@@ -296,6 +316,11 @@ export function duration(seconds: number | null | undefined): string {
   return rh ? `${number(d)} d ${rh} h` : `${number(d)} d`;
 }
 
+/** "1 day" / "4 days". Additive (3.11). */
+export function days(n: number): string {
+  return `${number(n)} ${n === 1 ? "day" : "days"}`;
+}
+
 // ── products ─────────────────────────────────────────────────────────────
 
 /** "JET_A" → "Jet a"; "kerosene_k1" → "Kerosene k1". */
@@ -327,6 +352,8 @@ export const format = {
   window,
   relative,
   duration,
+  days,
+  zoneName,
   productName,
   humanize,
 };

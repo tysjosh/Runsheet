@@ -174,3 +174,28 @@ describe("product names", () => {
     expect(humanize("bio-diesel_b20")).toBe("Bio diesel b20");
   });
 });
+describe("3.11 additions: hour12, zoneName, days", () => {
+  const at = "2026-10-09T14:20:00Z";
+  const chicago = { timeZone: "America/Chicago", locale: "en-US" };
+  it("keeps the 24 h default unchanged", () => {
+    expect(format.time(at, chicago)).toBe("09:20");
+    expect(format.dateTime(at, chicago)).toBe("Fri 9 Oct, 09:20");
+  });
+  it("renders 12-hour times without a leading zero", () => {
+    expect(format.time(at, { ...chicago, hour12: true })).toBe("9:20 AM");
+    expect(
+      format.time("2026-10-09T20:05:00Z", { ...chicago, hour12: true }),
+    ).toBe("3:05 PM");
+    expect(format.time(null, { hour12: true })).toBe(EMPTY);
+  });
+  it("names the zone for an instant", () => {
+    expect(format.zoneName(at, chicago)).toBe("CDT");
+    expect(format.zoneName("2026-01-09T14:20:00Z", chicago)).toBe("CST");
+    expect(format.zoneName(null)).toBe("");
+  });
+  it("counts days with the right plural", () => {
+    expect(format.days(1)).toBe("1 day");
+    expect(format.days(4)).toBe("4 days");
+    expect(format.days(0)).toBe("0 days");
+  });
+});

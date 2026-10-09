@@ -11,6 +11,8 @@ export interface InlineBannerProps {
   children: ReactNode;
   action?: ReactNode;
   className?: string;
+  /** `touch`: at least 44 px tall with 14 px text, for phones (R14.19). Additive (3.11). */
+  size?: "default" | "touch";
 }
 
 const TONES = {
@@ -30,12 +32,13 @@ export function InlineBanner({
   children,
   action,
   className = "",
+  size = "default",
 }: InlineBannerProps) {
   const { cls, Icon } = TONES[tone];
   return (
     <div
       role={tone === "critical" ? "alert" : "status"}
-      className={`flex min-h-8 items-center gap-2 rounded-md border px-3 py-1 text-xs font-medium ${cls} ${className}`}
+      className={`flex ${size === "touch" ? "min-h-11 py-2 text-sm" : "min-h-8 py-1 text-xs"} items-center gap-2 rounded-md border px-3 font-medium ${cls} ${className}`}
     >
       <Icon aria-hidden="true" className="h-3.5 w-3.5 shrink-0" />
       <div className="min-w-0 flex-1">{children}</div>

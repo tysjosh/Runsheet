@@ -38,6 +38,8 @@ export interface FilterChipsProps {
   className?: string;
   /** Move chips that don't fit into a "More" menu instead of clipping. */
   collapse?: boolean;
+  /** `touch`: 44 px chips for phone-sized targets (R14.19). Additive (3.11). */
+  size?: "default" | "touch";
 }
 
 const GAP = 6; // gap-1.5
@@ -109,7 +111,9 @@ export function FilterChips({
   label,
   className = "",
   collapse = false,
+  size = "default",
 }: FilterChipsProps) {
+  const chipH = size === "touch" ? "h-11 px-3.5 text-sm" : "h-7 px-2.5 text-xs";
   const selected = new Set(Array.isArray(value) ? value : [value]);
   const toggle = (id: string) => {
     if (!multi) {
@@ -192,7 +196,7 @@ export function FilterChips({
         aria-pressed={interactive ? on : undefined}
         tabIndex={interactive ? undefined : -1}
         onClick={interactive ? () => toggle(o.id) : undefined}
-        className={`inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border px-2.5 text-xs font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+        className={`inline-flex ${chipH} shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border font-semibold transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
           on
             ? "border-primary bg-primary-soft text-brand-800"
             : "border-slate-300 bg-surface text-slate-700 hover:bg-slate-50"
@@ -215,7 +219,7 @@ export function FilterChips({
       {...props}
       type="button"
       aria-label={`More ${label.toLowerCase()} filters (${n})`}
-      className="inline-flex h-7 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-slate-300 bg-surface px-2.5 text-xs font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+      className={`inline-flex ${chipH} shrink-0 items-center gap-1 whitespace-nowrap rounded-full border border-slate-300 bg-surface font-semibold text-slate-700 hover:bg-slate-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus`}
     >
       More · {n}
       <ChevronDown aria-hidden="true" className="h-3 w-3" />
@@ -236,6 +240,7 @@ export function FilterChips({
         <Menu
           label={`More ${label.toLowerCase()} filters`}
           align="start"
+          size={size}
           items={hidden.map((o) => ({
             id: o.id,
             label: o.count !== undefined ? `${o.label} (${o.count})` : o.label,

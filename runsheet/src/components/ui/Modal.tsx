@@ -30,6 +30,12 @@ export interface ModalProps {
   subheader?: React.ReactNode;
   /** Rendered over the panel (e.g. FormDialog's discard prompt). */
   overlay?: React.ReactNode;
+  /**
+   * `sheet`: below 640 px the panel is a bottom sheet (full width, rounded
+   * top corners, no side margin); from 640 px it is the centred dialog.
+   * Additive (task 3.11, for the portal's Request delivery dialog).
+   */
+  mobile?: "sheet";
 }
 
 const sizeStyles = {
@@ -53,6 +59,7 @@ export const Modal: React.FC<ModalProps> = ({
   bodyClassName = "px-6 py-4 max-h-[calc(100vh-200px)] overflow-y-auto",
   subheader,
   overlay,
+  mobile,
 }) => {
   const panelRef = useRef<HTMLDivElement>(null);
   const titleId = useId();
@@ -76,7 +83,10 @@ export const Modal: React.FC<ModalProps> = ({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+      className={`fixed inset-0 z-50 flex justify-center bg-black/30 ${
+        mobile === "sheet" ? "items-end sm:items-center" : "items-center"
+      }`}
+      data-mobile={mobile}
       onClick={onClose}
     >
       <div
@@ -86,7 +96,11 @@ export const Modal: React.FC<ModalProps> = ({
         aria-labelledby={titleId}
         aria-describedby={describedById}
         tabIndex={-1}
-        className={`relative flex flex-col bg-white rounded-xl shadow-xl w-full ${sizeStyles[size]} mx-4 ${className}`}
+        className={`relative flex flex-col bg-white shadow-xl w-full ${sizeStyles[size]} ${
+          mobile === "sheet"
+            ? "mx-0 rounded-t-xl sm:mx-4 sm:rounded-xl"
+            : "mx-4 rounded-xl"
+        } ${className}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

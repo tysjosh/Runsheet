@@ -80,6 +80,15 @@ export interface FormDialogProps<
   sections?: FormDialogSection[];
   steps?: FormDialogStep<V>[];
   children: (props: FormRenderProps<V>) => ReactNode;
+  /** `sheet`: a bottom sheet below 640 px (see Modal). Additive, task 3.11. */
+  mobile?: "sheet";
+  /**
+   * The submit stays focusable and announced but does nothing
+   * (`aria-disabled`), e.g. while a precondition is unmet. Additive.
+   */
+  submitDisabled?: boolean;
+  /** Stay open after a successful submit (the caller shows the result). */
+  keepOpenOnSuccess?: boolean;
 }
 
 const WIDTH = { sm: "max-w-[400px]", md: "max-w-[560px]", lg: "max-w-[760px]" };
@@ -173,6 +182,9 @@ export function FormDialog<V extends Record<string, unknown>, R = unknown>({
   sections,
   steps,
   children,
+  mobile,
+  submitDisabled = false,
+  keepOpenOnSuccess = false,
 }: FormDialogProps<V, R>) {
   const formId = useId();
   const helpId = useId();
@@ -251,7 +263,7 @@ export function FormDialog<V extends Record<string, unknown>, R = unknown>({
   const isLastStep = !steps || stepIndex === steps.length - 1;
 
   const submit = async () => {
-    if (saving) return;
+    if (saving || (submitDisabled && isLastStep)) return;
     setFormError(null);
     if (steps && !isLastStep) {
       const stepErrors = steps[stepIndex].validate?.(values) ?? {};
@@ -273,7 +285,7 @@ export function FormDialog<V extends Record<string, unknown>, R = unknown>({
     try {
       const result = await onSubmit(values);
       setSaving(false);
-      onClose();
+      if (!keepOpenOnSuccess) onClose();
       if (successMessage) notify({ type: "success", message: successMessage });
       onSaved?.(result);
     } catch (err) {
@@ -394,7 +406,16 @@ export function FormDialog<V extends Record<string, unknown>, R = unknown>({
           Back
         </Button>
       )}
-      <Button type="submit" form={formId} variant="primary" loading={saving}>
+      <Button
+        type="submit"
+        form={formId}
+        variant="primary"
+        loading={saving}
+        aria-disabled={submitDisabled && isLastStep ? true : undefined}
+        className={
+          submitDisabled && isLastStep ? "cursor-not-allowed opacity-50" : ""
+        }
+      >
         {isLastStep ? submitLabel : "Next"}
       </Button>
     </>
@@ -451,6 +472,7 @@ export function FormDialog<V extends Record<string, unknown>, R = unknown>({
       subheader={header}
       footer={footer}
       overlay={overlay}
+      mobile={mobile}
     >
       <form
         id={formId}

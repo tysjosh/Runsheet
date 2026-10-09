@@ -64,8 +64,18 @@ export interface TableProps<T> {
   data: T[];
   /** Legacy density name: standard = comfortable, compact = compact. */
   variant?: "standard" | "compact";
-  rowHeight?: "comfortable" | "compact";
+  /** `touch`: 48 px rows for phone-sized targets (additive, task 3.11). */
+  rowHeight?: "comfortable" | "compact" | "touch";
   stickyHeader?: boolean;
+  /**
+   * Stick the header at this offset from the page's scroll container (e.g.
+   * below a sticky title row). The table then has no `overflow-x-auto`
+   * wrapper, which would otherwise capture the sticky header. Trade-off: a
+   * table wider than its container then overflows the container instead of
+   * scrolling inside it, so use it only for tables that fit (or let the page
+   * scroll horizontally). Additive.
+   */
+  stickyTop?: number | string;
   onRowClick?: (item: T) => void;
   selectedId?: string;
   getRowId?: (item: T) => string;
@@ -116,6 +126,7 @@ export function DataTable<T extends Record<string, any>>({
   variant = "standard",
   rowHeight,
   stickyHeader = true,
+  stickyTop,
   onRowClick,
   selectedId,
   getRowId,
@@ -141,7 +152,8 @@ export function DataTable<T extends Record<string, any>>({
 }: TableProps<T>) {
   const density =
     rowHeight ?? (variant === "compact" ? "compact" : "comfortable");
-  const rowH = density === "compact" ? "h-8" : "h-10";
+  const rowH =
+    density === "compact" ? "h-8" : density === "touch" ? "h-12" : "h-10";
   const cellPad = "px-3 py-1";
   const resolveRowId = getRowId ?? keyExtractor;
   const selected = new Set(selectedIds);
@@ -291,10 +303,13 @@ export function DataTable<T extends Record<string, any>>({
   }
 
   return (
-    <div className={`overflow-x-auto ${className}`}>
+    <div
+      className={`${stickyTop === undefined ? "overflow-x-auto" : ""} ${className}`}
+    >
       <table className="w-full border-collapse" aria-label={ariaLabel}>
         <thead
-          className={`border-b border-slate-200 bg-slate-50 ${stickyHeader ? "sticky top-0 z-10" : ""}`}
+          className={`border-b border-slate-200 bg-slate-50 ${stickyHeader || stickyTop !== undefined ? "sticky top-0 z-10" : ""}`}
+          style={stickyTop !== undefined ? { top: stickyTop } : undefined}
         >
           <tr className="h-9">
             {selectable && (

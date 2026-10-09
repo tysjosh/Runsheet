@@ -44,6 +44,8 @@ export interface MenuProps {
   align?: "start" | "end";
   label?: string;
   className?: string;
+  /** `touch`: 44 px items for phone-sized targets (R14.19). Additive (3.11). */
+  size?: "default" | "touch";
 }
 
 export function Menu({
@@ -52,6 +54,7 @@ export function Menu({
   align = "end",
   label,
   className = "",
+  size = "default",
 }: MenuProps) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
@@ -149,7 +152,7 @@ export function Menu({
         tabIndex={i === active ? 0 : -1}
         onClick={() => select(item)}
         onMouseEnter={() => !item.disabled && setActive(i)}
-        className={`flex h-8 w-full items-center gap-2 px-3 text-left focus:bg-slate-100 focus:outline-none ${
+        className={`flex ${size === "touch" ? "h-11" : "h-8"} w-full items-center gap-2 px-3 text-left focus:bg-slate-100 focus:outline-none ${
           item.disabled
             ? "cursor-not-allowed text-slate-500"
             : item.danger
