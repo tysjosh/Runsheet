@@ -44,9 +44,11 @@ def _route_doc(key: str, pct: float, orders: Any, *, label: str = None, at: date
 
 @pytest.fixture(autouse=True)
 def _frozen_now(monkeypatch):
-    import services.elasticsearch_service as mod
-
-    monkeypatch.setattr(mod, "utcnow", lambda: NOW)
+    # Patch the globals the class's methods actually resolve: another test
+    # may have reloaded services.elasticsearch_service, so the module now in
+    # sys.modules is not necessarily the one this class was defined in.
+    module_globals = ElasticsearchService.get_route_performance_data.__globals__
+    monkeypatch.setitem(module_globals, "utcnow", lambda: NOW)
 
 
 @pytest.mark.asyncio
