@@ -95,7 +95,7 @@ describe("CostImportDialog", () => {
   });
 
   function pick() {
-    fireEvent.change(screen.getByLabelText("Cost entries CSV"), {
+    fireEvent.change(screen.getByLabelText(/Cost entries CSV/), {
       target: { files: [file] },
     });
   }
@@ -169,6 +169,38 @@ describe("CostImportDialog", () => {
     expect(mockImport).toHaveBeenLastCalledWith(file, false);
     expect(onImported).toHaveBeenCalledWith(2);
     expect(screen.getByText("Imported 2 rows.")).toBeInTheDocument();
+    // Stays open on the result; a second click can't import again.
+    expect(screen.getByTestId("import-step")).toHaveTextContent("Step 2 of 2");
+    const done = screen.getByRole("button", { name: "Imported" });
+    expect(done).toHaveAttribute("aria-disabled", "true");
+    await act(async () => {
+      fireEvent.click(done);
+    });
+    expect(mockImport).toHaveBeenCalledTimes(2);
+  });
+  it("is an lg FormDialog: step 1, a file is required, Cancel closes", async () => {
+    const onClose = jest.fn();
+    render(
+      <CostImportDialog isOpen onClose={onClose} onImported={jest.fn()} />,
+    );
+    expect(
+      screen.getByRole("dialog", { name: "Import cost entries" }),
+    ).toBeInTheDocument();
+    expect(screen.getByTestId("import-step")).toHaveTextContent(
+      "Step 1 of 2 · Check file",
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Check file" }));
+    });
+    expect(mockImport).not.toHaveBeenCalled();
+    expect(screen.getByText("Choose a CSV file first.")).toBeInTheDocument();
+    expect(screen.getByLabelText(/Cost entries CSV/)).toHaveAttribute(
+      "aria-invalid",
+      "true",
+    );
+    pick();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(onClose).toHaveBeenCalled();
   });
 });
 
