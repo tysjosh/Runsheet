@@ -349,7 +349,7 @@ class TestBalanceAndAging:
         with _patch_bridge(), _holds(True):
             payload = await _call(account_id="acct-1")
 
-        assert payload["accounts"][0]["ar_aging"]["oldest_bucket"] == "90+"
+        assert payload["accounts"][0]["ar_aging"]["oldest_bucket"] == "90+ days past due"
 
     @pytest.mark.asyncio
     async def test_no_open_money_has_no_oldest_bucket(self):

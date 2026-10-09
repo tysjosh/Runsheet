@@ -297,6 +297,7 @@ async def _evaluate(
 
     if aging:
         entry["ar_aging"] = {
+            "bucket_current_cents": _cents(aging.get("bucket_current_cents")),
             "bucket_0_30_cents": _cents(aging.get("bucket_0_30_cents")),
             "bucket_31_60_cents": _cents(aging.get("bucket_31_60_cents")),
             "bucket_61_90_cents": _cents(aging.get("bucket_61_90_cents")),
@@ -324,10 +325,11 @@ async def _evaluate(
 def _oldest_bucket(aging: Dict[str, Any]) -> Optional[str]:
     """The oldest bucket carrying money — the part a controller reacts to."""
     for key, label in (
-        ("bucket_90_plus_cents", "90+"),
-        ("bucket_61_90_cents", "61-90"),
-        ("bucket_31_60_cents", "31-60"),
-        ("bucket_0_30_cents", "0-30"),
+        ("bucket_90_plus_cents", "90+ days past due"),
+        ("bucket_61_90_cents", "61-90 days past due"),
+        ("bucket_31_60_cents", "31-60 days past due"),
+        ("bucket_0_30_cents", "1-30 days past due"),
+        ("bucket_current_cents", "Current"),
     ):
         if _cents(aging.get(key)) > 0:
             return label

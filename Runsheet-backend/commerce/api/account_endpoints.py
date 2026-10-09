@@ -505,28 +505,23 @@ async def get_account_aging(
     tenant: TenantContext = Depends(require_accounts_enabled),
 ) -> dict:
     """Return AR aging bucket breakdown for the account.
-
-    Returns ``{bucket_0_30_cents, bucket_31_60_cents, bucket_61_90_cents,
-    bucket_90_plus_cents, total_open_cents}`` computed against the current
-    moment via ``utcnow()``.
-
+    Returns ``{bucket_current_cents, bucket_0_30_cents, bucket_31_60_cents,
+    bucket_61_90_cents, bucket_90_plus_cents, total_open_cents}``, aged by
+    days past ``due_date`` against ``utcnow()`` with the same rule as
+    ``ARAgingService`` (``bucket_for_invoice``). ``bucket_0_30_cents`` means
+    1-30 days past due; ``bucket_current_cents`` is not yet due.
     Validates: Requirement 7.1
-
-    Note: Full implementation in Phase 10 (ar_aging_service). This endpoint
-    provides a direct computation against invoices_current for now.
     """
+    from commerce.services.ar_aging_service import bucket_for_invoice, empty_buckets
     from commerce.services.commerce_es_mappings import INVOICES_CURRENT_INDEX
     from ops.middleware.tenant_guard import inject_tenant_filter
     from services.time_utils import utcnow
-
     # First verify the account exists under this tenant
     account_service = _get_account_service()
     await account_service.get(tenant.tenant_id, account_id)
-
     # Use the account service's ES client for the aging query
     es_service = account_service._es
     now = utcnow()
-
     # Query all open invoices for this account
     query: Dict[str, Any] = {
         "query": {
@@ -538,68 +533,28 @@ async def get_account_aging(
             }
         },
         "size": 10000,
-        "_source": ["remaining_cents", "issued_at"],
+        "_source": ["remaining_cents", "issued_at", "due_date"],
     }
     query = inject_tenant_filter(query, tenant.tenant_id)
-
     response = await es_service.search_documents(
         INVOICES_CURRENT_INDEX, query, size=10000
     )
-
     hits = response.get("hits", {}).get("hits", [])
-
-    # Compute buckets
-    bucket_0_30_cents = 0
-    bucket_31_60_cents = 0
-    bucket_61_90_cents = 0
-    bucket_90_plus_cents = 0
-
+    buckets = empty_buckets()
     for hit in hits:
         source = hit["_source"]
         remaining = int(source.get("remaining_cents", 0))
-        issued_at_str = source.get("issued_at")
-
-        if not issued_at_str or remaining <= 0:
+        if remaining <= 0:
             continue
-
-        # Parse issued_at
-        try:
-            if isinstance(issued_at_str, str):
-                issued_at = datetime.fromisoformat(
-                    issued_at_str.replace("Z", "+00:00")
-                )
-            else:
-                issued_at = issued_at_str
-        except (ValueError, TypeError):
+        key = bucket_for_invoice(source, now)
+        if key is None:
             continue
-
-        if issued_at.tzinfo is None:
-            issued_at = issued_at.replace(tzinfo=timezone.utc)
-
-        now_aware = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
-        days_old = (now_aware - issued_at).days
-
-        if days_old <= 30:
-            bucket_0_30_cents += remaining
-        elif days_old <= 60:
-            bucket_31_60_cents += remaining
-        elif days_old <= 90:
-            bucket_61_90_cents += remaining
-        else:
-            bucket_90_plus_cents += remaining
-
-    total_open_cents = (
-        bucket_0_30_cents + bucket_31_60_cents + bucket_61_90_cents + bucket_90_plus_cents
-    )
-
+        buckets[key] += remaining
     return {
         "data": {
             "account_id": account_id,
-            "bucket_0_30_cents": bucket_0_30_cents,
-            "bucket_31_60_cents": bucket_31_60_cents,
-            "bucket_61_90_cents": bucket_61_90_cents,
-            "bucket_90_plus_cents": bucket_90_plus_cents,
-            "total_open_cents": total_open_cents,
+            **buckets,
+            "total_open_cents": sum(buckets.values()),
         },
         "request_id": _get_request_id(request),
     }
