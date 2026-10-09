@@ -534,4 +534,19 @@ describe("MarginHub", () => {
       "margin-tab-settings",
     );
   });
+  it("puts the Records filters and export in the sub-tab row (one 44 px row)", async () => {
+    await act(async () => {
+      render(<MarginHub />);
+    });
+    const slot = screen.getByTestId("margin-toolbar-slot");
+    expect(slot.parentElement).toBe(
+      screen.getByRole("tablist", { name: "Margin sections" }).parentElement,
+    );
+    expect(
+      within(slot).getByRole("button", { name: /Filters/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("toolbar", { name: "Margin records" }),
+    ).toBeNull();
+  });
 });

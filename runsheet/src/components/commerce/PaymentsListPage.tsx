@@ -254,7 +254,14 @@ export default function PaymentsListPage() {
           />
         }
       />
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/* Rows have no controls, so the scroll region itself takes focus for
+          keyboard scrolling (axe scrollable-region-focusable). */}
+      <section
+        aria-label="Payments list"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable region must be keyboard-focusable
+        tabIndex={0}
+        className="min-h-0 flex-1 overflow-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
+      >
         <DataTable<Payment>
           ariaLabel="Payments"
           columns={columns}
@@ -280,7 +287,7 @@ export default function PaymentsListPage() {
             </div>
           }
         />
-      </div>
+      </section>
     </div>
   );
 }

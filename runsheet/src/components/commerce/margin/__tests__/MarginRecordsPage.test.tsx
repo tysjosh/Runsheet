@@ -142,8 +142,11 @@ it("shows the sale date in the settings timezone, the filters' date axis", async
   });
   await renderPage();
   const row = screen.getByText("ORD-1").closest("tr") as HTMLElement;
-  expect(within(row).getByText("2026-10-04")).toBeInTheDocument();
-  expect(row.textContent).not.toContain("2026-10-05");
+  // Shown as a calendar day ("Sun 4 Oct 2026"); the ISO day stays machine-readable.
+  const day = within(row).getByText("Sun 4 Oct 2026");
+  expect(day.tagName).toBe("TIME");
+  expect(day).toHaveAttribute("datetime", "2026-10-04");
+  expect(row.textContent).not.toContain("5 Oct");
   expect(
     screen.getByRole("columnheader", { name: "Sale date (America/Chicago)" }),
   ).toBeInTheDocument();

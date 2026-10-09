@@ -398,7 +398,7 @@ export const MARGIN_RECORDS = range((i) => ({
   margin_per_gallon_micros: i % 6 === 5 ? null : 250_000,
   margin_bp: i % 6 === 5 ? null : 801,
   margin_pct: i % 6 === 5 ? null : "8.01",
-  no_cost_reason: i % 6 === 5 ? "no_cost_entry" : null,
+  no_cost_reason: i % 6 === 5 ? "no_lots_no_rack" : null,
   flags: i % 6 === 5 ? ["missing_cost"] : [],
   floor_micros_used: 0,
   cost_snapshot: {},
