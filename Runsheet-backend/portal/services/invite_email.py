@@ -6,8 +6,8 @@ page can welcome a new user instead of talking about a reset, and the invite
 email uses its own template instead of SuperTokens' reset email.
 
 Delivery goes through the notifications email channel
-(:class:`notifications.services.sendgrid_email_dispatcher.SendGridEmailDispatcher`)
-when its credentials are already configured in the environment. Nothing here
+(:func:`portal.services.portal_email.send_portal_email`: the SMTP dispatcher,
+or SendGrid) when its credentials are already configured in the environment. Nothing here
 creates or reads other credentials. Without them :func:`send_invite_email`
 returns ``False`` and the caller falls back to SuperTokens' reset email, which
 is the behaviour before PE5.
@@ -15,7 +15,6 @@ is the behaviour before PE5.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -73,11 +72,13 @@ async def render_invite_email_for_tenant(
 
 
 async def send_invite_email(email: str, content: InviteEmail) -> bool:
-    """Send through the SendGrid email channel; ``False`` when it isn't
-    configured or the send fails (the caller falls back to the reset email)."""
-    if not (os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDGRID_FROM_EMAIL")):
+    """Send through the configured email channel (SMTP, or SendGrid);
+    ``False`` when it isn't configured or the send fails (the caller falls
+    back to the reset email)."""
+    from portal.services.portal_email import PortalEmail, email_channel_configured, send_portal_email
+
+    if not email_channel_configured():
         return False
-    from portal.services.portal_email import PortalEmail, send_portal_email
 
     try:
         return await send_portal_email(
