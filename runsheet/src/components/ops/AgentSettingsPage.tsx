@@ -639,6 +639,7 @@ function MemorySection() {
               setPage(1);
             }}
             className={inputClass}
+            aria-label="Memory type"
           >
             <option value="">All types</option>
             <option value="pattern">Pattern</option>
@@ -958,6 +959,7 @@ function FeedbackSection() {
               setPage(1);
             }}
             className={inputClass}
+            aria-label="Feedback type"
           >
             <option value="">All types</option>
             <option value="positive">Positive</option>

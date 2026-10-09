@@ -215,13 +215,17 @@ const jurisdictionColumns: Column<JurisdictionRate>[] = [
     key: "effective_date",
     header: "Effective",
     width: 150,
-    cell: (r) => formatDate(r.effective_date),
+    cell: (r) => (
+      <span className="whitespace-nowrap">{formatDate(r.effective_date)}</span>
+    ),
   },
   {
     key: "expiry_date",
     header: "Expires",
     width: 150,
-    cell: (r) => formatDate(r.expiry_date),
+    cell: (r) => (
+      <span className="whitespace-nowrap">{formatDate(r.expiry_date)}</span>
+    ),
   },
 ];
 
