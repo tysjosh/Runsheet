@@ -33,6 +33,13 @@ export interface PortalMe {
   email: string;
   customer_display_name: string;
   supplier_name: string;
+  /**
+   * The tenant's IANA time zone (portal-fixes A5). Portal dates and delivery
+   * windows render in it so they read like the dispatcher's. Optional for an
+   * older API; the browser zone applies then.
+   */
+  time_zone?: string;
+  /** The tenant's portal online-ordering setting (not the intake rollout flag). */
   ordering_available: boolean;
   invoices_available: boolean;
   payments_available: boolean;
@@ -563,5 +570,27 @@ export function revokePortalUser(
 ): Promise<{ grant_id: string; status: "revoked" }> {
   return portalJson(`${portalUsersPath(customerId)}/${enc(grantId)}`, {
     method: "DELETE",
+  });
+}
+
+// ─── Tenant portal settings (portal-fixes B2) ───────────────────────────────
+
+export interface PortalSettings {
+  /** Customers can request deliveries in the portal (default on). */
+  ordering_enabled: boolean;
+}
+
+/** GET /api/commerce/portal-settings — any staff role. */
+export function getPortalSettings(): Promise<PortalSettings> {
+  return portalJson("/commerce/portal-settings");
+}
+
+/** PUT /api/commerce/portal-settings — admin only. */
+export function updatePortalSettings(
+  settings: PortalSettings,
+): Promise<PortalSettings> {
+  return portalJson("/commerce/portal-settings", {
+    method: "PUT",
+    body: JSON.stringify(settings),
   });
 }

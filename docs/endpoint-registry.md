@@ -82,6 +82,8 @@
 | POST | `/api/commerce/payments` | — | session_required | — | — | dict |
 | GET | `/api/commerce/payments/{payment_id}` | — | session_required | — | — | dict |
 | POST | `/api/commerce/payments/{payment_id}/reverse` | — | session_required | — | — | dict |
+| GET | `/api/commerce/portal-settings` | — | session_required | — | — | PortalSettings |
+| PUT | `/api/commerce/portal-settings` | — | session_required | — | — | PortalSettings |
 | GET | `/api/commerce/price-books` | — | session_required | — | — | dict |
 | POST | `/api/commerce/price-books` | — | session_required | — | — | dict |
 | POST | `/api/commerce/price-books/resolve` | — | session_required | — | — | dict |

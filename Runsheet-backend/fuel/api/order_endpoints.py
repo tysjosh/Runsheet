@@ -1238,6 +1238,10 @@ async def cancel_order(
             message=f"Order '{order_id}' not found after update",
             details={"order_id": order_id},
         )
+    # A declined customer-portal request: email the requester (best effort).
+    from portal.services.order_notifications import notify_staff_resolution
+
+    await notify_staff_resolution(tenant.tenant_id, order, updated_order, confirmed=False)
     return OrderResponse.from_model(updated_order)
 
 
@@ -1455,4 +1459,9 @@ async def release_hold_order(
             message=f"Order '{order_id}' not found after update",
             details={"order_id": order_id},
         )
+    if not hook_failure_reason:
+        # A confirmed customer-portal request: email the requester (best effort).
+        from portal.services.order_notifications import notify_staff_resolution
+
+        await notify_staff_resolution(tenant.tenant_id, order, updated_order, confirmed=True)
     return OrderResponse.from_model(updated_order)

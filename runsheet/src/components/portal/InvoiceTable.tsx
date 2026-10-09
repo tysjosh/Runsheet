@@ -32,6 +32,7 @@ export function InvoiceRow({ invoice }: { invoice: PortalInvoice }) {
         <Link
           href={href(invoice)}
           className={`${textLink} min-h-6 truncate text-[15px] text-text`}
+          title={invoiceName(invoice)}
         >
           {invoiceName(invoice)}
         </Link>
@@ -44,7 +45,10 @@ export function InvoiceRow({ invoice }: { invoice: PortalInvoice }) {
       <span className="text-right text-[15px] font-semibold tabular-nums text-text">
         {money(invoice.remaining_cents)}
       </span>
-      <span className="min-w-0 truncate text-sm leading-5 text-text-muted">
+      <span
+        className="min-w-0 truncate text-sm leading-5 text-text-muted"
+        title={`Due ${formatDate(invoice.due_date)} · ${invoice.account_display_name}`}
+      >
         Due {formatDate(invoice.due_date)} · {invoice.account_display_name}
       </span>
       <span className="text-right text-xs leading-5 text-text-muted">

@@ -68,8 +68,7 @@ export default function PortalGate({
   const [state, setState] = useState<GateState>({ kind: "checking" });
 
   const load = useCallback(async () => {
-    // PD23: portal times use the customer's browser zone, never the tenant
-    // zone the staff shell configures.
+    // Clear any zone a staff shell configured until `/me` names the tenant's.
     configureFormat({ timeZone: undefined });
     setState({ kind: "checking" });
     try {
@@ -85,6 +84,9 @@ export default function PortalGate({
         return;
       }
       const response = await getPortalMe();
+      // portal-fixes A5: the tenant's zone, so the customer reads the same
+      // clock as the dispatcher (an older API leaves the browser zone).
+      configureFormat({ timeZone: response.data.time_zone || undefined });
       setState({ kind: "ready", me: response.data });
     } catch (error) {
       setState({ kind: "error", ...portalLoadMessage(error) });

@@ -40,7 +40,12 @@ export function PortalBadge({
   icon?: string;
   className?: string;
 }) {
-  if (!icon && status !== "open" && status !== "partial") {
+  const token = portalStatusToken(status);
+  // portal-fixes A7: the portal never strikes a label through (Cancelled,
+  // Void); the icon and the label carry the meaning and stay legible. The
+  // shared badge strikes `cancelled`, so those render the same markup here
+  // without it.
+  if (!icon && status !== "open" && status !== "partial" && !token.strike) {
     return (
       <StatusBadge
         status={status as StatusKey}
@@ -50,7 +55,6 @@ export function PortalBadge({
       />
     );
   }
-  const token = portalStatusToken(status);
   const Icon = PORTAL_ICONS[icon ?? token.icon] ?? CircleDashed;
   return (
     <span
@@ -69,7 +73,7 @@ export function PortalBadge({
         className="h-3.5 w-3.5"
         style={{ color: token.fg }}
       />
-      <span className={token.strike ? "line-through" : undefined}>{label}</span>
+      <span>{label}</span>
     </span>
   );
 }

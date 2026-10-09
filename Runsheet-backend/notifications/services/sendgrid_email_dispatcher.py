@@ -58,13 +58,19 @@ class SendGridEmailDispatcher(ChannelDispatcher):
         recipient = notification.get("recipient_reference", "")
         subject = notification.get("subject", "Notification")
         body = notification.get("message_body", "")
+        # Optional HTML alternative (customer portal emails); the plain-text
+        # body is always sent as well.
+        html_body = notification.get("html_body")
 
-        mail = Mail(
-            from_email=self._from_email,
-            to_emails=recipient,
-            subject=subject,
-            plain_text_content=body,
-        )
+        mail_kwargs = {
+            "from_email": self._from_email,
+            "to_emails": recipient,
+            "subject": subject,
+            "plain_text_content": body,
+        }
+        if html_body:
+            mail_kwargs["html_content"] = html_body
+        mail = Mail(**mail_kwargs)
 
         try:
             response = self._client.send(mail)

@@ -13,8 +13,13 @@
  *   stays usable;
  * - a 404 on the tank says the tank isn't available any more and asks the
  *   page to reload its tank list;
- * - the date is bounded to local today … today + 60 days (server stays
- *   authoritative); a date alone is local midnight to the next midnight.
+ * - the date is bounded to today … today + 60 days and the times are
+ *   wall-clock times in the tenant's zone, the zone every portal time is
+ *   shown in (portal-fixes A5); a date alone is midnight to the next
+ *   midnight there. The server stays authoritative;
+ * - gallons: at least 25 (or the whole tank when it's smaller), at most the
+ *   capacity, and at most the room left when the latest reading is fresh
+ *   (portal-fixes B2, the same rule the server applies).
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 import { ApiError } from "../../services/api";
@@ -27,13 +32,31 @@ import {
   type PortalTank,
   rateLimitMessage,
 } from "../../services/portalApi";
-import { localIsoDate, newUuid } from "./ids";
-import { number } from "./portalFormat";
+import { newUuid } from "./ids";
+import { number, zonedInstant, zonedIsoDate } from "./portalFormat";
 
 /** PD9 horizon: today to today + 60 days. */
 export const MAX_DAYS_AHEAD = 60;
 export const PO_MAX = 64;
 export const NOTES_MAX = 500;
+/** Smallest gallons request (server: MIN_REQUEST_GALLONS). */
+export const MIN_GALLONS = 25;
+
+/** The most a request may ask for: the room left at a fresh reading, else the capacity. */
+export function maxGallons(tank: PortalTank): number {
+  if (!tank.reading_stale) {
+    return Math.max(
+      0,
+      Math.floor(tank.capacity_gallons - tank.current_level_gallons),
+    );
+  }
+  return tank.capacity_gallons;
+}
+
+/** The fewest a request may ask for: 25, or the whole tank when smaller. */
+export function minGallons(tank: PortalTank | null): number {
+  return tank ? Math.min(MIN_GALLONS, tank.capacity_gallons) : MIN_GALLONS;
+}
 
 export type RequestField =
   | "form"
@@ -85,7 +108,7 @@ function parseTime(value: string): [number, number] | null {
   return m ? [Number(m[1]), Number(m[2])] : null;
 }
 
-/** The request window as ISO-8601 instants (the browser's offset applied). */
+/** The request window as ISO-8601 instants (wall clock in the portal zone). */
 export function buildWindow(
   date: string,
   startTime: string,
@@ -96,12 +119,12 @@ export function buildWindow(
   const end = parseTime(endTime);
   const from =
     start && end
-      ? new Date(y, m - 1, d, start[0], start[1])
-      : new Date(y, m - 1, d);
+      ? zonedInstant(y, m, d, start[0], start[1])
+      : zonedInstant(y, m, d);
   const to =
     start && end
-      ? new Date(y, m - 1, d, end[0], end[1])
-      : new Date(y, m - 1, d + 1);
+      ? zonedInstant(y, m, d, end[0], end[1])
+      : zonedInstant(y, m, d + 1);
   return { window_start: from.toISOString(), window_end: to.toISOString() };
 }
 
@@ -117,8 +140,12 @@ export function validateRequest(
     const g = v.gallons;
     if (g === null || Number.isNaN(g) || g <= 0) {
       next.gallons = "Enter a number of gallons greater than 0.";
+    } else if (g < minGallons(tank)) {
+      next.gallons = `Request at least ${number(minGallons(tank))} gallons, or choose Fill to full.`;
     } else if (tank && g > tank.capacity_gallons) {
       next.gallons = `Enter no more than ${number(tank.capacity_gallons)} gallons, the tank's capacity.`;
+    } else if (tank && g > maxGallons(tank)) {
+      next.gallons = `The tank has room for about ${number(maxGallons(tank))} gallons at its latest reading. Request that much or less, or choose Fill to full.`;
     }
   }
   if (!v.date) {
@@ -162,8 +189,8 @@ export function useOrderRequest({
   const [created, setCreated] = useState<PortalOrder | null>(null);
   const inFlight = useRef(false);
 
-  const minDate = useMemo(() => localIsoDate(0), []);
-  const maxDate = useMemo(() => localIsoDate(MAX_DAYS_AHEAD), []);
+  const minDate = useMemo(() => zonedIsoDate(0), []);
+  const maxDate = useMemo(() => zonedIsoDate(MAX_DAYS_AHEAD), []);
   const tank = tanks.find((t) => t.customer_tank_id === values.tankId) ?? null;
   const unavailable = !orderingAvailable || intakeDisabled;
   const disabled = unavailable || submitting;

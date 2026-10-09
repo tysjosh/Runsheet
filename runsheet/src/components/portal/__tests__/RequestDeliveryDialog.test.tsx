@@ -26,6 +26,7 @@ const TANKS: PortalTank[] = [
     customer_tank_id: "QA-TANK-2",
     label: "South yard",
     capacity_gallons: 500,
+    current_level_gallons: 100,
     product_code: "HEATING_OIL",
   }),
 ];

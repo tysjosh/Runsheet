@@ -95,7 +95,7 @@ export default function TankRow({
     <article
       aria-labelledby={titleId}
       data-tank-row
-      className={`grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 md:gap-y-1.5 ${space.inset} ${space.rowY}`}
+      className={`grid grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 md:gap-y-1.5 ${space.inset} ${space.tankRowY}`}
     >
       <span className="row-span-2 self-start pt-0.5">
         <ProductCap code={tank.product_code} size="md" />
@@ -103,6 +103,7 @@ export default function TankRow({
       <Heading
         id={titleId}
         className="min-w-0 truncate text-[15px] font-bold text-text"
+        title={title}
       >
         {linkToDetail ? (
           <Link

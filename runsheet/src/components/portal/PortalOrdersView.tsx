@@ -26,7 +26,7 @@ import {
 import { ProductCap } from "../ui/ProductChip";
 import LiveRegion from "./LiveRegion";
 import { REQUEST_CHANGED_MESSAGE, requestCancelledMessage } from "./messages";
-import OrderRow, { deliveryText, orderRef, quantityText } from "./OrderRow";
+import OrderRow, { deliveryParts, orderRef, quantityParts } from "./OrderRow";
 import {
   PortalBanner,
   PortalEmpty,
@@ -148,25 +148,47 @@ export default function PortalOrdersView({
     void refresh().catch(() => list.reload());
   }, [refresh, list]);
 
+  // portal-fixes A4: a fixed-layout table that always fits its card at 1024,
+  // 1280 and 1440. Two-line cells keep it narrow; long names, POs and tickets
+  // truncate inside their cell with the full text in `title`; delivery wraps.
   const columns: PortalColumn<PortalOrder>[] = [
     {
       key: "tank",
       header: "Tank and product",
-      cell: (o) => (
-        <span className="inline-flex items-center gap-2">
-          {o.product_code && <ProductCap code={o.product_code} decorative />}
-          <span className="font-semibold text-text">{titleOf(o)}</span>
-          {o.product_code && (
-            <span className="text-text-muted">
-              · {productName(o.product_code)}
+      cell: (o) => {
+        const title = titleOf(o);
+        const product = o.product_code ? productName(o.product_code) : null;
+        return (
+          <span className="flex min-w-0 items-start gap-2">
+            {o.product_code && (
+              <span className="shrink-0 pt-0.5">
+                <ProductCap code={o.product_code} decorative />
+              </span>
+            )}
+            <span className="min-w-0">
+              <span
+                className="block truncate font-semibold text-text"
+                title={title}
+              >
+                {title}
+              </span>
+              {product && (
+                <span
+                  className="block truncate text-text-muted"
+                  title={product}
+                >
+                  {product}
+                </span>
+              )}
             </span>
-          )}
-        </span>
-      ),
+          </span>
+        );
+      },
     },
     {
       key: "status",
       header: "Status",
+      width: "w-[12.75rem]",
       cell: (o) => (
         <PortalStatus
           kind="order"
@@ -175,18 +197,62 @@ export default function PortalOrdersView({
         />
       ),
     },
-    { key: "delivery", header: "Delivery", cell: (o) => deliveryText(o) },
+    {
+      key: "delivery",
+      header: "Delivery",
+      width: "w-[11.5rem]",
+      wrap: true,
+      cell: (o) => {
+        const { day, rest } = deliveryParts(o);
+        return (
+          <>
+            <span className="block text-text">{day}</span>
+            {rest && <span className="block text-text-muted">{rest}</span>}
+          </>
+        );
+      },
+    },
     {
       key: "quantity",
       header: "Quantity",
       align: "right",
-      cell: (o) => quantityText(o, unit),
+      width: "w-[7.5rem]",
+      cell: (o) => {
+        const { value, qualifier } = quantityParts(o, unit);
+        return (
+          <>
+            <span className="block text-text">{value}</span>
+            {qualifier && (
+              <span className="block text-text-muted">{qualifier}</span>
+            )}
+          </>
+        );
+      },
     },
-    { key: "po", header: "PO", cell: (o) => o.po_number ?? "—" },
-    { key: "ticket", header: "Ticket", cell: (o) => o.ticket_number ?? "—" },
+    {
+      key: "po",
+      header: "PO and ticket",
+      width: "w-[9.5rem]",
+      cell: (o) => (
+        <>
+          <span className="block truncate text-text" title={o.po_number ?? ""}>
+            {o.po_number ?? "—"}
+          </span>
+          {o.ticket_number && (
+            <span
+              className="block truncate text-text-muted"
+              title={`Ticket ${o.ticket_number}`}
+            >
+              Ticket {o.ticket_number}
+            </span>
+          )}
+        </>
+      ),
+    },
     {
       key: "actions",
       header: <span className="sr-only">Actions</span>,
+      width: "w-[7rem] xl:w-[9.75rem]",
       cell: (o) =>
         o.cancellable ? (
           <button
@@ -196,7 +262,8 @@ export default function PortalOrdersView({
             aria-disabled={pendingId !== null ? true : undefined}
             onClick={() => void handleCancel(o)}
           >
-            Cancel request
+            <span className="xl:hidden">Cancel</span>
+            <span className="max-xl:hidden">Cancel request</span>
           </button>
         ) : null,
     },
@@ -263,6 +330,7 @@ export default function PortalOrdersView({
             {wide ? (
               <PortalTable
                 caption="Your orders"
+                layout="fixed"
                 columns={columns}
                 rows={list.items}
                 rowKey={(o) => o.order_id}

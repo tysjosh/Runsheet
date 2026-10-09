@@ -13,6 +13,7 @@ names are the audit actions.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -23,6 +24,7 @@ from config.settings import get_settings
 from errors.exceptions import portal_disabled, portal_unavailable
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from portal.models import (
+    PortalSettings,
     PortalUserInviteRequest,
     PortalUserInviteResponse,
     PortalUserLinkResponse,
@@ -30,10 +32,13 @@ from portal.models import (
     PortalUserRevokeResponse,
 )
 from portal.scope import portal_enabled
+from portal.services.ordering import portal_ordering_enabled, set_portal_ordering_enabled
 from portal.services.portal_access_service import (
     PortalAccessService,
     get_portal_access_service,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/commerce/customers/{customer_id}/portal-users",
@@ -118,8 +123,51 @@ async def portal_user_revoke(
     )
 
 
+# ---------------------------------------------------------------------------
+# Tenant portal settings (portal-fixes B2)
+# ---------------------------------------------------------------------------
+
+settings_router = APIRouter(prefix="/api/commerce/portal-settings", tags=["portal-admin"])
+
+
+def _require_portal_on() -> None:
+    if not portal_enabled(get_settings()):
+        raise portal_disabled()
+
+
+@settings_router.get("", response_model=PortalSettings)
+async def portal_settings_get(
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> PortalSettings:
+    """The tenant's customer-portal settings (any staff role may read)."""
+    _require_portal_on()
+    return PortalSettings(ordering_enabled=await portal_ordering_enabled(tenant.tenant_id))
+
+
+@settings_router.put("", response_model=PortalSettings)
+async def portal_settings_update(
+    body: PortalSettings,
+    tenant: TenantContext = Depends(get_tenant_context),
+) -> PortalSettings:
+    """Turn portal online ordering on or off for the tenant (admin only).
+    Requests already submitted are unaffected."""
+    _require_portal_on()
+    require_role(tenant, "admin")
+    await set_portal_ordering_enabled(tenant.tenant_id, body.ordering_enabled)
+    logger.info(
+        "portal settings: tenant=%s ordering_enabled=%s by user=%s",
+        tenant.tenant_id,
+        body.ordering_enabled,
+        tenant.user_id,
+    )
+    return PortalSettings(ordering_enabled=await portal_ordering_enabled(tenant.tenant_id))
+
+
 __all__ = [
     "PortalAdminTarget",
+    "portal_settings_get",
+    "portal_settings_update",
+    "settings_router",
     "portal_user_invite",
     "portal_user_list",
     "portal_user_resend",

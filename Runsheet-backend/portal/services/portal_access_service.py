@@ -582,11 +582,15 @@ class PortalAccessService:
         self, email: str, tenant_id: str, link: str, customer_name: str
     ) -> bool:
         """PE5: the invite template through the email channel, or ``False``."""
-        from portal.services.invite_email import render_invite_email, send_invite_email
+        from portal.services.invite_email import (
+            render_invite_email_for_tenant,
+            send_invite_email,
+        )
         from portal.services.supplier import supplier_name
 
         sender = self._invite_sender or send_invite_email
-        content = render_invite_email(
+        content = await render_invite_email_for_tenant(
+            tenant_id,
             supplier_name=await supplier_name(tenant_id),
             customer_name=customer_name,
             link=link,

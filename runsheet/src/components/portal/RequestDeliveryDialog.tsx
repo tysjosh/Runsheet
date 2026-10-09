@@ -25,7 +25,7 @@ import {
   PortalSectionError,
 } from "./PageState";
 import PortalStatus from "./PortalStatus";
-import { number } from "./portalFormat";
+import { number, zoneLongName } from "./portalFormat";
 import {
   fieldError,
   fieldHint,
@@ -39,6 +39,8 @@ import { PORTAL_PHONE, useMediaQuery } from "./useMediaQuery";
 import {
   FIELD_ORDER,
   MAX_DAYS_AHEAD,
+  maxGallons,
+  minGallons,
   NOTES_MAX,
   PO_MAX,
   type RequestErrors,
@@ -47,6 +49,17 @@ import {
 } from "./useOrderRequest";
 
 export { ORDERING_UNAVAILABLE_MESSAGE };
+
+/** "Between 25 and 1,700 gal." with the room left at a fresh reading. */
+export function gallonsHint(tank: PortalTank, unit = "gal"): string {
+  const max = maxGallons(tank);
+  if (max < minGallons(tank)) {
+    return "The tank is nearly full at its latest reading. Choose Fill to full.";
+  }
+  const room = max < tank.capacity_gallons;
+  const range = `Between ${number(minGallons(tank))} and ${number(max)} ${unit}`;
+  return room ? `${range}, the room left at the latest reading.` : `${range}.`;
+}
 
 export interface RequestDeliveryDialogProps {
   open: boolean;
@@ -474,8 +487,8 @@ export default function RequestDeliveryDialog({
                       onChange={(v) => req.set("gallons", v)}
                       unit={unit}
                       decimals={0}
-                      min={1}
-                      max={req.tank?.capacity_gallons}
+                      min={minGallons(req.tank)}
+                      max={req.tank ? maxGallons(req.tank) : undefined}
                       disabled={fieldsDisabled}
                       aria-invalid={req.errors.gallons ? true : undefined}
                       aria-describedby={describe(
@@ -487,7 +500,7 @@ export default function RequestDeliveryDialog({
                   </div>
                   {req.tank && (
                     <p id={`${ids.gallons}-hint`} className={fieldHint}>
-                      Up to {number(req.tank.capacity_gallons)} {unit}.
+                      {gallonsHint(req.tank, unit)}
                     </p>
                   )}
                   {req.errors.gallons && (
@@ -530,7 +543,8 @@ export default function RequestDeliveryDialog({
             <fieldset disabled={fieldsDisabled}>
               <legend className={fieldLabel}>Delivery window (optional)</legend>
               <p id={`${ids.start}-hint`} className={fieldHint}>
-                Leave both empty for any time that day.
+                Leave both empty for any time that day. Times are{" "}
+                {zoneLongName() || "local time"}.
               </p>
               <div className="mt-1.5 grid grid-cols-2 gap-3">
                 <div>

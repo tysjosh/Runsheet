@@ -63,6 +63,7 @@ const PortalTitleRow = forwardRef<HTMLHeadingElement, PortalTitleRowProps>(
       <h1
         ref={ref}
         tabIndex={-1}
+        title={title}
         className={`min-w-0 font-bold text-text focus:outline-none ${
           wrapTitle
             ? "text-lg leading-5 [overflow-wrap:anywhere] sm:truncate sm:text-xl sm:leading-tight"

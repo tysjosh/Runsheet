@@ -36,8 +36,14 @@ class PortalMe(_PortalModel):
 
     email: str
     customer_display_name: str
-    #: The tenant's display name (PE1), falling back to the tenant id.
+    #: The tenant's display name (PE1), falling back to a generic label
+    #: ("Your fuel supplier"), never the tenant id.
     supplier_name: str
+    #: The tenant's IANA time zone (the rule the Dispatch Board uses), so
+    #: portal dates and delivery windows read like the dispatcher's.
+    time_zone: str = "America/Chicago"
+    #: The tenant's portal online-ordering setting (default on); independent
+    #: of the ``order_intake_pipeline`` rollout flag.
     ordering_available: bool
     invoices_available: bool
     payments_available: bool
@@ -116,6 +122,15 @@ class PortalUserInviteResponse(_PortalModel):
 class PortalUserRevokeResponse(_PortalModel):
     grant_id: str
     status: Literal["revoked"]
+
+
+class PortalSettings(_PortalModel):
+    """``GET/PUT /api/commerce/portal-settings`` (portal-fixes B2): the
+    tenant's customer-portal settings an admin controls."""
+
+    #: Customers can request deliveries in the portal. Default on; separate
+    #: from the ``order_intake_pipeline`` rollout flag.
+    ordering_enabled: bool
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +234,10 @@ class PortalOrderRequest(_PortalModel):
             raise ValueError("window_start must be within the next 60 days")
         if self.window_end <= self.window_start:
             raise ValueError("window_end must be after window_start")
+        if self.window_end <= now:
+            # A window that has already closed can't be delivered (portal-fixes
+            # B2). A whole "today" window still passes: it ends at midnight.
+            raise ValueError("the delivery window must end in the future")
         if self.window_end - self.window_start > WINDOW_MAX_LENGTH:
             raise ValueError("the delivery window must be at most 25 hours long")
         return self

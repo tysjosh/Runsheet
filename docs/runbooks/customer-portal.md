@@ -11,15 +11,25 @@ Design: `.kiro/specs/customer-portal/design.md`. Backend code lives in `Runsheet
 
 ## Deploy checklist: supplier display name
 
-Customers see the tenant's display name ("supplier name") on Home, Account, the invoice PDF "From" line and the invite email. It's held only in Redis, at `tenant:{tenant_id}:display_name`, with no TTL. A new environment, a Redis rebuild or a cache flush loses it, and customer text silently falls back to the tenant id (for example `demo-tenant`).
+Customers see the tenant's display name ("supplier name") on Home, Account, the invoice PDF "From" line and the invite email. It's held only in Redis, at `tenant:{tenant_id}:display_name`, with no TTL. A new environment, a Redis rebuild or a cache flush loses it. Customer text then falls back to the generic label "Your fuel supplier" (never the tenant id).
+
+On staging the API also restores it at startup: `SEED_TENANT_DISPLAY_NAME` (set by `scripts/staging_aws.sh`, default "Demo Fuels") is written for `SEED_TENANT_ID` only when the tenant has no name, so a name set with the script below is never overwritten.
 
 After every deploy to a new or rebuilt environment, and after any Redis replacement:
 
 1. Check it, as a one-shot ECS task on the API task definition: `python -m scripts.set_tenant_display_name --tenant <tenant_id> --show`.
 2. If it's empty, set it: `python -m scripts.set_tenant_display_name --tenant <tenant_id> --name "<Supplier name>"` (whitespace is collapsed, 120 characters at most). `--clear` removes it, for example when a tenant is deleted.
-3. Confirm with `GET /api/portal/me` as a portal user: `supplier_name` should be the name, not the tenant id.
+3. Confirm with `GET /api/portal/me` as a portal user: `supplier_name` should be the name, not "Your fuel supplier".
 
 The script exits 2 when `REDIS_URL` isn't set, so a misconfigured task fails loudly.
+
+## Online ordering setting
+
+Portal delivery requests are governed by a per-tenant setting, default **on**, not by the shared `order_intake_pipeline` rollout flag. An admin turns it off or on with the checkbox at the top of any customer's Portal access panel, or `PUT /api/commerce/portal-settings {"ordering_enabled": false}`. It's stored in Redis at `tenant:{tenant_id}:portal_ordering` (only `disabled` is ever stored; no TTL). Requests already sent stay in the awaiting-confirmation queue. Dispatchers confirm with release-hold and decline with cancel.
+
+## Email (SendGrid)
+
+When `runsheet-staging/sendgrid-api-key` exists, `staging_aws.sh deploy` wires it as `SENDGRID_API_KEY` (portal invite and request emails) and `SMTP_PASSWORD` (SuperTokens auth email via `smtp.sendgrid.net:587`). Without it, deploy warns and email stays unconfigured. Templates: `portal_invite`, `portal_request_received`, `portal_request_confirmed`, `portal_request_declined` (email channel, editable per tenant in the notification templates). The requester gets the request emails; dispatchers see new requests in the notification bell.
 
 ## Inviting and revoking portal users
 

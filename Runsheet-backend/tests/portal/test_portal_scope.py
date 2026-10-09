@@ -43,9 +43,40 @@ def test_scope_params_rejected(portal_app, client, portal_on, cA, portal_fakes, 
     assert portal_fakes.customers.calls == []
 
 
-def test_me_shape_and_capabilities(client, portal_on, cA, portal_fakes):
-    """/me returns PortalMe; ordering off when the overlay is disabled, payments
-    off with no portal factory configured."""
+def test_me_shape_and_capabilities(client, portal_on, cA, portal_fakes, monkeypatch):
+    """/me returns PortalMe; ordering follows the tenant's portal ordering
+    setting (not the order_intake_pipeline flag) and needs the request path
+    wired; payments off with no portal factory configured."""
+    from ops.middleware import tenant_guard
+    from portal.services import portal_order_service as pos
+    from services.tenant_settings import TenantSettingsService
+
+    class _Redis:
+        def __init__(self):
+            self.data = {}
+
+        async def get(self, key):
+            return self.data.get(key)
+
+        async def set(self, key, value, ex=None, nx=False):
+            self.data[key] = value
+
+        async def delete(self, key):
+            self.data.pop(key, None)
+
+    redis = _Redis()
+    tenant_guard.configure_tenant_guard(TenantSettingsService(redis_client=redis))
+    saved = pos.get_configured_order_service()
+    pos.configure_portal_orders(object())
+    try:
+        _me_shape(client, cA, portal_fakes, redis)
+    finally:
+        pos.configure_portal_orders(saved)
+        tenant_guard.configure_tenant_guard(None)
+
+
+def _me_shape(client, cA, portal_fakes, redis):
+    # The shared rollout flag is off: portal ordering doesn't read it.
     portal_fakes.pipeline.state = "disabled"
     resp = call(client, "GET", "/api/portal/me", cA)
     assert resp.status_code == 200
@@ -56,6 +87,7 @@ def test_me_shape_and_capabilities(client, portal_on, cA, portal_fakes):
         "email",
         "customer_display_name",
         "supplier_name",
+        "time_zone",
         "ordering_available",
         "invoices_available",
         "payments_available",
@@ -66,14 +98,17 @@ def test_me_shape_and_capabilities(client, portal_on, cA, portal_fakes):
         "overdue_count",
     }
     assert data["customer_display_name"] == "Customer A"
-    assert data["supplier_name"] == T1
-    assert data["ordering_available"] is False
+    assert data["supplier_name"] == "Your fuel supplier"
+    assert data["time_zone"] == "America/Chicago"
+    assert data["ordering_available"] is True  # default on, flag disabled
     assert data["invoices_available"] is True
     assert data["payments_available"] is False
     assert data["measurement_units"] == {"volume": "gal", "distance": "mi"}
 
-    portal_fakes.pipeline.state = "shadow"
-    assert call(client, "GET", "/api/portal/me", cA).json()["data"]["ordering_available"] is True
+    # The admin turns portal ordering off for the tenant.
+    redis.data[f"tenant:{T1}:portal_ordering"] = "disabled"
+    portal_fakes.pipeline.state = "active_auto"
+    assert call(client, "GET", "/api/portal/me", cA).json()["data"]["ordering_available"] is False
 
 
 def test_me_payments_available_with_enabled_connector(client, portal_on, cA, portal_fakes):

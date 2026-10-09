@@ -562,6 +562,15 @@ DRIVER_PUSH_TEMPLATES: list[dict] = [
 
 DEFAULT_TEMPLATES.extend(DRIVER_PUSH_TEMPLATES)
 
+# ---------------------------------------------------------------------------
+# Customer portal emails (portal-fixes C2): invite, request received,
+# confirmed, declined. Defined with the portal code that renders and sends
+# them; listed here so the tenant seed creates them and staff can edit them.
+# ---------------------------------------------------------------------------
+from portal.services.portal_email import PORTAL_EMAIL_TEMPLATES  # noqa: E402
+
+DEFAULT_TEMPLATES.extend(PORTAL_EMAIL_TEMPLATES)
+
 
 class TemplateRenderer:
     """Render and manage notification templates stored in Elasticsearch.

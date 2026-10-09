@@ -19,6 +19,8 @@ jest.mock("../../../services/portalApi", () => ({
   invitePortalUser: jest.fn(),
   resendPortalUserLink: jest.fn(),
   revokePortalUser: jest.fn(),
+  getPortalSettings: jest.fn(),
+  updatePortalSettings: jest.fn(),
 }));
 
 jest.mock("../../../services/commerceApi", () => ({
@@ -32,14 +34,17 @@ jest.mock("../../../utils/auth", () => ({
 import { ApiError } from "../../../services/api";
 import { getCustomer } from "../../../services/commerceApi";
 import {
+  getPortalSettings,
   invitePortalUser,
   listPortalUsers,
   resendPortalUserLink,
   revokePortalUser,
+  updatePortalSettings,
 } from "../../../services/portalApi";
 import { getCurrentUserRoles } from "../../../utils/auth";
 import CustomerDetailPage from "../CustomerDetailPage";
 import PortalAccessPanel from "../PortalAccessPanel";
+import PortalOrderingSetting from "../PortalOrderingSetting";
 
 const mockList = listPortalUsers as jest.MockedFunction<typeof listPortalUsers>;
 const mockInvite = invitePortalUser as jest.MockedFunction<
@@ -55,6 +60,12 @@ const mockRoles = getCurrentUserRoles as jest.MockedFunction<
   typeof getCurrentUserRoles
 >;
 const mockGetCustomer = getCustomer as jest.MockedFunction<typeof getCustomer>;
+const mockGetSettings = getPortalSettings as jest.MockedFunction<
+  typeof getPortalSettings
+>;
+const mockUpdateSettings = updatePortalSettings as jest.MockedFunction<
+  typeof updatePortalSettings
+>;
 
 const USER = {
   grant_id: "pug_1",
@@ -68,6 +79,7 @@ const LINK = "https://staging.example/auth/reset-password?token=QA-TOKEN";
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockGetSettings.mockResolvedValue({ ordering_enabled: true });
   Object.assign(navigator, {
     clipboard: { writeText: jest.fn().mockResolvedValue(undefined) },
   });
@@ -214,6 +226,63 @@ describe("PortalAccessPanel", () => {
       await screen.findByText("Portal access for ap@example.test was revoked."),
     ).toBeInTheDocument();
     expect(mockList).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("PortalOrderingSetting (portal-fixes B2)", () => {
+  it("shows the tenant setting and turns it off and on", async () => {
+    mockUpdateSettings.mockImplementation(async (s) => s);
+    render(<PortalOrderingSetting />);
+    const box = await screen.findByRole("checkbox", {
+      name: "Customers can request deliveries online",
+    });
+    expect(box).toBeChecked();
+    expect(box).toHaveAccessibleDescription(
+      /every customer with portal access/,
+    );
+
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(mockUpdateSettings).toHaveBeenCalledWith({
+        ordering_enabled: false,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Online ordering is off.",
+      ),
+    );
+    expect(box).not.toBeChecked();
+
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(mockUpdateSettings).toHaveBeenLastCalledWith({
+        ordering_enabled: true,
+      }),
+    );
+    await waitFor(() => expect(box).toBeChecked());
+  });
+
+  it("explains a refusal and keeps the stored value", async () => {
+    mockUpdateSettings.mockRejectedValue(
+      new ApiError("Forbidden", 403, "INSUFFICIENT_ROLE"),
+    );
+    render(<PortalOrderingSetting />);
+    const box = await screen.findByRole("checkbox");
+    fireEvent.click(box);
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Only an admin can change this setting.",
+      ),
+    );
+    expect(box).toBeChecked();
+  });
+
+  it("hides itself when the portal is off (404)", async () => {
+    mockGetSettings.mockRejectedValue(new ApiError("Not found", 404));
+    const { container } = render(<PortalOrderingSetting />);
+    await waitFor(() => expect(mockGetSettings).toHaveBeenCalled());
+    expect(container).toBeEmptyDOMElement();
   });
 });
 

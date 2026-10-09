@@ -36,54 +36,63 @@ def with_invite_flag(link: str) -> str:
 class InviteEmail:
     subject: str
     text: str
+    #: The accessible HTML alternative of ``text`` (portal-fixes C2).
+    html: str = ""
+
+
+def _invite_data(supplier_name: str, customer_name: str, link: str) -> dict:
+    supplier = (supplier_name or "").strip() or "Your fuel supplier"
+    customer = (customer_name or "").strip()
+    return {
+        "supplier_name": supplier,
+        "for_customer": f" for {customer}" if customer else "",
+        "link": link,
+    }
 
 
 def render_invite_email(*, supplier_name: str, customer_name: str, link: str) -> InviteEmail:
-    """The invite email (plain text; no tracking, no internal ids)."""
-    supplier = (supplier_name or "").strip() or "Your fuel supplier"
-    customer = (customer_name or "").strip()
-    for_whom = f" for {customer}" if customer else ""
-    subject = f"{supplier} invited you to their customer portal"
-    text = (
-        f"Hello,\n\n"
-        f"{supplier} has set up a customer portal account{for_whom}. In the "
-        f"portal you can see your tank levels, request deliveries, follow your "
-        f"orders and view your invoices.\n\n"
-        f"Choose your password to get started:\n{link}\n\n"
-        f"The link works once and expires. If it has expired, ask "
-        f"{supplier} to send a new invite, or use \"Forgot password?\" on the "
-        f"sign-in page.\n\n"
-        f"If you weren't expecting this email, you can ignore it.\n"
+    """The invite email from the built-in ``portal_invite`` template: plain
+    text and HTML, no tracking, no internal ids."""
+    from portal.services.portal_email import INVITE, render_default
+
+    mail = render_default(INVITE, _invite_data(supplier_name, customer_name, link))
+    return InviteEmail(subject=mail.subject, text=mail.text, html=mail.html)
+
+
+async def render_invite_email_for_tenant(
+    tenant_id: str, *, supplier_name: str, customer_name: str, link: str
+) -> InviteEmail:
+    """Like :func:`render_invite_email`, using the tenant's edited
+    ``portal_invite`` template when there is one."""
+    from portal.services.portal_email import INVITE, render_portal_email
+
+    mail = await render_portal_email(
+        INVITE, _invite_data(supplier_name, customer_name, link), tenant_id=tenant_id
     )
-    return InviteEmail(subject=subject, text=text)
+    return InviteEmail(subject=mail.subject, text=mail.text, html=mail.html)
 
 
 async def send_invite_email(email: str, content: InviteEmail) -> bool:
-    """Send through the configured email channel; ``False`` when there is none
-    or the send fails (the caller falls back to the reset email)."""
+    """Send through the SendGrid email channel; ``False`` when it isn't
+    configured or the send fails (the caller falls back to the reset email)."""
     if not (os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDGRID_FROM_EMAIL")):
         return False
-    try:
-        from notifications.services.sendgrid_email_dispatcher import SendGridEmailDispatcher
+    from portal.services.portal_email import PortalEmail, send_portal_email
 
-        dispatcher = SendGridEmailDispatcher()
-        outcome = await dispatcher.dispatch(
-            {
-                "recipient_reference": email,
-                "subject": content.subject,
-                "message_body": content.text,
-            }
+    try:
+        return await send_portal_email(
+            email, PortalEmail(subject=content.subject, text=content.text, html=content.html)
         )
     except Exception as exc:  # noqa: BLE001 — best effort, the reset email follows
         logger.warning("Portal invite email could not be sent: %s", type(exc).__name__)
         return False
-    return outcome == "sent"
 
 
 __all__ = [
     "INVITE_PARAM",
     "InviteEmail",
     "render_invite_email",
+    "render_invite_email_for_tenant",
     "send_invite_email",
     "with_invite_flag",
 ]

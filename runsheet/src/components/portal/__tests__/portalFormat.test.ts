@@ -4,6 +4,7 @@
  * any zone.
  */
 import {
+  billedVolume,
   date,
   dateTime,
   days,
@@ -62,8 +63,12 @@ describe("portalFormat", () => {
     expect(money(null)).toBe("—");
     expect(volume(1240)).toBe("1,240 gal");
     expect(volume(1240, "L")).toBe("1,240 L");
-    expect(deliveredVolume(1187.4)).toBe("1,187.4 gal");
+    // Lists show whole gallons (portal-fixes A6); invoices keep the billed decimal.
+    expect(deliveredVolume(1187.4)).toBe("1,187 gal");
+    expect(deliveredVolume(275.5)).toBe("276 gal");
     expect(deliveredVolume(1200)).toBe("1,200 gal");
+    expect(billedVolume(1187.4)).toBe("1,187.4 gal");
+    expect(billedVolume(1200)).toBe("1,200 gal");
     expect(percent(31.6)).toBe("32 %");
   });
 

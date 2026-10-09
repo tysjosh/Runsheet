@@ -72,7 +72,9 @@ export default function PortalShell({
           >
             {mark}
           </span>
-          <div className="min-w-0 flex-1 md:max-w-[240px] md:flex-none">
+          {/* portal-fixes A2: the names take the width they need and only
+              truncate (with a title) when the bar genuinely runs out. */}
+          <div className="min-w-0 flex-1 md:flex-initial">
             <p
               className="truncate text-xs leading-4 text-text-muted"
               title={supplierName}
@@ -87,7 +89,10 @@ export default function PortalShell({
             </p>
           </div>
           {wide && (
-            <nav aria-label="Portal" className="ml-4 flex h-14 self-stretch">
+            <nav
+              aria-label="Portal"
+              className="ml-4 flex h-14 shrink-0 self-stretch"
+            >
               <ul className="flex h-14 items-stretch gap-1">
                 {items.map((item) => {
                   const current = isCurrentSection(pathname, item);

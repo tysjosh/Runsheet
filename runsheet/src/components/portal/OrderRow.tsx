@@ -12,25 +12,80 @@ import { ProductCap } from "../ui/ProductChip";
 import { orderReference } from "./messages";
 import PortalStatus from "./PortalStatus";
 import {
-  dateTime,
-  deliveredVolume,
+  dateTimeZone,
+  EMPTY,
   date as formatDate,
   window as formatWindow,
   volume,
 } from "./portalFormat";
 import { rowButton, space } from "./styles";
 
-export function quantityText(order: PortalOrder, unit = "gal"): string {
+/**
+ * One pattern for every order quantity (portal-fixes A6): whole gallons,
+ * then a muted qualifier: "1,600 gal requested", "1,450 gal delivered",
+ * "Fill to full requested". Invoices keep the billed precision instead.
+ */
+export function quantityParts(
+  order: PortalOrder,
+  unit = "gal",
+): { value: string; qualifier: "delivered" | "requested" | null } {
   if (order.delivered_gallons !== null && order.status_code === "delivered") {
-    return `${deliveredVolume(order.delivered_gallons, unit)} delivered`;
+    return {
+      value: volume(Math.round(order.delivered_gallons), unit),
+      qualifier: "delivered",
+    };
   }
-  if (order.fill_to_full) return "Fill to full";
-  return volume(order.gallons_requested, unit);
+  if (order.fill_to_full) return { value: "Fill to full", qualifier: null };
+  if (order.gallons_requested === null)
+    return { value: EMPTY, qualifier: null };
+  return {
+    value: volume(Math.round(order.gallons_requested), unit),
+    qualifier: "requested",
+  };
 }
 
+export function quantityText(order: PortalOrder, unit = "gal"): string {
+  const { value, qualifier } = quantityParts(order, unit);
+  return qualifier ? `${value} ${qualifier}` : value;
+}
+
+/** Number first, the qualifier muted after it. */
+export function QuantityCell({
+  order,
+  unit = "gal",
+}: {
+  order: PortalOrder;
+  unit?: string;
+}) {
+  const { value, qualifier } = quantityParts(order, unit);
+  return (
+    <span className="tabular-nums">
+      {value}
+      {qualifier && (
+        <span className="font-normal text-text-muted"> {qualifier}</span>
+      )}
+    </span>
+  );
+}
+
+/** The delivered moment or the window, both with the zone (portal-fixes A5). */
 export function deliveryText(order: PortalOrder): string {
-  if (order.delivered_at) return dateTime(order.delivered_at);
+  if (order.delivered_at) return dateTimeZone(order.delivered_at);
   return formatWindow(order.window_start, order.window_end);
+}
+
+/**
+ * `deliveryText` split for the two-line table cell: the day, then the rest
+ * ("Fri 9 Oct" / "9:00 AM – 1:00 PM CDT"). A whole-day window has no rest.
+ */
+export function deliveryParts(order: PortalOrder): {
+  day: string;
+  rest: string;
+} {
+  const text = deliveryText(order);
+  const at = text.indexOf(", ");
+  if (at < 0) return { day: text, rest: "" };
+  return { day: text.slice(0, at), rest: text.slice(at + 2) };
 }
 
 export function secondaryLine(order: PortalOrder): string {
@@ -74,15 +129,21 @@ const OrderRow = forwardRef<
         <span aria-hidden="true" />
       )}
     </span>
-    <p className="min-w-0 truncate text-[15px] font-semibold leading-5 text-text">
-      {title} · {quantityText(order, unit)}
+    <p
+      className="min-w-0 truncate text-[15px] font-semibold leading-5 text-text"
+      title={`${title} · ${quantityText(order, unit)}`}
+    >
+      {title} · <QuantityCell order={order} unit={unit} />
     </p>
     <PortalStatus
       kind="order"
       code={order.status_code}
       label={order.status_label}
     />
-    <p className="col-span-2 col-start-2 min-w-0 truncate text-sm leading-5 text-text-muted">
+    <p
+      className="col-span-2 col-start-2 min-w-0 truncate text-sm leading-5 text-text-muted"
+      title={secondaryLine(order)}
+    >
       {secondaryLine(order)}
     </p>
     {order.cancellable && onCancel && (

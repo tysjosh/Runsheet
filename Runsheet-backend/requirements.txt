@@ -155,6 +155,13 @@ mygeotab==0.9.1
 # vendor-maintained client.
 stripe>=10.0.0,<13.0.0
 
+# SendGrid v3 Mail Send client for the email channel
+# (notifications/services/sendgrid_email_dispatcher.py; customer portal
+# invite and order emails). Imported lazily; without it, or without
+# SENDGRID_API_KEY + SENDGRID_FROM_EMAIL, non-production falls back to the
+# log-only stub dispatcher. Pinned exactly (portal-fixes C1).
+sendgrid==6.12.5
+
 # Shapely for GeoJSON polygon validation on storm road restrictions
 # (Fuel Ops Hardening Req 9.3.3; Task 10.8 — fuel/storm_mode_models.py).
 # Imported lazily where used so unit tests can mock polygon validation

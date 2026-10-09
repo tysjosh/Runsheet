@@ -7,6 +7,7 @@ and registers Prometheus metrics for the intake channel admin surface.
 Requirements: 2.1
 """
 import logging
+import os
 
 from bootstrap.container import ServiceContainer
 
@@ -145,8 +146,51 @@ async def initialize(app, container: ServiceContainer) -> None:
                 customer_service=container.commerce_customer_service,
             )
             logger.info("Customer portal orders and tanks configured")
+            # Request notifications (portal-fixes B2/C2): dispatchers through
+            # the activity log (staff bell), the requester by email.
+            from portal.services.order_notifications import (
+                PortalOrderNotifier,
+                configure_portal_order_notifier,
+            )
+            configure_portal_order_notifier(
+                PortalOrderNotifier(
+                    activity_log=container.get("activity_log_service")
+                    if container.has("activity_log_service") else None,
+                    order_repository=container.order_repository,
+                    tank_repository=container.customer_tank_repository,
+                )
+            )
     except Exception as exc:
         logger.warning("Customer portal order wiring failed: %s", exc)
+    # Portal email templates: tenant-edited wording from the notifications
+    # template store when it exists (portal-fixes C2).
+    try:
+        if container.has("notification_service"):
+            from portal.services.portal_email import configure_portal_email_templates
+            configure_portal_email_templates(
+                container.notification_service._template_renderer
+            )
+    except Exception as exc:
+        logger.warning("Portal email template wiring failed: %s", exc)
+    # Supplier display name seed (portal-fixes A1): SEED_TENANT_DISPLAY_NAME
+    # restores the name for SEED_TENANT_ID after a Redis rebuild, without
+    # overwriting a name an operator set with scripts/set_tenant_display_name.
+    try:
+        seed_tenant = (
+            getattr(container.settings, "seed_tenant_id", "") or ""
+        ).strip() or os.environ.get("SEED_TENANT_ID", "").strip()
+        seed_name = os.environ.get("SEED_TENANT_DISPLAY_NAME", "").strip()
+        if seed_tenant and seed_name and container.has("tenant_settings_service"):
+            wrote = await container.tenant_settings_service.seed_display_name(
+                seed_tenant, seed_name
+            )
+            logger.info(
+                "Tenant display name seed for tenant=%s: %s",
+                seed_tenant,
+                "set" if wrote else "already set",
+            )
+    except Exception as exc:
+        logger.warning("Tenant display name seed failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Dinee voice integration (Surface A submission bridge + Surface B
