@@ -21,6 +21,7 @@ import {
   resendPortalUserLink,
   revokePortalUser,
 } from "../../services/portalApi";
+import PortalOrderingSetting from "./PortalOrderingSetting";
 
 type Load =
   | { kind: "loading" }
@@ -180,6 +181,7 @@ export default function PortalAccessPanel({
         Portal access
       </h2>
       <div className="border rounded p-6 space-y-4">
+        <PortalOrderingSetting />
         <form onSubmit={handleInvite} noValidate className="space-y-2">
           <label htmlFor={emailId} className="block text-sm font-medium">
             Invite by email

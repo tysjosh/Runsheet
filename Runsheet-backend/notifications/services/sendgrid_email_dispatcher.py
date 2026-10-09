@@ -10,12 +10,23 @@ imported lazily so the module can be imported even when the
 Requirements: 2.3, 2.4, 2.5, 2.6
 """
 
+import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from notifications.services.channel_dispatchers import ChannelDispatcher
 
 logger = logging.getLogger(__name__)
+
+#: Upper bound for one SendGrid Mail Send call (socket timeout and the
+#: awaited wait). Module-level so tests can shorten it.
+SEND_TIMEOUT_SECONDS: float = 10.0
+
+#: Dedicated threads for the synchronous SDK call, so a stalled send never
+#: occupies the loop's default executor (used by other ``to_thread`` work)
+#: and loop shutdown never waits on it.
+_SEND_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sendgrid-send")
 
 
 class SendGridEmailDispatcher(ChannelDispatcher):
@@ -38,6 +49,11 @@ class SendGridEmailDispatcher(ChannelDispatcher):
         from sendgrid import SendGridAPIClient  # type: ignore[import-untyped]
 
         self._client = SendGridAPIClient(self._api_key)
+        # python_http_client defaults to ``urlopen(timeout=None)``; bound the
+        # socket so a stalled connection can't pin the worker thread forever.
+        http_client = getattr(self._client, "client", None)
+        if http_client is not None and hasattr(http_client, "timeout"):
+            http_client.timeout = SEND_TIMEOUT_SECONDS
 
     @property
     def channel_name(self) -> str:
@@ -58,16 +74,35 @@ class SendGridEmailDispatcher(ChannelDispatcher):
         recipient = notification.get("recipient_reference", "")
         subject = notification.get("subject", "Notification")
         body = notification.get("message_body", "")
+        # Optional HTML alternative (customer portal emails); the plain-text
+        # body is always sent as well.
+        html_body = notification.get("html_body")
 
-        mail = Mail(
-            from_email=self._from_email,
-            to_emails=recipient,
-            subject=subject,
-            plain_text_content=body,
-        )
+        mail_kwargs = {
+            "from_email": self._from_email,
+            "to_emails": recipient,
+            "subject": subject,
+            "plain_text_content": body,
+        }
+        if html_body:
+            mail_kwargs["html_content"] = html_body
+        mail = Mail(**mail_kwargs)
 
         try:
-            response = self._client.send(mail)
+            # The SDK call is synchronous (urllib). Run it off the event loop
+            # and bound it, so a slow or hung SendGrid never stalls request
+            # handlers that await this (portal submit, release-hold, cancel).
+            try:
+                loop = asyncio.get_running_loop()
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(_SEND_EXECUTOR, self._client.send, mail),
+                    timeout=SEND_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                reason = f"SendGrid send timed out after {SEND_TIMEOUT_SECONDS:g}s"
+                notification["failure_reason"] = reason
+                logger.warning("[EMAIL] Failed to send to %s: %s", recipient, reason)
+                return "failed"
 
             if response.status_code in (200, 201, 202):
                 # SendGrid returns the message ID in the X-Message-Id header

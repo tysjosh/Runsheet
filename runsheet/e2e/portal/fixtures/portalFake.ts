@@ -19,6 +19,7 @@ export const ME = {
   email: "qa-portal-ap@example.test",
   customer_display_name: "QA Lone Star Construction",
   supplier_name: "QA Demo Fuels",
+  time_zone: "America/Chicago",
   ordering_available: true,
   invoices_available: true,
   payments_available: true,

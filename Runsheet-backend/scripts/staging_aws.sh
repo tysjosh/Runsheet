@@ -254,6 +254,17 @@ SECRET_ST="${PREFIX}/supertokens-api-key"
 #: REDIS_URL is a SECRET, not a plain environment variable, because TLS + AUTH puts
 #: the auth token inside the URL: rediss://:<token>@<primary-endpoint>:6379/0
 SECRET_REDIS="${PREFIX}/redis-url"
+#: SendGrid API key (Mail Send only), created by the OWNER, never by this script
+#: (.agents/tasks/portal-fixes-2026-10-09/sendgrid-setup.md). One secret feeds both
+#: email paths: SENDGRID_API_KEY (notifications + portal emails) and SMTP_PASSWORD
+#: (SuperTokens auth email through smtp.sendgrid.net). Absent = email stays
+#: unconfigured and deploy warns. EMAIL_FROM must be a SendGrid-verified sender.
+SECRET_SENDGRID="${PREFIX}/sendgrid-api-key"
+EMAIL_FROM="${EMAIL_FROM:-no-reply@${DOMAIN:-runsheetops.com}}"
+EMAIL_FROM_NAME="${EMAIL_FROM_NAME:-Runsheet}"
+#: Supplier name customers see for SEED_TENANT_ID (demo-tenant); set at API start
+#: only when the tenant has none, so an operator's name is never overwritten.
+SEED_TENANT_DISPLAY_NAME="${SEED_TENANT_DISPLAY_NAME:-Demo Fuels}"
 
 #: SuperTokens Cloud connection details for staging. Supplied by the environment so
 #: a staging-specific core can be used without editing this file:
@@ -1084,10 +1095,14 @@ ensure_execution_role() {
   # Least privilege on the secrets: the execution role resolves them at task
   # start, and it is scoped to these four ARNs rather than secretsmanager:*.
   # REDIS_URL is one of them because it carries the ElastiCache AUTH token.
-  local doc
-  doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s","%s"]}]}' \
+  # The SendGrid key joins the list only once the owner has created it.
+  local doc extra=""
+  if secret_exists "${SECRET_SENDGRID}"; then
+    extra="$(printf ',"%s"' "$(secret_arn "${SECRET_SENDGRID}")")"
+  fi
+  doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s","%s"%s]}]}' \
       "$(secret_arn "${SECRET_DB}")" "$(secret_arn "${SECRET_GEMINI}")" \
-      "$(secret_arn "${SECRET_ST}")" "$(secret_arn "${SECRET_REDIS}")")"
+      "$(secret_arn "${SECRET_ST}")" "$(secret_arn "${SECRET_REDIS}")" "$extra")"
   aws iam put-role-policy --role-name "$role" --policy-name "${PREFIX}-read-secrets" \
     --policy-document "$doc" >/dev/null
   ok "scoped secret read policy"
@@ -1609,7 +1624,23 @@ containers = [
             # Seeds the default notification rules/templates at startup
             # (idempotent; bootstrap/notifications.py). Data finding B2.
             {"name": "SEED_TENANT_ID", "value": "demo-tenant"},
+            # Supplier name customers see for SEED_TENANT_ID, set only when the
+            # tenant has none (portal-fixes A1).
+            {"name": "SEED_TENANT_DISPLAY_NAME", "value": os.environ.get("SEED_TENANT_DISPLAY_NAME", "")},
         ] + (
+            # Email through SendGrid (portal-fixes C1), only when the owner has
+            # stored runsheet-staging/sendgrid-api-key. The same key is the API
+            # key and the SMTP password (username "apikey"); both are "secrets"
+            # below. Without it nothing is set and email stays unconfigured.
+            [{"name": "SENDGRID_FROM_EMAIL", "value": os.environ["EMAIL_FROM"]},
+             {"name": "SMTP_HOST", "value": "smtp.sendgrid.net"},
+             {"name": "SMTP_PORT", "value": "587"},
+             {"name": "SMTP_USERNAME", "value": "apikey"},
+             {"name": "SMTP_FROM_EMAIL", "value": os.environ["EMAIL_FROM"]},
+             {"name": "SMTP_FROM_NAME", "value": os.environ.get("EMAIL_FROM_NAME", "Runsheet")},
+             {"name": "SMTP_SECURE", "value": "false"}]
+            if os.environ.get("SENDGRID_SECRET_ARN") else []
+        ) + (
             # The TenantCredentialsVault's envelope-encryption key (see
             # ensure_vault_kms). Without it every credential write raises
             # "kms_key_id required", which is what made POST /api/orders 500 on
@@ -1631,7 +1662,11 @@ containers = [
             # Points at the ElastiCache PRIMARY endpoint, so a failover is followed
             # by DNS rather than needing a task-definition revision.
             {"name": "REDIS_URL", "valueFrom": secret_redis},
-        ],
+        ] + (
+            [{"name": "SENDGRID_API_KEY", "valueFrom": os.environ["SENDGRID_SECRET_ARN"]},
+             {"name": "SMTP_PASSWORD", "valueFrom": os.environ["SENDGRID_SECRET_ARN"]}]
+            if os.environ.get("SENDGRID_SECRET_ARN") else []
+        ),
         "logConfiguration": logs("api"),
     },
 ]
@@ -1913,6 +1948,16 @@ cmd_deploy() {
     ok "files bucket ${FILES_BUCKET_NAME}"
   else
     warn "no ${FILES_BUCKET} — BOL scans and POD photos won't be stored; run 'files-bucket'"
+  fi
+  # Email (portal-fixes C1). The key is never read or printed here; only the
+  # secret's ARN goes into the task definition, resolved by ECS at task start.
+  export SENDGRID_SECRET_ARN="" EMAIL_FROM EMAIL_FROM_NAME SEED_TENANT_DISPLAY_NAME
+  if secret_exists "${SECRET_SENDGRID}"; then
+    SENDGRID_SECRET_ARN="$(secret_arn "${SECRET_SENDGRID}")"
+    ensure_execution_role
+    ok "email via SendGrid (API + SMTP) from ${EMAIL_FROM}"
+  else
+    warn "no ${SECRET_SENDGRID} — email stays unconfigured (SuperTokens built-in auth email, no portal emails); see sendgrid-setup.md"
   fi
   local td; td="$(register_task_def "$image")"
   ok "$td"

@@ -82,12 +82,14 @@ export default function TankPicker({
                 <span
                   id={`${id}-title`}
                   className="block truncate text-[15px] font-semibold text-text"
+                  title={title}
                 >
                   {title}
                 </span>
                 <span
                   id={`${id}-level`}
                   className="block truncate text-sm text-text-muted"
+                  title={`${productName(t.product_code)} · ${number(t.current_level_gallons)} of ${number(t.capacity_gallons)} ${unit} · ${percent(t.percent_full)}`}
                 >
                   {productName(t.product_code)} ·{" "}
                   {number(t.current_level_gallons)} of{" "}

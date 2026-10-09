@@ -15,6 +15,15 @@ import { useEffect, useId, useRef, useState } from "react";
 import { IdentityAvatar } from "../ui/IdentityAvatar";
 import { focusRing } from "./styles";
 
+/**
+ * The signed-in person, not the customer account (portal-fixes A3): the
+ * email's local part, so "olukotunjosh@…" → "OL" and "jane.doe@…" → "JD",
+ * the same `initials()` rule the staff `IdentityAvatar` uses.
+ */
+export function avatarLabel(email: string): string {
+  return (email.split("@")[0] ?? "").trim();
+}
+
 export default function PortalAccountMenu({
   email,
   supplierName,
@@ -70,7 +79,7 @@ export default function PortalAccountMenu({
       >
         <IdentityAvatar
           id={email || customerName}
-          label={customerName || email}
+          label={avatarLabel(email) || customerName}
           size="md"
           className="!h-9 !w-9 !text-[13px]"
         />

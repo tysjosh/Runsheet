@@ -20,7 +20,7 @@ import PortalTable, {
 } from "../../../../components/portal/PortalTable";
 import PortalTitleRow from "../../../../components/portal/PortalTitleRow";
 import {
-  dateTime,
+  dateTimeZone,
   deliveredVolume,
   number,
   productName,
@@ -116,7 +116,7 @@ export default function PortalTankDetailPage() {
     {
       key: "delivered",
       header: "Delivered",
-      cell: (d) => dateTime(d.delivered_at),
+      cell: (d) => dateTimeZone(d.delivered_at),
     },
     {
       key: "product",
@@ -179,7 +179,7 @@ export default function PortalTankDetailPage() {
             <div>
               <dt className="text-text-muted">Last reading</dt>
               <dd className="font-medium text-text">
-                {dateTime(t.last_reading_at)}
+                {dateTimeZone(t.last_reading_at)}
                 {t.reading_stale ? ` · ${STALE_READING_TEXT}` : ""}
               </dd>
             </div>
@@ -248,14 +248,26 @@ export default function PortalTankDetailPage() {
                   <span className="row-span-2 self-start pt-0.5">
                     {d.product_code && <ProductCap code={d.product_code} />}
                   </span>
-                  <span className="truncate text-[15px] font-semibold leading-6 text-text">
-                    {deliveredVolume(d.delivered_gallons, unit)} delivered
+                  <span
+                    className="truncate text-[15px] font-semibold leading-6 text-text"
+                    title={`${deliveredVolume(d.delivered_gallons, unit)} delivered`}
+                  >
+                    <span className="tabular-nums">
+                      {deliveredVolume(d.delivered_gallons, unit)}
+                    </span>
+                    <span className="font-normal text-text-muted">
+                      {" "}
+                      delivered
+                    </span>
                   </span>
                   <span className="text-sm text-text-muted">
                     {d.ticket_number ? `ticket ${d.ticket_number}` : ""}
                   </span>
-                  <span className="col-span-2 col-start-2 truncate text-sm leading-5 text-text-muted">
-                    {dateTime(d.delivered_at)}
+                  <span
+                    className="col-span-2 col-start-2 truncate text-sm leading-5 text-text-muted"
+                    title={`${dateTimeZone(d.delivered_at)}${d.product_code ? ` · ${productName(d.product_code)}` : ""}`}
+                  >
+                    {dateTimeZone(d.delivered_at)}
                     {d.product_code ? ` · ${productName(d.product_code)}` : ""}
                   </span>
                 </li>

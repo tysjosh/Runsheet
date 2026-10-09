@@ -22,7 +22,12 @@ process.env.PORTAL_FIXTURES = "1";
 
 export default defineConfig({
   testDir: "./e2e/portal",
-  testMatch: ["chrome.spec.ts", "visual.spec.ts", "signin-keyboard.spec.ts"],
+  testMatch: [
+    "chrome.spec.ts",
+    "visual.spec.ts",
+    "signin-keyboard.spec.ts",
+    "portal-fixes.spec.ts",
+  ],
   timeout: 60_000,
   expect: {
     timeout: 10_000,

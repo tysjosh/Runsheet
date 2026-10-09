@@ -40,7 +40,7 @@ describe("PortalStatus", () => {
     },
   );
 
-  it("struck-through cancelled and dashed draft", () => {
+  it("cancelled keeps its icon and label with no strikethrough (portal-fixes A7); draft is dashed", () => {
     render(
       <>
         <PortalStatus kind="order" code="cancelled" label="Cancelled" />
@@ -51,7 +51,12 @@ describe("PortalStatus", () => {
         />
       </>,
     );
-    expect(screen.getByText("Cancelled")).toHaveClass("line-through");
+    const cancelled = screen.getByText("Cancelled");
+    expect(cancelled).not.toHaveClass("line-through");
+    const badge = cancelled.closest("[data-status]") as HTMLElement;
+    expect(badge).toHaveAttribute("data-status", "cancelled");
+    expect(badge.querySelector("svg")).not.toBeNull();
+    expect(badge.innerHTML).not.toContain("line-through");
     expect(
       (
         screen

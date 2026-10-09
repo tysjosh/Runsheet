@@ -74,10 +74,13 @@ def test_me_supplier_name_is_the_tenant_display_name(client, portal_on, tenant_n
     assert resp.json()["data"]["supplier_name"] == "QA Demo Fuels"
 
 
-def test_me_supplier_name_falls_back_to_the_tenant_id(client, portal_on, tenant_names, cC):
+def test_me_supplier_name_falls_back_to_a_generic_label_never_the_tenant_id(
+    client, portal_on, tenant_names, cC
+):
     resp = call(client, "GET", "/api/portal/me", cC)
     assert resp.status_code == 200, resp.text
-    assert resp.json()["data"]["supplier_name"] == T2
+    assert resp.json()["data"]["supplier_name"] == "Your fuel supplier"
+    assert T2 not in resp.text
 
 
 async def test_tenant_display_name_round_trip_has_no_ttl_and_survives_other_writes():

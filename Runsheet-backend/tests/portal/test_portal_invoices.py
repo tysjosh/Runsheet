@@ -255,7 +255,9 @@ def test_pdf_is_attachment_with_projected_text(client, portal_on, portal_fakes, 
     reader = PdfReader(io.BytesIO(resp.content))
     assert len(reader.pages) == 2  # 30 line items per page
     text = _pdf_text(resp.content)
-    for expected in ('INV/2026 "7";x', "Void", "Account A Main", "Customer A", T1,
+    # No tenant display name: the generic supplier label, never the tenant id.
+    assert T1 not in text
+    for expected in ('INV/2026 "7";x', "Void", "Account A Main", "Customer A", "Your fuel supplier",
                      "$2.966", "$296.60", "PROPANE", "Page 2 of 2"):
         assert expected in text, expected
 

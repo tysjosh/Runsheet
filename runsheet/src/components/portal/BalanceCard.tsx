@@ -13,7 +13,7 @@ import Link from "next/link";
 import type { PortalInvoice } from "../../services/portalApi";
 import { PAYMENTS_UNAVAILABLE_MESSAGE } from "./messages";
 import PortalStatus from "./PortalStatus";
-import { dateTime, date as formatDate, money } from "./portalFormat";
+import { dateTimeZone, date as formatDate, money } from "./portalFormat";
 import { PAYMENT_IN_FLIGHT } from "./portalStatusMap";
 import { card, primaryButton } from "./styles";
 
@@ -81,7 +81,7 @@ export default function BalanceCard({
             />
             <p className="text-sm text-text-muted">
               {money(attempt.amount_cents)} started{" "}
-              {dateTime(attempt.created_at)}
+              {dateTimeZone(attempt.created_at)}
             </p>
           </>
         )}

@@ -6,8 +6,11 @@
  * The portal adds what the shared module doesn't have yet (follow-up: move
  * `hour12`, `zoneName` and `days()` into `lib/format`, design §11.3):
  *
- * - times in the browser's zone, 12-hour, no leading zero ("9:20 AM");
- * - the zone abbreviation once, at the end of a window ("… – 3:20 PM CDT");
+ * - times in the tenant's zone (`/api/portal/me.time_zone`, pushed into
+ *   `lib/format` by `PortalGate`; portal-fixes A5 replaces PD23's browser
+ *   zone so the customer and the dispatcher read the same clock), 12-hour,
+ *   no leading zero ("9:20 AM");
+ * - the zone abbreviation on every time ("… – 3:20 PM CDT", "…, 6:55 PM CDT");
  * - dates as "Thu 9 Oct", with the year only when it isn't the current one;
  * - a bare `YYYY-MM-DD` (due dates) shown as that calendar day, never shifted;
  * - "1 day" / "4 days".
@@ -16,6 +19,7 @@
  */
 import {
   EMPTY,
+  formatConfig,
   gallons as formatGallons,
   money as formatMoneyValue,
   number as formatNumberValue,
@@ -44,18 +48,79 @@ function toDate(d: DateInput): { date: Date; bare: boolean } | null {
   return Number.isNaN(date.getTime()) ? null : { date, bare: false };
 }
 
+/** The zone portal times render in: the tenant's (set by `PortalGate`), else the browser's. */
+export function portalTimeZone(): string | undefined {
+  return formatConfig().timeZone;
+}
+
 function parts(
   date: Date,
   options: Intl.DateTimeFormatOptions,
   bare = false,
 ): Record<string, string> {
+  const zone = bare ? "UTC" : portalTimeZone();
   const fmt = new Intl.DateTimeFormat("en-US", {
     ...options,
-    ...(bare ? { timeZone: "UTC" } : {}),
+    ...(zone ? { timeZone: zone } : {}),
   });
   const out: Record<string, string> = {};
   for (const p of fmt.formatToParts(date)) out[p.type] = p.value;
   return out;
+}
+
+/** Milliseconds the portal zone is ahead of UTC at `instant`. */
+function zoneOffsetMs(instant: number): number {
+  const whole = Math.floor(instant / 1000) * 1000;
+  const p = parts(new Date(whole), {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  });
+  const asUtc = Date.UTC(
+    Number(p.year),
+    Number(p.month) - 1,
+    Number(p.day),
+    Number(p.hour) % 24,
+    Number(p.minute),
+    Number(p.second),
+  );
+  return asUtc - whole;
+}
+
+/**
+ * The instant at wall-clock `y-m-d h:min` in the portal zone (the tenant's),
+ * so a requested "9:00" means 9:00 where the times are shown. Days and months
+ * may overflow (`d + 1` for the next midnight).
+ */
+export function zonedInstant(
+  y: number,
+  m: number,
+  d: number,
+  h = 0,
+  min = 0,
+): Date {
+  const guess = Date.UTC(y, m - 1, d, h, min);
+  const first = guess - zoneOffsetMs(guess);
+  const second = guess - zoneOffsetMs(first);
+  return new Date(second);
+}
+
+/** Today in the portal zone as `YYYY-MM-DD`, shifted by `offsetDays`. */
+export function zonedIsoDate(offsetDays = 0, now: Date = new Date()): string {
+  const p = parts(now, { year: "numeric", month: "2-digit", day: "2-digit" });
+  const d = new Date(
+    Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day) + offsetDays),
+  );
+  return d.toISOString().slice(0, 10);
+}
+
+/** "Central Daylight Time" style name of the portal zone, for form hints. */
+export function zoneLongName(d: Date = new Date()): string {
+  return parts(d, { timeZoneName: "long" }).timeZoneName ?? "";
 }
 
 function yearOf(date: Date, bare: boolean): string {
@@ -99,6 +164,14 @@ export function dateTime(d: DateInput, now: Date = new Date()): string {
   const v = toDate(d);
   if (!v) return EMPTY;
   return `${date(v.date, now)}, ${time(v.date)}`;
+}
+
+/** "Sat 26 Sep, 6:55 PM CDT": one moment, zone named like a window's. */
+export function dateTimeZone(d: DateInput, now: Date = new Date()): string {
+  const v = toDate(d);
+  if (!v) return EMPTY;
+  if (v.bare) return date(d, now);
+  return `${dateTime(v.date, now)} ${zoneName(v.date)}`.trim();
 }
 
 function dayKey(d: Date): string {
@@ -177,8 +250,23 @@ export function volume(
   return s === EMPTY ? s : `${s} ${unit}`;
 }
 
-/** A delivered quantity: one decimal only when it isn't whole. */
+/**
+ * A delivered quantity in lists (orders, tank history): whole gallons, like
+ * every other portal quantity (portal-fixes A6). "275.5" → "276 gal".
+ */
 export function deliveredVolume(
+  v: number | null | undefined,
+  unit = "gal",
+): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return EMPTY;
+  return volume(Math.round(v), unit, 0);
+}
+
+/**
+ * A billed quantity on an invoice: one decimal only when it isn't whole, so
+ * "275.5 gal × $4.25" matches the line subtotal.
+ */
+export function billedVolume(
   v: number | null | undefined,
   unit = "gal",
 ): string {
@@ -201,6 +289,7 @@ export const portalFormat = {
   date,
   time,
   dateTime,
+  dateTimeZone,
   window,
   zoneName,
   money,
@@ -208,6 +297,7 @@ export const portalFormat = {
   number,
   volume,
   deliveredVolume,
+  billedVolume,
   days,
   percent,
   productName,

@@ -35,6 +35,7 @@ from portal.models import (
     PortalOrderTank,
     PortalQuantityGallons,
 )
+from portal.services.ordering import portal_ordering_enabled
 from portal.services.projection import AWAITING_CONFIRMATION, project_order, tank_label
 from portal.services.scoped_readers import (
     PortalReaders,
@@ -59,6 +60,11 @@ class SubmitResult:
     order: PortalOrder
 
 
+#: Smallest gallons request (portal-fixes B2). A smaller tank can still ask
+#: for its whole capacity, and "Fill to full" is always allowed.
+MIN_REQUEST_GALLONS = 25
+
+
 def _gallons_invalid() -> AppException:
     return AppException(
         ErrorCode.VALIDATION_ERROR,
@@ -66,6 +72,44 @@ def _gallons_invalid() -> AppException:
         status_code=422,
         details={"fields": ["quantity.gallons"]},
     )
+
+
+def _gallons_too_small() -> AppException:
+    return AppException(
+        ErrorCode.VALIDATION_ERROR,
+        f"Request at least {MIN_REQUEST_GALLONS} gallons, or choose Fill to full.",
+        status_code=422,
+        details={"fields": ["quantity.gallons"], "min_gallons": MIN_REQUEST_GALLONS},
+    )
+
+
+def _gallons_over_room(room: float) -> AppException:
+    whole = int(room)
+    return AppException(
+        ErrorCode.VALIDATION_ERROR,
+        f"The tank has room for about {whole:,} gallons at its latest reading. "
+        "Request that much or less, or choose Fill to full.",
+        status_code=422,
+        details={"fields": ["quantity.gallons"], "max_gallons": whole},
+    )
+
+
+def _fresh_room(tank: Any, capacity: float) -> Optional[float]:
+    """Capacity minus the level, when the latest reading is fresh
+    (``portal_stale_reading_days``); else ``None`` (not enforced)."""
+    from datetime import datetime, timedelta, timezone
+
+    from config.settings import get_settings
+    from portal.services.projection import _parse_ts
+
+    level = getattr(tank, "current_level_gallons", None)
+    read_at = _parse_ts(getattr(tank, "last_reading_at", None))
+    if level is None or read_at is None:
+        return None
+    days = get_settings().portal_stale_reading_days
+    if datetime.now(timezone.utc) - read_at > timedelta(days=days):
+        return None
+    return max(0.0, capacity - float(level))
 
 
 class PortalOrderService:
@@ -120,8 +164,10 @@ class PortalOrderService:
     ) -> SubmitResult:
         oid = portal_order_id(scope.tenant_id, scope.user_id, body.client_event_id)
 
-        # 1. Intake off: only a replay read, never a write (R4.2, R4.5).
-        if await self._pipeline.get_ordering_state(scope.tenant_id) == "disabled":
+        # 1. Portal ordering off for the tenant: only a replay read, never a
+        #    write (R4.2, R4.5). This is the tenant's portal setting
+        #    (portal-fixes B2), not the order_intake_pipeline rollout flag.
+        if not await portal_ordering_enabled(scope.tenant_id):
             replay = await self._replay(scope, oid)
             if replay is not None:
                 return replay
@@ -130,12 +176,20 @@ class PortalOrderService:
         # 2. The customer's own active tank (R4.3).
         tank = await self.readers.tanks.get(scope, body.customer_tank_id)
 
-        # 3. Capacity.
+        # 3. Quantity: a minimum, the capacity, and the room left in the tank
+        #    when the latest reading is fresh (a stale reading is not trusted
+        #    to refuse a request; capacity still is).
         gallons: Optional[float] = None
         if isinstance(body.quantity, PortalQuantityGallons):
             gallons = float(body.quantity.gallons)
-            if gallons > float(tank.capacity_gallons):
+            capacity = float(tank.capacity_gallons)
+            if gallons < MIN_REQUEST_GALLONS and gallons < capacity:
+                raise _gallons_too_small()
+            if gallons > capacity:
                 raise _gallons_invalid()
+            room = _fresh_room(tank, capacity)
+            if room is not None and gallons > room:
+                raise _gallons_over_room(room)
 
         # 4. Customer name.
         customer = await self._customers.get(scope.tenant_id, scope.customer_id)
@@ -202,8 +256,18 @@ class PortalOrderService:
         if status == "processed":
             stored = await self.readers.orders.get_or_none(scope, result.order_id or oid)
             if stored is not None:
+                await self._notify_received(scope, stored)
                 return SubmitResult(201, await self.project(scope, stored))
             # Not readable yet: answer from what was submitted.
+            await self._notify_received(
+                scope,
+                {
+                    **payload,
+                    "order_id": result.order_id or oid,
+                    "delivery_window_start": body.window_start,
+                    "delivery_window_end": body.window_end,
+                },
+            )
             code, label = AWAITING_CONFIRMATION
             return SubmitResult(
                 201,
@@ -232,6 +296,21 @@ class PortalOrderService:
             request_id,
         )
         raise order_request_rejected(REJECTED_MESSAGE)
+
+    @staticmethod
+    async def _notify_received(scope: Any, order: Any) -> None:
+        """Dispatcher notice + "request received" email; never raises."""
+        from portal.services.order_notifications import get_portal_order_notifier
+
+        notifier = get_portal_order_notifier()
+        if notifier is None:
+            return
+        try:
+            await notifier.request_received(
+                scope.tenant_id, order, requester_user_id=scope.user_id
+            )
+        except Exception as exc:  # noqa: BLE001 — the request is already stored
+            logger.warning("portal order: notification failed: %s", type(exc).__name__)
 
     @staticmethod
     def _rejected(exc: BaseException) -> AppException:

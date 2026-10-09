@@ -23,8 +23,8 @@ import { usePortalMe } from "../../../../components/portal/PortalContext";
 import PortalStatus from "../../../../components/portal/PortalStatus";
 import PortalTitleRow from "../../../../components/portal/PortalTitleRow";
 import {
-  dateTime,
-  deliveredVolume,
+  billedVolume,
+  dateTimeZone,
   date as formatDate,
   money,
   unitPrice,
@@ -185,7 +185,7 @@ export default function PortalInvoiceDetailPage() {
               <Fact term="Latest payment">
                 {inv.payment_attempt.status_label},{" "}
                 {money(inv.payment_attempt.amount_cents)},{" "}
-                {dateTime(inv.payment_attempt.created_at)}
+                {dateTimeZone(inv.payment_attempt.created_at)}
               </Fact>
             )}
           </dl>
@@ -198,10 +198,10 @@ export default function PortalInvoiceDetailPage() {
             </h2>
             <dl className="mt-2 grid grid-cols-1 gap-x-6 sm:grid-cols-3">
               <Fact term="Delivered">
-                {dateTime(inv.delivery.delivered_at)}
+                {dateTimeZone(inv.delivery.delivered_at)}
               </Fact>
               <Fact term="Volume">
-                {deliveredVolume(inv.delivery.actual_gallons, unit)}
+                {billedVolume(inv.delivery.actual_gallons, unit)}
               </Fact>
               <Fact term="Ticket">{inv.delivery.ticket_number ?? "—"}</Fact>
             </dl>
@@ -235,7 +235,7 @@ export default function PortalInvoiceDetailPage() {
                     </span>
                   )}
                   <span className="text-sm text-text-muted">
-                    {deliveredVolume(line.quantity_gallons, unit)} ×{" "}
+                    {billedVolume(line.quantity_gallons, unit)} ×{" "}
                     {linePrice(line)}
                   </span>
                   <span className="ml-auto text-[15px] font-semibold tabular-nums text-text">

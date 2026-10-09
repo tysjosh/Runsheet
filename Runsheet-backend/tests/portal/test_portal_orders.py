@@ -53,12 +53,52 @@ def _err(resp):
 
 
 # ---------------------------------------------------------------------------
-# OID-1 / OID-2: intake disabled
+# OID-1 / OID-2: portal ordering off (portal-fixes B2: the tenant's portal
+# ordering setting, not the order_intake_pipeline rollout flag)
 # ---------------------------------------------------------------------------
 
 
-def test_intake_disabled_409(client, orders, cA):
-    orders.flags.state = "disabled"
+class _SettingsRedis:
+    def __init__(self):
+        self.data = {}
+
+    async def get(self, key):
+        return self.data.get(key)
+
+    async def set(self, key, value, ex=None, nx=False):
+        if nx and key in self.data:
+            return None
+        self.data[key] = value
+        return True
+
+    async def delete(self, key):
+        self.data.pop(key, None)
+
+
+@pytest.fixture
+def portal_ordering(cA):  # noqa: ARG001 — after the session fixture resets the guard
+    """``portal_ordering(T1, False)`` turns the tenant's portal ordering off."""
+    from ops.middleware import tenant_guard
+    from services.tenant_settings import TenantSettingsService
+
+    redis = _SettingsRedis()
+    tenant_guard.configure_tenant_guard(TenantSettingsService(redis_client=redis))
+
+    def set_(tenant_id, enabled):
+        key = f"tenant:{tenant_id}:portal_ordering"
+        if enabled:
+            redis.data.pop(key, None)
+        else:
+            redis.data[key] = "disabled"
+
+    try:
+        yield set_
+    finally:
+        tenant_guard.configure_tenant_guard(None)
+
+
+def test_portal_ordering_off_409(client, orders, cA, portal_ordering):
+    portal_ordering(T1, False)
     resp = post(client, cA, order_body())
     assert resp.status_code == 409
     assert _err(resp) == "ORDER_INTAKE_DISABLED"
@@ -68,13 +108,20 @@ def test_intake_disabled_409(client, orders, cA):
     assert me["ordering_available"] is False
 
 
-def test_replay_while_disabled_returns_original(client, orders, cA):
+def test_portal_ordering_off_for_one_tenant_only(client, orders, cA, cC, portal_ordering):
+    portal_ordering(T2, False)
+    assert post(client, cA, order_body()).status_code == 201
+    assert call(client, "GET", "/api/portal/me", cA).json()["data"]["ordering_available"] is True
+    assert call(client, "GET", "/api/portal/me", cC).json()["data"]["ordering_available"] is False
+
+
+def test_replay_while_ordering_off_returns_original(client, orders, cA, portal_ordering):
     body = order_body()
     first = post(client, cA, body)
     assert first.status_code == 201, first.text
     writes = orders.order_writes()
 
-    orders.flags.state = "disabled"
+    portal_ordering(T1, False)
     replay = post(client, cA, body)
     assert replay.status_code == 200
     assert replay.json()["data"]["order_id"] == first.json()["data"]["order_id"]
@@ -82,14 +129,15 @@ def test_replay_while_disabled_returns_original(client, orders, cA):
     assert orders.order_writes() == writes
 
 
-def test_flag_flips_mid_request(client, orders, cA):
-    # Step 1 reads shadow; the pipeline's own read sees disabled.
-    orders.flags.states = ["shadow", "disabled"]
+@pytest.mark.parametrize("state", ["disabled", "shadow", "active_gated", "active_auto"])
+def test_portal_ordering_works_whatever_the_pipeline_flag(client, orders, cA, state):
+    """The shared rollout flag doesn't gate portal requests (B2)."""
+    orders.flags.state = state
     resp = post(client, cA, order_body())
-    assert resp.status_code == 409
-    assert _err(resp) == "ORDER_INTAKE_DISABLED"
-    assert len(orders.ingest_calls) == 1
-    assert orders.order_writes() == 0
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["data"]["status_code"] == "awaiting_confirmation"
+    assert orders.order_writes() == 1
+    assert call(client, "GET", "/api/portal/me", cA).json()["data"]["ordering_available"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +312,8 @@ def _window(start, length=8 * H):
 @pytest.mark.parametrize(
     "overrides,ok",
     [
-        pytest.param({"window": _window(-24 * H + S)}, True, id="start-24h+1s"),
+        pytest.param({"window": _window(-24 * H + S, 25 * H)}, True, id="start-24h+1s"),
+        pytest.param({"window": _window(-9 * H, 8 * H)}, False, id="window-already-over"),
         pytest.param({"window": _window(-24 * H - S)}, False, id="start-24h-1s"),
         pytest.param({"window": _window(timedelta(days=60) - S)}, True, id="start+60d-1s"),
         pytest.param({"window": _window(timedelta(days=60) + S)}, False, id="start+60d+1s"),
@@ -319,7 +368,31 @@ def test_gallons_over_capacity_422(client, orders, cA):
     assert resp.json()["error_code"] == "VALIDATION_ERROR"
     assert resp.json()["details"]["fields"] == ["quantity.gallons"]
     assert orders.ingest_calls == []
-    assert post(client, cA, order_body(quantity={"mode": "gallons", "gallons": 500})).status_code == 201
+    # Exactly the capacity is accepted when the reading isn't fresh enough to
+    # say how much room is left.
+    orders.add_tank(T1, CUSTOMER_A, "QA-TANK-A9", last_reading_at=None)
+    assert post(client, cA, order_body("QA-TANK-A9", quantity={"mode": "gallons", "gallons": 500})).status_code == 201
+
+
+def test_gallons_over_room_at_a_fresh_reading_422(client, orders, cA):
+    # QA-TANK-A1: 500 gal, 250 in it, read just now: room for 250.
+    resp = post(client, cA, order_body(quantity={"mode": "gallons", "gallons": 251}))
+    assert resp.status_code == 422
+    assert resp.json()["details"] == {"fields": ["quantity.gallons"], "max_gallons": 250}
+    assert "room for about 250 gallons" in resp.json()["message"]
+    assert orders.ingest_calls == []
+    assert post(client, cA, order_body(quantity={"mode": "gallons", "gallons": 250})).status_code == 201
+
+
+def test_gallons_below_minimum_422(client, orders, cA):
+    resp = post(client, cA, order_body(quantity={"mode": "gallons", "gallons": 24}))
+    assert resp.status_code == 422
+    assert resp.json()["details"]["min_gallons"] == 25
+    assert orders.ingest_calls == []
+    assert post(client, cA, order_body(quantity={"mode": "gallons", "gallons": 25})).status_code == 201
+    # A tank smaller than the minimum can still ask for its whole capacity.
+    orders.add_tank(T1, CUSTOMER_A, "QA-TANK-A8", capacity=20.0, level=0.0)
+    assert post(client, cA, order_body("QA-TANK-A8", quantity={"mode": "gallons", "gallons": 20})).status_code == 201
 
 
 # ---------------------------------------------------------------------------

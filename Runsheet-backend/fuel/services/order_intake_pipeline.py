@@ -509,12 +509,17 @@ class OrderIntakePipeline:
         """
         if not client_event_id:
             raise missing_client_event_id(details={"path": "web_portal"})
+        # Portal ordering has its own per-tenant setting, checked by
+        # PortalOrderService before this call (portal-fixes B2). The
+        # ``order_intake_pipeline`` rollout flag gates the staff and
+        # integration channels, so it doesn't short-circuit this one.
         return await self._ingest_common(
             channel=_PortalChannel(tenant_id=scope.tenant_id),
             payload=payload,
             request_id=request_id,
             actor_user_id=scope.user_id,
             client_event_id=portal_event_id(scope.user_id, client_event_id),
+            honour_overlay_flag=False,
         )
 
     # ------------------------------------------------------------------
@@ -529,8 +534,13 @@ class OrderIntakePipeline:
         actor_user_id: Optional[str],
         client_event_id: Optional[str],
         schema_version_override: Optional[str] = None,
+        honour_overlay_flag: bool = True,
     ) -> IntakeResponse:
         """Shared pipeline logic for all intake paths.
+
+        ``honour_overlay_flag=False`` skips step (0); only the customer
+        portal passes it, because portal ordering is governed by its own
+        tenant setting.
 
         Steps:
             (0) Check ``overlay.order_intake_pipeline`` feature flag state:
@@ -559,7 +569,9 @@ class OrderIntakePipeline:
         ingest_start = time.monotonic()
 
         # (0) Check overlay.order_intake_pipeline feature flag state
-        overlay_state = await self._get_overlay_state(tenant_id)
+        overlay_state = (
+            await self._get_overlay_state(tenant_id) if honour_overlay_flag else "active_auto"
+        )
 
         # ``disabled`` → short-circuit. The caller is responsible for deciding
         # what to do with a ``legacy_passthrough`` response.

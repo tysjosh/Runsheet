@@ -38,8 +38,17 @@ export const space = {
   titleRow: "py-2 md:pt-4 md:pb-3",
   /** Gap between page sections: 24 px on phones (no cards to separate them), 16 px between cards. */
   sectionGap: "gap-6 md:gap-4",
-  /** Row vertical padding: 12 px on phones and inside desktop cards. */
-  rowY: "py-3",
+  /**
+   * Row vertical padding: 16 px on phones (the owner's 16–20 px), 12 px
+   * inside desktop cards. Account rows, invoice line items, Home's empty
+   * orders row.
+   */
+  rowY: "py-4 md:py-3",
+  /**
+   * Tank rows only: 12 px, so Home's Balance due stays above the fold within
+   * the 116 px phone chrome (P3P-R11; portal-fixes A9).
+   */
+  tankRowY: "py-3",
   /**
    * Two-line list rows (orders, invoices, delivery history): R14.9 caps them
    * at 72 px below 1024, and a 24 px badge line + a 20 px text line leaves

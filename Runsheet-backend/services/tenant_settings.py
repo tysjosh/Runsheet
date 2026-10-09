@@ -59,6 +59,12 @@ DISPLAY_NAME_MAX: Final[int] = 120
 #: deleted tenant's key is removed by running the script with ``--clear``.
 TENANT_DISPLAY_NAME_KEY_PATTERN: Final[str] = "tenant:{tenant_id}:display_name"
 
+#: Redis key for the tenant's customer-portal online ordering switch
+#: (portal-fixes B2). Like the display name it has no TTL. Absent means the
+#: default, ON: a tenant with the portal enabled takes delivery requests
+#: until an admin turns them off. Only ``"disabled"`` is ever stored.
+TENANT_PORTAL_ORDERING_KEY_PATTERN: Final[str] = "tenant:{tenant_id}:portal_ordering"
+
 #: TTL applied to every tenant-settings Redis write. 30 days balances
 #: "tenant config must survive long idle periods" against "deleted
 #: tenants must not leak keys indefinitely". Every write refreshes the
@@ -381,6 +387,75 @@ class TenantSettingsService:
         logger.info("Tenant display name set: tenant=%s", tenant_id)
         return text
 
+    async def seed_display_name(self, tenant_id: str, display_name: str) -> bool:
+        """Store ``display_name`` only when the tenant has none (``SET NX``).
+
+        Used at startup (``SEED_TENANT_DISPLAY_NAME``) so a rebuilt Redis gets
+        the name back without overwriting one an operator set. Returns True
+        when it wrote. Never raises.
+        """
+        text = clean_display_name(display_name)
+        if not tenant_id or not text or self._redis is None:
+            return False
+        try:
+            wrote = await self._redis.set(self._display_name_key(tenant_id), text, nx=True)
+        except Exception as exc:  # noqa: BLE001 — cosmetic; startup continues
+            logger.warning(
+                "TenantSettingsService: display name seed failed for tenant=%s: %s",
+                tenant_id,
+                type(exc).__name__,
+            )
+            return False
+        return bool(wrote)
+
+    # -- Portal online ordering (portal-fixes B2) -----------------------
+
+    @staticmethod
+    def _portal_ordering_key(tenant_id: str) -> str:
+        return TENANT_PORTAL_ORDERING_KEY_PATTERN.format(tenant_id=tenant_id)
+
+    async def get_portal_ordering_enabled(self, tenant_id: str) -> bool:
+        """Whether portal customers may request deliveries. Default ON.
+
+        With no Redis client nothing can have been stored, so the default
+        (on) applies. A failed read fails closed (off): an admin's "off"
+        must not be skipped because Redis blipped.
+        """
+        if not tenant_id:
+            return False
+        if self._redis is None:
+            return True
+        try:
+            raw = await self._redis.get(self._portal_ordering_key(tenant_id))
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            logger.warning(
+                "TenantSettingsService: portal ordering lookup failed for tenant=%s: %s",
+                tenant_id,
+                type(exc).__name__,
+            )
+            return False
+        if isinstance(raw, bytes):
+            raw = raw.decode(errors="replace")
+        return raw != "disabled"
+
+    async def set_portal_ordering_enabled(self, tenant_id: str, enabled: bool) -> bool:
+        """Turn portal online ordering on (delete the key) or off."""
+        if not tenant_id:
+            raise ValueError("tenant_id must be a non-empty string")
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a bool")
+        if self._redis is None:
+            raise RuntimeError(
+                "TenantSettingsService: cannot write portal ordering — no Redis client configured"
+            )
+        key = self._portal_ordering_key(tenant_id)
+        if enabled:
+            await self._redis.delete(key)
+        else:
+            await self._redis.set(key, "disabled")
+        logger.info("Portal ordering %s: tenant=%s", "enabled" if enabled else "disabled", tenant_id)
+        return enabled
+
     # -- Internal helpers -----------------------------------------------
 
     @staticmethod
@@ -455,6 +530,7 @@ __all__ = [
     "DISPLAY_NAME_MAX",
     "DistanceUnit",
     "TENANT_DISPLAY_NAME_KEY_PATTERN",
+    "TENANT_PORTAL_ORDERING_KEY_PATTERN",
     "clean_display_name",
     "MeasurementUnits",
     "Region",

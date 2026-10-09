@@ -24,6 +24,7 @@ from portal.api._authz import (
 )
 from portal.models import PortalMe, PortalMeasurementUnits, PortalMeEnvelope
 from portal.services.portal_payment_service import portal_connector
+from portal.services.ordering import portal_ordering_enabled, tenant_time_zone
 from portal.services.supplier import supplier_name
 
 logger = logging.getLogger(__name__)
@@ -52,18 +53,14 @@ def configure_portal_me(**services: Any) -> None:
 
 
 async def _ordering_available(tenant_id: str) -> bool:
-    pipeline = _services["order_intake_pipeline"]
-    if pipeline is None:
+    """The tenant's portal ordering setting (portal-fixes B2), and only when
+    the request path is wired. The ``order_intake_pipeline`` rollout flag is
+    not read: portal requests don't depend on it."""
+    from portal.services.portal_order_service import get_configured_order_service
+
+    if _services["order_intake_pipeline"] is None or get_configured_order_service() is None:
         return False
-    try:
-        return await pipeline.get_ordering_state(tenant_id) != "disabled"
-    except Exception as exc:  # noqa: BLE001 — fail closed
-        logger.warning(
-            "Portal /me: ordering state read failed for tenant=%s: %s",
-            tenant_id,
-            type(exc).__name__,
-        )
-        return False
+    return await portal_ordering_enabled(tenant_id)
 
 
 def _invoices_available() -> bool:
@@ -124,6 +121,7 @@ async def get_portal_me(
         email=await _email(scope.user_id),
         customer_display_name=await _customer_display_name(scope),
         supplier_name=await supplier_name(scope.tenant_id),
+        time_zone=tenant_time_zone(scope.tenant_id),
         ordering_available=await _ordering_available(scope.tenant_id),
         invoices_available=invoices_available,
         payments_available=payments_available,
