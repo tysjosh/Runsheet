@@ -112,24 +112,58 @@ def _is_vehicle(doc: dict) -> bool:
     return asset_type is None or asset_type == "vehicle"
 
 
-def _truck_summary(docs: list, average_delay: float) -> "FleetSummary":
+def _asset_ids(doc: dict) -> set:
+    """Ids a job's ``asset_assigned`` may reference for this asset doc."""
+    return {v for v in (doc.get("truck_id"), doc.get("asset_id")) if v}
+
+
+def _is_delayed_asset(doc: dict, delayed_ids: set) -> bool:
+    """Delayed = has an in-progress delayed job, or still carries the legacy
+    ``delayed`` truck status (F9)."""
+    return doc.get("status") == "delayed" or bool(_asset_ids(doc) & delayed_ids)
+
+
+def _delayed_asset_filter(delayed_ids: set) -> dict:
+    """Document-query filter matching :func:`_is_delayed_asset` on active assets."""
+    should: list = [{"term": {"status": "delayed"}}]
+    if delayed_ids:
+        ids = sorted(delayed_ids)
+        should += [{"terms": {"truck_id": ids}}, {"terms": {"asset_id": ids}}]
+    return {
+        "bool": {
+            "filter": [{"terms": {"status": list(_ACTIVE_ASSET_STATUSES)}}],
+            "should": should,
+            "minimum_should_match": 1,
+        }
+    }
+
+
+def _truck_summary(
+    docs: list, average_delay: float, delayed_ids: Optional[set] = None
+) -> "FleetSummary":
+    delayed_ids = delayed_ids or set()
     trucks = [d for d in docs if _is_vehicle(d)]
+    active = [t for t in trucks if t.get("status") in _ACTIVE_ASSET_STATUSES]
+    delayed = [t for t in active if _is_delayed_asset(t, delayed_ids)]
     return FleetSummary(
         totalTrucks=len(trucks),
-        activeTrucks=len([t for t in trucks if t.get("status") in _ACTIVE_ASSET_STATUSES]),
-        onTimeTrucks=len([t for t in trucks if t.get("status") == "on_time"]),
-        delayedTrucks=len([t for t in trucks if t.get("status") == "delayed"]),
+        activeTrucks=len(active),
+        # On time = active and not delayed. The legacy on_time/delayed truck
+        # statuses are no longer written, so counting them read 0/0 (F9).
+        onTimeTrucks=len(active) - len(delayed),
+        delayedTrucks=len(delayed),
         averageDelay=average_delay,
     )
 
 
-async def _average_delay_minutes(tenant_id: str) -> float:
-    """Mean ``delay_duration_minutes`` over the tenant's delayed jobs (0.0 with none).
+async def _delay_stats(tenant_id: str) -> tuple:
+    """``(average delay minutes, ids of assets with an in-progress delayed job)``.
 
     Reads the ``job`` aggregate from Postgres when cut over, otherwise the
-    ``jobs_current`` index, and averages with ``delay_metrics`` so the number
-    matches ``/scheduling/metrics/delays``. A failed read is logged and
-    reported as 0.0, like the asset aggregations below.
+    ``jobs_current`` index, and averages with ``delay_metrics`` (live minutes
+    for open jobs, F10) so the number matches ``/scheduling/metrics/delays``.
+    A failed read is logged and reported as ``(0.0, set())``, like the asset
+    aggregations below.
     """
     from commerce.services.commerce_persistence_bridge import (
         _NOT_CUT_OVER,
@@ -152,10 +186,15 @@ async def _average_delay_minutes(tenant_id: str) -> float:
             j for j in jobs
             if j.get("tenant_id") == tenant_id and j.get("delayed") is True
         ]
-        return float(delay_metrics(jobs)["avg_delay_minutes"])
+        delayed_ids = {
+            j["asset_assigned"]
+            for j in jobs
+            if j.get("status") == "in_progress" and j.get("asset_assigned")
+        }
+        return float(delay_metrics(jobs)["avg_delay_minutes"]), delayed_ids
     except Exception as exc:
         logger.warning("Failed to compute average delay, returning 0.0: %s", exc)
-        return 0.0
+        return 0.0, set()
 
 
 # Multi-Asset Models
@@ -345,9 +384,8 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
                 a for a in pg_assets if a.get("tenant_id") == tenant.tenant_id
             ]
             # Truck counts cover vehicles only (see _is_vehicle).
-            summary = _truck_summary(
-                pg_assets, await _average_delay_minutes(tenant.tenant_id)
-            )
+            average_delay, delayed_ids = await _delay_stats(tenant.tenant_id)
+            summary = _truck_summary(pg_assets, average_delay, delayed_ids)
 
             # Multi-asset rollups: reproduce the by_type / by_subtype terms aggs
             # (doc_count-desc, then key asc to match ES bucket ordering) and the
@@ -375,7 +413,9 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
                 a for a in pg_assets if a.get("status") in _ACTIVE_ASSET_STATUSES
             ])
             delayed_assets = len([
-                a for a in pg_assets if a.get("status") == "delayed"
+                a for a in pg_assets
+                if a.get("status") in _ACTIVE_ASSET_STATUSES
+                and _is_delayed_asset(a, delayed_ids)
             ])
             by_type = _ordered(type_counts)
             by_subtype = _ordered(subtype_counts)
@@ -402,7 +442,8 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
         trucks_response = await elasticsearch_service.search_documents("trucks", trucks_query, size=1000)
         trucks = [hit["_source"] for hit in trucks_response["hits"]["hits"]]
 
-        summary = _truck_summary(trucks, await _average_delay_minutes(tenant.tenant_id))
+        average_delay, delayed_ids = await _delay_stats(tenant.tenant_id)
+        summary = _truck_summary(trucks, average_delay, delayed_ids)
 
         # Multi-asset counts via ES aggregations (tenant-scoped)
         agg_query = inject_tenant_filter(
@@ -422,10 +463,10 @@ async def get_fleet_summary(request: Request, tenant: TenantContext = Depends(ge
                     "terms": {"status": list(_ACTIVE_ASSET_STATUSES)}
                 }
             },
+            # Same rule as _is_delayed_asset: an active asset that has an
+            # in-progress delayed job, or the legacy delayed status (F9).
             "delayed_count": {
-                "filter": {
-                    "term": {"status": "delayed"}
-                }
+                "filter": _delayed_asset_filter(delayed_ids)
             }
         }
 

@@ -357,28 +357,24 @@ async def test_get_eta_not_found_raises_404():
 async def test_get_delay_metrics_returns_correct_counts_and_averages():
     """get_delay_metrics should return total_delayed, avg_delay_minutes, and by-type breakdown.
 
+    The ES path fetches delayed jobs and aggregates them with the same code as
+    the PG path (F10), so completed jobs keep their stored minutes.
+
     Validates: Requirement 7.5
     """
+    def _job(job_type, minutes):
+        return {"_source": {
+            "job_id": f"J-{job_type}-{minutes}", "job_type": job_type,
+            "status": "completed", "delay_duration_minutes": minutes,
+        }}
+
     es = _make_es_mock()
     es.search_documents = AsyncMock(return_value={
-        "hits": {"hits": [], "total": {"value": 5}},
-        "aggregations": {
-            "avg_delay": {"value": 42.5},
-            "delays_by_job_type": {
-                "buckets": [
-                    {
-                        "key": "cargo_transport",
-                        "doc_count": 3,
-                        "avg_delay": {"value": 35.0},
-                    },
-                    {
-                        "key": "vessel_movement",
-                        "doc_count": 2,
-                        "avg_delay": {"value": 53.75},
-                    },
-                ]
-            },
-        },
+        "hits": {"hits": [
+            _job("cargo_transport", 30), _job("cargo_transport", 35),
+            _job("cargo_transport", 40), _job("vessel_movement", 50),
+            _job("vessel_movement", 57.5),
+        ], "total": {"value": 5}},
     })
     svc = _make_service(es)
 
@@ -393,6 +389,62 @@ async def test_get_delay_metrics_returns_correct_counts_and_averages():
     assert result["delays_by_job_type"][1]["job_type"] == "vessel_movement"
     assert result["delays_by_job_type"][1]["count"] == 2
     assert result["delays_by_job_type"][1]["avg_delay_minutes"] == 53.75
+
+
+@pytest.mark.asyncio
+async def test_open_delayed_job_delay_is_computed_at_read_time():
+    """F10: an in-progress job flagged at ~0 min whose ETA was 7 h ago reads
+    420 min; a completed delayed job keeps its stored value."""
+    now = datetime.now(timezone.utc)
+    es = _make_es_mock()
+    es.search_documents = AsyncMock(return_value={
+        "hits": {"hits": [
+            {"_source": {
+                "job_id": "JOB_30", "job_type": "fuel_delivery", "status": "in_progress",
+                "estimated_arrival": (now - timedelta(hours=7, seconds=30)).isoformat(),
+                "delay_duration_minutes": 0,
+            }},
+        ], "total": {"value": 1}},
+    })
+    result = await _make_service(es).get_delay_metrics("tenant_a")
+    assert result["avg_delay_minutes"] == 420.0
+
+    es.search_documents = AsyncMock(return_value={
+        "hits": {"hits": [
+            {"_source": {
+                "job_id": "JOB_9", "job_type": "fuel_delivery", "status": "completed",
+                "estimated_arrival": (now - timedelta(days=3)).isoformat(),
+                "delay_duration_minutes": 25,
+            }},
+        ], "total": {"value": 1}},
+    })
+    result = await _make_service(es).get_delay_metrics("tenant_a")
+    assert result["avg_delay_minutes"] == 25.0
+
+
+def test_effective_delay_minutes_rules():
+    from scheduling.services.job_metrics_aggregator import effective_delay_minutes
+
+    now = datetime(2026, 10, 8, 23, 0, tzinfo=timezone.utc)
+    eta = "2026-10-08T16:00:00Z"
+    assert effective_delay_minutes(
+        {"status": "in_progress", "estimated_arrival": eta, "delay_duration_minutes": 0}, now
+    ) == 420.0
+    # A stored value larger than the live one is kept (never shrinks).
+    assert effective_delay_minutes(
+        {"status": "in_progress", "estimated_arrival": eta, "delay_duration_minutes": 500}, now
+    ) == 500.0
+    # ETA in the future (should not happen for a delayed job) floors at 0.
+    assert effective_delay_minutes(
+        {"status": "in_progress", "estimated_arrival": "2026-10-09T00:00:00Z"}, now
+    ) == 0.0
+    assert effective_delay_minutes(
+        {"status": "completed", "estimated_arrival": eta, "delay_duration_minutes": 12}, now
+    ) == 12.0
+    assert effective_delay_minutes({"status": "completed"}, now) is None
+    assert effective_delay_minutes(
+        {"status": "in_progress", "estimated_arrival": "garbage", "delay_duration_minutes": 3}, now
+    ) == 3.0
 
 
 @pytest.mark.asyncio
@@ -447,3 +499,24 @@ async def test_get_delay_metrics_with_date_range():
     date_range = range_clauses[0]["range"]["scheduled_time"]
     assert date_range["gte"] == "2026-01-01T00:00:00Z"
     assert date_range["lte"] == "2026-01-31T23:59:59Z"
+
+
+@pytest.mark.asyncio
+async def test_get_delayed_jobs_reports_live_minutes():
+    """F10: /scheduling/jobs/delayed shows the delay as of now, not the ~0
+    minutes frozen when the sweep flagged the job."""
+    from scheduling.services.job_service import JobService
+
+    now = datetime.now(timezone.utc)
+    es = _make_es_mock()
+    es.search_documents = AsyncMock(return_value={"hits": {"hits": [{"_source": {
+        "job_id": "JOB_30", "status": "in_progress", "delayed": True,
+        "estimated_arrival": (now - timedelta(hours=2, seconds=10)).isoformat(),
+        "delay_duration_minutes": 0, "tenant_id": "tenant_a",
+    }}], "total": {"value": 1}}})
+    with patch("scheduling.services.job_service.get_settings") as settings:
+        settings.return_value = MagicMock(scheduling_default_eta_hours=4)
+        svc = JobService(es_service=es, redis_url=None)
+
+    (job,) = await svc.get_delayed_jobs("tenant_a")
+    assert job["delay_duration_minutes"] == 120

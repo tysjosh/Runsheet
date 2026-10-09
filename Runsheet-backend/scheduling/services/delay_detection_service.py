@@ -25,6 +25,18 @@ from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
 
 logger = logging.getLogger(__name__)
 
+#: Fields read for delay metrics and the fleet summary's delayed trucks.
+_DELAY_SOURCE_FIELDS = (
+    "job_id",
+    "job_type",
+    "status",
+    "estimated_arrival",
+    "delay_duration_minutes",
+    "tenant_id",
+    "scheduled_time",
+    "asset_assigned",
+)
+
 
 def _minutes_until(value: Any) -> Optional[int]:
     """Whole minutes from now until ``value`` (ISO 8601), rounded up and
@@ -285,6 +297,20 @@ class DelayDetectionService:
         if pg_jobs is not _NOT_CUT_OVER:
             return agg.delay_metrics(pg_jobs)
 
+        # ES path: fetch the delayed jobs and aggregate in Python with the same
+        # code as the PG path, because an open job's delay must be computed
+        # at read time (F10); an ES avg over the stored field cannot do that.
+        jobs = await self.fetch_delayed_jobs(tenant_id, start_date, end_date)
+        return agg.delay_metrics(jobs)
+
+    async def fetch_delayed_jobs(
+        self,
+        tenant_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> list[dict]:
+        """Delayed jobs for ``tenant_id`` (document store), optionally
+        filtered on ``scheduled_time``. Bounded at 1000 rows."""
         must_clauses: list[dict] = [
             {"term": {"tenant_id": tenant_id}},
             {"term": {"delayed": True}},
@@ -301,49 +327,14 @@ class DelayDetectionService:
 
         query: dict = {
             "query": {"bool": {"must": must_clauses}},
-            "size": 0,
-            "aggs": {
-                "avg_delay": {
-                    "avg": {"field": "delay_duration_minutes"}
-                },
-                "delays_by_job_type": {
-                    "terms": {"field": "job_type", "size": 20},
-                    "aggs": {
-                        "avg_delay": {
-                            "avg": {"field": "delay_duration_minutes"}
-                        }
-                    },
-                },
-            },
+            "size": 1000,
+            "_source": list(_DELAY_SOURCE_FIELDS),
         }
 
         response = await self._es.search_documents(
-            JOBS_CURRENT_INDEX, query, size=0
+            JOBS_CURRENT_INDEX, query, size=1000
         )
-
-        total_delayed = response["hits"]["total"]["value"]
-        aggs = response.get("aggregations", {})
-
-        avg_delay_minutes = 0.0
-        avg_delay_agg = aggs.get("avg_delay", {})
-        if avg_delay_agg.get("value") is not None:
-            avg_delay_minutes = round(avg_delay_agg["value"], 2)
-
-        delays_by_job_type: list[dict] = []
-        job_type_buckets = aggs.get("delays_by_job_type", {}).get("buckets", [])
-        for bucket in job_type_buckets:
-            bucket_avg = bucket.get("avg_delay", {}).get("value")
-            delays_by_job_type.append({
-                "job_type": bucket["key"],
-                "count": bucket["doc_count"],
-                "avg_delay_minutes": round(bucket_avg, 2) if bucket_avg is not None else 0.0,
-            })
-
-        return {
-            "total_delayed": total_delayed,
-            "avg_delay_minutes": avg_delay_minutes,
-            "delays_by_job_type": delays_by_job_type,
-        }
+        return [hit["_source"] for hit in response["hits"]["hits"]]
 
     # ------------------------------------------------------------------
     # Internal: WebSocket broadcast
