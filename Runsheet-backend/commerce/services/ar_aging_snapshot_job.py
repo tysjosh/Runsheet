@@ -58,7 +58,9 @@ async def run_ar_aging_snapshot_cycle(
         )
     except Exception as exc:
         logger.error("AR aging snapshot tenant scan failed: %s", exc)
-        return 0
+        # Raise so run_periodic(record="success") does not record this as a
+        # successful run and retries it.
+        raise RuntimeError("AR aging snapshot tenant scan failed") from exc
 
     # Extract distinct tenant_ids from the aggregation
     buckets = (
@@ -96,11 +98,17 @@ async def run_ar_aging_snapshot_cycle(
                 exc,
             )
 
-    if snapshot_count > 0:
-        logger.info(
-            "AR aging snapshot cycle complete: %d snapshot(s) written across %d tenant(s)",
-            snapshot_count,
-            len(tenant_ids),
+    if snapshot_count == 0:
+        # Every tenant failed: treat the cycle as failed (partial failure
+        # stays a logged success).
+        raise RuntimeError(
+            f"AR aging snapshot failed for all {len(tenant_ids)} tenant(s)"
         )
+
+    logger.info(
+        "AR aging snapshot cycle complete: %d snapshot(s) written across %d tenant(s)",
+        snapshot_count,
+        len(tenant_ids),
+    )
 
     return snapshot_count

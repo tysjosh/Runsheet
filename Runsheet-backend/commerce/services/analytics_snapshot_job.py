@@ -146,7 +146,9 @@ async def run_analytics_snapshot_cycle(
         )
     except Exception as exc:
         logger.error("Analytics snapshot tenant scan failed: %s", exc)
-        return 0
+        # Raise so run_periodic(record="success") retries instead of
+        # recording a successful run.
+        raise RuntimeError("Analytics snapshot tenant scan failed") from exc
 
     buckets = (
         tenant_resp.get("aggregations", {}).get("tenants", {}).get("buckets", [])
@@ -179,11 +181,15 @@ async def run_analytics_snapshot_cycle(
                 "Analytics snapshot failed for tenant %s: %s", tenant_id, exc
             )
 
-    if snapshot_count:
-        logger.info(
-            "Analytics snapshot cycle complete: %d tenant(s) snapshotted",
-            snapshot_count,
+    if snapshot_count == 0:
+        # Every tenant failed; partial failure stays a logged success.
+        raise RuntimeError(
+            f"Analytics snapshot failed for all {len(tenant_ids)} tenant(s)"
         )
+    logger.info(
+        "Analytics snapshot cycle complete: %d tenant(s) snapshotted",
+        snapshot_count,
+    )
     return snapshot_count
 
 
