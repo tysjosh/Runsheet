@@ -74,6 +74,7 @@ jest.mock("../../services/fuelApi", () => {
     getPlanCosts: jest.fn(),
     getPlanOutcomes: jest.fn(),
     rejectPlan: jest.fn(),
+    getPriorityLists: jest.fn(),
   };
 });
 jest.mock("../../utils/auth", () => ({
@@ -127,6 +128,7 @@ import {
   getPlan,
   getPlanCosts,
   getPlanOutcomes,
+  getPriorityLists,
   listCombinableGroups,
   listDeliveryDestinations,
   listPlans,
@@ -868,5 +870,56 @@ describe("Dispatch → Plans chrome (UI revamp task 2.5, R8.7)", () => {
       );
     });
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+describe("FuelDistributionPage — Priorities cluster view (3.10 review finding 5)", () => {
+  beforeEach(() => {
+    window.localStorage.setItem("tenant_id", "dev-tenant");
+    mockListPlans.mockResolvedValue({
+      data: [],
+      pagination: { page: 1, size: 10, total: 0, total_pages: 1 },
+      request_id: "req-plans",
+    });
+    (getPriorityLists as jest.Mock).mockResolvedValue({
+      data: [
+        {
+          priorities: [
+            {
+              station_id: "STN-042",
+              station_name: "Elm Street",
+              fuel_grade: "DIESEL_2",
+              cluster_id: "c1",
+            },
+            {
+              customer_tank_id: "CT-101",
+              fuel_grade: "GASOLINE_REG",
+              cluster_id: "c1",
+            },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("names the product (not the raw code) and the station in member chips", async () => {
+    render(<FuelDistributionPage />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: /^Priorities$/i }));
+    });
+    await waitFor(() => expect(getPriorityLists).toHaveBeenCalled());
+    await act(async () => {
+      fireEvent.click(
+        await screen.findByRole("button", { name: /Cluster view/ }),
+      );
+    });
+    const table = await screen.findByRole("table", {
+      name: "Delivery priorities by cluster",
+    });
+    expect(table).toHaveTextContent("Elm Street");
+    expect(table).toHaveTextContent("Diesel #2 (on-road)");
+    expect(table).toHaveTextContent("Regular unleaded");
+    expect(table).not.toHaveTextContent("DIESEL_2");
+    expect(table).not.toHaveTextContent("GASOLINE_REG");
   });
 });

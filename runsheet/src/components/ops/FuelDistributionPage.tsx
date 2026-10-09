@@ -2611,8 +2611,13 @@ function PrioritiesTab() {
               key={`${m.station_id ?? m.customer_tank_id ?? i}-${i}`}
               className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 rounded text-[11px]"
             >
-              {m.station_id ?? m.customer_tank_id ?? "?"}
-              {m.fuel_grade ? ` · ${m.fuel_grade}` : ""}
+              {m.station_name ?? m.station_id ?? m.customer_tank_id ?? "?"}
+              {m.fuel_grade && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <ProductChip code={m.fuel_grade} className="text-[11px]" />
+                </>
+              )}
             </span>
           ))}
           {c.members.length > 8 && (
