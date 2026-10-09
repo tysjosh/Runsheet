@@ -1,16 +1,32 @@
 "use client";
 
-import { type FormEvent, useCallback, useEffect, useState } from "react";
+/**
+ * Compliance → Certifications (UI revamp task 3.5): the summary cards are the
+ * status chips' counts, one toolbar, a DataTable of assets (worst status
+ * first), an asset's certifications in a Drawer, and "Add certification" as
+ * an md FormDialog (design.md §5).
+ */
+import { Eye, Plus, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Badge,
-  type BadgeVariant,
   Button,
   type Column,
+  DataTable,
+  Drawer,
   EntityLink,
-  PageHeader,
-  Pagination,
-  Table,
+  Field,
+  FilterChips,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { calendarDate, number } from "../../lib/format";
+import type { StatusKey } from "../../styles/tokens";
+import { PageTitle } from "../ui/PageHeader";
 import {
   type AssetCertification,
   type AssetCertificationDashboard,
@@ -24,10 +40,6 @@ import {
 } from "../../services/complianceApi";
 import AssetPicker from "../ops/AssetPicker";
 
-// ─── Sub-view types ──────────────────────────────────────────────────────────
-
-type ViewMode = "dashboard" | "asset-detail" | "add";
-
 // ─── Certification type labels ───────────────────────────────────────────────
 
 const CERT_TYPE_LABELS: Record<CertificationType, string> = {
@@ -40,37 +52,30 @@ const CERT_TYPE_LABELS: Record<CertificationType, string> = {
   fire_extinguisher: "Fire Extinguisher",
 };
 
-// ─── Status color mapping ────────────────────────────────────────────────────
+// ─── Status mapping ──────────────────────────────────────────────────────────
 
-function certStatusVariant(status: CertificationStatus): BadgeVariant {
-  switch (status) {
-    case "valid":
-      return "success";
-    case "expiring_soon":
-      return "warning";
-    case "expired":
-      return "error";
-    default:
-      return "neutral";
-  }
-}
+const CERT_STATUS: Record<string, { status: StatusKey; label: string }> = {
+  valid: { status: "ok", label: "Valid" },
+  expiring_soon: { status: "warning", label: "Expiring Soon" },
+  expired: { status: "critical", label: "Expired" },
+};
 
-function certStatusLabel(status: CertificationStatus) {
-  switch (status) {
-    case "valid":
-      return "Valid";
-    case "expiring_soon":
-      return "Expiring Soon";
-    case "expired":
-      return "Expired";
-    default:
-      return status;
-  }
+function CertStatusBadge({
+  status,
+  label,
+}: {
+  status: CertificationStatus;
+  label?: string;
+}) {
+  const s = CERT_STATUS[status] ?? {
+    status: "draft" as StatusKey,
+    label: String(status).replace(/_/g, " "),
+  };
+  return <StatusBadge status={s.status} label={label ?? s.label} />;
 }
 
 function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
+  return dateStr ? calendarDate(dateStr) : "—";
 }
 
 // ─── Urgency sort helper ─────────────────────────────────────────────────────
@@ -160,64 +165,73 @@ function aggregateByAsset(
 const assetCertColumns: Column<AssetCertification>[] = [
   {
     key: "certification_type",
-    label: "Type",
-    render: (cert) => (
-      <span className="font-medium">
-        {CERT_TYPE_LABELS[cert.certification_type] || cert.certification_type}
-      </span>
-    ),
+    header: "Type",
+    className: "font-medium text-text",
+    cell: (cert) =>
+      CERT_TYPE_LABELS[cert.certification_type] || cert.certification_type,
   },
   {
     key: "status",
-    label: "Status",
-    render: (cert) => (
-      <Badge variant={certStatusVariant(cert.status)} size="sm">
-        {certStatusLabel(cert.status)}
-      </Badge>
-    ),
+    header: "Status",
+    width: 140,
+    cell: (cert) => <CertStatusBadge status={cert.status} />,
   },
   {
     key: "certification_date",
-    label: "Certification Date",
-    render: (cert) => formatDate(cert.certification_date),
+    header: "Certified",
+    width: 150,
+    cell: (cert) => formatDate(cert.certification_date),
   },
   {
     key: "expiry_date",
-    label: "Expiry Date",
-    render: (cert) => formatDate(cert.expiry_date),
+    header: "Expires",
+    width: 150,
+    cell: (cert) => formatDate(cert.expiry_date),
   },
   {
     key: "inspector_name",
-    label: "Inspector",
-    render: (cert) => cert.inspector_name,
+    header: "Inspector",
+    truncate: true,
+    cell: (cert) => cert.inspector_name,
   },
   {
     key: "certificate_number",
-    label: "Certificate #",
-    render: (cert) => cert.certificate_number,
+    header: "Certificate",
+    truncate: true,
+    className: "font-mono text-xs",
+    cell: (cert) => cert.certificate_number,
   },
+];
+
+const STATUS_CHIPS: { id: "" | CertificationStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "expired", label: "Expired" },
+  { id: "expiring_soon", label: "Expiring soon" },
+  { id: "valid", label: "Valid" },
 ];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function AssetCertificationsPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>("dashboard");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Dashboard state
+  const [reload, setReload] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<"" | CertificationStatus>(
+    "",
+  );
   const [dashboard, setDashboard] =
     useState<AssetCertificationDashboard | null>(null);
-
-  // Asset detail state
+  // Asset drawer
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [assetCertifications, setAssetCertifications] = useState<
     AssetCertification[]
   >([]);
+  const [assetLoading, setAssetLoading] = useState(false);
+  const [assetError, setAssetError] = useState<string | null>(null);
   const [assetCertsPage, setAssetCertsPage] = useState(1);
   const [assetCertsTotalPages, setAssetCertsTotalPages] = useState(1);
-
-  // ─── Fetch dashboard ─────────────────────────────────────────────────────
+  // Add dialog: null = closed; "" = no asset prefilled.
+  const [adding, setAdding] = useState<string | null>(null);
 
   const fetchDashboard = useCallback(async () => {
     setLoading(true);
@@ -234,20 +248,17 @@ export default function AssetCertificationsPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+    // `reload` refetches after a create.
+  }, [reload]);
 
   useEffect(() => {
-    if (viewMode === "dashboard") {
-      fetchDashboard();
-    }
-  }, [fetchDashboard, viewMode]);
-
-  // ─── Fetch certifications for a specific asset ───────────────────────────
+    fetchDashboard();
+  }, [fetchDashboard]);
 
   const fetchAssetCertifications = useCallback(async () => {
     if (!selectedAssetId) return;
-    setLoading(true);
-    setError(null);
+    setAssetLoading(true);
+    setAssetError(null);
     try {
       const response = await getAssetCertifications({
         asset_id: selectedAssetId,
@@ -257,489 +268,410 @@ export default function AssetCertificationsPage() {
       setAssetCertifications(response.data ?? []);
       setAssetCertsTotalPages(response.pagination?.total_pages ?? 1);
     } catch (err) {
-      setError(
+      setAssetError(
         err instanceof Error
           ? err.message
           : "Failed to load asset certifications",
       );
     } finally {
-      setLoading(false);
+      setAssetLoading(false);
     }
   }, [selectedAssetId, assetCertsPage]);
 
   useEffect(() => {
-    if (viewMode === "asset-detail" && selectedAssetId) {
-      fetchAssetCertifications();
-    }
-  }, [fetchAssetCertifications, viewMode, selectedAssetId]);
+    if (selectedAssetId) fetchAssetCertifications();
+  }, [fetchAssetCertifications, selectedAssetId]);
 
-  // ─── Handlers ────────────────────────────────────────────────────────────
-
-  const handleViewAsset = (assetId: string) => {
+  const openAsset = (assetId: string) => {
     setSelectedAssetId(assetId);
     setAssetCertsPage(1);
-    setViewMode("asset-detail");
   };
 
-  const handleBackToDashboard = () => {
-    setSelectedAssetId(null);
-    setAssetCertifications([]);
-    setViewMode("dashboard");
-  };
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setAdding("")}
+      >
+        Add Certification
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
 
-  // ─── Render: Dashboard Summary Cards ─────────────────────────────────────
+  // The backend returns a flat list of per-certification rows; group them
+  // into per-asset summaries (already sorted by urgency).
+  const assets = useMemo(
+    () => aggregateByAsset(dashboard?.assets),
+    [dashboard],
+  );
+  const visible = statusFilter
+    ? assets.filter((a) => a.overall_status === statusFilter)
+    : assets;
+  const counts: Record<string, number | undefined> = dashboard
+    ? {
+        "": assets.length,
+        expired: assets.filter((a) => a.overall_status === "expired").length,
+        expiring_soon: assets.filter(
+          (a) => a.overall_status === "expiring_soon",
+        ).length,
+        valid: assets.filter((a) => a.overall_status === "valid").length,
+      }
+    : {};
 
-  function renderSummaryCards() {
-    if (!dashboard) return null;
-    return (
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-        <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-          <p className="text-sm text-gray-500">Valid Certifications</p>
-          <p className="text-2xl font-bold text-success-dark">
-            {dashboard.total_valid}
-          </p>
+  const dashboardColumns: Column<AssetCertificationSummary>[] = [
+    {
+      key: "asset_id",
+      header: "Asset",
+      width: 180,
+      // The compliance subject (asset) is navigable to the Fleet module
+      // (Req 11.3, 13.1). The dashboard list carries no resolver `links`, so
+      // link optimistically on the raw asset_id.
+      cell: (asset) => (
+        <EntityLink
+          type="asset"
+          id={asset.asset_id}
+          className="font-medium"
+          stopPropagation
+        />
+      ),
+    },
+    {
+      key: "overall_status",
+      header: "Status",
+      width: 150,
+      cell: (asset) => <CertStatusBadge status={asset.overall_status} />,
+    },
+    {
+      key: "next_expiry",
+      header: "Next expiry",
+      width: 150,
+      cell: (asset) => formatDate(asset.next_expiry_date),
+    },
+    {
+      key: "days_until_expiry",
+      header: "Days left",
+      align: "right",
+      width: 110,
+      className: "tabular-nums",
+      cell: (asset) =>
+        asset.days_until_next_expiry <= 0
+          ? "Overdue"
+          : `${number(asset.days_until_next_expiry)} days`,
+    },
+    {
+      key: "certifications",
+      header: "Certifications",
+      cell: (asset) => (
+        <div className="flex flex-wrap gap-1">
+          {asset.certifications.map((cert) => (
+            <span
+              key={cert.cert_id}
+              title={`${CERT_TYPE_LABELS[cert.certification_type]}: expires ${formatDate(cert.expiry_date)}`}
+            >
+              <CertStatusBadge
+                status={cert.status}
+                label={cert.certification_type.replace(/_/g, " ")}
+              />
+            </span>
+          ))}
         </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-          <p className="text-sm text-gray-500">Expiring Soon</p>
-          <p className="text-2xl font-bold text-warning-dark">
-            {dashboard.total_expiring_soon}
-          </p>
-        </div>
-        <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
-          <p className="text-sm text-gray-500">Expired</p>
-          <p className="text-2xl font-bold text-error-dark">
-            {dashboard.total_expired}
-          </p>
-        </div>
-      </div>
-    );
-  }
+      ),
+    },
+  ];
 
-  // ─── Render: Dashboard Fleet Table ───────────────────────────────────────
+  const titleRow = embedded ? null : (
+    <div className="flex h-11 items-center border-b border-slate-200 px-4">
+      <PageTitle className="text-base font-semibold text-text">
+        Fleet Certifications
+      </PageTitle>
+      <div className="ml-auto">{actions}</div>
+    </div>
+  );
 
-  function renderDashboard() {
-    if (loading) {
-      return (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">
-            Loading fleet certification dashboard...
-          </span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      );
-    }
-
-    if (!dashboard) return null;
-
-    // The backend returns a flat list of per-certification rows; group
-    // them into per-asset summaries (already sorted by urgency).
-    const sortedAssets = aggregateByAsset(dashboard.assets);
-
-    const dashboardColumns: Column<AssetCertificationSummary>[] = [
-      {
-        key: "asset_id",
-        label: "Asset",
-        // The compliance subject (asset) is navigable to the Fleet module
-        // (Req 11.3, 13.1). The dashboard list carries no resolver `links`, so
-        // link optimistically on the raw asset_id.
-        render: (asset) => (
-          <EntityLink
-            type="asset"
-            id={asset.asset_id}
-            className="font-medium"
+  return (
+    <div className="flex h-full flex-col bg-surface">
+      {titleRow}
+      <Toolbar
+        label="Certifications"
+        filters={
+          <FilterChips
+            label="Certification status"
+            options={STATUS_CHIPS.map((c) => ({
+              id: c.id || "all",
+              label: c.label,
+              count: counts[c.id],
+              status: c.id ? CERT_STATUS[c.id].status : undefined,
+            }))}
+            value={statusFilter || "all"}
+            onChange={(v) =>
+              setStatusFilter(v === "all" ? "" : (v as CertificationStatus))
+            }
           />
-        ),
-      },
-      {
-        key: "overall_status",
-        label: "Overall Status",
-        render: (asset) => (
-          <Badge variant={certStatusVariant(asset.overall_status)} size="sm">
-            {certStatusLabel(asset.overall_status)}
-          </Badge>
-        ),
-      },
-      {
-        key: "next_expiry",
-        label: "Next Expiry",
-        render: (asset) => formatDate(asset.next_expiry_date),
-      },
-      {
-        key: "days_until_expiry",
-        label: "Days Until Expiry",
-        render: (asset) => (
-          <span
-            className={`font-medium ${
-              asset.days_until_next_expiry <= 7
-                ? "text-error-dark"
-                : asset.days_until_next_expiry <= 30
-                  ? "text-warning-dark"
-                  : "text-gray-700"
-            }`}
-          >
-            {asset.days_until_next_expiry <= 0
-              ? "Overdue"
-              : `${asset.days_until_next_expiry} days`}
-          </span>
-        ),
-      },
-      {
-        key: "certifications",
-        label: "Certifications",
-        render: (asset) => (
-          <div className="flex flex-wrap gap-1">
-            {asset.certifications.map((cert) => (
-              <span
-                key={cert.cert_id}
-                title={`${CERT_TYPE_LABELS[cert.certification_type]}: expires ${formatDate(cert.expiry_date)}`}
-              >
-                <Badge variant={certStatusVariant(cert.status)} size="sm">
-                  {cert.certification_type.replace(/_/g, " ")}
-                </Badge>
+        }
+        end={
+          <>
+            {dashboard && (
+              <span className="sr-only">
+                Valid Certifications {dashboard.total_valid}, Expiring Soon{" "}
+                {dashboard.total_expiring_soon}, Expired{" "}
+                {dashboard.total_expired}
               </span>
-            ))}
-          </div>
-        ),
-      },
-      {
-        key: "actions",
-        label: "Actions",
-        render: (asset) => (
-          <Button
-            type="button"
-            onClick={() => handleViewAsset(asset.asset_id)}
-            variant="ghost"
-            size="sm"
-          >
-            View Details
-          </Button>
-        ),
-      },
-    ];
-
-    return (
-      <div>
-        {renderSummaryCards()}
-
-        <Table<AssetCertificationSummary>
+            )}
+            <IconButton
+              label="Refresh"
+              size="sm"
+              onClick={() => setReload((n) => n + 1)}
+              icon={
+                <RefreshCw
+                  className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+                />
+              }
+            />
+          </>
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<AssetCertificationSummary>
           ariaLabel="Fleet certification dashboard"
           columns={dashboardColumns}
-          data={sortedAssets}
+          data={loading || error ? [] : visible}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchDashboard } : null}
           getRowId={(asset) => asset.asset_id}
-          emptyState={<span className="text-gray-500">No assets found.</span>}
+          rowLabel={(asset) => `Asset ${asset.asset_id}`}
+          onRowClick={(asset) => openAsset(asset.asset_id)}
+          rowMenu={(asset) => [
+            {
+              id: "view",
+              label: "View certifications",
+              icon: <Eye className="h-3.5 w-3.5" />,
+              onSelect: () => openAsset(asset.asset_id),
+            },
+            {
+              id: "add",
+              label: "Add certification",
+              icon: <Plus className="h-3.5 w-3.5" />,
+              onSelect: () => setAdding(asset.asset_id),
+            },
+          ]}
+          emptyState={<span className="text-text-muted">No assets found.</span>}
         />
       </div>
-    );
-  }
 
-  // ─── Render: Asset Detail View ───────────────────────────────────────────
-
-  function renderAssetDetail() {
-    if (loading) {
-      return (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading certifications...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      <Drawer
+        open={selectedAssetId !== null}
+        onClose={() => setSelectedAssetId(null)}
+        title={
+          selectedAssetId
+            ? `Certifications · ${selectedAssetId}`
+            : "Certifications"
+        }
+        width={760}
+      >
+        <div className="flex items-center justify-between gap-2 px-4 py-2">
+          {selectedAssetId && <EntityLink type="asset" id={selectedAssetId} />}
+          <Button
+            size="sm"
+            variant="secondary"
+            icon={<Plus className="h-3.5 w-3.5" />}
+            onClick={() => setAdding(selectedAssetId ?? "")}
+          >
+            Add certification
+          </Button>
         </div>
-      );
-    }
-
-    return (
-      <div>
-        <div className="mb-4">
-          <h2 className="text-lg font-bold">
-            Certifications for Asset:{" "}
-            {selectedAssetId ? (
-              <EntityLink type="asset" id={selectedAssetId} />
-            ) : (
-              "—"
-            )}
-          </h2>
-        </div>
-
-        <Table<AssetCertification>
+        <DataTable<AssetCertification>
           ariaLabel={`Certifications for asset ${selectedAssetId ?? ""}`}
           columns={assetCertColumns}
-          data={assetCertifications}
+          data={assetLoading || assetError ? [] : assetCertifications}
+          loading={assetLoading}
+          error={
+            assetError
+              ? { message: assetError, onRetry: fetchAssetCertifications }
+              : null
+          }
           getRowId={(cert) => cert.cert_id}
+          pagination={
+            assetCertsTotalPages > 1
+              ? {
+                  page: assetCertsPage,
+                  totalPages: assetCertsTotalPages,
+                  onPageChange: setAssetCertsPage,
+                }
+              : undefined
+          }
           emptyState={
-            <span className="text-gray-500">
+            <span className="text-text-muted">
               No certifications found for this asset.
             </span>
           }
         />
+      </Drawer>
 
-        {/* Pagination */}
-        {assetCertifications.length > 0 && (
-          <Pagination
-            currentPage={assetCertsPage}
-            totalPages={assetCertsTotalPages}
-            onPageChange={setAssetCertsPage}
-            className="px-0 mt-4"
-          />
-        )}
-      </div>
-    );
-  }
-
-  // ─── Render: Add Certification Form ──────────────────────────────────────
-
-  function renderAddForm() {
-    return (
-      <CertificationForm
-        prefilledAssetId={selectedAssetId}
-        onSubmit={async (data) => {
-          setLoading(true);
-          setError(null);
-          try {
-            await createAssetCertification(data);
-            // Return to dashboard after successful creation
-            setViewMode("dashboard");
-          } catch (err) {
-            setError(
-              err instanceof Error
-                ? err.message
-                : "Failed to create certification",
-            );
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onCancel={() => {
-          if (selectedAssetId) {
-            setViewMode("asset-detail");
-          } else {
-            setViewMode("dashboard");
-          }
-        }}
-        loading={loading}
-      />
-    );
-  }
-
-  // ─── Main Render ─────────────────────────────────────────────────────────
-
-  return (
-    <div className="h-full flex flex-col bg-white">
-      <PageHeader
-        title="Fleet Certifications"
-        subtitle="Track DOT cargo tank inspections, meter seals, and fire extinguisher certifications."
-        actions={
-          <>
-            {viewMode === "asset-detail" && (
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={handleBackToDashboard}
-              >
-                Back to Dashboard
-              </Button>
-            )}
-            {viewMode === "add" && (
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={() => {
-                  if (selectedAssetId) {
-                    setViewMode("asset-detail");
-                  } else {
-                    setViewMode("dashboard");
-                  }
-                }}
-              >
-                Cancel
-              </Button>
-            )}
-            {(viewMode === "dashboard" || viewMode === "asset-detail") && (
-              <Button type="button" onClick={() => setViewMode("add")}>
-                Add Certification
-              </Button>
-            )}
-          </>
-        }
-      />
-
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="mx-8 mt-6 bg-error-light border border-error/20 text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
+      {adding !== null && (
+        <CertificationDialog
+          prefilledAssetId={adding || null}
+          onClose={() => setAdding(null)}
+          onSaved={() => {
+            setReload((n) => n + 1);
+            if (selectedAssetId) void fetchAssetCertifications();
+          }}
+        />
       )}
-
-      {/* View content */}
-      <div className="flex-1 overflow-auto px-8 py-6">
-        {viewMode === "dashboard" && renderDashboard()}
-        {viewMode === "asset-detail" && renderAssetDetail()}
-        {viewMode === "add" && renderAddForm()}
-      </div>
     </div>
   );
 }
 
-// ─── Certification Form Sub-Component ────────────────────────────────────────
+// ─── Add certification dialog ────────────────────────────────────────────────
 
-interface CertificationFormProps {
-  prefilledAssetId: string | null;
-  onSubmit: (data: CreateAssetCertificationPayload) => Promise<void>;
-  onCancel: () => void;
-  loading: boolean;
+type CertValues = {
+  asset_id: string;
+  certification_type: CertificationType;
+  certification_date: string;
+  expiry_date: string;
+  inspector_name: string;
+  certificate_number: string;
+};
+
+export function validateCertification(v: CertValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.asset_id) errors.asset_id = "Pick an asset.";
+  if (!v.certification_date)
+    errors.certification_date = "Enter the certification date.";
+  if (!v.expiry_date) errors.expiry_date = "Enter the expiry date.";
+  else if (v.certification_date && v.expiry_date <= v.certification_date)
+    errors.expiry_date = "Expiry must be after the certification date.";
+  if (!v.inspector_name.trim()) errors.inspector_name = "Enter the inspector.";
+  if (!v.certificate_number.trim())
+    errors.certificate_number = "Enter the certificate number.";
+  return errors;
 }
 
-function CertificationForm({
+function CertificationDialog({
   prefilledAssetId,
-  onSubmit,
-  onCancel,
-  loading,
-}: CertificationFormProps) {
-  const [assetId, setAssetId] = useState(prefilledAssetId ?? "");
-  const [certificationType, setCertificationType] =
-    useState<CertificationType>("V_test");
-  const [certificationDate, setCertificationDate] = useState("");
-  const [expiryDate, setExpiryDate] = useState("");
-  const [inspectorName, setInspectorName] = useState("");
-  const [certificateNumber, setCertificateNumber] = useState("");
-  // The asset picker isn't a native input, so enforce its "required" rule here.
-  const [assetError, setAssetError] = useState<string | null>(null);
-
-  const handleSubmit = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!assetId) {
-      setAssetError("Asset ID is required.");
-      return;
-    }
+  onClose,
+  onSaved,
+}: {
+  prefilledAssetId: string | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const submit = async (v: CertValues) => {
     const data: CreateAssetCertificationPayload = {
-      asset_id: assetId,
-      certification_type: certificationType,
-      certification_date: certificationDate,
-      expiry_date: expiryDate,
-      inspector_name: inspectorName,
-      certificate_number: certificateNumber,
+      asset_id: v.asset_id,
+      certification_type: v.certification_type,
+      certification_date: v.certification_date,
+      expiry_date: v.expiry_date,
+      inspector_name: v.inspector_name.trim(),
+      certificate_number: v.certificate_number.trim(),
     };
-    await onSubmit(data);
+    await createAssetCertification(data);
   };
-
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+    <FormDialog<CertValues, void>
+      open
+      size="md"
+      title="Add certification"
+      submitLabel="Add Certification"
+      successMessage="Certification added"
+      initialValues={{
+        asset_id: prefilledAssetId ?? "",
+        certification_type: "V_test",
+        certification_date: "",
+        expiry_date: "",
+        inspector_name: "",
+        certificate_number: "",
+      }}
+      validate={validateCertification}
+      onSubmit={submit}
+      onSaved={onSaved}
+      onClose={onClose}
     >
-      <h2 className="text-lg font-bold mb-4">Add New Certification</h2>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <label htmlFor="asset-id" className="block text-sm font-medium mb-1">
-            Asset ID
-          </label>
-          {/* Cargo-tank trucks are fleet vehicles, so the roster is filtered to
-              vehicle assets (the live equivalent of the former TRUCK-001 text
-              entry). */}
-          <AssetPicker
-            id="asset-id"
-            assetType="vehicle"
-            aria-label="Asset ID"
-            value={assetId || null}
-            onChange={(value) => {
-              setAssetId(value);
-              setAssetError(null);
-            }}
-          />
-          {assetError && (
-            <p className="text-xs text-error mt-1">{assetError}</p>
-          )}
-        </div>
-        <div>
-          <label htmlFor="cert-type" className="block text-sm font-medium mb-1">
-            Certification Type
-          </label>
-          <select
-            id="cert-type"
-            value={certificationType}
-            onChange={(e) =>
-              setCertificationType(e.target.value as CertificationType)
-            }
-            className="w-full border rounded px-3 py-2"
-          >
-            {Object.entries(CERT_TYPE_LABELS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label htmlFor="cert-date" className="block text-sm font-medium mb-1">
-            Certification Date
-          </label>
-          <input
-            id="cert-date"
-            type="date"
+      {({ values, set, errors }) => (
+        <>
+          <Field label="Asset ID" required span={1} error={errors.asset_id}>
+            {/* Cargo-tank trucks are fleet vehicles, so the roster is filtered
+                to vehicle assets. */}
+            <AssetPicker
+              id="asset-id"
+              assetType="vehicle"
+              aria-label="Asset ID"
+              value={values.asset_id || null}
+              onChange={(value) => set("asset_id", value)}
+            />
+          </Field>
+          <Field label="Certification Type" span={1}>
+            <Select
+              id="cert-type"
+              value={values.certification_type}
+              onChange={(v) =>
+                set("certification_type", v as CertificationType)
+              }
+              options={Object.entries(CERT_TYPE_LABELS).map(
+                ([value, label]) => ({ value, label }),
+              )}
+            />
+          </Field>
+          <Field
+            label="Certification Date"
             required
-            value={certificationDate}
-            onChange={(e) => setCertificationDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="expiry-date"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.certification_date}
           >
-            Expiry Date
-          </label>
-          <input
-            id="expiry-date"
-            type="date"
+            <input
+              id="cert-date"
+              type="date"
+              value={values.certification_date}
+              onChange={(e) => set("certification_date", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field
+            label="Expiry Date"
             required
-            value={expiryDate}
-            onChange={(e) => setExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="inspector-name"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.expiry_date}
           >
-            Inspector Name
-          </label>
-          <input
-            id="inspector-name"
-            type="text"
+            <input
+              id="expiry-date"
+              type="date"
+              value={values.expiry_date}
+              onChange={(e) => set("expiry_date", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field
+            label="Inspector Name"
             required
-            value={inspectorName}
-            onChange={(e) => setInspectorName(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="cert-number"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.inspector_name}
           >
-            Certificate Number
-          </label>
-          <input
-            id="cert-number"
-            type="text"
+            <input
+              id="inspector-name"
+              type="text"
+              value={values.inspector_name}
+              onChange={(e) => set("inspector_name", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+          <Field
+            label="Certificate Number"
             required
-            value={certificateNumber}
-            onChange={(e) => setCertificateNumber(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-      </div>
-
-      <div className="flex gap-3 mt-6">
-        <Button type="submit" disabled={loading} loading={loading}>
-          {loading ? "Saving..." : "Add Certification"}
-        </Button>
-        <Button type="button" onClick={onCancel} variant="secondary">
-          Cancel
-        </Button>
-      </div>
-    </form>
+            span={1}
+            error={errors.certificate_number}
+          >
+            <input
+              id="cert-number"
+              type="text"
+              value={values.certificate_number}
+              onChange={(e) => set("certificate_number", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }

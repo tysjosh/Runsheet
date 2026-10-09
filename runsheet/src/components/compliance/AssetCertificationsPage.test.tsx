@@ -146,8 +146,11 @@ describe("AssetCertificationsPage — fleet dashboard", () => {
     render(<AssetCertificationsPage />);
 
     await screen.findByText("TNK-001");
-    // Summary cards render with the backend totals.
-    expect(screen.getByText("Valid Certifications")).toBeInTheDocument();
+    // Summary cards became the status chips' counts (task 3.5).
+    expect(
+      screen.getByRole("group", { name: "Certification status" }),
+    ).toHaveTextContent(/Expired\s*\d/);
+    expect(screen.getByText(/Valid Certifications/)).toBeInTheDocument();
     // "Expiring Soon" / "Expired" also appear as status badges, so scope
     // the assertion to the summary card label specifically.
     expect(screen.getAllByText("Expiring Soon").length).toBeGreaterThan(0);
@@ -203,7 +206,7 @@ describe("AssetCertificationsPage — add form asset picker", () => {
     render(<AssetCertificationsPage />);
 
     // Open the create form.
-    fireEvent.click(await screen.findByText("Add Certification"));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Certification" }));
 
     // The Asset ID field is the roster-backed picker (loaded from getAssets).
     await waitFor(() => expect(mockGetAssets).toHaveBeenCalled());
@@ -211,21 +214,54 @@ describe("AssetCertificationsPage — add form asset picker", () => {
     fireEvent.click(await screen.findByText("Rig 1"));
 
     // Fill the remaining required fields and submit.
-    fireEvent.change(screen.getByLabelText("Certification Date"), {
+    fireEvent.change(screen.getByLabelText(/^Certification Date/), {
       target: { value: "2025-01-01" },
     });
-    fireEvent.change(screen.getByLabelText("Expiry Date"), {
+    fireEvent.change(screen.getByLabelText(/^Expiry Date/), {
       target: { value: "2026-01-01" },
     });
-    fireEvent.change(screen.getByLabelText("Inspector Name"), {
+    fireEvent.change(screen.getByLabelText(/^Inspector Name/), {
       target: { value: "John Smith" },
     });
-    fireEvent.change(screen.getByLabelText("Certificate Number"), {
+    fireEvent.change(screen.getByLabelText(/^Certificate Number/), {
       target: { value: "V-2025-TX-001" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Add Certification" }));
+    fireEvent.click(
+      within(screen.getByRole("dialog", { name: "Add certification" })).getByRole(
+        "button",
+        { name: "Add Certification" },
+      ),
+    );
 
     await waitFor(() => expect(mockCreateCert).toHaveBeenCalled());
     expect(mockCreateCert.mock.calls[0][0].asset_id).toBe("TRUCK-001");
+  });
+});
+
+describe("AssetCertificationsPage — FormDialog (task 3.5)", () => {
+  it("validates inline and keeps the dialog open; Escape closes it", async () => {
+    mockGetDashboard.mockResolvedValue({
+      data: { assets: [], total_valid: 0, total_expiring_soon: 0, total_expired: 0 },
+      request_id: "r",
+    });
+    render(<AssetCertificationsPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add Certification" }),
+    );
+    const dialog = screen.getByRole("dialog", { name: "Add certification" });
+    fireEvent.change(within(dialog).getByLabelText(/^Certification Date/), {
+      target: { value: "2026-01-01" },
+    });
+    fireEvent.change(within(dialog).getByLabelText(/^Expiry Date/), {
+      target: { value: "2025-01-01" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Add Certification" }),
+    );
+    expect(await within(dialog).findByText("Pick an asset.")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Expiry must be after the certification date."),
+    ).toBeInTheDocument();
+    expect(mockCreateCert).not.toHaveBeenCalled();
   });
 });
