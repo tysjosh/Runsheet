@@ -393,6 +393,7 @@ async def test_default_sender_sends_nothing_without_email_credentials(monkeypatc
 
     monkeypatch.delenv("SENDGRID_API_KEY", raising=False)
     monkeypatch.delenv("SENDGRID_FROM_EMAIL", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
     assert await send_invite_email("qa@example.test", InviteEmail("s", "t")) is False
 
 

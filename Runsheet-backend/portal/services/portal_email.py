@@ -1,5 +1,5 @@
-"""Customer-portal emails: templates, rendering and SendGrid delivery
-(portal-fixes C2).
+"""Customer-portal emails: templates, rendering and delivery (portal-fixes C2;
+SMTP/Mailtrap in staging).
 
 Four emails, each an ``email`` template in the notifications templates
 mechanism (``notifications.services.template_renderer.DEFAULT_TEMPLATES``,
@@ -14,12 +14,15 @@ Every email is sent as plain text plus an HTML alternative built from the
 same text (escaped, paragraphs, the link as a labelled link), so the two
 never disagree. Nothing here carries prices, costs, margins or internal ids.
 
-Delivery uses :class:`notifications.services.sendgrid_email_dispatcher.
-SendGridEmailDispatcher`, the dispatcher ``bootstrap/notifications.py``
-registers, and only when ``SENDGRID_API_KEY`` and ``SENDGRID_FROM_EMAIL``
-are set. Without them every send returns ``False`` and nothing is logged
-about the recipient beyond what callers already log. The key is never read
-here, only its presence.
+Delivery uses the same email dispatcher ``bootstrap/notifications.py``
+registers: :class:`notifications.services.smtp_email_dispatcher.
+SmtpEmailDispatcher` when ``SMTP_HOST``, ``SMTP_FROM_EMAIL`` and
+``SMTP_PASSWORD`` are set (staging: Mailtrap), else
+:class:`notifications.services.sendgrid_email_dispatcher.
+SendGridEmailDispatcher` when ``SENDGRID_API_KEY`` and
+``SENDGRID_FROM_EMAIL`` are set. With neither, every send returns ``False``
+and nothing is logged about the recipient beyond what callers already log.
+Credentials are never read here, only their presence.
 """
 from __future__ import annotations
 
@@ -142,9 +145,30 @@ class PortalEmail:
     html: str = ""
 
 
-def email_channel_configured() -> bool:
-    """True when the SendGrid email channel has its two settings."""
+def _sendgrid_configured() -> bool:
     return bool(os.environ.get("SENDGRID_API_KEY") and os.environ.get("SENDGRID_FROM_EMAIL"))
+
+
+def email_channel_configured() -> bool:
+    """True when an email provider (SMTP, or SendGrid) has its settings."""
+    from notifications.services.smtp_email_dispatcher import smtp_email_configured
+
+    return smtp_email_configured() or _sendgrid_configured()
+
+
+def _email_dispatcher():
+    """The configured email dispatcher: SMTP first, then SendGrid (the same
+    order as ``bootstrap/notifications.py``)."""
+    from notifications.services.smtp_email_dispatcher import (
+        SmtpEmailDispatcher,
+        smtp_email_configured,
+    )
+
+    if smtp_email_configured():
+        return SmtpEmailDispatcher()
+    from notifications.services.sendgrid_email_dispatcher import SendGridEmailDispatcher
+
+    return SendGridEmailDispatcher()
 
 
 def _render(template: str, data: Mapping[str, Any]) -> str:
@@ -236,7 +260,8 @@ async def render_portal_email(
 
 
 async def send_portal_email(recipient: str, email: PortalEmail) -> bool:
-    """Send through SendGrid; ``False`` when it isn't configured or fails.
+    """Send through the configured email provider; ``False`` when none is
+    configured or the send fails.
 
     The recipient is not logged here (it's PII); the dispatcher logs its own
     outcome line.
@@ -244,9 +269,7 @@ async def send_portal_email(recipient: str, email: PortalEmail) -> bool:
     if not recipient or not email_channel_configured():
         return False
     try:
-        from notifications.services.sendgrid_email_dispatcher import SendGridEmailDispatcher
-
-        dispatcher = SendGridEmailDispatcher()
+        dispatcher = _email_dispatcher()
         outcome = await dispatcher.dispatch(
             {
                 "recipient_reference": recipient,

@@ -11,7 +11,8 @@ Every method is best effort and never raises: a notification failure must
 not fail the request or the dispatcher's action. Emails go only to the
 portal user who made the request (from the ``order_placed`` event), never to
 other addresses, and carry no price, cost, margin or internal id. Without
-SendGrid configured no email is sent and the activity entry still is.
+an email provider configured (SMTP or SendGrid) no email is sent and the
+activity entry still is.
 """
 from __future__ import annotations
 
