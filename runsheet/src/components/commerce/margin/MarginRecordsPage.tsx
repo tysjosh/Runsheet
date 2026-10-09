@@ -308,8 +308,8 @@ export default function MarginRecordsPage() {
           <caption className="sr-only">
             Margin records, newest sale first
           </caption>
-          <thead>
-            <tr className="h-9 whitespace-nowrap border-b bg-slate-50 text-left text-xs font-semibold text-gray-600">
+          <thead className="border-b border-slate-200 bg-slate-50">
+            <tr className="h-9 whitespace-nowrap text-left text-xs font-semibold text-gray-600">
               <th scope="col" className="py-2 pr-3">
                 Sale date{timeZone ? ` (${timeZone})` : ""}
               </th>
