@@ -116,10 +116,14 @@ describe("ARAgingDashboard", () => {
       expect(screen.getByText("AR Aging Dashboard")).toBeInTheDocument();
     });
 
-    // Summary stats - total outstanding
-    expect(screen.getByText(/\$115,000.00 outstanding/)).toBeInTheDocument();
-    // Accounts with balance count (title-row counts)
-    expect(screen.getByText(/2 accounts/)).toBeInTheDocument();
+    // Toolbar summary: total outstanding and accounts with a balance (moved
+    // out of the hub title row, where it clipped under nine Billing tabs).
+    const summary = document.querySelector("[data-aging-summary]");
+    expect(summary).toHaveTextContent("$115,000.00 outstanding · 2 accounts");
+    expect(summary).toHaveAttribute(
+      "title",
+      "$115,000.00 outstanding · 2 accounts",
+    );
 
     // Top accounts
     expect(screen.getByText("Acme Main")).toBeInTheDocument();

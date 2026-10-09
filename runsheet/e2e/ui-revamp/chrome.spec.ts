@@ -65,6 +65,59 @@ for (const p of SHELL_PAGES) {
   }
 }
 
+// Title-row counts are `overflow-hidden` with no ellipsis, so a page whose
+// counts outgrow the row loses them silently (phase 3 iteration-5 review,
+// AR aging under the nine platform_admin Billing tabs). Every page's counts,
+// when it has any, must fit at both viewports.
+for (const p of SHELL_PAGES) {
+  for (const vp of VIEWPORTS) {
+    test(`${p.id}: title-row counts are not clipped at ${vp.width}×${vp.height}`, async ({
+      page,
+      context,
+    }) => {
+      await signIn(context, p.roles);
+      await installShellFake(page);
+      await page.setViewportSize(vp);
+      await page.goto(p.path);
+      await expect(page.locator("h1")).toHaveText(p.h1);
+      if (p.ready)
+        await page.locator(p.ready).first().waitFor({ timeout: 10_000 });
+      const clipped = await page.evaluate(() =>
+        Array.from(
+          document.querySelectorAll<HTMLElement>('[data-chrome="counts"]'),
+        )
+          .filter((el) => el.scrollWidth > el.clientWidth + 1)
+          .map((el) => (el.textContent ?? "").trim()),
+      );
+      expect(clipped).toEqual([]);
+    });
+  }
+}
+// AR aging moved its summary into the toolbar; the summary and the bucket
+// legend (with the 90+ figure last) must both be fully visible.
+for (const vp of VIEWPORTS) {
+  test(`billing-ar-aging: summary and legend fit at ${vp.width}×${vp.height}`, async ({
+    page,
+    context,
+  }) => {
+    await signIn(context, ["admin", "dispatcher", "platform_admin"]);
+    await installShellFake(page);
+    await page.setViewportSize(vp);
+    await page.goto("/dashboard/billing?tab=ar-aging");
+    await page.locator("tbody tr").first().waitFor({ timeout: 10_000 });
+    const summary = page.locator("[data-aging-summary]");
+    await expect(summary).toContainText("outstanding");
+    await expect(summary).toContainText("accounts");
+    const legend = page.locator("[data-aging-legend]");
+    await expect(legend).toContainText("90+");
+    for (const loc of [summary, legend]) {
+      const fits = await loc.evaluate(
+        (el) => el.scrollWidth <= el.clientWidth + 1,
+      );
+      expect(fits).toBe(true);
+    }
+  });
+}
 // R4.7: the Dispatch Board's first lane also fits at 1024×768 (the narrowest
 // panels layout; below 1024 px the board stacks).
 test(`dispatch-board: first lane ≤ ${FIRST_ROW_BUDGET} px at 1024×768`, async ({

@@ -2,7 +2,7 @@ import { Activity } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { usePageChrome } from "@/components/ui";
 import { CHART, COLOR, SEMANTIC } from "@/styles/tokens";
-import { dateTime, number } from "../lib/format";
+import { date, dateTime, number } from "../lib/format";
 import {
   type AnalyticsMetricKey,
   type AnalyticsMetrics,
@@ -57,10 +57,13 @@ export function parseMetricValue(
   return Number.isFinite(numeric) ? numeric : null;
 }
 
-/** Bucket timestamp → "YYYY-MM-DD" in UTC (snapshots are per UTC date). */
+/**
+ * Bucket timestamp → "Tue 6 Oct", formatted in UTC because snapshots are per
+ * UTC date (the axis title says so).
+ */
 function utcDay(timestamp: string): string {
   const d = new Date(timestamp);
-  return Number.isNaN(d.getTime()) ? timestamp : d.toISOString().slice(0, 10);
+  return Number.isNaN(d.getTime()) ? timestamp : date(d, { timeZone: "UTC" });
 }
 
 function formatAsOf(asOf: string): string {
@@ -296,6 +299,7 @@ export default function Analytics() {
       case "line":
         return {
           ...baseOptions,
+          hAxis: { ...baseOptions.hAxis, title: "Date (UTC)" },
           curveType: "function",
           colors: [SEMANTIC.primary],
           pointSize: 6,

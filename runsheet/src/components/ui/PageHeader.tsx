@@ -284,7 +284,10 @@ function HeaderRow({
         ) : null,
       )}
       {(counts || extra.some((c) => c.counts)) && (
-        <div className="flex min-w-0 items-center gap-2 overflow-hidden text-xs text-text-muted">
+        <div
+          data-chrome="counts"
+          className="flex min-w-0 items-center gap-2 overflow-hidden text-xs text-text-muted"
+        >
           {counts}
           {extra.map((c, i) =>
             c.counts ? <span key={`cnt-${i}`}>{c.counts}</span> : null,

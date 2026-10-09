@@ -8,7 +8,7 @@
  */
 import { Eye, History } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Button,
   type Column,
@@ -84,18 +84,34 @@ export default function ARAgingDashboard({
   }, [fetchData]);
 
   const cents = (c: number) => money(c / 100);
-  const counts = useMemo(
-    () =>
-      aging ? (
-        <span className="whitespace-nowrap">
-          {cents(aging.total_open_cents)} outstanding ·{" "}
-          {number(aging.by_account.length)} accounts · 90+ days past due{" "}
-          {cents(aging.bucket_90_plus_cents)}
-        </span>
-      ) : null,
-    [aging],
-  );
-  const embedded = usePageChrome({ counts });
+  // Whole dollars for the toolbar strip so the summary and all five buckets
+  // fit one 44 px row at 1280 px; exact cents stay in the table, the
+  // tooltips and the assistive-tech labels.
+  const dollars = (c: number) => money(c / 100, { decimals: 0 });
+  // The summary lives in the toolbar, not the hub title row: under the
+  // platform_admin Billing tab set the title row has no room left for it
+  // (iteration-5 review). The 90+ figure is the legend's last item.
+  const summaryText = aging
+    ? `${cents(aging.total_open_cents)} outstanding · ${number(
+        aging.by_account.length,
+      )} accounts`
+    : "";
+  const summary = aging ? (
+    <span
+      data-aging-summary
+      className="min-w-0 truncate whitespace-nowrap text-xs text-text-muted"
+      title={summaryText}
+    >
+      <span className="sr-only">{summaryText}</span>
+      <span aria-hidden="true">
+        <span className="font-semibold tabular-nums text-text">
+          {dollars(aging.total_open_cents)}
+        </span>{" "}
+        outstanding · {number(aging.by_account.length)} accounts
+      </span>
+    </span>
+  ) : null;
+  const embedded = usePageChrome({});
   const viewAccount = (accountId: string) =>
     onViewAccount
       ? onViewAccount(accountId)
@@ -113,7 +129,6 @@ export default function ARAgingDashboard({
   ) : (
     <div className="flex h-11 items-center gap-3 border-b border-slate-200 px-4">
       {title}
-      <span className="text-xs text-text-muted">{counts}</span>
     </div>
   );
 
@@ -292,7 +307,7 @@ export default function ARAgingDashboard({
         filters={
           <div className="flex min-w-0 items-center gap-3">
             <div
-              className="flex h-2.5 w-32 shrink-0 overflow-hidden rounded-full bg-slate-200"
+              className="flex h-2.5 w-20 shrink-0 overflow-hidden rounded-full bg-slate-200"
               role="img"
               aria-label={`Aging bucket distribution chart: ${buckets
                 .map(
@@ -318,7 +333,10 @@ export default function ARAgingDashboard({
             >
               Days past due:
             </span>
-            <ul className="flex min-w-0 items-center gap-3 overflow-hidden text-xs">
+            <ul
+              data-aging-legend
+              className="flex shrink-0 items-center gap-3 text-xs"
+            >
               {buckets.map((b) => (
                 <li
                   key={b.label}
@@ -329,16 +347,28 @@ export default function ARAgingDashboard({
                     className="h-2.5 w-2.5 rounded-sm"
                     style={{ backgroundColor: b.color }}
                   />
-                  <span className="text-text-muted" title={b.label}>
+                  <span
+                    className="text-text-muted"
+                    title={`${b.label}: ${cents(b.cents)}`}
+                  >
                     <span aria-hidden="true">{b.short}</span>
                     <span className="sr-only">{b.label}</span>
                   </span>
-                  <span className="font-semibold tabular-nums text-text">
-                    {cents(b.cents)}
+                  <span className="sr-only">{cents(b.cents)}</span>
+                  <span
+                    aria-hidden="true"
+                    className="font-semibold tabular-nums text-text"
+                  >
+                    {dollars(b.cents)}
                   </span>
                 </li>
               ))}
             </ul>
+            <span
+              aria-hidden="true"
+              className="h-4 w-px shrink-0 bg-slate-200"
+            />
+            {summary}
           </div>
         }
         end={
