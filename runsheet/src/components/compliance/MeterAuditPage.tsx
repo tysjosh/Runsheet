@@ -49,8 +49,9 @@ export function calibrationStatus(
       ? `${expiryDate}T23:59:59Z`
       : expiryDate,
   );
-  const diffDays = Math.ceil((expiry.getTime() - now.getTime()) / DAY_MS);
-  if (diffDays < 0) return { status: "critical", label: "Expired" };
+  const diffMs = expiry.getTime() - now.getTime();
+  if (diffMs < 0) return { status: "critical", label: "Expired" };
+  const diffDays = Math.ceil(diffMs / DAY_MS);
   if (diffDays <= 30)
     return { status: "warning", label: `Expiring (${diffDays}d)` };
   return { status: "ok", label: "Valid" };
