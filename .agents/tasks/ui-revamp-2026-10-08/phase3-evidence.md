@@ -371,3 +371,39 @@ Redirect map: unchanged since iteration 3. All 24 redirect tests pass in the ful
 ### Housekeeping
 
 `.next`, `test-results`, `coverage` and the fresh worktree removed. Scratch under `Runsheet/tmp/ui-phase3/` and `tmp/p3merge/` deleted.
+
+## Iteration 5: fixes for the iteration-5 review (commit `6ac0faf`)
+
+### Findings addressed
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 (blocking) | AR aging title-row counts were clipped under the nine platform_admin Billing tabs | The summary moved from the hub title row into the AR aging toolbar, after the bucket legend and a divider: "**$53,123** outstanding · 22 accounts". The 90+ figure is the legend's last item ("90+ $5,000", with the full "90+ days past due" label in sr-only text and a `title`). The toolbar strip shows whole dollars (`money(…, { decimals: 0 })`) so the bar, the label, all five buckets and the summary fit one 44 px row at 1280. Exact cents still appear in the table, in each item's `title` and in the sr-only text. The legend `ul` is `shrink-0` now, so the summary is the only element that can give way, and it truncates with an ellipsis and a `title`. The bar went from `w-32` to `w-20`. Standalone (non-hub) rendering no longer repeats the counts in its own title row. |
+| 1 (guard) | Neither the chrome nor the axe spec caught clipped counts | `PageHeader` counts container gains `data-chrome="counts"` (additive, no visual change). `chrome.spec.ts` adds two tests. The first is "title-row counts are not clipped" for **every** `SHELL_PAGES` page at 1280×800 and 1440×900 (62 tests), asserting `scrollWidth <= clientWidth + 1` with each page's own roles (platform_admin for the Tier 4 Billing tabs). The second is "billing-ar-aging: summary and legend fit" at both viewports (platform_admin): the summary contains "outstanding" and "accounts", the legend contains "90+", and neither node overflows. Before the layout rework the second test failed at 1280 (legend's 90+ amount cut). It passes now. All 62 counts tests passed, so no other page clips. |
+| 2 | Stale `billing-ar-aging` baseline | Re-recorded at both viewports (`-g "(billing-ar-aging\|analytics) 1[24]" visual.spec.ts --update-snapshots=all`, 4 passed), then compared clean in the full run. |
+| 3 | Analytics trend axis showed ISO dates | `utcDay()` now formats with `date(d, { timeZone: "UTC" })` ("Tue 6 Oct"), and the line chart's hAxis title reads "Date (UTC)". Analytics baselines re-recorded with it. |
+| 4 | Carried follow-ups | Unchanged and still open: `CompartmentsTab` raw codes and `type="number"` (Phase 2 file, not edited here); Linux visual baselines to record before go-live. |
+
+`ARAgingDashboard.test.tsx` now asserts the toolbar summary text and its `title` ("$115,000.00 outstanding · 2 accounts").
+
+### Verification (from `.worktrees/ui-phase3/runsheet`, node_modules symlinked to `merge-board`; code at `6ac0faf`)
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm run lint` (biome) | 0 errors, the same 2 pre-existing warnings (`DispatchBoard.tsx:327`, `portal/PortalTitleRow.tsx:40`); identical count with the changes stashed |
+| `npx jest --silent --maxWorkers=50%` | **170/170 suites, 2375 passed, 1 skipped, 0 failed** |
+| Fresh checkout (`git worktree add --detach 6ac0faf` under `tmp/`) | `tsc` OK, `next build` exit 0, `BUILD_ID` written; worktree removed |
+| ui-revamp e2e, full (`npx playwright test -c playwright.ui-revamp.config.ts --project=chromium`, production build) | **321 passed, 0 failed**: the previous 257, plus 62 counts-clipping tests and 2 AR aging fit tests. That covers chrome, axe, dialogs, 24 redirects, tabs, systemHealth, fuelStation and visual. |
+| Dispatch board e2e (`PW_BOARD_PROD=1`, all projects) | **28 passed, 32 skipped**, 0 failed. N1 drag p95 **18.6 ms** (budget 20), hover 18.6, scroll 18.5, 12 lane rows. Without `PW_BOARD_PROD`, the Turbopack dev server panics on the symlinked node_modules, which is an environment issue and not a test result. |
+| Backend gate | Not needed: no backend files touched |
+
+Chrome height: every Phase 3 list page still measures 172/172 at 1280×800 and 1440×900 in the full run. AR aging's toolbar stays the 44 px row, so its first row is unchanged. Axe: 0 critical or serious findings. Contrast and colour vision: `styles/tokens.test.ts` passes. The bucket hues didn't change, and every bucket is still labelled in text.
+
+Screenshots: `screenshots/phase3/` refreshed from the full run (67 PNGs). `billing-ar-aging-1280x800.png` shows the full legend through "90+ $5,000" and "$53,123 outstanding · 22 accounts" with room to spare.
+
+Redirect map: unchanged since iteration 3.
+
+### Housekeeping
+
+`.next`, `test-results` and the fresh worktree were removed. The scratch logs and shots under `Runsheet/tmp/` were deleted after copying.

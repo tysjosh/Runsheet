@@ -1,60 +1,53 @@
-# Phase 3 iteration 4 review: evidence and fixes closed; branch stale against go-live-blockers
+# Phase 3 iteration 5 review: go-live-blockers F-fixes ported; AR aging title row clips
 
-This pass covers `5300be5..eb0eec5`, the fixes for all nine iteration-3 findings and the iteration-3 evidence. All nine are closed. The shared `FormDialog`/`Modal`/`DataTable`/touch-variant additions are committed with no-change tests (`sharedAdditions.test.tsx`). The Plans cluster chips show product names. Cost import is a two-step `lg` FormDialog, and the deviation from the `steps` prop is recorded. The Sourcing wait report and cargo manifest editor are on FormDialog. Copilot cards with no action id offer no decision. 3.11's re-scope is written into `tasks.md`. Every Phase 3 task is ticked. `phase3-evidence.md` now records tsc, lint, jest (168 suites, 2351 passed), a fresh-checkout build, a full green `e2e/ui-revamp` run with no `test.fail` marks, the board e2e with N1 at 17.5 ms, 172 px first rows on every Phase 3 list page at both sizes, and axe on 31 pages and 13 dialogs. The measurement work also caught six Billing entries that were silently measuring the Invoices fallback, and fixed them.
+This pass covers `eb0eec5..e7b71f6`: the `e636358` (F1–F15) and `e19fb9b` merges, the hand-ported F-fixes in the redesigned components, and the iteration-4 evidence. The blocking finding from iteration 4 is closed. The branch is now level with `origin/production-readiness/go-live-blockers` (`HEAD..origin` is empty, and `ls-remote` matches `e19fb9b`). Backend, portal and auth trees are byte-identical to go-live-blockers. The ports are faithful to the upstream intent: the Current bucket and "days past due" labels in AR aging and account detail, "—" for non-consuming stations in the Fuel counts, list (sorted last) and drawer, the upstream Analytics rewrite with Phase 3 chrome on top, and the scheduling completion rate no longer multiplied by 100. Margin availability is one implementation. Every Phase 3 task is ticked. The evidence records tsc, lint, jest, a fresh-checkout build, a 257/257 ui-revamp run, the board e2e (N1 18.4 ms), 172 px on every list page, and axe clean.
 
-Watch for: `origin/production-readiness/go-live-blockers` moved after the last merge (`ab5f933` → `e636358`, 14 commits), and merging it into this branch now conflicts in 9 files (confirmed). Those commits are owner-facing data-correctness fixes (F2–F5, F11–F13): an AR aging Current bucket, Analytics real data and as-of, fuel "—" for non-consuming stations, and scheduling completion %. They land in components Phase 3 rewrote or deleted, including `FuelSummaryBar.tsx`, which Phase 3 deleted and go-live-blockers modified. Phase 3 can't merge in order until they're ported into the redesigned components and re-verified.
+Watch for: on Billing → AR aging, the title-row counts are hard-clipped for platform_admin (confirmed from the implementer's own screenshots). At 1280×800 only a stray "$" shows after the nine tabs. At 1440×900 the text stops mid-word at "$53,123.00 outstanding · 22 a". The outstanding total, the account count and the "90+ days past due" figure the F12 port added are never visible at the budget size.
 
 **Verdict**: NEEDS_CHANGES
 
 ## High-level view
 
-The Phase 3 scope matches the spec. Every create/edit flow in design §5 plus the extra inline flows found in review is on `FormDialog`. The only `fixed inset-0` overlays outside `ui/` are the §5 exemptions (`ReportViewer`, `TankConsumptionDrillIn`, board sheets), the mobile sidebar and `request-pilot`. The only remaining `type="number"` is in the Phase 2 `CompartmentsTab`, logged as a follow-up. Products render by name through `ProductChip`/`ProductSelect`. The station capacity and compartment float-gallon bugs have regression tests. Role gating matches `modules.ts`: System health is `platform_admin` only, Tier 4 Billing tabs are `platform_admin`, and Margin is admin-only and hidden when the feed is off. The Analytics range selector stays hidden (D13). The redirect map covers row 5 and every function move, and all 24 redirect tests pass in the recorded run. Portal and auth files are byte-identical to go-live-blockers. The Phase 2 edits are format-only plus the owner-requested tray fix, and all are listed in evidence.
+The merge was done as a port, not a pick-a-side. AR aging keeps the Phase 3 list template and adds Current first, in the `open` hue, with short legend labels and the full `AGING_LABELS` text available to assistive tech. Account detail goes to six facts. `FuelSummaryBar` stays deleted, and its "—" rule now lives in `avgDaysLeftLabel()` and `displayDaysUntilEmpty()`, with the upstream test moved to the new components. Analytics takes the upstream F2/F3/F13 body, then removes the nested hero header, publishes "As of …" to the hub title row, uses the `CHART` pie palette and keeps the range selector hidden (D13). Scheduling metrics keeps the upstream UTC bucket labels and goes through `pct()` without `fraction`. The `CommerceHub` difference from go-live-blockers is only Phase 3's detail-route navigation, and both `/dashboard/billing/accounts/[id]` and `/invoices/[id]` exist, with invoice → account wired.
 
-The blocker is integration, not implementation. Fourteen go-live-blockers commits from the owner's staging sweep (F1–F15) touch nine files this branch rewrote. A merge needs hand resolution, and some resolutions are real ports rather than picking a side. The backend now ages AR by due date and returns `bucket_current_cents`. Phase 3's `ARAgingDashboard` has no Current bucket, so taking Phase 3's side would leave the bucket bars short of `total_open_cents`. `Analytics.tsx` was rewritten on both sides (457 lines on go-live-blockers). `FuelSummaryBar` is a modify/delete conflict whose "—" for no consumption has to reappear in the Fuel title-row counts. Margin availability was fixed on both branches with the same intent, so `CommerceHub` and `marginApi` need a single reconciled version. All of the iteration-3 verification ran on the pre-merge tree, so the affected suites, the chrome/axe pages for Fuel, Analytics and Billing, and a fresh-checkout build need a re-run after the merge.
+The one regression is presentational. AR aging's counts are a single `whitespace-nowrap` span in the shared title row, whose counts container is `overflow-hidden` with no ellipsis. Platform_admin sees nine Billing tabs, so the counts have almost no room. The legend row directly below has about 300 px of free space at 1280.
+
+The Phase 2 file set changed against go-live-blockers is the same one recorded and accepted in iterations 2–3 (CreateJobModal, OrderDetailView, JobsView, tray, CompartmentsTab/DriverTray format-only, CargoManifestEditor, ReplanDiffBody). The dashboard, control/Live and portal/auth files are untouched.
 
 <details>
-<summary>Issues (3)</summary>
+<summary>Issues (4)</summary>
 
-1. **Branch stale against go-live-blockers; F-fixes at risk (blocking)**: merging `e636358` conflicts in `Analytics.tsx`, `CommerceHub.tsx`, `ARAgingDashboard.tsx`, `AccountDetailPage.tsx`, `FuelStationDetail.tsx`, `FuelStationList.tsx`, `FuelSummaryBar.tsx` (modify/delete), `SchedulingMetricsPage.tsx` and `e2e/ui-revamp/shellFake.ts` (confirmed with `git merge-tree`). Merge it, then port F2/F3/F13 (Analytics real data, as-of, error states), F4/F11 (scheduling completion %, UTC bucket dates), F5 ("—" for non-consuming stations in the Fuel title-row counts and station detail) and F12 (AR Current bucket and "days past due" labels) into the redesigned components. Keep one Margin availability implementation. Then re-run tsc, lint, jest, a fresh-checkout build, and the ui-revamp chrome/axe/visual runs for Fuel, Analytics, Billing and Scheduling metrics, and record the results in evidence.
-2. **Phase 2 `CompartmentsTab` codes (follow-up)**: `CompartmentsTab.tsx:138, 359` still print a raw `product_code`, and `:143` is a `type="number"` input (confirmed; Phase 2 file, logged in evidence). Not blocking for Phase 3. Schedule it with the next board change.
-3. **Visual baselines self-recorded, Darwin only (follow-up)**: CI skips the pixel compare on Linux, so the new Billing/Compliance/Settings baselines guard nothing in CI (confirmed, carried). Record Linux baselines before go-live.
+1. **AR aging title-row counts clipped (blocking, confirmed)**: `ARAgingDashboard` counts are hidden at 1280×800 (a lone "$") and cut mid-word at 1440×900 for platform_admin. Move "outstanding · accounts · 90+ past due" into the legend row, which has room, or give the title-row counts `truncate` with a `title`. Add an e2e assertion that the counts aren't clipped (`scrollWidth <= clientWidth`) at 1280 for platform_admin, and re-shoot.
+2. **AR aging visual baseline is stale (follow-up, confirmed)**: per the evidence, `billing-ar-aging` still compares against the iteration-3 render without the Current column, so it guards the old layout. Re-record it together with the fix for issue 1.
+3. **Analytics trend axis shows ISO dates (follow-up, likely)**: the 30-day chart labels read "2026-10-06" (upstream `utcDay`), not `calendarDate`-style dates. This was a deliberate upstream UTC choice, so it doesn't block. Consider `calendarDate()` in UTC, with "UTC" in the axis title.
+4. **Carried follow-ups (non-blocking, confirmed)**: `CompartmentsTab.tsx:138,359` raw `product_code` and `:143` `type="number"` (Phase 2 file); Darwin-only, self-recorded visual baselines; record Linux baselines before go-live.
 
 </details>
 
 <details>
 <summary>Details</summary>
 
-### What go-live-blockers changed underneath Phase 3
+### AR aging counts vs the nine-tab Billing title row
 
 ```
-ab5f933 (merged into ui-phase3 at 18b4829)
-   │
-   ├── ui-phase3: 5300be5 … eb0eec5  (iteration-3 fixes, evidence)
-   │
-   └── go-live-blockers: 776055c … e636358  (F1–F15 staging sweep)
-          backend: analytics snapshots/as_of/time-series, AR due-date aging,
-                   fuel avg-days exclusion, live delay minutes, driver reset
-          UI:      Analytics.tsx, SchedulingMetricsPage, FuelSummaryBar/
-                   StationList/StationDetail/DashboardView, ARAgingDashboard
-                   (+ agingLabels), AccountDetailPage, CommerceHub + marginApi
-                   (margin availability), shellFake ar-aging body
+| Billing (i) | Accounts | Invoices | Price Books | Pricing Rules | Contracts | Payments | AR Aging | Reconciliation | Margin | $…   ← counts, overflow-hidden
+| ▇▇▇▇ Days past due: ● Current $8,000 ● 1–30 $21,000 ● 31–60 … ● 90+ $5,000            [~300 px free]
 ```
 
-The backend half merges cleanly. That widens the gap: after the merge, the API returns fields the Phase 3 UI doesn't render. For AR aging, the five-bucket response would show four bars that no longer sum to the total. For Fuel, the backend now excludes non-consuming stations from the average, while go-live-blockers' UI shows "—" for them, a display rule that lived in the deleted `FuelSummaryBar`. The Margin fix on go-live-blockers (`32614d9`) is the same change Phase 3 iteration 2 made (`getMarginAvailability`, `MarginUnavailable`), written independently, so the conflict in `CommerceHub` is two versions of one behaviour and should come out as one. `e636358` changes the same `shellFake` AR aging fixture that Phase 3 depends on for its Billing chrome/axe pages.
+`PageHeader` renders contributed counts in `flex min-w-0 … overflow-hidden` with no `truncate`, and AR aging wraps its counts in `whitespace-nowrap`. The text is cut at the container edge with no ellipsis and no tooltip. In `screenshots/phase3/billing-ar-aging-1280x800.png` the only visible character is "$". In the 1440 shot it ends at "· 22 a". The F12 relabel ("90+ days past due") made the string longer, but it was already past the edge. Payments has no counts and fits, so this is specific to pages that contribute counts under the platform_admin tab set. The chrome spec measures the first row (172 px) and axe doesn't flag clipped text, so neither check caught it. A `scrollWidth <= clientWidth` check on the counts node at 1280 would.
 
 </details>
 
 <details>
 <summary>File map</summary>
 
-- `components/ui/{FormDialog,Modal,Table,Menu,FilterChips,EmptyState,InlineBanner}.tsx`, `ui/sharedAdditions.test.tsx`, `lib/format.ts`: 3.11 shared pieces (opt-in).
-- `components/commerce/margin/{CostImportDialog,MarginHub,MarginRecordsPage,marginToolbarSlot}.tsx`: two-step import, Records toolbar in the sub-tab row, 172 px.
-- `components/ops/{SourcingPage,CargoManifestEditor,FuelDistributionPage}.tsx`: wait report and manifest on FormDialog, cluster chips by name.
-- `components/AIChat.tsx` (+test): no decision without an action id.
-- `components/commerce/PaymentsListPage.tsx`, `ops/AgentSettingsPage.tsx`, `NotificationMetrics*`, `compliance/TaxJurisdictionsPage.tsx`: axe and wrap fixes.
-- `e2e/ui-revamp/{pages,chrome,axe,visual,phase3Dialogs}.spec/ts`, `phase3Fake.ts`, `__screenshots__/*`: platform_admin roles for Tier 4 pages, dialog axe, new baselines.
-- `spec/tasks.md`, `phase3-evidence.md`: ticks, 3.11 re-scope, iteration-3 evidence.
+- `commerce/ARAgingDashboard.tsx`, `commerce/AccountDetailPage.tsx`, new `commerce/agingLabels.ts`, `services/commerceApi.ts`: F12 Current bucket and days-past-due labels.
+- `ops/FuelDashboardView.tsx`, `ops/FuelStationList.tsx`, `ops/FuelStationDetail.tsx`, `services/fuelApi.ts`, new `ops/FuelDaysLeft.test.tsx`: F5 "—" for non-consuming stations.
+- `Analytics.tsx` (+test), `services/api.ts`: upstream F2/F3/F13 body with Phase 3 chrome and as-of in the title row.
+- `ops/SchedulingMetricsPage.tsx` (+test): F4/F11 with `lib/format`.
+- `e2e/ui-revamp/phase3Fake.ts`, `__screenshots__/analytics-*`: AR Current and Analytics fixtures, re-recorded Analytics baselines.
+- `phase3-evidence.md`: iteration 4.
 
-Full diff: `git -C .worktrees/ui-phase3 diff origin/production-readiness/go-live-blockers...HEAD`. This pass: `git diff b70d8d9 eb0eec5`. Pending upstream: `git log HEAD..origin/production-readiness/go-live-blockers`.
+Full diff: `git -C .worktrees/ui-phase3 diff origin/production-readiness/go-live-blockers...HEAD`. This pass: `git diff eb0eec5 e7b71f6`.
 
 </details>

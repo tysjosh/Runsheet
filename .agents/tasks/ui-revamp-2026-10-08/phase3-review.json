@@ -3,30 +3,39 @@
   "findings": [
     {
       "id": 1,
-      "severity": "HIGH",
+      "severity": "MEDIUM",
       "blocking": true,
       "confidence": "confirmed",
-      "title": "Branch stale against go-live-blockers; F-fixes at risk",
-      "detail": "origin/production-readiness/go-live-blockers moved ab5f933 -> e636358 (14 commits, owner staging sweep F1-F15). Merging into ui-phase3 conflicts in 9 files (git merge-tree): Analytics.tsx, CommerceHub.tsx, commerce/ARAgingDashboard.tsx, commerce/AccountDetailPage.tsx, ops/FuelStationDetail.tsx, ops/FuelStationList.tsx, ops/FuelSummaryBar.tsx (modify/delete), ops/SchedulingMetricsPage.tsx, e2e/ui-revamp/shellFake.ts. Phase 3's ARAgingDashboard has no Current bucket (backend now returns bucket_current_cents), and Analytics lacks the as-of/real-data rewrite.",
-      "action": "Merge go-live-blockers; port F2/F3/F13 (Analytics real data, as-of, error states), F4/F11 (scheduling completion %, UTC bucket dates), F5 (fuel '—' for non-consuming stations in Fuel title-row counts and station detail), F12 (AR Current bucket, 'days past due' labels) into the redesigned components; keep one Margin availability implementation; re-run tsc, lint, jest, fresh-checkout build and ui-revamp chrome/axe/visual for Fuel, Analytics, Billing and Scheduling metrics; record in evidence."
+      "title": "AR aging title-row counts clipped",
+      "detail": "Billing -> AR aging for platform_admin (9 tabs): the title-row counts ('$X outstanding · N accounts · 90+ days past due $Y') are hard-clipped by PageHeader's overflow-hidden counts container (no ellipsis, no title). screenshots/phase3/billing-ar-aging-1280x800.png shows only a stray '$'; the 1440x900 shot ends mid-word at '· 22 a'. The F12 '90+ days past due' figure is never visible at the budget size. Chrome/axe specs don't catch it.",
+      "action": "Move the outstanding/accounts/90+ summary into the AR aging legend row (≈300 px free at 1280), or give the title-row counts truncate + title. Add an e2e assertion (counts scrollWidth <= clientWidth at 1280, platform_admin), re-shoot, and record in evidence."
     },
     {
       "id": 2,
       "severity": "LOW",
       "blocking": false,
       "confidence": "confirmed",
-      "title": "Phase 2 CompartmentsTab raw codes (follow-up)",
-      "detail": "dispatch-board/drawer/CompartmentsTab.tsx:138,359 print raw product_code; :143 is type=number. Phase 2 file, logged in evidence.",
-      "action": "Schedule with the next board change."
+      "title": "AR aging visual baseline stale",
+      "detail": "Evidence notes billing-ar-aging passed against its iteration-3 baseline (no Current column); the baseline guards the old layout.",
+      "action": "Re-record billing-ar-aging baselines with the fix for finding 1."
     },
     {
       "id": 3,
       "severity": "LOW",
       "blocking": false,
+      "confidence": "likely",
+      "title": "Analytics trend axis shows ISO dates",
+      "detail": "30-day trend x-axis labels read '2026-10-06' (upstream utcDay), not formatted calendar dates. Deliberate upstream UTC choice.",
+      "action": "Optionally format with calendarDate() in UTC and note UTC in the axis title."
+    },
+    {
+      "id": 4,
+      "severity": "LOW",
+      "blocking": false,
       "confidence": "confirmed",
-      "title": "Visual baselines Darwin-only, self-recorded (follow-up)",
-      "detail": "CI skips pixel compare on Linux, so new Phase 3 baselines guard nothing in CI.",
-      "action": "Record Linux baselines before go-live."
+      "title": "Carried follow-ups",
+      "detail": "CompartmentsTab.tsx:138,359 raw product_code and :143 type=number (Phase 2 file); visual baselines Darwin-only and self-recorded.",
+      "action": "Schedule CompartmentsTab with the next board change; record Linux baselines before go-live."
     }
   ],
   "reviewDoc": "/Users/olukotunjosh/Downloads/Runsheet/.agents/tasks/ui-revamp-2026-10-08/phase3-review.md"
