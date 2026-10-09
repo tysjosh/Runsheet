@@ -117,13 +117,13 @@ describe("PriceProtectionContractsPage", () => {
 
     // Satisfy the remaining native-required fields so the picker-level
     // validation (customer + account + product) is what gets exercised.
-    fireEvent.change(screen.getByLabelText("Start Date"), {
+    fireEvent.change(screen.getByLabelText(/^Start Date/), {
       target: { value: "2026-01-01" },
     });
-    fireEvent.change(screen.getByLabelText("End Date"), {
+    fireEvent.change(screen.getByLabelText(/^End Date/), {
       target: { value: "2026-12-31" },
     });
-    fireEvent.change(screen.getByLabelText("Contracted Gallons"), {
+    fireEvent.change(screen.getByLabelText(/^Contracted Gallons/), {
       target: { value: "1000" },
     });
 
@@ -133,11 +133,58 @@ describe("PriceProtectionContractsPage", () => {
       .at(-1) as HTMLButtonElement;
     fireEvent.click(submit);
 
-    expect(
-      await screen.findByText(
-        /Customer, account, and product code are required/i,
-      ),
-    ).toBeInTheDocument();
+    // Field-level errors in the FormDialog (task 3.5).
+    expect(await screen.findByText("Pick a customer.")).toBeInTheDocument();
+    expect(screen.getByText("Pick an account.")).toBeInTheDocument();
+    expect(screen.getByText("Pick a product.")).toBeInTheDocument();
     expect(mockCreateContract).not.toHaveBeenCalled();
+  });
+
+  it("lists products by name and prices in dollars, and edits in the dialog", async () => {
+    mockGetContracts.mockResolvedValue({
+      data: [
+        {
+          contract_id: "pc_1",
+          customer_id: "CUST-1",
+          account_id: "acc_1",
+          product_code: "DIESEL_2",
+          contract_type: "collar",
+          start_date: "2026-01-01",
+          end_date: "2026-12-31",
+          contracted_gallons: 10000,
+          remaining_gallons: 4000,
+          price_cap_cents: 400,
+          price_floor_cents: 300,
+          fixed_price_cents: null,
+          status: "active",
+        },
+      ],
+      pagination: { page: 1, size: 20, total: 1, total_pages: 1 },
+    } as any);
+    const { updatePriceProtectionContract } = jest.requireMock(
+      "../../services/complianceApi",
+    ) as { updatePriceProtectionContract: jest.Mock };
+    updatePriceProtectionContract.mockResolvedValue({ data: {} });
+    render(<PriceProtectionContractsPage />);
+    const table = await screen.findByRole("table", {
+      name: "Price protection contracts",
+    });
+    await waitFor(() => expect(table).toHaveTextContent("Diesel #2 (on-road)"));
+    expect(table).toHaveTextContent("$3.00–$4.00");
+    expect(table).toHaveTextContent("4,000 gal of 10,000 gal");
+    // Market $3.50 inside the collar: no variance; 6,000 gal delivered.
+    expect(table).toHaveTextContent("$0.00 gain");
+    fireEvent.click(screen.getByText("$3.00–$4.00"));
+    const cap = await screen.findByLabelText(/^Price cap/);
+    expect(cap).toHaveValue("4.00");
+    fireEvent.change(cap, { target: { value: "4.25" } });
+    fireEvent.blur(cap);
+    fireEvent.click(screen.getByRole("button", { name: "Update Contract" }));
+    await waitFor(() =>
+      expect(updatePriceProtectionContract).toHaveBeenCalledWith(
+        "pc_1",
+        expect.objectContaining({ price_cap_cents: 425, price_floor_cents: 300 }),
+      ),
+    );
   });
 });
