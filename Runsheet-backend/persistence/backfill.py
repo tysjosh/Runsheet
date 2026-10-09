@@ -554,6 +554,7 @@ async def backfill(tenant_id: Optional[str] = None, *, dry_run: bool = False) ->
                 tenant_id=src["tenant_id"],
                 snapshot_date=_parse_date(src.get("snapshot_date")),
                 total_open_cents=src.get("total_open_cents", 0),
+                bucket_current_cents=src.get("bucket_current_cents"),
                 bucket_0_30_cents=src.get("bucket_0_30_cents", 0),
                 bucket_31_60_cents=src.get("bucket_31_60_cents", 0),
                 bucket_61_90_cents=src.get("bucket_61_90_cents", 0),

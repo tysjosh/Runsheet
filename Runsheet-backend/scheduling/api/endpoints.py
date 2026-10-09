@@ -11,6 +11,7 @@ Validates: Requirements 2.1, 3.1-3.6, 4.1-4.8, 5.1-5.7, 6.1-6.6,
 """
 
 import logging
+import re
 from datetime import datetime
 from typing import Any, Literal, Optional
 
@@ -185,6 +186,26 @@ def _validate_date(value: Optional[str], field_name: str) -> None:
             f"Invalid {field_name}: '{value}'. Expected ISO 8601 format.",
             details={field_name: value},
         )
+
+
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _normalize_range(
+    start_date: Optional[str], end_date: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """Make a date-only range cover whole UTC days (F11).
+
+    ``<input type="date">`` sends ``YYYY-MM-DD``. Used as-is, an end date
+    meant midnight at the *start* of that day, so ``start=end=2026-10-06``
+    matched nothing. A date-only start becomes 00:00:00 UTC and a date-only
+    end 23:59:59.999999 UTC; full datetimes pass through unchanged.
+    """
+    if start_date and _DATE_ONLY.match(start_date):
+        start_date = f"{start_date}T00:00:00+00:00"
+    if end_date and _DATE_ONLY.match(end_date):
+        end_date = f"{end_date}T23:59:59.999999+00:00"
+    return start_date, end_date
 
 
 def _resolve_bucket(
@@ -855,6 +876,7 @@ async def get_job_metrics(
     _validate_bucket(bucket)
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
+    start_date, end_date = _normalize_range(start_date, end_date)
 
     svc = _get_job_service()
     es = svc._es
@@ -957,6 +979,7 @@ async def get_completion_metrics(
     """
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
+    start_date, end_date = _normalize_range(start_date, end_date)
 
     svc = _get_job_service()
     es = svc._es
@@ -1077,6 +1100,7 @@ async def get_asset_utilization(
     """
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
+    start_date, end_date = _normalize_range(start_date, end_date)
 
     svc = _get_job_service()
     es = svc._es
@@ -1213,6 +1237,7 @@ async def get_delay_metrics(
     """
     _validate_date(start_date, "start_date")
     _validate_date(end_date, "end_date")
+    start_date, end_date = _normalize_range(start_date, end_date)
 
     svc = _get_delay_service()
     metrics = await svc.get_delay_metrics(

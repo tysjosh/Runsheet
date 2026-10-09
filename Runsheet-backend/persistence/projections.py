@@ -330,6 +330,7 @@ def ar_aging_snapshot_to_doc(row) -> Dict[str, Any]:
         "tenant_id": row.tenant_id,
         "snapshot_date": _iso(row.snapshot_date),
         "total_open_cents": row.total_open_cents,
+        "bucket_current_cents": row.bucket_current_cents,
         "bucket_0_30_cents": row.bucket_0_30_cents,
         "bucket_31_60_cents": row.bucket_31_60_cents,
         "bucket_61_90_cents": row.bucket_61_90_cents,

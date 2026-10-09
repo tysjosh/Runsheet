@@ -953,6 +953,7 @@ class ArAgingSnapshotRepository:
         fields = dict(
             snapshot_date=self._date(doc.get("snapshot_date")),
             total_open_cents=doc.get("total_open_cents", 0),
+            bucket_current_cents=doc.get("bucket_current_cents"),
             bucket_0_30_cents=doc.get("bucket_0_30_cents", 0),
             bucket_31_60_cents=doc.get("bucket_31_60_cents", 0),
             bucket_61_90_cents=doc.get("bucket_61_90_cents", 0),

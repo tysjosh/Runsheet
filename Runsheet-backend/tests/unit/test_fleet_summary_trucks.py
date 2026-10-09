@@ -11,7 +11,11 @@ counts in ``/fleet/summary``.
   "delayed"}``. It used to count only ``on_time``/``delayed``.
 * ``averageDelay`` is the mean ``delay_duration_minutes`` over the tenant's
   delayed jobs (``job_metrics_aggregator.delay_metrics``), 0.0 with none. It
-  used to be hard-coded to 45.
+  used to be hard-coded to 45. Open (in-progress) jobs use live minutes (F10).
+* ``delayedTrucks`` counts active vehicles with an in-progress delayed job
+  (``jobs.asset_assigned``) or the legacy ``delayed`` status;
+  ``onTimeTrucks`` is active minus delayed (F9). Both used to read only the
+  legacy ``on_time``/``delayed`` truck statuses, so staging showed 0/0.
 
 Both the Elasticsearch-facade branch and the Postgres read-cutover branch are
 covered.
@@ -184,7 +188,7 @@ def test_trucks_pg_cutover_lists_every_vehicle(make_client):
 def _assert_truck_counts(data):
     assert data["totalTrucks"] == 4  # barge and crane are not trucks
     assert data["activeTrucks"] == 3  # active + in_transit + on_time; maintenance excluded
-    assert data["onTimeTrucks"] == 1
+    assert data["onTimeTrucks"] == 3  # no delayed job on any truck: all active are on time
     assert data["delayedTrucks"] == 0
 
 
@@ -251,3 +255,66 @@ def test_summary_pg_cutover_average_delay_is_zero_without_delays(make_client):
         data = client.get("/api/fleet/summary").json()["data"]
 
     assert data["averageDelay"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# F9: delayed / on-time trucks come from delayed jobs
+# ---------------------------------------------------------------------------
+
+STAGING_LIKE_FLEET = [
+    _asset(f"TRUCK-0{i}", "vehicle", "fuel_truck", "active") for i in range(1, 6)
+]
+
+
+def _open_delayed_job(asset: str, hours_late: float) -> Dict[str, Any]:
+    from datetime import datetime, timedelta, timezone
+
+    eta = datetime.now(timezone.utc) - timedelta(hours=hours_late)
+    return {
+        "job_id": f"J-{asset}", "delayed": True, "status": "in_progress",
+        "delay_duration_minutes": 0, "job_type": "fuel_delivery",
+        "estimated_arrival": eta.isoformat(), "asset_assigned": asset,
+        "tenant_id": TENANT,
+    }
+
+
+def test_summary_es_delayed_truck_from_a_delayed_job(make_client):
+    jobs = [
+        _open_delayed_job("TRUCK-01", 7),
+        # A completed delayed job does not make its truck delayed now.
+        {"job_id": "J-old", "delayed": True, "status": "completed",
+         "delay_duration_minutes": 20, "asset_assigned": "TRUCK-02",
+         "job_type": "fuel_delivery", "tenant_id": TENANT},
+    ]
+    fake = _FakeEs(STAGING_LIKE_FLEET, jobs)
+    data = make_client(fake).get("/api/fleet/summary").json()["data"]
+
+    assert data["activeTrucks"] == 5
+    assert data["delayedTrucks"] == 1
+    assert data["onTimeTrucks"] == 4
+    assert data["averageDelay"] > 200  # (420 live + 20 stored) / 2, not 10
+
+    agg_query = next(q for i, q in fake.calls if "aggs" in q)
+    delayed_filter = agg_query["aggs"]["delayed_count"]["filter"]["bool"]
+    assert {"terms": {"truck_id": ["TRUCK-01"]}} in delayed_filter["should"]
+    assert {"term": {"status": "delayed"}} in delayed_filter["should"]
+
+
+def test_summary_pg_cutover_delayed_truck_from_a_delayed_job(make_client):
+    client = make_client(_FakeEs([], []))
+    with _pg_cutover(STAGING_LIKE_FLEET, [_open_delayed_job("TRUCK-01", 7)], []):
+        data = client.get("/api/fleet/summary").json()["data"]
+
+    assert data["delayedTrucks"] == 1
+    assert data["onTimeTrucks"] == 4
+    assert data["delayedAssets"] == 1
+    assert data["averageDelay"] == pytest.approx(420.0, abs=1)
+
+
+def test_legacy_delayed_status_still_counts(make_client):
+    fleet = STAGING_LIKE_FLEET[:2] + [_asset("OLD-1", None, None, "delayed")]
+    client = make_client(_FakeEs([], []))
+    with _pg_cutover(fleet, [], []):
+        data = client.get("/api/fleet/summary").json()["data"]
+    assert data["delayedTrucks"] == 1
+    assert data["onTimeTrucks"] == 2

@@ -33,11 +33,16 @@ no survey/rating feature anywhere in this codebase, so fabricating a
 number would be worse than omitting it. Callers must treat a missing
 ``customer_satisfaction`` metric as "not available", not zero.
 
-Regional bucketing degrades to an ``"UNKNOWN"`` bucket when
-``StateBoundaryDetector`` cannot resolve a state (e.g. the TIGER
-shapefile is not installed in this environment, or the order has no
-ship-to coordinates) rather than raising or silently dropping the order
-from the total.
+Regional bucketing skips orders whose state ``StateBoundaryDetector``
+cannot resolve (no ship-to coordinates, or the TIGER shapefile is not
+installed in this environment). The unresolved count is logged; no
+``"UNKNOWN"`` region is ever written, because readers would present it
+as a region.
+
+Route documents carry ``route_name`` (the stable key: run id, else
+driver id) and ``route_label`` (a human label: ``"<run> · <driver
+name>"`` for a run driven by one named driver, the driver name for a
+driver-keyed route, else the key).
 
 Registered via the existing scheduler infrastructure (asyncio background
 task pattern used throughout bootstrap/), following the same shape as
@@ -146,7 +151,9 @@ async def run_analytics_snapshot_cycle(
         )
     except Exception as exc:
         logger.error("Analytics snapshot tenant scan failed: %s", exc)
-        return 0
+        # Raise so run_periodic(record="success") retries instead of
+        # recording a successful run.
+        raise RuntimeError("Analytics snapshot tenant scan failed") from exc
 
     buckets = (
         tenant_resp.get("aggregations", {}).get("tenants", {}).get("buckets", [])
@@ -179,11 +186,15 @@ async def run_analytics_snapshot_cycle(
                 "Analytics snapshot failed for tenant %s: %s", tenant_id, exc
             )
 
-    if snapshot_count:
-        logger.info(
-            "Analytics snapshot cycle complete: %d tenant(s) snapshotted",
-            snapshot_count,
+    if snapshot_count == 0:
+        # Every tenant failed; partial failure stays a logged success.
+        raise RuntimeError(
+            f"Analytics snapshot failed for all {len(tenant_ids)} tenant(s)"
         )
+    logger.info(
+        "Analytics snapshot cycle complete: %d tenant(s) snapshotted",
+        snapshot_count,
+    )
     return snapshot_count
 
 
@@ -213,8 +224,17 @@ async def _snapshot_tenant(
         drivers=drivers,
         reference_now=reference_now,
     )
+    driver_names = {
+        d["driver_id"]: d.get("driver_name")
+        for d in drivers
+        if d.get("driver_id") and d.get("driver_name")
+    }
     await _write_route_performance(
-        es_service, tenant_id=tenant_id, scored=scored, reference_now=reference_now
+        es_service,
+        tenant_id=tenant_id,
+        scored=scored,
+        reference_now=reference_now,
+        driver_names=driver_names,
     )
     await _write_delay_cause_analysis(
         es_service,
@@ -358,6 +378,7 @@ class _ScoredOrder:
         "on_time",
         "delay_minutes",
         "route_key",
+        "driver_id",
         "lat",
         "lon",
         "has_window",
@@ -371,6 +392,7 @@ class _ScoredOrder:
         on_time: Optional[bool],
         delay_minutes: float,
         route_key: str,
+        driver_id: Optional[str] = None,
         lat: Optional[float],
         lon: Optional[float],
         has_window: bool,
@@ -380,6 +402,7 @@ class _ScoredOrder:
         self.on_time = on_time
         self.delay_minutes = delay_minutes
         self.route_key = route_key
+        self.driver_id = driver_id
         self.lat = lat
         self.lon = lon
         self.has_window = has_window
@@ -437,6 +460,7 @@ def _score_order(order: Dict[str, Any]) -> Optional[_ScoredOrder]:
         on_time=on_time,
         delay_minutes=max(0.0, delay_minutes),
         route_key=route_key,
+        driver_id=order.get("assigned_driver_id"),
         lat=order.get("ship_to_lat"),
         lon=order.get("ship_to_lon"),
         has_window=has_window,
@@ -522,7 +546,9 @@ async def _write_route_performance(
     tenant_id: str,
     scored: List["_ScoredOrder"],
     reference_now: datetime,
+    driver_names: Optional[Dict[str, str]] = None,
 ) -> None:
+    driver_names = driver_names or {}
     by_route: Dict[str, List["_ScoredOrder"]] = defaultdict(list)
     for s in scored:
         if s.on_time is not None:
@@ -543,12 +569,28 @@ async def _write_route_performance(
             timestamp=reference_now,
             fields={
                 "route_name": route_key,
+                "route_label": _route_label(route_key, entries, driver_names),
                 "metrics": {
                     "performance_pct": performance_pct,
                     "orders_scored": len(entries),
                 },
             },
         )
+
+
+def _route_label(
+    route_key: str, entries: List["_ScoredOrder"], driver_names: Dict[str, str]
+) -> str:
+    """Human label for a route. The key stays the id (stable across runs)."""
+    if route_key in driver_names:  # keyed by driver id (no run recorded)
+        return driver_names[route_key]
+    drivers = {e.driver_id for e in entries}
+    if len(drivers) == 1:
+        (only,) = drivers
+        name = driver_names.get(only) if only else None
+        if name:
+            return f"{route_key} · {name}"
+    return route_key
 
 
 async def _write_delay_cause_analysis(
@@ -611,6 +653,7 @@ async def _write_regional_performance(
     reference_now: datetime,
 ) -> None:
     by_region: Dict[str, List["_ScoredOrder"]] = defaultdict(list)
+    unresolved = 0
     for s in scored:
         if s.on_time is None:
             continue
@@ -620,7 +663,17 @@ async def _write_regional_performance(
                 region = state_boundary_detector.get_state(s.lat, s.lon)
             except Exception:
                 region = None
-        by_region[region or "UNKNOWN"].append(s)
+        if not region:
+            unresolved += 1
+            continue
+        by_region[region].append(s)
+    if unresolved:
+        logger.info(
+            "Analytics snapshot: %d scored order(s) for tenant=%s had no "
+            "resolvable state; excluded from regional performance",
+            unresolved,
+            tenant_id,
+        )
 
     for region, entries in by_region.items():
         on_time_pct = round(

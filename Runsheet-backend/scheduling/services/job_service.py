@@ -51,6 +51,19 @@ from services.elasticsearch_service import ElasticsearchService
 logger = logging.getLogger(__name__)
 
 
+
+def _with_live_delay(jobs: list[dict]) -> list[dict]:
+    """Report each open delayed job's delay as of now (F10): the stored
+    ``delay_duration_minutes`` is frozen at detection time."""
+    from scheduling.services.job_metrics_aggregator import effective_delay_minutes
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for job in jobs:
+        minutes = effective_delay_minutes(job, now)
+        out.append({**job, "delay_duration_minutes": int(minutes)} if minutes is not None else job)
+    return out
+
 class JobService:
     """Manages job lifecycle: creation, assignment, status transitions, and queries.
 
@@ -1145,7 +1158,7 @@ class JobService:
             page=1, size=1000,
         )
         if pg is not _NOT_CUT_OVER:
-            return pg["items"]
+            return _with_live_delay(pg["items"])
 
         query: dict = {
             "query": {
@@ -1165,7 +1178,7 @@ class JobService:
             JOBS_CURRENT_INDEX, query, size=1000
         )
 
-        return [hit["_source"] for hit in response["hits"]["hits"]]
+        return _with_live_delay([hit["_source"] for hit in response["hits"]["hits"]])
 
     async def get_job_events(
         self, job_id: str, tenant_id: str

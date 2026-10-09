@@ -27,6 +27,7 @@ import type {
 } from "../../services/commerceApi";
 import { STATUS } from "../../styles/tokens";
 import { PageTitle } from "../ui/PageHeader";
+import { AGING_LABELS } from "./agingLabels";
 
 type AccountAging = TenantAgingResponse["by_account"][number];
 
@@ -88,7 +89,7 @@ export default function ARAgingDashboard({
       aging ? (
         <span className="whitespace-nowrap">
           {cents(aging.total_open_cents)} outstanding ·{" "}
-          {number(aging.by_account.length)} accounts · 90+ days{" "}
+          {number(aging.by_account.length)} accounts · 90+ days past due{" "}
           {cents(aging.bucket_90_plus_cents)}
         </span>
       ) : null,
@@ -166,25 +167,37 @@ export default function ARAgingDashboard({
   if (!aging) return null;
 
   const totalCents = aging.total_open_cents || 1;
-  // Bucket hues follow the status scale (OK → Warning → Overdue → Critical).
+  // Aged by days past due_date (F12); Current is not yet due. Hues follow
+  // the status scale (Open → OK → Warning → Overdue → Critical); `short` is
+  // the visible legend label, `label` the full one for assistive tech.
   const buckets = [
     {
-      label: "0–30 days",
+      short: "Current",
+      label: AGING_LABELS.current,
+      cents: aging.bucket_current_cents ?? 0,
+      color: STATUS.open.dot,
+    },
+    {
+      short: "1–30",
+      label: AGING_LABELS.d1_30,
       cents: aging.bucket_0_30_cents,
       color: STATUS.ok.dot,
     },
     {
-      label: "31–60 days",
+      short: "31–60",
+      label: AGING_LABELS.d31_60,
       cents: aging.bucket_31_60_cents,
       color: STATUS.warning.dot,
     },
     {
-      label: "61–90 days",
+      short: "61–90",
+      label: AGING_LABELS.d61_90,
       cents: aging.bucket_61_90_cents,
       color: STATUS.overdue.dot,
     },
     {
-      label: "90+ days",
+      short: "90+",
+      label: AGING_LABELS.d90_plus,
       cents: aging.bucket_90_plus_cents,
       color: STATUS.critical.dot,
     },
@@ -199,9 +212,17 @@ export default function ARAgingDashboard({
       className: "font-medium text-text",
       cell: (a) => a.display_name,
     },
+    {
+      key: "bucket_current_cents",
+      header: "Current",
+      align: "right",
+      width: 130,
+      className: "tabular-nums text-slate-700",
+      cell: (a) => cents(a.bucket_current_cents ?? 0),
+    },
     ...(
       [
-        ["bucket_0_30_cents", "0–30"],
+        ["bucket_0_30_cents", "1–30"],
         ["bucket_31_60_cents", "31–60"],
         ["bucket_61_90_cents", "61–90"],
       ] as const
@@ -237,9 +258,18 @@ export default function ARAgingDashboard({
       header: "Date",
       cell: (h) => calendarDate(h.snapshot_date),
     },
+    {
+      key: "bucket_current_cents",
+      header: "Current",
+      align: "right",
+      className: "tabular-nums",
+      // null: snapshot from before due-date aging (no Current bucket).
+      cell: (h) =>
+        h.bucket_current_cents == null ? "—" : cents(h.bucket_current_cents),
+    },
     ...(
       [
-        ["bucket_0_30_cents", "0–30"],
+        ["bucket_0_30_cents", "1–30"],
         ["bucket_31_60_cents", "31–60"],
         ["bucket_61_90_cents", "61–90"],
         ["bucket_90_plus_cents", "90+"],
@@ -282,6 +312,12 @@ export default function ARAgingDashboard({
                 );
               })}
             </div>
+            <span
+              className="shrink-0 whitespace-nowrap text-xs text-text-muted"
+              title="Days past the invoice due date. Current is not yet due."
+            >
+              Days past due:
+            </span>
             <ul className="flex min-w-0 items-center gap-3 overflow-hidden text-xs">
               {buckets.map((b) => (
                 <li
@@ -293,7 +329,10 @@ export default function ARAgingDashboard({
                     className="h-2.5 w-2.5 rounded-sm"
                     style={{ backgroundColor: b.color }}
                   />
-                  <span className="text-text-muted">{b.label}</span>
+                  <span className="text-text-muted" title={b.label}>
+                    <span aria-hidden="true">{b.short}</span>
+                    <span className="sr-only">{b.label}</span>
+                  </span>
                   <span className="font-semibold tabular-nums text-text">
                     {cents(b.cents)}
                   </span>

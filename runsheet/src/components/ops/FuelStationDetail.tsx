@@ -11,6 +11,7 @@ import { useState } from "react";
 import { gallons, number, pct } from "../../lib/format";
 import type { FuelStationDetail as FuelStationDetailType } from "../../services/fuelApi";
 import {
+  displayDaysUntilEmpty,
   getEventQuantityGallons,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
@@ -59,6 +60,9 @@ export default function FuelStationDetail({
       <div className="text-xs text-text-muted">{label}</div>
     </div>
   );
+
+  // null for a station with no consumption: shown as "—" (F5).
+  const daysLeft = displayDaysUntilEmpty(station);
 
   return (
     <section
@@ -110,8 +114,8 @@ export default function FuelStationDetail({
           )}
           {metric(
             <Clock aria-hidden="true" className="h-3.5 w-3.5 text-slate-500" />,
-            station.days_until_empty > 0
-              ? `${number(station.days_until_empty, { decimals: 1 })} d`
+            daysLeft != null
+              ? `${number(daysLeft, { decimals: 1 })} d`
               : "—",
             "Days left",
           )}

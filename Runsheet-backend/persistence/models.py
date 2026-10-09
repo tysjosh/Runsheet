@@ -542,6 +542,9 @@ class ArAgingSnapshotORM(Base):
     tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
     snapshot_date: Mapped[Optional[date]] = mapped_column(Date)
     total_open_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # Not yet due. NULL marks a snapshot written before aging moved to days
+    # past due_date (those were aged by issued_at and had no Current bucket).
+    bucket_current_cents: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     bucket_0_30_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     bucket_31_60_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     bucket_61_90_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)

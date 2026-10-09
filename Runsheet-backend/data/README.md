@@ -4,6 +4,12 @@ This directory contains geospatial and reference data files used by the
 compliance services. Binary data files (shapefiles) are **not committed to
 version control** — use the provided download script to fetch them.
 
+**The backend Docker image bundles the shapefile.** The `Dockerfile` builder
+stage runs `scripts/download_shapefile.py --output-dir /opt/geodata`
+(checksum-pinned via `EXPECTED_ZIP_SHA256`) and the runtime stage copies it
+to `/app/data/`. Regional performance analytics depends on it; without it,
+orders get no region (they are excluded, never reported as `UNKNOWN`).
+
 ---
 
 ## US State Boundary Shapefile

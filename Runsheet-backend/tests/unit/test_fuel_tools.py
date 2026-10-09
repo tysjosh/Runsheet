@@ -98,7 +98,7 @@ def _es_agg_response(total_stations=5, total_capacity=250000, total_stock=175000
             "total_capacity": {"value": total_capacity},
             "total_stock": {"value": total_stock},
             "total_daily_consumption": {"value": total_daily},
-            "avg_days_until_empty": {"value": avg_days},
+            "avg_days_until_empty": {"v": {"value": avg_days}},
             "by_status": {"buckets": status_buckets},
         },
     }
@@ -112,7 +112,7 @@ def _es_report_summary_response():
             "total_capacity": {"value": 150000},
             "total_stock": {"value": 90000},
             "total_daily_consumption": {"value": 3000},
-            "avg_days_until_empty": {"value": 30.0},
+            "avg_days_until_empty": {"v": {"value": 30.0}},
             "by_status": {
                 "buckets": [
                     {"key": "normal", "doc_count": 2},
@@ -271,6 +271,21 @@ class TestGetFuelSummary:
             assert "Normal" in result
             assert "Low" in result
             assert "Critical" in result
+            assert "Average Days Until Empty: 29.2" in result
+
+    @pytest.mark.asyncio
+    async def test_avg_days_excludes_non_consuming_stations(self):
+        """F5: the 99999 sentinel is filtered out; no consuming station reads
+        "not available" instead of a number."""
+        with patch("Agents.tools.fuel_tools.elasticsearch_service") as mock_es, \
+             patch("Agents.tools.fuel_tools.get_telemetry_service", return_value=None):
+            mock_es.search_documents = AsyncMock(return_value=_es_agg_response(avg_days=None))
+            result = await get_fuel_summary(tenant_id="tenant-1")
+            agg = mock_es.search_documents.call_args[0][1]["aggs"]["avg_days_until_empty"]
+
+        assert agg["filter"] == {"range": {"daily_consumption_rate": {"gt": 0}}}
+        assert "Average Days Until Empty: not available" in result
+        assert "99999" not in result
 
     @pytest.mark.asyncio
     async def test_tenant_scoping_in_query(self):

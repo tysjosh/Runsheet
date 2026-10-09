@@ -3,11 +3,16 @@
 Implements the ARAgingService with compute_account_aging,
 compute_tenant_aging, and write_daily_snapshot methods.
 
-Aging buckets are computed based on days since invoice issued_at:
-  - 0-30 days
-  - 31-60 days
-  - 61-90 days
-  - 90+ days
+Aging buckets are computed from days past due
+(``today - due_date`` in UTC calendar days), see :func:`bucket_for_invoice`:
+  - current      not yet due (<= 0 days past due)
+  - 0-30 key     1-30 days past due (key kept for compatibility)
+  - 31-60        31-60 days past due
+  - 61-90        61-90 days past due
+  - 90+          more than 90 days past due
+An invoice with no due_date falls back to issued_at (due on receipt); one
+with neither is skipped. Snapshots written before this change have
+``bucket_current_cents`` null and were aged by issued_at.
 
 Only invoices with status in (open, partial, overdue) are included.
 All monetary values are integer cents (Constraint C1).
@@ -20,8 +25,8 @@ Validates: Requirements 7.1, 7.2, 9.4, C1, C2, C3
 from __future__ import annotations
 
 import logging
-from datetime import timezone
-from typing import Any, Dict, List
+from datetime import date, datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from commerce.services.commerce_es_mappings import (
     ACCOUNTS_CURRENT_INDEX,
@@ -44,6 +49,71 @@ _AGING_STATUSES = ["open", "partial", "overdue"]
 # Top N accounts returned in tenant-level aging
 _TOP_ACCOUNTS_LIMIT = 50
 
+#: Bucket keys in display order. ``bucket_0_30_cents`` means 1-30 days past
+#: due; the key is unchanged so stored snapshots and clients keep working.
+BUCKET_KEYS = (
+    "bucket_current_cents",
+    "bucket_0_30_cents",
+    "bucket_31_60_cents",
+    "bucket_61_90_cents",
+    "bucket_90_plus_cents",
+)
+
+
+def _to_datetime(raw: Any) -> Optional[datetime]:
+    """Parse an ES/PG date value (ISO string, epoch millis or datetime)."""
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, (int, float)):
+        dt = datetime.fromtimestamp(raw / 1000.0, tz=timezone.utc)
+    elif isinstance(raw, str):
+        text = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                d = date.fromisoformat(text[:10])
+            except ValueError:
+                return None
+            dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    else:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def days_past_due(source: Dict[str, Any], now: datetime) -> Optional[int]:
+    """UTC calendar days past ``due_date`` (falling back to ``issued_at``).
+
+    Negative or zero means not yet due. None when the invoice has neither.
+    """
+    due = _to_datetime(source.get("due_date")) or _to_datetime(source.get("issued_at"))
+    if due is None:
+        return None
+    now_aware = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    return (now_aware.astimezone(timezone.utc).date() - due.astimezone(timezone.utc).date()).days
+
+
+def bucket_for_invoice(source: Dict[str, Any], now: datetime) -> Optional[str]:
+    """Bucket key for one open invoice, or None to skip it (no dates)."""
+    days = days_past_due(source, now)
+    if days is None:
+        return None
+    if days <= 0:
+        return "bucket_current_cents"
+    if days <= 30:
+        return "bucket_0_30_cents"
+    if days <= 60:
+        return "bucket_31_60_cents"
+    if days <= 90:
+        return "bucket_61_90_cents"
+    return "bucket_90_plus_cents"
+
+
+def empty_buckets() -> Dict[str, int]:
+    return {key: 0 for key in BUCKET_KEYS}
+
 
 # ---------------------------------------------------------------------------
 # Service
@@ -53,9 +123,9 @@ _TOP_ACCOUNTS_LIMIT = 50
 class ARAgingService:
     """Service layer for AR aging bucket computation and daily snapshots.
 
-    Computes aging buckets (0-30, 31-60, 61-90, 90+ days) based on the
-    number of days since each invoice's ``issued_at`` date relative to
-    ``utcnow()``.
+    Computes aging buckets (current, 1-30, 31-60, 61-90, 90+ days past due)
+    from each invoice's ``due_date`` relative to ``utcnow()`` (see
+    :func:`bucket_for_invoice`).
 
     Every public method takes ``tenant_id`` and every ES query passes
     through ``inject_tenant_filter`` (Constraint C3).
@@ -76,60 +146,33 @@ class ARAgingService:
         """Compute aging buckets for a single account.
 
         Returns a dict with:
-          - bucket_0_30_cents: int
+          - bucket_current_cents: int (not yet due)
+          - bucket_0_30_cents: int (1-30 days past due)
           - bucket_31_60_cents: int
           - bucket_61_90_cents: int
           - bucket_90_plus_cents: int
-          - total_open_cents: int
+          - total_open_cents: int (includes current)
 
         Only includes invoices with status in (open, partial, overdue).
-        Aging is computed from the invoice's issued_at relative to utcnow().
+        Aging is days past due_date relative to utcnow().
 
         Validates: Requirements 7.1, C1, C2, C3
         """
         now = utcnow()
 
-        # Query all open invoices for this account with their issued_at
-        # and remaining_cents. We use a scroll-style approach with a
-        # reasonable size limit since accounts typically don't have
-        # thousands of open invoices.
-        hits = await self._fetch_open_invoices(
-            tenant_id, account_id=account_id, require_issued_at=True
-        )
+        hits = await self._fetch_open_invoices(tenant_id, account_id=account_id)
 
-        # Compute buckets
-        bucket_0_30 = 0
-        bucket_31_60 = 0
-        bucket_61_90 = 0
-        bucket_90_plus = 0
-
+        buckets = empty_buckets()
         for source in hits:
             remaining_cents = int(source.get("remaining_cents", 0))
-            issued_at_raw = source.get("issued_at")
-
-            if issued_at_raw is None or remaining_cents <= 0:
+            if remaining_cents <= 0:
                 continue
+            key = bucket_for_invoice(source, now)
+            if key is None:
+                continue
+            buckets[key] += remaining_cents
 
-            days_aged = self._compute_days_aged(issued_at_raw, now)
-
-            if days_aged <= 30:
-                bucket_0_30 += remaining_cents
-            elif days_aged <= 60:
-                bucket_31_60 += remaining_cents
-            elif days_aged <= 90:
-                bucket_61_90 += remaining_cents
-            else:
-                bucket_90_plus += remaining_cents
-
-        total_open_cents = bucket_0_30 + bucket_31_60 + bucket_61_90 + bucket_90_plus
-
-        return {
-            "bucket_0_30_cents": bucket_0_30,
-            "bucket_31_60_cents": bucket_31_60,
-            "bucket_61_90_cents": bucket_61_90,
-            "bucket_90_plus_cents": bucket_90_plus,
-            "total_open_cents": total_open_cents,
-        }
+        return {**buckets, "total_open_cents": sum(buckets.values())}
 
     # ------------------------------------------------------------------
     # compute_tenant_aging (Req 7.2)
@@ -140,78 +183,41 @@ class ARAgingService:
     ) -> Dict[str, Any]:
         """Compute aging buckets aggregated across all accounts for a tenant.
 
-        Returns a dict with:
-          - bucket_0_30_cents: int
-          - bucket_31_60_cents: int
-          - bucket_61_90_cents: int
-          - bucket_90_plus_cents: int
-          - total_open_cents: int
-          - by_account: list of top 50 accounts by total_open_cents desc
+        Returns a dict with the bucket keys of
+        :meth:`compute_account_aging`, ``total_open_cents`` and
+        ``by_account`` (top 50 accounts by total_open_cents desc).
 
         Only includes invoices with status in (open, partial, overdue).
-        Aging is computed from the invoice's issued_at relative to utcnow().
+        Aging is days past due_date relative to utcnow().
 
         Validates: Requirements 7.2, C1, C2, C3
         """
         now = utcnow()
 
-        # Query all open invoices for this tenant
-        hits = await self._fetch_open_invoices(tenant_id, require_issued_at=True)
+        hits = await self._fetch_open_invoices(tenant_id)
 
-        # Aggregate buckets at tenant level and per-account
-        tenant_bucket_0_30 = 0
-        tenant_bucket_31_60 = 0
-        tenant_bucket_61_90 = 0
-        tenant_bucket_90_plus = 0
-
-        # Per-account tracking
-        account_aging: Dict[str, Dict[str, int]] = {}
+        tenant_buckets = empty_buckets()
+        account_aging: Dict[str, Dict[str, Any]] = {}
 
         for source in hits:
             remaining_cents = int(source.get("remaining_cents", 0))
-            issued_at_raw = source.get("issued_at")
             acct_id = source.get("account_id", "unknown")
-
-            if issued_at_raw is None or remaining_cents <= 0:
+            if remaining_cents <= 0:
+                continue
+            key = bucket_for_invoice(source, now)
+            if key is None:
                 continue
 
-            days_aged = self._compute_days_aged(issued_at_raw, now)
-
-            # Initialize account entry if needed
             if acct_id not in account_aging:
                 account_aging[acct_id] = {
                     "account_id": acct_id,
-                    "bucket_0_30_cents": 0,
-                    "bucket_31_60_cents": 0,
-                    "bucket_61_90_cents": 0,
-                    "bucket_90_plus_cents": 0,
+                    **empty_buckets(),
                     "total_open_cents": 0,
                 }
-
-            # Assign to bucket
-            if days_aged <= 30:
-                tenant_bucket_0_30 += remaining_cents
-                account_aging[acct_id]["bucket_0_30_cents"] += remaining_cents
-            elif days_aged <= 60:
-                tenant_bucket_31_60 += remaining_cents
-                account_aging[acct_id]["bucket_31_60_cents"] += remaining_cents
-            elif days_aged <= 90:
-                tenant_bucket_61_90 += remaining_cents
-                account_aging[acct_id]["bucket_61_90_cents"] += remaining_cents
-            else:
-                tenant_bucket_90_plus += remaining_cents
-                account_aging[acct_id]["bucket_90_plus_cents"] += remaining_cents
-
+            tenant_buckets[key] += remaining_cents
+            account_aging[acct_id][key] += remaining_cents
             account_aging[acct_id]["total_open_cents"] += remaining_cents
 
-        total_open_cents = (
-            tenant_bucket_0_30
-            + tenant_bucket_31_60
-            + tenant_bucket_61_90
-            + tenant_bucket_90_plus
-        )
-
-        # Sort accounts by total_open_cents descending, take top 50
         sorted_accounts = sorted(
             account_aging.values(),
             key=lambda a: a["total_open_cents"],
@@ -220,11 +226,8 @@ class ARAgingService:
         top_accounts = sorted_accounts[:_TOP_ACCOUNTS_LIMIT]
 
         return {
-            "bucket_0_30_cents": tenant_bucket_0_30,
-            "bucket_31_60_cents": tenant_bucket_31_60,
-            "bucket_61_90_cents": tenant_bucket_61_90,
-            "bucket_90_plus_cents": tenant_bucket_90_plus,
-            "total_open_cents": total_open_cents,
+            **tenant_buckets,
+            "total_open_cents": sum(tenant_buckets.values()),
             "by_account": top_accounts,
         }
 
@@ -271,6 +274,7 @@ class ARAgingService:
             "tenant_id": tenant_id,
             "snapshot_date": snapshot_date,
             "total_open_cents": aging["total_open_cents"],
+            "bucket_current_cents": aging["bucket_current_cents"],
             "bucket_0_30_cents": aging["bucket_0_30_cents"],
             "bucket_31_60_cents": aging["bucket_31_60_cents"],
             "bucket_61_90_cents": aging["bucket_61_90_cents"],
@@ -303,53 +307,6 @@ class ARAgingService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    @staticmethod
-    def _compute_days_aged(issued_at_raw, now) -> int:
-        """Compute the number of days between issued_at and now.
-
-        Handles both ISO string and epoch-millis formats that ES may
-        return. Returns a non-negative integer.
-        """
-        from datetime import datetime
-
-        if isinstance(issued_at_raw, (int, float)):
-            # Epoch millis from ES
-            issued_dt = datetime.fromtimestamp(
-                issued_at_raw / 1000.0, tz=timezone.utc
-            )
-        elif isinstance(issued_at_raw, str):
-            # ISO format string
-            issued_at_str = issued_at_raw
-            # Handle various ISO formats
-            if issued_at_str.endswith("Z"):
-                issued_at_str = issued_at_str[:-1] + "+00:00"
-            try:
-                issued_dt = datetime.fromisoformat(issued_at_str)
-            except ValueError:
-                # Fallback: try parsing as date only
-                from datetime import date as date_type
-
-                d = date_type.fromisoformat(issued_at_str[:10])
-                issued_dt = datetime(
-                    d.year, d.month, d.day, tzinfo=timezone.utc
-                )
-        elif isinstance(issued_at_raw, datetime):
-            issued_dt = issued_at_raw
-        else:
-            return 0
-
-        # Ensure timezone-aware
-        if issued_dt.tzinfo is None:
-            issued_dt = issued_dt.replace(tzinfo=timezone.utc)
-
-        # Ensure now is timezone-aware
-        now_aware = now
-        if now_aware.tzinfo is None:
-            now_aware = now_aware.replace(tzinfo=timezone.utc)
-
-        delta = now_aware - issued_dt
-        return max(0, delta.days)
 
     async def _fetch_open_invoices(
         self, tenant_id: str, *, account_id: str | None = None,

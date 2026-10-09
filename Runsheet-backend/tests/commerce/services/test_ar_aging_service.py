@@ -1,8 +1,9 @@
 """Unit tests for ARAgingService.
 
 Tests cover:
-- compute_account_aging: bucket assignment based on days since issued_at,
-  only includes open/partial/overdue invoices, integer cents
+- compute_account_aging: bucket assignment by days past due_date (falling
+  back to issued_at when an invoice has no due_date), a Current bucket for
+  not-yet-due invoices, only open/partial/overdue invoices, integer cents
 - compute_tenant_aging: aggregation across all accounts, top 50 by
   total_open_cents descending
 - write_daily_snapshot: persists to ar_aging_snapshots with idempotent
@@ -44,19 +45,21 @@ def _make_invoice_hit(
     invoice_id: str = "inv_001",
     account_id: str = _ACCOUNT_ID,
     issued_at: str | None = None,
+    due_date: str | None = None,
     remaining_cents: int = 10000,
     status: str = "open",
 ) -> Dict[str, Any]:
     """Build a mock ES hit for an invoice."""
-    return {
-        "_source": {
-            "invoice_id": invoice_id,
-            "account_id": account_id,
-            "issued_at": issued_at or _FIXED_NOW.isoformat(),
-            "remaining_cents": remaining_cents,
-            "status": status,
-        }
+    source = {
+        "invoice_id": invoice_id,
+        "account_id": account_id,
+        "issued_at": issued_at or _FIXED_NOW.isoformat(),
+        "remaining_cents": remaining_cents,
+        "status": status,
     }
+    if due_date is not None:
+        source["due_date"] = due_date
+    return {"_source": source}
 
 
 def _es_search_response(hits: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -96,6 +99,7 @@ class TestComputeAccountAging:
         result = await service.compute_account_aging(_TENANT_ID, _ACCOUNT_ID)
 
         assert result == {
+            "bucket_current_cents": 0,
             "bucket_0_30_cents": 0,
             "bucket_31_60_cents": 0,
             "bucket_61_90_cents": 0,
@@ -430,12 +434,15 @@ class TestWriteDailySnapshot:
         service = ARAgingService(es)
         result = await service.write_daily_snapshot(_TENANT_ID)
 
+        assert result["bucket_current_cents"] == 0
         assert result["bucket_0_30_cents"] == 5000
         assert result["bucket_31_60_cents"] == 0
         assert result["bucket_61_90_cents"] == 0
         assert result["bucket_90_plus_cents"] == 3000
         assert result["total_open_cents"] == 8000
         assert result["account_count_with_balance"] == 2
+        written = es.index_document.await_args.args[2]
+        assert "bucket_current_cents" in written
 
     @pytest.mark.asyncio
     @patch("commerce.services.ar_aging_service.utcnow", return_value=_FIXED_NOW)
@@ -462,3 +469,94 @@ class TestWriteDailySnapshot:
         first_call_id = es.index_document.call_args_list[0][0][1]
         second_call_id = es.index_document.call_args_list[1][0][1]
         assert first_call_id == second_call_id
+
+
+# ---------------------------------------------------------------------------
+# F12: aging by days past due_date, with a Current bucket
+# ---------------------------------------------------------------------------
+
+
+class TestAgingByDueDate:
+    NOW = datetime(2026, 10, 8, 19, 41, tzinfo=timezone.utc)
+
+    async def _age(self, *hits):
+        es = _make_es_service()
+        es.search_documents.return_value = _es_search_response(list(hits))
+        with patch("commerce.services.ar_aging_service.utcnow", return_value=self.NOW):
+            return await ARAgingService(es).compute_account_aging(_TENANT_ID, _ACCOUNT_ID)
+
+    @pytest.mark.asyncio
+    async def test_not_yet_due_is_current(self):
+        result = await self._age(_make_invoice_hit(
+            issued_at="2026-09-01T00:00:00Z", due_date="2026-10-09T00:00:00Z",
+        ))
+        assert result["bucket_current_cents"] == 10000
+        assert result["bucket_0_30_cents"] == 0
+
+    @pytest.mark.asyncio
+    async def test_due_today_is_current(self):
+        result = await self._age(_make_invoice_hit(due_date="2026-10-08"))
+        assert result["bucket_current_cents"] == 10000
+
+    @pytest.mark.asyncio
+    async def test_staging_inv_000004_due_09_18_is_1_30_past_due(self):
+        """Report row 10: overdue INV-000004 (due 09-18) is 20 days past due."""
+        result = await self._age(_make_invoice_hit(
+            issued_at="2026-08-19T00:00:00Z", due_date="2026-09-18T00:00:00Z",
+            status="overdue",
+        ))
+        assert result["bucket_0_30_cents"] == 10000
+        assert result["bucket_31_60_cents"] == 0  # issued_at aging said 31-60
+
+    @pytest.mark.asyncio
+    async def test_due_100_days_ago_is_90_plus(self):
+        due = (self.NOW - timedelta(days=100)).date().isoformat()
+        result = await self._age(_make_invoice_hit(due_date=due))
+        assert result["bucket_90_plus_cents"] == 10000
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("days, key", [
+        (1, "bucket_0_30_cents"), (30, "bucket_0_30_cents"),
+        (31, "bucket_31_60_cents"), (60, "bucket_31_60_cents"),
+        (61, "bucket_61_90_cents"), (90, "bucket_61_90_cents"),
+        (91, "bucket_90_plus_cents"),
+    ])
+    async def test_boundaries(self, days, key):
+        due = (self.NOW - timedelta(days=days)).date().isoformat()
+        result = await self._age(_make_invoice_hit(due_date=due))
+        assert result[key] == 10000
+
+    @pytest.mark.asyncio
+    async def test_missing_due_date_falls_back_to_issued_at(self):
+        result = await self._age(_make_invoice_hit(
+            issued_at=(self.NOW - timedelta(days=45)).isoformat(),
+        ))
+        assert result["bucket_31_60_cents"] == 10000
+
+    @pytest.mark.asyncio
+    async def test_invoice_with_no_dates_is_skipped(self):
+        hit = _make_invoice_hit()
+        hit["_source"]["issued_at"] = None
+        result = await self._age(hit)
+        assert result["total_open_cents"] == 0
+
+    @pytest.mark.asyncio
+    async def test_total_includes_current(self):
+        result = await self._age(
+            _make_invoice_hit(invoice_id="a", due_date="2026-10-20", remaining_cents=700),
+            _make_invoice_hit(invoice_id="b", due_date="2026-09-18", remaining_cents=300),
+        )
+        assert result["bucket_current_cents"] == 700
+        assert result["bucket_0_30_cents"] == 300
+        assert result["total_open_cents"] == 1000
+
+    @pytest.mark.asyncio
+    async def test_tenant_aging_by_account_carries_current(self):
+        es = _make_es_service()
+        es.search_documents.return_value = _es_search_response([
+            _make_invoice_hit(account_id="acct_a", due_date="2026-10-20", remaining_cents=700),
+        ])
+        with patch("commerce.services.ar_aging_service.utcnow", return_value=self.NOW):
+            result = await ARAgingService(es).compute_tenant_aging(_TENANT_ID)
+        assert result["bucket_current_cents"] == 700
+        assert result["by_account"][0]["bucket_current_cents"] == 700

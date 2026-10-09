@@ -117,8 +117,10 @@ async def get_tenant_aging(
 ) -> dict:
     """Return tenant-level AR aging aggregated across all accounts.
 
-    Returns ``{bucket_0_30_cents, bucket_31_60_cents, bucket_61_90_cents,
-    bucket_90_plus_cents, total_open_cents, by_account: [...top 50...]}``
+    Returns ``{bucket_current_cents, bucket_0_30_cents, bucket_31_60_cents,
+    bucket_61_90_cents, bucket_90_plus_cents, total_open_cents,
+    by_account: [...top 50...]}``, aged by days past ``due_date``
+    (``bucket_0_30_cents`` = 1-30 days past due, current = not yet due).
     computed against the current moment via ``utcnow()``.
 
     The ``by_account`` array contains the top 50 accounts sorted by

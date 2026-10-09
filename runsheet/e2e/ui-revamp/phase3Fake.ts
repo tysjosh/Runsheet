@@ -436,7 +436,8 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
     return {
       data: {
         tenant_id: TENANT,
-        total_open_cents: 4_512_300,
+        total_open_cents: 5_312_300,
+        bucket_current_cents: 800_000,
         bucket_0_30_cents: 2_100_000,
         bucket_31_60_cents: 1_200_000,
         bucket_61_90_cents: 712_300,
@@ -444,11 +445,12 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
         by_account: ACCOUNTS.map((a, i) => ({
           account_id: a.account_id,
           display_name: a.display_name,
+          bucket_current_cents: 30_000,
           bucket_0_30_cents: 100_000 + i * 1_000,
           bucket_31_60_cents: 50_000,
           bucket_61_90_cents: 20_000,
           bucket_90_plus_cents: i % 3 ? 0 : 15_000,
-          total_open_cents: 170_000 + i * 1_000 + (i % 3 ? 0 : 15_000),
+          total_open_cents: 200_000 + i * 1_000 + (i % 3 ? 0 : 15_000),
         })),
         as_of: iso(8),
       },

@@ -479,12 +479,28 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+#: ``record`` modes for :func:`run_periodic` / :func:`wait_until_due`.
+#: ``"claim"`` (default): the run is recorded when it starts (at most once per
+#: interval). ``"success"``: the run is recorded only after the cycle returns,
+#: under its own ledger key, so a run killed by a deploy (or one that raised)
+#: is retried on the next boot instead of counting as done.
+RECORD_CLAIM = "claim"
+RECORD_SUCCESS = "success"
+
+
+def ledger_key(job: str, record: str = RECORD_CLAIM) -> str:
+    """Ledger row for ``job``. Success-mode rows live under their own key so a
+    claim or seed row written by an older build is never read as a success."""
+    return f"{job}:success" if record == RECORD_SUCCESS else job
+
+
 async def wait_until_due(
     job: str,
     interval_seconds: float,
     last_local: Optional[datetime],
     *,
     seed_if_missing: bool,
+    record: str = RECORD_CLAIM,
 ) -> datetime:
     """Wait until this process is sweep leader and ``job`` is due, then claim it.
 
@@ -499,21 +515,25 @@ async def wait_until_due(
     records now as the baseline and waits a whole interval (``run_periodic``
     without ``run_immediately``, which never ran a job at boot).
 
+    With ``record="success"`` the ledger row is ``<job>:success`` and nothing
+    is written here: the caller records the run only after the cycle succeeds.
+
     Returns the claimed start time.
     """
     from persistence.periodic_runs import read_last_run, write_last_run
 
+    key = ledger_key(job, record)
     while True:
         if not is_sweep_leader():
             await wait_for_leadership(min(interval_seconds, LEADERSHIP_RETRY_SECONDS))
             continue
-        persisted = await read_last_run(job)
+        persisted = await read_last_run(key)
         known = [t for t in (persisted, last_local) if t is not None]
         now = _utcnow()
         if not known:
             if not seed_if_missing:
                 break
-            await write_last_run(job, now, seeded=True)
+            await write_last_run(key, now, seeded=True)
             last_local = now
             known = [now]
         remaining = (max(known) - now).total_seconds() + interval_seconds
@@ -522,7 +542,8 @@ async def wait_until_due(
         await asyncio.sleep(min(remaining, LEADERSHIP_RETRY_SECONDS))
 
     started = _utcnow()
-    await write_last_run(job, started)
+    if record != RECORD_SUCCESS:
+        await write_last_run(key, started)
     return started
 
 
@@ -532,6 +553,7 @@ async def run_periodic(
     cycle: Callable[[], Awaitable[None]],
     *,
     run_immediately: bool = False,
+    record: str = RECORD_CLAIM,
 ) -> None:
     """Run ``cycle`` every ``interval_seconds``, but only while leader.
 
@@ -553,9 +575,19 @@ async def run_periodic(
     schedules from its persisted last run (:func:`wait_until_due`), so a
     deploy neither restarts its clock (a daily job would never run on an
     environment redeployed more than daily) nor runs it twice in one interval.
-    """
-    from persistence.periodic_runs import PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS
 
+    ``record="success"`` (idempotent jobs only, e.g. per-UTC-date snapshots)
+    records the run after ``cycle`` returns instead of when it starts. A cycle
+    that raises, or is killed by a deploy, records nothing: the same process
+    retries one interval later and a restarted process retries at once.
+    """
+    from persistence.periodic_runs import (
+        PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS,
+        write_last_run,
+    )
+
+    if record not in (RECORD_CLAIM, RECORD_SUCCESS):
+        raise ValueError(f"unknown record mode {record!r}")
     persisted = interval_seconds >= PERSISTED_SCHEDULE_MIN_INTERVAL_SECONDS
     logger.info(
         "Periodic job %r scheduled every %.0fs%s",
@@ -569,7 +601,11 @@ async def run_periodic(
         while True:
             if persisted:
                 last_run = await wait_until_due(
-                    name, interval_seconds, last_run, seed_if_missing=not run_immediately
+                    name,
+                    interval_seconds,
+                    last_run,
+                    seed_if_missing=not run_immediately,
+                    record=record,
                 )
             else:
                 if not (first and run_immediately):
@@ -587,6 +623,9 @@ async def run_periodic(
                 raise
             except Exception:  # noqa: BLE001 — a bad cycle must not kill the loop
                 logger.exception("Periodic job %r cycle failed", name)
+            else:
+                if persisted and record == RECORD_SUCCESS and last_run is not None:
+                    await write_last_run(ledger_key(name, record), last_run)
     except asyncio.CancelledError:
         logger.info("Periodic job %r cancelled", name)
         raise
@@ -603,6 +642,9 @@ __all__ = [
     "is_sweep_leader",
     "role_object_id",
     "LEADERSHIP_RETRY_SECONDS",
+    "RECORD_CLAIM",
+    "RECORD_SUCCESS",
+    "ledger_key",
     "run_periodic",
     "wait_for_leadership",
     "wait_until_due",

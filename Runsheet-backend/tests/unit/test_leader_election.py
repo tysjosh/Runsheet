@@ -649,6 +649,161 @@ class TestPersistedSchedule:
         await self._stop(task)
 
 
+class TestRecordOnSuccess:
+    """``record="success"`` (F1, analytics + AR-aging snapshots): the ledger
+    row ``<job>:success`` is written only after the cycle returns, so a run
+    killed by a deploy, or one that raised, is retried on the next boot."""
+
+    _ledger_and_clock = TestPersistedSchedule._ledger_and_clock
+    _stop = staticmethod(TestPersistedSchedule._stop)
+
+    def _start(self, cycle, name="snap"):
+        return asyncio.create_task(
+            run_periodic(name, 86_400.0, cycle, run_immediately=True, record="success")
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_record_runs_without_waiting_and_records_success(self):
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        assert self.ledger.runs["snap:success"] == self.clock[0]
+        assert "snap" not in self.ledger.runs, "a claim row was written"
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_success_1h_old_waits_about_23h(self):
+        from datetime import timedelta
+
+        self.ledger.runs["snap:success"] = self.clock[0] - timedelta(hours=1)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == []
+        self.clock[0] += timedelta(hours=22, minutes=59)
+        await asyncio.sleep(0.04)
+        assert calls == []
+        self.clock[0] += timedelta(minutes=1)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_success_25h_old_runs_at_once(self):
+        from datetime import timedelta
+
+        self.ledger.runs["snap:success"] = self.clock[0] - timedelta(hours=25)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_a_raising_cycle_records_nothing_and_a_restart_retries(self):
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def failing():
+            calls.append("fail")
+            raise RuntimeError("tenant scan failed")
+
+        task = self._start(failing)
+        await asyncio.sleep(0.04)
+        assert calls == ["fail"], "the same process retried inside the interval"
+        assert "snap:success" not in self.ledger.runs
+        await self._stop(task)
+
+        async def ok():
+            calls.append("ok")
+
+        restarted = self._start(ok)  # simulated deploy / new process
+        await asyncio.sleep(0.04)
+        assert calls == ["fail", "ok"]
+        assert self.ledger.runs["snap:success"] == self.clock[0]
+        await self._stop(restarted)
+
+    @pytest.mark.asyncio
+    async def test_a_cycle_killed_mid_run_is_retried_after_restart(self):
+        set_sweep_leader(_FakeLeader(True))
+        started = asyncio.Event()
+
+        async def hangs():
+            started.set()
+            await asyncio.sleep(3600)
+
+        task = self._start(hangs)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await self._stop(task)  # SIGTERM during deploy
+        assert "snap:success" not in self.ledger.runs
+
+        calls = []
+
+        async def ok():
+            calls.append(1)
+
+        restarted = self._start(ok)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(restarted)
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_claim_or_seed_row_is_ignored(self):
+        from datetime import timedelta
+
+        # Seeded by an older build an hour ago; it never ran the job.
+        self.ledger.runs["snap"] = self.clock[0] - timedelta(hours=1)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_a_follower_never_runs_the_cycle(self):
+        set_sweep_leader(_FakeLeader(False))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.05)
+        assert calls == []
+        assert "snap:success" not in self.ledger.runs
+        assert not task.done()
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_unknown_record_mode_is_rejected(self):
+        async def cycle():
+            return None
+
+        with pytest.raises(ValueError):
+            await run_periodic("snap", 86_400.0, cycle, record="bogus")
+
+
 class TestDocumentStoreRunLedger:
     @pytest.mark.asyncio
     async def test_round_trip_through_the_document_store(self):

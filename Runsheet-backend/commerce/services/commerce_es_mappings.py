@@ -358,6 +358,9 @@ AR_AGING_SNAPSHOTS_MAPPING = {
             "tenant_id":                  {"type": "keyword"},
             "snapshot_date":              {"type": "date"},
             "total_open_cents":           {"type": "long"},
+            # Not yet due; absent on snapshots from before due_date aging.
+            "bucket_current_cents":       {"type": "long"},
+            # Key kept for compatibility: 1-30 days past due.
             "bucket_0_30_cents":          {"type": "long"},
             "bucket_31_60_cents":         {"type": "long"},
             "bucket_61_90_cents":         {"type": "long"},

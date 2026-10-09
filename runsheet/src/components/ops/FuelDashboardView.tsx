@@ -45,13 +45,21 @@ const EMPTY_SUMMARY: FuelNetworkSummary = {
   total_capacity_liters: 0,
   total_current_stock_liters: 0,
   total_daily_consumption: 0,
-  average_days_until_empty: 0,
+  average_days_until_empty: null,
   stations_normal: 0,
   stations_low: 0,
   stations_critical: 0,
   stations_empty: 0,
   active_alerts: 0,
 };
+
+/**
+ * Network "Avg … days left" for the title-row counts. The backend averages
+ * only stations that consume fuel and sends null when none do (F5): "—".
+ */
+export function avgDaysLeftLabel(avg: number | null | undefined): string {
+  return avg != null && avg > 0 ? number(avg, { decimals: 1 }) : "—";
+}
 
 // Fallback poll so stock levels recover if the ops WebSocket drops or misses
 // a push: a monitoring screen can't silently go stale.
@@ -266,15 +274,14 @@ export default function FuelDashboardView({
             </b>{" "}
             {summary.active_alerts === 1 ? "alert" : "alerts"}
           </span>
-          {summary.average_days_until_empty > 0 && (
-            <span>
-              Avg{" "}
-              <b className="font-semibold text-text tabular-nums">
-                {number(summary.average_days_until_empty, { decimals: 1 })}
-              </b>{" "}
-              days left
-            </span>
-          )}
+          {/* null: no station consumes fuel, so there is no average (F5). */}
+          <span>
+            Avg{" "}
+            <b className="font-semibold text-text tabular-nums">
+              {avgDaysLeftLabel(summary.average_days_until_empty)}
+            </b>{" "}
+            days left
+          </span>
         </span>
       ),
     [loading, capacity, stock, summary],

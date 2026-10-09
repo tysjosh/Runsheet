@@ -201,7 +201,14 @@ class FuelNetworkSummary(BaseModel):
     total_capacity_liters: float = Field(..., ge=0, description="Sum of all station capacities")
     total_current_stock_liters: float = Field(..., ge=0, description="Sum of all current stock levels")
     total_daily_consumption: float = Field(..., ge=0, description="Sum of all daily consumption rates")
-    average_days_until_empty: float = Field(..., ge=0, description="Average days until empty across stations")
+    average_days_until_empty: Optional[float] = Field(
+        None,
+        ge=0,
+        description=(
+            "Average days until empty across stations that consume fuel; "
+            "null when none do"
+        ),
+    )
     stations_normal: int = Field(..., ge=0, description="Stations with normal stock status")
     stations_low: int = Field(..., ge=0, description="Stations with low stock status")
     stations_critical: int = Field(..., ge=0, description="Stations with critical stock status")

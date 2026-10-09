@@ -38,6 +38,14 @@ COPY requirements.txt ./
 RUN pip install --upgrade pip setuptools wheel \
     && pip install -r requirements.txt
 
+# US state boundaries for StateBoundaryDetector (regional analytics, IFTA).
+# The Census file is public domain and not committed; the script pins its
+# sha256 and exits non-zero on a mismatch or a failed verification, so a bad
+# download fails the build. Its own layer, before the source COPY, so it
+# caches across source-only changes.
+COPY scripts/download_shapefile.py /build/scripts/download_shapefile.py
+RUN python /build/scripts/download_shapefile.py --output-dir /opt/geodata
+
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------
@@ -60,6 +68,9 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=runsheet:runsheet . /app
+# After the source COPY so data/ in the build context (README/.gitkeep) does
+# not hide it. StateBoundaryDetector reads data/us_states.shp from /app.
+COPY --from=builder --chown=runsheet:runsheet /opt/geodata/ /app/data/
 
 # Non-root: the process needs no write access to the image, and a container
 # escape from an unprivileged uid is worth strictly less than from root.

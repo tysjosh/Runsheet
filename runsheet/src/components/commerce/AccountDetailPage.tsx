@@ -32,6 +32,7 @@ import {
   getAccountAging,
 } from "../../services/commerceApi";
 import { PageTitle } from "../ui/PageHeader";
+import { AGING_LABELS } from "./agingLabels";
 import { AccountStatusBadge, CreditStateBadge } from "./billingStatus";
 
 interface AccountDetailPageProps {
@@ -264,21 +265,26 @@ export default function AccountDetailPage({
             >
               AR aging
             </h2>
-            <dl className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            {/* Aged by days past due_date (F12); Current is not yet due. */}
+            <dl className="grid grid-cols-2 gap-3 md:grid-cols-6">
               <Fact
-                label="0–30 days"
+                label={AGING_LABELS.current}
+                value={money((aging.bucket_current_cents ?? 0) / 100)}
+              />
+              <Fact
+                label={AGING_LABELS.d1_30}
                 value={money(aging.bucket_0_30_cents / 100)}
               />
               <Fact
-                label="31–60 days"
+                label={AGING_LABELS.d31_60}
                 value={money(aging.bucket_31_60_cents / 100)}
               />
               <Fact
-                label="61–90 days"
+                label={AGING_LABELS.d61_90}
                 value={money(aging.bucket_61_90_cents / 100)}
               />
               <Fact
-                label="90+ days"
+                label={AGING_LABELS.d90_plus}
                 value={money(aging.bucket_90_plus_cents / 100)}
                 tone="critical"
               />

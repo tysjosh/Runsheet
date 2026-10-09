@@ -1146,6 +1146,11 @@ async def initialize(app, container: ServiceContainer) -> None:
                     "commerce.ar-aging-snapshot",
                     AR_AGING_SNAPSHOT_INTERVAL_SECONDS,
                     _ar_aging_snapshot_cycle,
+                    # Snapshot ids are per UTC date, so a catch-up run is
+                    # idempotent. Record only successful runs so a deploy
+                    # that kills a cycle (or a failed cycle) retries on boot.
+                    run_immediately=True,
+                    record="success",
                 )
             )
             logger.info(
@@ -1211,6 +1216,10 @@ async def initialize(app, container: ServiceContainer) -> None:
                 "core.analytics-snapshot",
                 ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
                 _analytics_snapshot_cycle,
+                # Doc ids are per UTC date (idempotent catch-up). Run on boot
+                # when the last *successful* run is >= 24 h old.
+                run_immediately=True,
+                record="success",
             )
         )
         logger.info(

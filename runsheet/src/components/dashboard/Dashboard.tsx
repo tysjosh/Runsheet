@@ -56,6 +56,7 @@ import {
   type FuelAlert,
   getAlerts as getFuelAlerts,
   listPlans,
+  NO_CONSUMPTION_DAYS,
   type PlanListItem,
 } from "../../services/fuelApi";
 import { type FuelOrder, listOrders } from "../../services/ordersApi";
@@ -832,6 +833,8 @@ export function tankPrefill(a: FuelAlert): CreateOrderPrefill {
 
 function runout(days: number | undefined): string | null {
   if (typeof days !== "number" || !Number.isFinite(days)) return null;
+  // 99999 is the backend's "no consumption" sentinel, not a runout (F5).
+  if (days >= NO_CONSUMPTION_DAYS) return null;
   const hours = Math.round(days * 24);
   return hours < 48
     ? `runout in ~${hours} h`

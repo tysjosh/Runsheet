@@ -12,6 +12,7 @@ import {
 import { gallons, number, pct } from "../../lib/format";
 import type { FuelStation, StationStatus } from "../../services/fuelApi";
 import {
+  displayDaysUntilEmpty,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
 } from "../../services/fuelApi";
@@ -79,9 +80,16 @@ export default function FuelStationList({
     let cmp = 0;
     if (key === "stock_pct")
       cmp = getStockPercentage(a) - getStockPercentage(b);
-    else if (key === "days_until_empty")
-      cmp = (a.days_until_empty ?? 0) - (b.days_until_empty ?? 0);
-    else cmp = String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
+    else if (key === "days_until_empty") {
+      // Stations with no consumption ("—") sort last in either order (F5).
+      const da = displayDaysUntilEmpty(a);
+      const db = displayDaysUntilEmpty(b);
+      if (da == null || db == null) {
+        if (da == null && db == null) return 0;
+        return da == null ? 1 : -1;
+      }
+      cmp = da - db;
+    } else cmp = String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
     return sort.direction === "asc" ? cmp : -cmp;
   });
 
@@ -153,10 +161,10 @@ export default function FuelStationList({
       align: "right",
       width: 100,
       className: "tabular-nums text-slate-700",
-      cell: (s) =>
-        s.days_until_empty > 0
-          ? `${number(s.days_until_empty, { decimals: 1 })} d`
-          : "—",
+      cell: (s) => {
+        const days = displayDaysUntilEmpty(s);
+        return days != null ? `${number(days, { decimals: 1 })} d` : "—";
+      },
     },
     {
       key: "location_name",
