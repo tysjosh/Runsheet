@@ -714,10 +714,16 @@ class ElasticsearchService:
             response = await self.search_documents("analytics_events", query)
             buckets = response["aggregations"]["time_series"]["buckets"]
             
+            # An empty bucket (no snapshot that day, or a null metric) is
+            # None, not 0: a missing day must render as a gap, not a zero.
             return [
                 {
                     "timestamp": bucket["key_as_string"],
-                    "value": round(bucket["avg_metric"]["value"] or 0, 2)
+                    "value": (
+                        round(bucket["avg_metric"]["value"], 2)
+                        if bucket["avg_metric"]["value"] is not None
+                        else None
+                    ),
                 }
                 for bucket in buckets
             ]
@@ -727,9 +733,18 @@ class ElasticsearchService:
         except Exception as e:
             self._handle_elasticsearch_error("get_time_series_data", e)
     
-    async def get_route_performance_data(self, tenant_id: str):
+    async def get_route_performance_data(self, tenant_id: str, days: int = 30):
         """
-        Get route performance aggregation with circuit breaker protection.
+        Route performance over the last ``days`` days, with circuit breaker
+        protection.
+
+        Each ``route_performance`` doc is one route on one day. Performance
+        per route is the mean of the daily percentages weighted by
+        ``orders_scored`` (a doc without it, i.e. legacy/seed data, weighs
+        1), so a day with 1 order does not count as much as a day with 30.
+        ``name`` is the newest doc's ``route_label`` (human label), falling
+        back to ``route_name`` (the id, also returned as ``route_id``).
+        Returns the top 10 routes by orders scored.
 
         Validates:
         - Requirement 3.5: Implement circuit breakers for Elasticsearch
@@ -739,42 +754,64 @@ class ElasticsearchService:
         if not tenant_id:
             raise ValueError("get_route_performance_data requires a tenant_id")
         try:
+            from datetime import timedelta
+
+            start = utcnow() - timedelta(days=days)
             query = {
                 "query": {
                     "bool": {
-                        "must": [{"term": {"event_type": "route_performance"}}],
+                        "must": [
+                            {"term": {"event_type": "route_performance"}},
+                            {"range": {"timestamp": {"gte": start.isoformat()}}},
+                        ],
                         "filter": [{"term": {"tenant_id": tenant_id}}],
                     }
                 },
-                "aggs": {
-                    "routes": {
-                        "terms": {"field": "route_name.keyword", "size": 10},
-                        "aggs": {
-                            "avg_performance": {
-                                "avg": {"field": "metrics.performance_pct"}
-                            }
-                        }
-                    }
-                },
-                "size": 0
+                "sort": [{"timestamp": {"order": "desc"}}],
+                "size": 2000,
             }
-            
-            response = await self.search_documents("analytics_events", query)
-            buckets = response["aggregations"]["routes"]["buckets"]
-            
+
+            response = await self.search_documents("analytics_events", query, 2000)
+            routes: Dict[str, Dict[str, Any]] = {}
+            for hit in response.get("hits", {}).get("hits", []):
+                src = hit.get("_source") or {}
+                key = src.get("route_name")
+                metrics = src.get("metrics") or {}
+                pct = metrics.get("performance_pct")
+                if not key or pct is None:
+                    continue
+                weight = metrics.get("orders_scored")
+                weight = weight if isinstance(weight, (int, float)) and weight > 0 else 1
+                entry = routes.get(key)
+                if entry is None:
+                    # Hits are newest first, so the first label seen wins.
+                    entry = routes[key] = {
+                        "name": src.get("route_label") or key,
+                        "route_id": key,
+                        "_weighted": 0.0,
+                        "orders_scored": 0,
+                    }
+                entry["_weighted"] += pct * weight
+                entry["orders_scored"] += weight
+
+            ranked = sorted(
+                routes.values(), key=lambda r: r["orders_scored"], reverse=True
+            )[:10]
             return [
                 {
-                    "name": bucket["key"],
-                    "performance": round(bucket["avg_performance"]["value"] or 0, 1)
+                    "name": r["name"],
+                    "route_id": r["route_id"],
+                    "performance": round(r["_weighted"] / r["orders_scored"], 1),
+                    "orders_scored": r["orders_scored"],
                 }
-                for bucket in buckets
+                for r in ranked
             ]
         except AppException:
             # Re-raise AppExceptions (already handled by search_documents)
             raise
         except Exception as e:
             self._handle_elasticsearch_error("get_route_performance_data", e)
-    
+
     async def get_delay_causes_data(self, tenant_id: str):
         """
         Get delay causes aggregation with circuit breaker protection.
@@ -857,13 +894,16 @@ class ElasticsearchService:
             
             response = await self.search_documents("analytics_events", query)
             buckets = response["aggregations"]["regions"]["buckets"]
-            
+
+            # "UNKNOWN" is a legacy bucket for orders with no resolvable
+            # state (written before F7). It is not a region; never show it.
             return [
                 {
                     "name": bucket["key"],
                     "onTimePercentage": round(bucket["avg_on_time"]["value"] or 0, 1)
                 }
                 for bucket in buckets
+                if bucket.get("key") and bucket["key"] != "UNKNOWN"
             ]
         except AppException:
             # Re-raise AppExceptions (already handled by search_documents)
@@ -872,8 +912,19 @@ class ElasticsearchService:
             self._handle_elasticsearch_error("get_regional_performance_data", e)
     
     async def get_current_metrics(self, tenant_id: str):
+        """Current metrics only (see :meth:`get_current_metrics_snapshot`).
+
+        Kept for the agent tools, which iterate the metric dict.
+        """
+        snapshot = await self.get_current_metrics_snapshot(tenant_id)
+        return snapshot["metrics"] if snapshot else None
+
+    async def get_current_metrics_snapshot(self, tenant_id: str):
         """
         Get current performance metrics with circuit breaker protection.
+
+        Returns ``{"as_of": <snapshot doc timestamp>, "metrics": {...}}``
+        so callers can show how old the snapshot is.
 
         Returns ``None`` when the tenant has no ``daily_performance``
         snapshot yet (e.g. no orders have been delivered/failed in the
@@ -896,7 +947,7 @@ class ElasticsearchService:
         - Requirements 9.2, 9.4: Enforce tenant scoping on ES reads
         """
         if not tenant_id:
-            raise ValueError("get_current_metrics requires a tenant_id")
+            raise ValueError("get_current_metrics_snapshot requires a tenant_id")
         try:
             query = {
                 "query": {
@@ -913,13 +964,14 @@ class ElasticsearchService:
             if not response["hits"]["hits"]:
                 return None
 
-            latest = response["hits"]["hits"][0]["_source"]["metrics"]
+            latest_source = response["hits"]["hits"][0]["_source"]
+            latest = latest_source["metrics"]
 
             def _pct(value: Any) -> Optional[str]:
                 return f"{value}%" if value is not None else None
 
             delay_minutes = latest.get("average_delay_minutes")
-            return {
+            metrics = {
                 "delivery_performance": {
                     "title": "Delivery Performance",
                     "value": _pct(latest.get("delivery_performance_pct")),
@@ -937,11 +989,12 @@ class ElasticsearchService:
                     "value": _pct(latest.get("fleet_utilization_pct")),
                 },
             }
+            return {"as_of": latest_source.get("timestamp"), "metrics": metrics}
         except AppException:
             # Re-raise AppExceptions (already handled by search_documents)
             raise
         except Exception as e:
-            self._handle_elasticsearch_error("get_current_metrics", e)
+            self._handle_elasticsearch_error("get_current_metrics_snapshot", e)
 
 # Global instance
 elasticsearch_service = ElasticsearchService()
