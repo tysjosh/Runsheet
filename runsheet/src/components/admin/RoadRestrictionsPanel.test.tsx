@@ -209,6 +209,12 @@ describe("SEVERITY_BADGE_CONFIG", () => {
 
 // ─── Component tests ─────────────────────────────────────────────────────────
 
+/** Open the upload FormDialog (task 3.8) and return it. */
+async function openUpload() {
+  fireEvent.click(await screen.findByTestId("road-restriction-upload-button"));
+  return screen.getByRole("dialog", { name: "Upload road restriction" });
+}
+
 describe("RoadRestrictionsPanel", () => {
   beforeEach(() => {
     mockList.mockReset();
@@ -274,7 +280,7 @@ describe("RoadRestrictionsPanel", () => {
       ).toBeInTheDocument();
     });
     expect(
-      screen.queryByTestId("road-restriction-upload-form"),
+      screen.queryByTestId("road-restriction-upload-button"),
     ).not.toBeInTheDocument();
     expect(
       screen.getByTestId("road-restriction-role-gate-notice"),
@@ -287,7 +293,7 @@ describe("RoadRestrictionsPanel", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByTestId("road-restriction-upload-form"),
+        screen.getByTestId("road-restriction-upload-button"),
       ).toBeInTheDocument();
     });
   });
@@ -306,7 +312,7 @@ describe("RoadRestrictionsPanel", () => {
 
     render(<RoadRestrictionsPanel roles={["dispatcher"]} />);
 
-    const form = await screen.findByTestId("road-restriction-upload-form");
+    const form = await openUpload();
     fireEvent.change(within(form).getByLabelText(/Name/i), {
       target: { value: "Broad St bridge closure" },
     });
@@ -317,7 +323,9 @@ describe("RoadRestrictionsPanel", () => {
       },
     );
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Upload restriction" }),
+      );
     });
 
     await waitFor(() => {
@@ -343,7 +351,7 @@ describe("RoadRestrictionsPanel", () => {
     mockList.mockResolvedValue(listResponseFixture([]));
     render(<RoadRestrictionsPanel roles={["dispatcher"]} />);
 
-    const form = await screen.findByTestId("road-restriction-upload-form");
+    const form = await openUpload();
     fireEvent.change(within(form).getByLabelText(/Name/i), {
       target: { value: "Broken polygon" },
     });
@@ -354,20 +362,20 @@ describe("RoadRestrictionsPanel", () => {
       },
     );
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Upload restriction" }),
+      );
     });
 
     expect(mockUpload).not.toHaveBeenCalled();
-    expect(
-      screen.getByTestId("road-restriction-polygon-error"),
-    ).toHaveTextContent(/valid JSON/i);
+    expect(within(form).getByText(/valid JSON/i)).toBeInTheDocument();
   });
 
   it("blocks submit when the name is blank", async () => {
     mockList.mockResolvedValue(listResponseFixture([]));
     render(<RoadRestrictionsPanel roles={["admin"]} />);
 
-    const form = await screen.findByTestId("road-restriction-upload-form");
+    const form = await openUpload();
     fireEvent.change(
       within(form).getByTestId("road-restriction-polygon-input"),
       {
@@ -375,7 +383,9 @@ describe("RoadRestrictionsPanel", () => {
       },
     );
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Upload restriction" }),
+      );
     });
 
     expect(mockUpload).not.toHaveBeenCalled();
