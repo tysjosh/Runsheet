@@ -250,7 +250,11 @@ describe("ReconciliationPage", () => {
 
     expect(highRow).not.toBeNull();
     expect(cleanRow).not.toBeNull();
-    expect(highRow?.className).toContain("bg-error-light");
+    // No row tinting (design.md §d): the Variance column says it with an
+    // icon and a label, so colour is never the only signal.
+    expect(highRow).toHaveTextContent("Over threshold");
+    expect(highRow?.querySelector('[data-status="critical"]')).not.toBeNull();
+    expect(cleanRow).toHaveTextContent("Within");
     expect(cleanRow?.className).not.toContain("bg-error-light");
   });
 
@@ -520,9 +524,10 @@ describe("ReconciliationPage — Export CSV", () => {
     const button = await screen.findByRole("button", {
       name: /^Export CSV ?: reconciliation$/,
     });
-    fireEvent.change(screen.getByLabelText("Min Variance %"), {
-      target: { value: "2.5" },
-    });
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    const minVariance = screen.getByLabelText(/^Min variance %/);
+    fireEvent.change(minVariance, { target: { value: "2.5" } });
+    fireEvent.blur(minVariance);
     await act(async () => {
       fireEvent.click(button);
     });
