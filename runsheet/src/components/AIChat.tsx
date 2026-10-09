@@ -287,6 +287,7 @@ export default function AIChat({ isOpen, onClose }: AIChatProps) {
     data: ConfirmationData,
     decision: "approved" | "rejected",
   ) => {
+    if (!data.actionId) return;
     updateConfirmation(messageId, { status: "submitting", error: undefined });
     try {
       if (decision === "approved") await approveAction(data.actionId);
@@ -852,6 +853,12 @@ function ConfirmationCard({
             label={data.status === "approved" ? "Approved" : "Rejected"}
           />
         </p>
+      ) : !data.actionId ? (
+        // No action id: the approvals API can't record a decision, so offer
+        // none here (review finding 8). The action still queues in Approvals.
+        <p className="mt-2 text-xs text-slate-700">
+          Decide this in Live → Approvals.
+        </p>
       ) : (
         <div className="mt-2 flex items-center gap-2">
           <button
@@ -870,14 +877,12 @@ function ConfirmationCard({
           >
             Reject
           </button>
-          {data.actionId && (
-            <a
-              href={`/dashboard/control?tab=approvals&id=${encodeURIComponent(data.actionId)}`}
-              className="text-xs font-semibold text-link hover:underline"
-            >
-              Open in Approvals
-            </a>
-          )}
+          <a
+            href={`/dashboard/control?tab=approvals&id=${encodeURIComponent(data.actionId)}`}
+            className="text-xs font-semibold text-link hover:underline"
+          >
+            Open in Approvals
+          </a>
         </div>
       )}
     </section>

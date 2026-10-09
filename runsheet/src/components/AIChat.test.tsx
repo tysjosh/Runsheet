@@ -128,3 +128,22 @@ it("keeps the card pending with the error when the decision fails", async () => 
   expect(within(card).getByRole("alert")).toHaveTextContent("Already decided");
   expect(within(card).getByRole("button", { name: "Approve" })).toBeEnabled();
 });
+it("offers no decision when the action has no id (nothing to approve)", async () => {
+  (globalThis as { fetch: unknown }).fetch = jest
+    .fn()
+    .mockResolvedValue(
+      sseResponse([
+        { ...CONFIRMATION, action: { ...CONFIRMATION.action, action_id: "" } },
+        { type: "done" },
+      ]),
+    );
+  const card = await ask();
+  expect(within(card).queryByRole("button", { name: "Approve" })).toBeNull();
+  expect(within(card).queryByRole("button", { name: "Reject" })).toBeNull();
+  expect(
+    within(card).queryByRole("link", { name: "Open in Approvals" }),
+  ).toBeNull();
+  expect(card).toHaveTextContent("Decide this in Live → Approvals.");
+  expect(approveAction).not.toHaveBeenCalled();
+  expect(rejectAction).not.toHaveBeenCalled();
+});
