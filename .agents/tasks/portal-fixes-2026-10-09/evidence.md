@@ -77,7 +77,34 @@ Screenshots (40): `.agents/tasks/ui-revamp-2026-10-08/screenshots/portal-fixes/{
 
 Cleanup: `.next`, `test-results`, coverage removed; probe scripts deleted. `tmp/portal-fixes/` holds only run logs and the one-shot helper.
 
+## Iteration 2 (review fixes)
+
+| Finding | Fix |
+|---|---|
+| HIGH: blocking SendGrid send on request paths | `SendGridEmailDispatcher.dispatch` now runs the synchronous `client.send` in a dedicated 4-thread executor (`sendgrid-send`) under `asyncio.wait_for(..., SEND_TIMEOUT_SECONDS=10)`; a timeout returns `failed` with `failure_reason` "SendGrid send timed out after 10s". `__init__` also sets the SDK's `python_http_client` socket timeout to the same bound (checked in the 6.12.5 / 3.3.7 sources: `Client.timeout` feeds `urlopen(timeout=...)`), so a stalled thread frees itself. Fixed at the dispatcher (D17), so the notification pipeline is covered too. A dedicated executor rather than `to_thread`: the first attempt with `to_thread` still held the test request for the full hang, because the default executor is joined on loop shutdown. |
+| LOW: key in shell history | `sendgrid-setup.md` step 3 uses `read -rs SG_KEY`, `--secret-string "$SG_KEY"`, `unset SG_KEY`. |
+| LOW: tenant-wide switch on a per-customer panel | No code change. Raised below for the owner. |
+| LOW: nearly-full tank only allows Fill to full | No code change. Raised below for the owner. |
+
+New tests (`tests/portal/test_portal_fixes.py`): `test_hung_sendgrid_times_out_without_blocking_the_event_loop` (send hangs; dispatch returns `failed` in < 2 s, a concurrent ticker keeps running, the HTTP client timeout is set, no key in logs) and `test_submit_and_release_hold_return_when_sendgrid_hangs` (real `send_portal_email` → dispatcher with a hanging fake SDK; `POST /api/portal/orders` and release-hold each return in < 3 s, dispatchers still notified, order Confirmed). Without the fix each request blocks for the full 5 s hang.
+
+| Check | Command | Result |
+|---|---|---|
+| Targeted | `pytest --no-cov tests/portal/test_portal_fixes.py tests/unit/test_real_channel_dispatchers.py` | 50 passed |
+| Backend full + coverage (CI form) | `pytest --cov=. --cov-fail-under=70 -x -q -p no:cacheprovider --deselect tests/unit/test_dispatch_board_perf.py` | **14,810 passed**, 274 skipped (Postgres), coverage **79.68%** |
+| Board perf budgets | `pytest tests/unit/test_dispatch_board_perf.py --no-cov` | 9 passed |
+| Changed-file coverage | `python scripts/check_coverage.py --threshold 0` | passed (309 files) |
+| Endpoint registry | `python scripts/generate_endpoint_registry.py` + `git diff docs/endpoint-registry.md` | no diff |
+| Alembic | no migration | single head unchanged |
+| tsc / lint / Jest | `npx tsc --noEmit`; `npm run lint`; `npx jest --ci` | 0 errors; 0 errors, 2 pre-existing warnings; 149 suites, 2041 passed, 1 skipped |
+| Build, fresh-checkout build, portal + ui-revamp e2e | not rerun | No file under `runsheet/` changed this iteration (tree `26d9ac0` identical to iteration 1), so iteration 1's results (174/174, 128/128, builds OK) still apply to the same frontend tree. |
+| GitHub CI (Postgres jobs) | not run | pending, release step |
+
+Cleanup: coverage output removed; `tmp/portal-fixes/pkg` (downloaded wheels to read the SDK timeout) deleted.
+
 ## Owner follow-ups
 
-- SendGrid: `sendgrid-setup.md` (create a Mail Send key, verify the sender, store the secret, tell the orchestrator).
+- SendGrid: `sendgrid-setup.md` (create a Mail Send key, verify the sender, store the secret with `read -rs`, tell the orchestrator).
+- Where the ordering switch lives: Customers → any customer → **Portal access** panel → "Customers can request deliveries online" (admin only). It's **tenant-wide**: switching it on one customer changes it for every customer, and the label says so. Staff Settings would be a better home once that module is in scope (Phase 3 owns it now).
+- Nearly-full tanks: when a fresh reading leaves less than 25 gal of room, no gallon amount passes both the 25 gal minimum and the room-left limit, so the customer can only choose **Fill to full** (the dialog hint explains this). Options: keep it, or lower the minimum for nearly-full tanks.
 - Possible product change (not made): a confirm step on the portal's Cancel request (PD8 has none). The owner's own click cancelled `QA-OWNER-REQ-1`.

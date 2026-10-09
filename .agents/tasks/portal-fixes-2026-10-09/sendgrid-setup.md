@@ -20,20 +20,24 @@ The deploy script sends from **`no-reply@staging.runsheetops.com`** by default (
 
 ## 3. Store the key in AWS Secrets Manager
 
-Run this in a terminal signed in to AWS account 224535575204. Paste the key in place of `<KEY>`, and don't put it in any file, chat or ticket:
+Run this in a terminal signed in to AWS account 224535575204. `read -rs` asks for the key without showing it, so it never lands on the command line or in shell history. Paste the key at the prompt and press Enter. Don't put it in any file, chat or ticket.
 
 ```sh
+read -rs SG_KEY
 aws secretsmanager create-secret --region us-east-2 \
   --name runsheet-staging/sendgrid-api-key \
-  --secret-string '<KEY>'
+  --secret-string "$SG_KEY"
+unset SG_KEY
 ```
 
 If the secret already exists, use this instead:
 
 ```sh
+read -rs SG_KEY
 aws secretsmanager put-secret-value --region us-east-2 \
   --secret-id runsheet-staging/sendgrid-api-key \
-  --secret-string '<KEY>'
+  --secret-string "$SG_KEY"
+unset SG_KEY
 ```
 
 ## 4. Tell the orchestrator

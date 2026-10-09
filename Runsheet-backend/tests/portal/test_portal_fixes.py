@@ -392,6 +392,101 @@ def test_auth_email_routes_through_sendgrid_smtp_without_logging_the_key(caplog)
     assert _build_email_delivery(Settings(smtp_host="", smtp_from_email="")) is None
 
 
+# ---------------------------------------------------------------------------
+# A hung SendGrid never stalls the event loop or the request (review #1)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def hung_sendgrid(monkeypatch):
+    """A fake SendGrid SDK whose ``send`` blocks until released, a short send
+    bound, and the socket timeout the dispatcher sets on the HTTP client."""
+    import sys
+    import threading
+
+    from notifications.services import sendgrid_email_dispatcher as sgd
+
+    release = threading.Event()
+    clients = []
+
+    class Mail:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    class Client:
+        def __init__(self, key):
+            self.client = SimpleNamespace(timeout=None)
+            clients.append(self)
+
+        def send(self, mail):
+            release.wait(5)
+            return SimpleNamespace(status_code=202, headers={})
+
+    helpers_mail = SimpleNamespace(Mail=Mail)
+    monkeypatch.setitem(sys.modules, "sendgrid", SimpleNamespace(SendGridAPIClient=Client))
+    monkeypatch.setitem(sys.modules, "sendgrid.helpers", SimpleNamespace(mail=helpers_mail))
+    monkeypatch.setitem(sys.modules, "sendgrid.helpers.mail", helpers_mail)
+    monkeypatch.setenv("SENDGRID_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("SENDGRID_FROM_EMAIL", "no-reply@example.test")
+    monkeypatch.setattr(sgd, "SEND_TIMEOUT_SECONDS", 0.3)
+    try:
+        yield SimpleNamespace(clients=clients, sgd=sgd)
+    finally:
+        release.set()
+
+
+async def test_hung_sendgrid_times_out_without_blocking_the_event_loop(hung_sendgrid, caplog):
+    import asyncio
+    import time
+
+    ticks = 0
+
+    async def ticker():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    caplog.set_level(logging.DEBUG)
+    task = asyncio.create_task(ticker())
+    dispatcher = hung_sendgrid.sgd.SendGridEmailDispatcher()
+    notification = {"recipient_reference": "buyer@example.test", "subject": "s", "message_body": "t"}
+    started = time.monotonic()
+    try:
+        outcome = await dispatcher.dispatch(notification)
+    finally:
+        task.cancel()
+    elapsed = time.monotonic() - started
+    assert outcome == "failed"
+    assert "timed out" in notification["failure_reason"]
+    assert elapsed < 2
+    assert ticks >= 5  # the loop kept running while the send hung
+    assert hung_sendgrid.clients[0].client.timeout == pytest.approx(0.3)
+    assert FAKE_KEY not in caplog.text
+
+
+def test_submit_and_release_hold_return_when_sendgrid_hangs(client, sessions, notified, hung_sendgrid, cA):
+    import time
+
+    from portal.services import portal_email as pe
+    from portal.services.order_notifications import get_portal_order_notifier
+
+    # The real send path (portal_email -> SendGridEmailDispatcher), not the outbox.
+    get_portal_order_notifier()._send = pe.send_portal_email
+
+    started = time.monotonic()
+    oid = _submit(client, cA)
+    assert time.monotonic() - started < 3
+    assert len(notified.activity.entries) == 1  # dispatchers still heard
+
+    started = time.monotonic()
+    resp = _release(client, sessions, oid)
+    assert resp.status_code == 200, resp.text
+    assert time.monotonic() - started < 3
+    portal = call(client, "GET", f"/api/portal/orders/{oid}", cA).json()["data"]
+    assert portal["status_code"] == "confirmed"
+
+
 def test_staff_resolution_ignores_non_portal_and_non_awaiting_orders():
     import asyncio
 
