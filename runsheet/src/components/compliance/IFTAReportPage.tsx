@@ -1,14 +1,29 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+/**
+ * Compliance → IFTA (UI revamp task 3.5): the summary cards are title-row
+ * counts, the quarter picker is the toolbar, incomplete trucks are one
+ * actionable banner, and the manual mileage adjustment is an md FormDialog
+ * (design.md §5) instead of an always-open form below the report.
+ */
+import { Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Button,
   type Column,
+  DataTable,
   EntityLink,
   ExportCsvButton,
-  PageHeader,
-  Table,
+  Field,
+  FormDialog,
+  INPUT_CLASS,
+  InlineBanner,
+  NumberField,
+  Select,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { money, number } from "../../lib/format";
 import {
   type CreateMileageAdjustmentPayload,
   createMileageAdjustment,
@@ -19,6 +34,8 @@ import {
   type IFTATruckSummary,
 } from "../../services/complianceApi";
 import AssetPicker from "../ops/AssetPicker";
+import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -33,46 +50,54 @@ function isValidQuarter(value: string): boolean {
 }
 
 function formatNumber(value: number | null | undefined, decimals = 1): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  return value.toLocaleString(undefined, {
-    minimumFractionDigits: decimals,
-    maximumFractionDigits: decimals,
-  });
+  return number(value, { decimals });
 }
 
 function formatCurrency(cents: number | null | undefined): string {
   if (cents == null || Number.isNaN(cents)) return "—";
-  return `$${(cents / 100).toFixed(2)}`;
+  return money(cents / 100);
+}
+
+/** Quarters from last year to next year ("2026-Q4"). */
+function getQuarterOptions(): string[] {
+  const currentYear = new Date().getFullYear();
+  const options: string[] = [];
+  for (let year = currentYear - 1; year <= currentYear + 1; year++) {
+    for (let q = 1; q <= 4; q++) options.push(`${year}-Q${q}`);
+  }
+  return options;
+}
+
+type AdjustmentValues = {
+  truck_id: string;
+  jurisdiction: string;
+  miles: number | null;
+  quarter: string;
+  reason: string;
+};
+
+export function validateAdjustment(v: AdjustmentValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.truck_id.trim()) errors.truck_id = "Pick a truck.";
+  if (!/^[A-Za-z]{2}$/.test(v.jurisdiction.trim()))
+    errors.jurisdiction = "Enter a two-letter state, e.g. TX.";
+  if (v.miles == null || v.miles === 0)
+    errors.miles = "Miles must be non-zero.";
+  if (!isValidQuarter(v.quarter))
+    errors.quarter = "Quarter must be in YYYY-Q[1-4] format.";
+  if (!v.reason.trim()) errors.reason = "Reason is required for audit trail.";
+  return errors;
 }
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function IFTAReportPage() {
-  // Report state
   const [quarter, setQuarter] = useState(getCurrentQuarter());
   const [report, setReport] = useState<IFTAReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Expanded truck detail
   const [expandedTruck, setExpandedTruck] = useState<string | null>(null);
-
-  // Manual adjustment form state
-  const [adjustmentForm, setAdjustmentForm] =
-    useState<CreateMileageAdjustmentPayload>({
-      truck_id: "",
-      jurisdiction: "",
-      miles: 0,
-      quarter: getCurrentQuarter(),
-      reason: "",
-    });
-  const [submittingAdjustment, setSubmittingAdjustment] = useState(false);
-  const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
-  const [adjustmentSuccess, setAdjustmentSuccess] = useState<string | null>(
-    null,
-  );
-
-  // ─── Fetch report ──────────────────────────────────────────────────────────
+  const [adjusting, setAdjusting] = useState<string | null>(null);
 
   const fetchReport = useCallback(async (q: string) => {
     if (!isValidQuarter(q)) return;
@@ -95,521 +120,362 @@ export default function IFTAReportPage() {
     fetchReport(quarter);
   }, [fetchReport, quarter]);
 
-  // ─── Quarter selector handler ──────────────────────────────────────────────
+  const actions = useMemo(
+    () => (
+      <>
+        <ExportCsvButton
+          type="ifta"
+          params={{ quarter }}
+          subject="IFTA report"
+          allowedRoles={["admin", "dispatcher"]}
+        />
+        <Button
+          size="sm"
+          icon={<Plus className="h-3.5 w-3.5" />}
+          onClick={() => setAdjusting("")}
+        >
+          Record adjustment
+        </Button>
+      </>
+    ),
+    [quarter],
+  );
+  // Summary cards → title-row counts (design.md §6 rule 3).
+  const counts = useMemo(
+    () =>
+      report ? (
+        <span className="flex items-center gap-1 whitespace-nowrap">
+          <span>Fleet MPG</span>{" "}
+          <span className="font-semibold text-text">
+            {formatNumber(report.fleet_mpg, 2)}
+          </span>
+          <span aria-hidden="true">·</span>
+          <span>{number(report.trucks.length)} trucks</span>
+          <span aria-hidden="true">·</span>
+          <span>{number(report.incomplete_trucks.length)} incomplete</span>
+        </span>
+      ) : null,
+    [report],
+  );
+  const embedded = usePageChrome({ actions, counts });
 
-  function handleQuarterChange(e: React.ChangeEvent<HTMLSelectElement>) {
-    const value = e.target.value;
-    setQuarter(value);
-    setAdjustmentForm((prev) => ({ ...prev, quarter: value }));
-  }
-
-  // ─── Generate quarter options (current year ± 1 year) ──────────────────────
-
-  function getQuarterOptions(): string[] {
-    const now = new Date();
-    const currentYear = now.getFullYear();
-    const options: string[] = [];
-    for (let year = currentYear - 1; year <= currentYear + 1; year++) {
-      for (let q = 1; q <= 4; q++) {
-        options.push(`${year}-Q${q}`);
-      }
-    }
-    return options;
-  }
-
-  // ─── Toggle truck detail ───────────────────────────────────────────────────
-
-  function toggleTruckDetail(truckId: string) {
-    setExpandedTruck((prev) => (prev === truckId ? null : truckId));
-  }
-
-  // ─── Manual adjustment form handlers ───────────────────────────────────────
-
-  function handleAdjustmentFieldChange(
-    field: keyof CreateMileageAdjustmentPayload,
-    value: string | number,
-  ) {
-    setAdjustmentForm((prev) => ({ ...prev, [field]: value }));
-    setAdjustmentError(null);
-    setAdjustmentSuccess(null);
-  }
-
-  async function handleSubmitAdjustment(e: React.FormEvent) {
-    e.preventDefault();
-
-    // Validate
-    if (!adjustmentForm.truck_id.trim()) {
-      setAdjustmentError("Truck ID is required.");
-      return;
-    }
-    if (!adjustmentForm.jurisdiction.trim()) {
-      setAdjustmentError("Jurisdiction is required.");
-      return;
-    }
-    if (adjustmentForm.miles === 0) {
-      setAdjustmentError("Miles must be non-zero.");
-      return;
-    }
-    if (!isValidQuarter(adjustmentForm.quarter)) {
-      setAdjustmentError("Quarter must be in YYYY-Q[1-4] format.");
-      return;
-    }
-    if (!adjustmentForm.reason.trim()) {
-      setAdjustmentError("Reason is required for audit trail.");
-      return;
-    }
-
-    setSubmittingAdjustment(true);
-    setAdjustmentError(null);
-    setAdjustmentSuccess(null);
-
-    try {
-      await createMileageAdjustment({
-        ...adjustmentForm,
-        jurisdiction: adjustmentForm.jurisdiction.toUpperCase(),
-      });
-      setAdjustmentSuccess(
-        `Adjustment recorded: ${adjustmentForm.miles > 0 ? "+" : ""}${adjustmentForm.miles} miles for ${adjustmentForm.truck_id} in ${adjustmentForm.jurisdiction.toUpperCase()}.`,
-      );
-      // Reset form (keep quarter)
-      setAdjustmentForm({
-        truck_id: "",
-        jurisdiction: "",
-        miles: 0,
-        quarter: adjustmentForm.quarter,
-        reason: "",
-      });
-      // Refresh report if same quarter
-      if (adjustmentForm.quarter === quarter) {
-        await fetchReport(quarter);
-      }
-    } catch (err) {
-      setAdjustmentError(
-        err instanceof Error ? err.message : "Failed to submit adjustment",
-      );
-    } finally {
-      setSubmittingAdjustment(false);
-    }
-  }
-
-  // ─── Render ────────────────────────────────────────────────────────────────
-
-  // Per-truck summary columns. ``Details`` toggles the expandable
-  // jurisdiction breakdown rendered via the Table's renderExpanded hook.
+  // Per-truck summary columns. The row menu toggles the jurisdiction
+  // breakdown rendered via the table's renderExpanded hook.
   const truckColumns: Column<IFTATruckSummary>[] = [
     {
       key: "truck_id",
-      label: "Truck ID",
+      header: "Truck",
+      width: 160,
       // The per-truck IFTA subject is navigable to the Fleet module as a
       // canonical asset (Req 11.3, 13.1).
-      render: (t) => (
-        <EntityLink type="asset" id={t.truck_id} className="font-medium" />
+      cell: (t) => (
+        <EntityLink
+          type="asset"
+          id={t.truck_id}
+          className="font-medium"
+          stopPropagation
+        />
       ),
     },
-    { key: "truck_name", label: "Truck Name", render: (t) => t.truck_name },
+    {
+      key: "truck_name",
+      header: "Name",
+      truncate: true,
+      cell: (t) => t.truck_name,
+    },
     {
       key: "total_miles",
-      label: "Total Miles",
+      header: "Miles",
       align: "right",
-      render: (t) => (
-        <span className="font-mono text-sm">{formatNumber(t.total_miles)}</span>
-      ),
+      width: 120,
+      className: "tabular-nums",
+      cell: (t) => formatNumber(t.total_miles),
     },
     {
       key: "total_gallons",
-      label: "Total Gallons",
+      header: "Gallons",
       align: "right",
-      render: (t) => (
-        <span className="font-mono text-sm">
-          {formatNumber(t.total_gallons)}
-        </span>
-      ),
+      width: 120,
+      className: "tabular-nums",
+      cell: (t) => formatNumber(t.total_gallons),
     },
     {
       key: "fleet_mpg",
-      label: "MPG",
+      header: "MPG",
       align: "right",
-      render: (t) => (
-        <span className="font-mono text-sm">
-          {formatNumber(t.fleet_mpg, 2)}
-        </span>
-      ),
+      width: 90,
+      className: "tabular-nums",
+      cell: (t) => formatNumber(t.fleet_mpg, 2),
     },
     {
       key: "jurisdiction_count",
-      label: "Jurisdictions",
-      align: "center",
-      render: (t) => t.jurisdictions.length,
-    },
-    {
-      key: "details",
-      label: "Details",
-      render: (t) => (
-        <button
-          type="button"
-          onClick={() => toggleTruckDetail(t.truck_id)}
-          className="text-info hover:text-info-dark text-sm underline"
-        >
-          {expandedTruck === t.truck_id ? "Hide" : "View"}
-        </button>
-      ),
+      header: "Jurisdictions",
+      align: "right",
+      width: 120,
+      className: "tabular-nums",
+      cell: (t) => number(t.jurisdictions.length),
     },
   ];
 
   const jurisdictionColumns: Column<IFTAJurisdictionEntry>[] = [
     {
       key: "jurisdiction",
-      label: "Jurisdiction",
-      render: (j) => <span className="font-medium">{j.jurisdiction}</span>,
+      header: "Jurisdiction",
+      className: "font-medium",
+      cell: (j) => j.jurisdiction,
     },
-    {
-      key: "total_miles",
-      label: "Total Miles",
-      align: "right",
-      render: (j) => (
-        <span className="font-mono">{formatNumber(j.total_miles)}</span>
-      ),
-    },
-    {
-      key: "taxable_miles",
-      label: "Taxable Miles",
-      align: "right",
-      render: (j) => (
-        <span className="font-mono">{formatNumber(j.taxable_miles)}</span>
-      ),
-    },
-    {
-      key: "tax_paid_gallons",
-      label: "Tax Paid Gallons",
-      align: "right",
-      render: (j) => (
-        <span className="font-mono">{formatNumber(j.tax_paid_gallons)}</span>
-      ),
-    },
-    {
-      key: "net_taxable_gallons",
-      label: "Net Taxable Gallons",
-      align: "right",
-      render: (j) => (
-        <span className="font-mono">{formatNumber(j.net_taxable_gallons)}</span>
-      ),
-    },
+    ...(
+      [
+        ["total_miles", "Miles"],
+        ["taxable_miles", "Taxable miles"],
+        ["tax_paid_gallons", "Tax-paid gal"],
+        ["net_taxable_gallons", "Net taxable gal"],
+      ] as const
+    ).map(([key, header]) => ({
+      key,
+      header,
+      align: "right" as const,
+      className: "tabular-nums",
+      cell: (j: IFTAJurisdictionEntry) => formatNumber(j[key]),
+    })),
     {
       key: "tax_rate",
-      label: "Tax Rate",
+      header: "Rate",
       align: "right",
-      render: (j) => (
-        <span className="font-mono">{formatCurrency(j.tax_rate)}</span>
-      ),
+      className: "tabular-nums",
+      cell: (j) => formatCurrency(j.tax_rate),
     },
     {
       key: "tax_due",
-      label: "Tax Due",
+      header: "Tax due",
       align: "right",
-      render: (j) => (
-        <span className="font-mono">{formatCurrency(j.tax_due)}</span>
-      ),
+      className: "tabular-nums",
+      cell: (j) => formatCurrency(j.tax_due),
     },
   ];
 
+  const submitAdjustment = async (v: AdjustmentValues) => {
+    await createMileageAdjustment({
+      truck_id: v.truck_id,
+      jurisdiction: v.jurisdiction.trim().toUpperCase(),
+      miles: v.miles ?? 0,
+      quarter: v.quarter,
+      reason: v.reason.trim(),
+    } satisfies CreateMileageAdjustmentPayload);
+    return v;
+  };
+
   return (
-    <div className="p-6">
-      <PageHeader
-        title="IFTA Quarterly Report"
-        subtitle="View per-truck mileage by jurisdiction, fleet MPG, and manage manual mileage adjustments for IFTA filing.
-        "
-        actions={
-          <ExportCsvButton
-            type="ifta"
-            params={{ quarter }}
-            subject="IFTA report"
-            allowedRoles={["admin", "dispatcher"]}
-          />
-        }
-      />
-
-      {/* Quarter selector */}
-      <div className="mb-6 flex items-center gap-4">
-        <label
-          htmlFor="quarter-select"
-          className="text-sm font-medium text-gray-700"
-        >
-          Quarter:
-        </label>
-        <select
-          id="quarter-select"
-          value={quarter}
-          onChange={handleQuarterChange}
-          className="border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-        >
-          {getQuarterOptions().map((q) => (
-            <option key={q} value={q}>
-              {q}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* Loading state */}
-      {loading && (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading IFTA report...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center gap-3 border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            IFTA Quarterly Report
+          </PageTitle>
+          <span className="text-xs text-text-muted">{counts}</span>
+          <div className="ml-auto flex gap-2">{actions}</div>
         </div>
       )}
-
-      {/* Error state */}
-      {!loading && error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Report content */}
-      {!loading && !error && report && (
-        <>
-          {/* Summary cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-            <div className="bg-info-light border border-info rounded-lg p-4">
-              <div className="text-sm text-info-dark font-medium">
-                Fleet MPG
-              </div>
-              <div className="text-2xl font-bold text-info-dark mt-1">
-                {formatNumber(report.fleet_mpg, 2)}
-              </div>
-              <div className="text-xs text-info mt-1">
-                Total miles / total gallons
-              </div>
-            </div>
-            <div className="bg-success-light border border-success-light rounded-lg p-4">
-              <div className="text-sm text-success-dark font-medium">
-                Total Trucks
-              </div>
-              <div className="text-2xl font-bold text-success-dark mt-1">
-                {report.trucks.length}
-              </div>
-              <div className="text-xs text-success mt-1">
-                Trucks with mileage data
-              </div>
-            </div>
-            <div className="bg-warning-light border border-warning-light rounded-lg p-4">
-              <div className="text-sm text-warning-dark font-medium">
-                Incomplete Trucks
-              </div>
-              <div className="text-2xl font-bold text-warning-dark mt-1">
-                {report.incomplete_trucks.length}
-              </div>
-              <div className="text-xs text-warning mt-1">
-                Missing Geotab data — requires review
-              </div>
-            </div>
-          </div>
-
-          {/* Per-truck table */}
-          <div className="mb-8">
-            <h2 className="text-lg font-semibold mb-3">Per-Truck Summary</h2>
-            <Table<IFTATruckSummary>
-              ariaLabel="Per-truck IFTA summary"
-              columns={truckColumns}
-              data={report.trucks}
-              getRowId={(truck) => truck.truck_id}
-              emptyState={
-                <span className="text-gray-500">
-                  No truck data available for {quarter}.
-                </span>
-              }
-              renderExpanded={(truck) =>
-                expandedTruck === truck.truck_id ? (
-                  <div className="bg-gray-50 p-4 border-b border-gray-200">
-                    <Table<IFTAJurisdictionEntry>
-                      variant="compact"
-                      ariaLabel={`Jurisdiction breakdown for ${truck.truck_id}`}
-                      columns={jurisdictionColumns}
-                      data={truck.jurisdictions}
-                      getRowId={(j) => j.jurisdiction}
-                      emptyState={
-                        <span className="text-gray-500">
-                          No jurisdiction data.
-                        </span>
-                      }
-                    />
-                  </div>
-                ) : null
-              }
+      <Toolbar
+        label="IFTA"
+        filters={
+          <div className="w-36">
+            <Select
+              id="quarter-select"
+              aria-label="Quarter"
+              value={quarter}
+              onChange={setQuarter}
+              options={getQuarterOptions().map((q) => ({ value: q, label: q }))}
             />
           </div>
-
-          {/* Incomplete trucks section */}
-          {report.incomplete_trucks.length > 0 && (
-            <div className="mb-8">
-              <h2 className="text-lg font-semibold mb-3">Incomplete Trucks</h2>
-              <div className="bg-warning-light border border-warning-light rounded-lg p-4">
-                <p className="text-sm text-warning-dark mb-3">
-                  The following trucks have incomplete Geotab data for {quarter}
-                  . Manual mileage adjustments may be required.
-                </p>
-                <div className="flex flex-wrap gap-2">
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        {!loading &&
+          !error &&
+          report &&
+          report.incomplete_trucks.length > 0 && (
+            <div className="px-4 pt-3">
+              <InlineBanner
+                tone="warning"
+                action={
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() =>
+                      setAdjusting(report.incomplete_trucks[0]?.truck_id ?? "")
+                    }
+                  >
+                    Record adjustment
+                  </Button>
+                }
+              >
+                <span className="flex flex-wrap items-center gap-x-2">
+                  Incomplete Geotab data for {quarter}:
                   {report.incomplete_trucks.map((flag) => (
-                    <span
-                      key={flag.truck_id}
-                      title={flag.reason}
-                      className="inline-block bg-warning-light text-warning-dark px-3 py-1 rounded text-sm font-medium"
-                    >
+                    <span key={flag.truck_id} title={flag.reason}>
                       <EntityLink type="asset" id={flag.truck_id} />
                     </span>
                   ))}
-                </div>
+                </span>
+              </InlineBanner>
+            </div>
+          )}
+        <DataTable<IFTATruckSummary>
+          ariaLabel="Per-truck IFTA summary"
+          columns={truckColumns}
+          data={loading || error || !report ? [] : report.trucks}
+          loading={loading}
+          error={
+            error
+              ? { message: error, onRetry: () => fetchReport(quarter) }
+              : null
+          }
+          getRowId={(truck) => truck.truck_id}
+          rowLabel={(truck) => `Truck ${truck.truck_id}`}
+          onRowClick={(t) =>
+            setExpandedTruck((prev) =>
+              prev === t.truck_id ? null : t.truck_id,
+            )
+          }
+          rowMenu={(t) => [
+            {
+              id: "details",
+              label:
+                expandedTruck === t.truck_id
+                  ? "Hide jurisdictions"
+                  : "Show jurisdictions",
+              onSelect: () =>
+                setExpandedTruck((prev) =>
+                  prev === t.truck_id ? null : t.truck_id,
+                ),
+            },
+            {
+              id: "adjust",
+              label: "Record adjustment",
+              onSelect: () => setAdjusting(t.truck_id),
+            },
+          ]}
+          emptyState={
+            <span className="text-text-muted">
+              No truck data available for {quarter}.
+            </span>
+          }
+          renderExpanded={(truck) =>
+            expandedTruck === truck.truck_id ? (
+              <div className="border-b border-slate-200 bg-slate-50 p-3">
+                <DataTable<IFTAJurisdictionEntry>
+                  rowHeight="compact"
+                  ariaLabel={`Jurisdiction breakdown for ${truck.truck_id}`}
+                  columns={jurisdictionColumns}
+                  data={truck.jurisdictions}
+                  getRowId={(j) => j.jurisdiction}
+                  emptyState={
+                    <span className="text-text-muted">
+                      No jurisdiction data.
+                    </span>
+                  }
+                />
               </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* Manual adjustment form */}
-      <div className="border-t pt-6 mt-6">
-        <h2 className="text-lg font-semibold mb-3">
-          Manual Mileage Adjustment
-        </h2>
-        <p className="text-sm text-gray-600 mb-4">
-          Record a manual mileage adjustment for a truck. Positive values add
-          miles; negative values subtract. All adjustments are logged for audit
-          purposes.
-        </p>
-
-        <form onSubmit={handleSubmitAdjustment} className="space-y-4 max-w-xl">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="adj-truck-id"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                Truck ID
-              </label>
-              <AssetPicker
-                id="adj-truck-id"
-                assetType="vehicle"
-                aria-label="Truck ID"
-                value={adjustmentForm.truck_id || null}
-                onChange={(value) =>
-                  handleAdjustmentFieldChange("truck_id", value)
-                }
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="adj-jurisdiction"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                Jurisdiction (State)
-              </label>
-              <input
-                id="adj-jurisdiction"
-                type="text"
-                value={adjustmentForm.jurisdiction}
-                onChange={(e) =>
-                  handleAdjustmentFieldChange("jurisdiction", e.target.value)
-                }
-                placeholder="e.g. TX"
-                maxLength={2}
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm uppercase focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="adj-miles"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                Miles (+/-)
-              </label>
-              <input
-                id="adj-miles"
-                type="number"
-                step="0.1"
-                value={adjustmentForm.miles}
-                onChange={(e) =>
-                  handleAdjustmentFieldChange(
-                    "miles",
-                    parseFloat(e.target.value) || 0,
-                  )
-                }
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="adj-quarter"
-                className="block text-sm font-medium text-gray-700 mb-1"
-              >
-                Quarter
-              </label>
-              <select
-                id="adj-quarter"
-                value={adjustmentForm.quarter}
-                onChange={(e) =>
-                  handleAdjustmentFieldChange("quarter", e.target.value)
-                }
-                className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-              >
-                {getQuarterOptions().map((q) => (
-                  <option key={q} value={q}>
-                    {q}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label
-              htmlFor="adj-reason"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Reason
-            </label>
-            <textarea
-              id="adj-reason"
-              value={adjustmentForm.reason}
-              onChange={(e) =>
-                handleAdjustmentFieldChange("reason", e.target.value)
-              }
-              placeholder="Explain the reason for this adjustment (required for audit trail)"
-              rows={3}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-            />
-          </div>
-
-          {/* Adjustment error */}
-          {adjustmentError && (
-            <div
-              role="alert"
-              className="bg-error-light border border-error-light text-error-dark p-3 rounded text-sm"
-            >
-              {adjustmentError}
-            </div>
-          )}
-
-          {/* Adjustment success */}
-          {adjustmentSuccess && (
-            <div
-              role="status"
-              className="bg-success-light border border-success-light text-success-dark p-3 rounded text-sm"
-            >
-              {adjustmentSuccess}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            disabled={submittingAdjustment}
-            className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50 text-sm"
-          >
-            {submittingAdjustment ? "Submitting..." : "Record Adjustment"}
-          </button>
-        </form>
+            ) : null
+          }
+        />
       </div>
+
+      {adjusting !== null && (
+        <FormDialog<AdjustmentValues, AdjustmentValues>
+          open
+          size="md"
+          title="Record mileage adjustment"
+          help="Positive miles add, negative miles subtract. Every adjustment is logged for audit."
+          submitLabel="Record adjustment"
+          successMessage={null}
+          initialValues={{
+            truck_id: adjusting,
+            jurisdiction: "",
+            miles: null,
+            quarter,
+            reason: "",
+          }}
+          validate={validateAdjustment}
+          onSubmit={submitAdjustment}
+          onSaved={(v) => {
+            notifyAdjustment(v);
+            if (v.quarter === quarter) void fetchReport(quarter);
+          }}
+          onClose={() => setAdjusting(null)}
+        >
+          {({ values, set, errors }) => (
+            <>
+              <Field label="Truck ID" required span={1} error={errors.truck_id}>
+                <AssetPicker
+                  id="adj-truck-id"
+                  assetType="vehicle"
+                  aria-label="Truck ID"
+                  value={values.truck_id || null}
+                  onChange={(value) => set("truck_id", value)}
+                />
+              </Field>
+              <Field
+                label="Jurisdiction (state)"
+                required
+                span={1}
+                error={errors.jurisdiction}
+              >
+                <input
+                  id="adj-jurisdiction"
+                  type="text"
+                  value={values.jurisdiction}
+                  onChange={(e) => set("jurisdiction", e.target.value)}
+                  placeholder="e.g. TX"
+                  maxLength={2}
+                  className={`${INPUT_CLASS} uppercase`}
+                />
+              </Field>
+              <Field label="Miles (+/-)" required span={1} error={errors.miles}>
+                <NumberField
+                  id="adj-miles"
+                  value={values.miles}
+                  onChange={(n) => set("miles", n)}
+                  unit="mi"
+                  decimals={1}
+                />
+              </Field>
+              <Field label="Quarter" span={1} error={errors.quarter}>
+                <Select
+                  id="adj-quarter"
+                  value={values.quarter}
+                  onChange={(v) => set("quarter", v)}
+                  options={getQuarterOptions().map((q) => ({
+                    value: q,
+                    label: q,
+                  }))}
+                />
+              </Field>
+              <Field label="Reason" required error={errors.reason}>
+                <textarea
+                  id="adj-reason"
+                  value={values.reason}
+                  onChange={(e) => set("reason", e.target.value)}
+                  placeholder="Why this adjustment is needed (kept for audit)"
+                  rows={3}
+                  className={`${INPUT_CLASS} h-auto py-1.5`}
+                />
+              </Field>
+            </>
+          )}
+        </FormDialog>
+      )}
     </div>
   );
+}
+
+function notifyAdjustment(v: AdjustmentValues) {
+  const miles = v.miles ?? 0;
+  notify({
+    type: "success",
+    message: `Adjustment recorded: ${miles > 0 ? "+" : ""}${number(miles, {
+      decimals: Number.isInteger(miles) ? 0 : 1,
+    })} miles for ${v.truck_id} in ${v.jurisdiction.trim().toUpperCase()}.`,
+  });
 }

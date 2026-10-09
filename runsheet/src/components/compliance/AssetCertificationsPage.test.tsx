@@ -206,7 +206,9 @@ describe("AssetCertificationsPage — add form asset picker", () => {
     render(<AssetCertificationsPage />);
 
     // Open the create form.
-    fireEvent.click(await screen.findByRole("button", { name: "Add Certification" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Add Certification" }),
+    );
 
     // The Asset ID field is the roster-backed picker (loaded from getAssets).
     await waitFor(() => expect(mockGetAssets).toHaveBeenCalled());
@@ -227,10 +229,9 @@ describe("AssetCertificationsPage — add form asset picker", () => {
       target: { value: "V-2025-TX-001" },
     });
     fireEvent.click(
-      within(screen.getByRole("dialog", { name: "Add certification" })).getByRole(
-        "button",
-        { name: "Add Certification" },
-      ),
+      within(
+        screen.getByRole("dialog", { name: "Add certification" }),
+      ).getByRole("button", { name: "Add Certification" }),
     );
 
     await waitFor(() => expect(mockCreateCert).toHaveBeenCalled());
@@ -241,7 +242,12 @@ describe("AssetCertificationsPage — add form asset picker", () => {
 describe("AssetCertificationsPage — FormDialog (task 3.5)", () => {
   it("validates inline and keeps the dialog open; Escape closes it", async () => {
     mockGetDashboard.mockResolvedValue({
-      data: { assets: [], total_valid: 0, total_expiring_soon: 0, total_expired: 0 },
+      data: {
+        assets: [],
+        total_valid: 0,
+        total_expiring_soon: 0,
+        total_expired: 0,
+      },
       request_id: "r",
     });
     render(<AssetCertificationsPage />);
@@ -258,7 +264,9 @@ describe("AssetCertificationsPage — FormDialog (task 3.5)", () => {
     fireEvent.click(
       within(dialog).getByRole("button", { name: "Add Certification" }),
     );
-    expect(await within(dialog).findByText("Pick an asset.")).toBeInTheDocument();
+    expect(
+      await within(dialog).findByText("Pick an asset."),
+    ).toBeInTheDocument();
     expect(
       within(dialog).getByText("Expiry must be after the certification date."),
     ).toBeInTheDocument();

@@ -84,9 +84,13 @@ it("opens the audit trail in a drawer with formatted gallons and a named varianc
 it("registers a meter through the FormDialog with inline validation", async () => {
   (createMeter as jest.Mock).mockResolvedValue({ data: {} });
   render(<MeterAuditPage />);
-  fireEvent.click(await screen.findByRole("button", { name: "Register meter" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Register meter" }),
+  );
   const dialog = screen.getByRole("dialog", { name: "Register meter" });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Register meter" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Register meter" }),
+  );
   expect(await within(dialog).findByText("Pick a truck.")).toBeInTheDocument();
   expect(createMeter).not.toHaveBeenCalled();
   fireEvent.change(within(dialog).getByLabelText(/^Meter number/), {
@@ -106,7 +110,9 @@ it("registers a meter through the FormDialog with inline validation", async () =
   fireEvent.change(within(dialog).getByLabelText(/^Calibration expiry/), {
     target: { value: "2027-01-01" },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Register meter" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Register meter" }),
+  );
   await waitFor(() =>
     expect(createMeter).toHaveBeenCalledWith(
       expect.objectContaining({ meter_number: "MTR-9", truck_id: "TRUCK-001" }),

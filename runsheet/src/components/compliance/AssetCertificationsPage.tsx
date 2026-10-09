@@ -25,8 +25,6 @@ import {
   usePageChrome,
 } from "@/components/ui";
 import { calendarDate, number } from "../../lib/format";
-import type { StatusKey } from "../../styles/tokens";
-import { PageTitle } from "../ui/PageHeader";
 import {
   type AssetCertification,
   type AssetCertificationDashboard,
@@ -38,7 +36,9 @@ import {
   getAssetCertifications,
   getAssetCertificationsDashboard,
 } from "../../services/complianceApi";
+import type { StatusKey } from "../../styles/tokens";
 import AssetPicker from "../ops/AssetPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Certification type labels ───────────────────────────────────────────────
 

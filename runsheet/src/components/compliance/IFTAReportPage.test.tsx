@@ -14,6 +14,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 jest.mock("../../services/complianceApi", () => {
@@ -177,7 +178,7 @@ describe("Export CSV", () => {
     const button = await screen.findByRole("button", {
       name: /^Export CSV ?: IFTA report$/,
     });
-    const select = screen.getByLabelText("Quarter:") as HTMLSelectElement;
+    const select = screen.getByLabelText("Quarter") as HTMLSelectElement;
     const other = Array.from(select.options).find(
       (o) => o.value !== select.value,
     );
@@ -187,5 +188,62 @@ describe("Export CSV", () => {
       fireEvent.click(button);
     });
     expect(mockDownload).toHaveBeenCalledWith("ifta", { quarter: other.value });
+  });
+});
+
+describe("IFTAReportPage — adjustment FormDialog (task 3.5)", () => {
+  it("prefills the truck from an incomplete flag and validates inline", async () => {
+    const { createMileageAdjustment } = jest.requireMock(
+      "../../services/complianceApi",
+    ) as { createMileageAdjustment: jest.Mock };
+    createMileageAdjustment.mockResolvedValue({ data: {} });
+    mockGetReport.mockResolvedValue({
+      data: reportFixture({
+        incomplete_trucks: [
+          { truck_id: "TRK-009", reason: "no data" },
+        ] as unknown as IFTAReport["incomplete_trucks"],
+      }),
+      request_id: "r",
+    } as never);
+    render(<IFTAReportPage />);
+    await screen.findByText(/Incomplete Geotab data/);
+    // Title-row action first, the banner's own action second.
+    const buttons = screen.getAllByRole("button", { name: "Record adjustment" });
+    fireEvent.click(buttons[buttons.length - 1]);
+    const dialog = screen.getByRole("dialog", {
+      name: "Record mileage adjustment",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Record adjustment" }),
+    );
+    expect(
+      await within(dialog).findByText("Miles must be non-zero."),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Enter a two-letter state, e.g. TX."),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText("Pick a truck.")).toBeNull();
+    expect(createMileageAdjustment).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByLabelText(/^Jurisdiction/), {
+      target: { value: "tx" },
+    });
+    const miles = within(dialog).getByLabelText(/^Miles/);
+    fireEvent.change(miles, { target: { value: "-12.5" } });
+    fireEvent.blur(miles);
+    fireEvent.change(within(dialog).getByLabelText(/^Reason/), {
+      target: { value: "Geotab gap" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Record adjustment" }),
+    );
+    await waitFor(() =>
+      expect(createMileageAdjustment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          truck_id: "TRK-009",
+          jurisdiction: "TX",
+          miles: -12.5,
+        }),
+      ),
+    );
   });
 });
