@@ -14,6 +14,8 @@ const buttonBase = `inline-flex h-11 min-w-11 shrink-0 items-center justify-cent
 
 export const primaryButton = `${buttonBase} border border-primary bg-primary text-on-primary hover:bg-primary-hover`;
 export const secondaryButton = `${buttonBase} border border-slate-300 bg-surface text-slate-800 hover:bg-slate-50`;
+/** A destructive confirm (Cancel request). */
+export const dangerButton = `${buttonBase} border border-red-600 bg-red-600 text-white hover:bg-red-700`;
 /** A smaller row action (still 44 px tall on phones). */
 export const rowButton = `inline-flex h-11 min-w-11 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-[10px] border border-slate-300 bg-surface px-3 text-sm font-semibold text-slate-800 hover:bg-slate-50 md:h-9 aria-disabled:cursor-not-allowed aria-disabled:opacity-60 ${focusRing}`;
 export const textLink = `inline-flex min-h-6 items-center font-semibold text-link underline-offset-2 hover:underline ${focusRing}`;

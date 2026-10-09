@@ -1,7 +1,13 @@
 /**
  * Customer Cancel on the portal orders page (R4.10, PD8; review R2, D-F6-2).
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 jest.mock("supertokens-auth-react/recipe/session", () => ({
   __esModule: true,
@@ -15,11 +21,19 @@ import {
   ME,
 } from "../../../components/portal/__fixtures__/portal";
 import {
+  CANCEL_DIALOG_TITLE,
+  cancelRequestSummary,
+} from "../../../components/portal/CancelRequestDialog";
+import {
   REQUEST_CHANGED_MESSAGE,
   requestCancelledMessage,
 } from "../../../components/portal/messages";
 import { PortalMeContext } from "../../../components/portal/PortalContext";
-import { date } from "../../../components/portal/portalFormat";
+import {
+  date,
+  window as formatWindow,
+  productName,
+} from "../../../components/portal/portalFormat";
 import type { PortalOrder } from "../../../services/portalApi";
 import PortalOrdersPage from "./page";
 
@@ -110,6 +124,110 @@ function row(button: HTMLElement): HTMLElement {
   return li;
 }
 
+const posts = (calls: Calls) => calls.filter((c) => c.method === "POST");
+
+function confirmDialog(): HTMLElement {
+  return screen.getByRole("dialog", { name: CANCEL_DIALOG_TITLE });
+}
+
+/** Click the row's Cancel, then confirm in the dialog (owner decision 2026-10-09). */
+function cancelAndConfirm(button: HTMLElement): void {
+  fireEvent.click(button);
+  fireEvent.click(
+    within(confirmDialog()).getByRole("button", { name: "Cancel request" }),
+  );
+}
+
+describe("Cancel request confirmation", () => {
+  it("asks first: names the tank, window and quantity; Keep request has focus", async () => {
+    const calls = installOrdersFetch([[order()]]);
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: CANCEL_NAME }));
+
+    const dialog = confirmDialog();
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(dialog).toHaveAccessibleDescription(
+      `This cancels your request for 300 gal of ${productName("ULSD")} for North yard, delivery ${formatWindow(
+        "2026-10-12T13:00:00Z",
+        "2026-10-12T17:00:00Z",
+      )}.`,
+    );
+    expect(dialog.textContent).not.toMatch(/QA-ORD/);
+    const keep = within(dialog).getByRole("button", { name: "Keep request" });
+    await waitFor(() => expect(keep).toHaveFocus());
+    expect(posts(calls)).toHaveLength(0);
+  });
+
+  it("Keep request closes without cancelling and returns focus to Cancel", async () => {
+    const calls = installOrdersFetch([[order()]]);
+    renderPage();
+    const button = await screen.findByRole("button", { name: CANCEL_NAME });
+    button.focus();
+    fireEvent.click(button);
+    fireEvent.click(
+      within(confirmDialog()).getByRole("button", { name: "Keep request" }),
+    );
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(posts(calls)).toHaveLength(0);
+    expect(orderGets(calls)).toHaveLength(1);
+    expect(button).toHaveFocus();
+    expect(screen.getByText("Awaiting confirmation")).toBeInTheDocument();
+  });
+
+  it("Esc and the close button keep the request", async () => {
+    const calls = installOrdersFetch([[order()]]);
+    renderPage();
+    const button = await screen.findByRole("button", { name: CANCEL_NAME });
+    button.focus();
+
+    fireEvent.click(button);
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Escape",
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(button).toHaveFocus();
+
+    fireEvent.click(button);
+    fireEvent.click(
+      within(confirmDialog()).getByRole("button", { name: "Close" }),
+    );
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(posts(calls)).toHaveLength(0);
+    expect(button).toHaveFocus();
+  });
+
+  it("Cancel request in the dialog sends one cancel and closes", async () => {
+    const calls = installOrdersFetch([[order()], [CANCELLED]], {
+      body: { data: CANCELLED, request_id: "req-test" },
+    });
+    renderPage();
+    const button = await screen.findByRole("button", { name: CANCEL_NAME });
+    const li = row(button);
+    cancelAndConfirm(button);
+
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(
+      await screen.findByText(requestCancelledMessage(REFERENCE)),
+    ).toBeInTheDocument();
+    expect(posts(calls)).toHaveLength(1);
+    await waitFor(() => expect(li).toHaveFocus());
+  });
+
+  it("describes fill to full without repeating a product-named tank", () => {
+    const summary = cancelRequestSummary(
+      order({ fill_to_full: true, gallons_requested: null }),
+      `${productName("ULSD")} tank`,
+    );
+    expect(summary).toBe(
+      `This cancels your request for a fill to full for ${productName("ULSD")} tank, delivery ${formatWindow(
+        "2026-10-12T13:00:00Z",
+        "2026-10-12T17:00:00Z",
+      )}.`,
+    );
+  });
+});
+
 describe("customer Cancel request", () => {
   it("shows Cancel only on cancellable rows", async () => {
     installOrdersFetch([
@@ -137,12 +255,13 @@ describe("customer Cancel request", () => {
     const button = await screen.findByRole("button", { name: CANCEL_NAME });
     const li = row(button);
     button.focus();
-    fireEvent.click(button);
+    cancelAndConfirm(button);
     await waitFor(() =>
       expect(button).toHaveAttribute("aria-disabled", "true"),
     );
-    // A second click while in flight sends nothing.
+    // A second click while in flight opens nothing and sends nothing.
     fireEvent.click(button);
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(calls.filter((c) => c.method === "POST")).toHaveLength(1);
     expect(calls.find((c) => c.method === "POST")?.url).toMatch(
       /\/portal\/orders\/QA-ORD-1\/cancel$/,
@@ -172,7 +291,7 @@ describe("customer Cancel request", () => {
     renderPage();
     const button = await screen.findByRole("button", { name: CANCEL_NAME });
     const li = row(button);
-    fireEvent.click(button);
+    cancelAndConfirm(button);
 
     const status = await screen.findByText(REQUEST_CHANGED_MESSAGE);
     expect(status).toHaveAttribute("aria-live", "polite");
@@ -192,7 +311,7 @@ describe("customer Cancel request", () => {
     });
     renderPage();
     const button = await screen.findByRole("button", { name: CANCEL_NAME });
-    fireEvent.click(button);
+    cancelAndConfirm(button);
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "We couldn't cancel this request. Try again.",

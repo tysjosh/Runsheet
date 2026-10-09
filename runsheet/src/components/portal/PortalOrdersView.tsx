@@ -4,8 +4,10 @@
  * The customer's orders from every channel, newest first (R4.11, PD11,
  * R14.9): two-line rows below 1024 px, a table from 1024 px.
  *
- * Rows with `cancellable` get "Cancel request" (R4.10, PD8): no confirm step,
- * like staff Decline. Success, or a 409 ORDER_NOT_CANCELLABLE, reloads the
+ * Rows with `cancellable` get "Cancel request" (R4.10, PD8). It opens a
+ * confirm dialog (owner decision 2026-10-09): "Keep request", Esc or × leave
+ * the request alone. Confirming sends the cancel. Success, or a 409
+ * ORDER_NOT_CANCELLABLE, reloads the
  * list in place, announces the outcome in a polite live region and puts focus
  * back on the row (or the list if the row is gone). Other errors show in the
  * alert banner. Names and announcements use the tank and date, never the
@@ -24,6 +26,7 @@ import {
   type PortalOrder,
 } from "../../services/portalApi";
 import { ProductCap } from "../ui/ProductChip";
+import CancelRequestDialog from "./CancelRequestDialog";
 import LiveRegion from "./LiveRegion";
 import { REQUEST_CHANGED_MESSAGE, requestCancelledMessage } from "./messages";
 import OrderRow, { deliveryParts, orderRef, quantityParts } from "./OrderRow";
@@ -75,6 +78,7 @@ export default function PortalOrdersView({
   const [notice, setNotice] = useState<string | null>(null);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
+  const [confirmOrder, setConfirmOrder] = useState<PortalOrder | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const rowRefs = useRef(new Map<string, HTMLElement>());
@@ -133,6 +137,23 @@ export default function PortalOrdersView({
       setFocusId(orderId);
     },
     [pendingId, refresh, titleOf],
+  );
+
+  // The row's Cancel button asks first; nothing is sent until confirmed.
+  const askCancel = useCallback(
+    (order: PortalOrder) => {
+      if (pendingId !== null) return;
+      setConfirmOrder(order);
+    },
+    [pendingId],
+  );
+  const keepRequest = useCallback(() => setConfirmOrder(null), []);
+  const confirmCancel = useCallback(
+    (order: PortalOrder) => {
+      setConfirmOrder(null);
+      void handleCancel(order);
+    },
+    [handleCancel],
   );
 
   const closeDialog = useCallback(() => {
@@ -260,7 +281,7 @@ export default function PortalOrdersView({
             className={rowButton}
             aria-label={`Cancel request for ${orderRef(o, titleOf(o))}`}
             aria-disabled={pendingId !== null ? true : undefined}
-            onClick={() => void handleCancel(o)}
+            onClick={() => askCancel(o)}
           >
             <span className="xl:hidden">Cancel</span>
             <span className="max-xl:hidden">Cancel request</span>
@@ -345,7 +366,7 @@ export default function PortalOrdersView({
                     order={order}
                     title={titleOf(order)}
                     unit={unit}
-                    onCancel={(o) => void handleCancel(o)}
+                    onCancel={askCancel}
                     cancelDisabled={pendingId !== null}
                   />
                 ))}
@@ -387,6 +408,14 @@ export default function PortalOrdersView({
         unit={unit}
         initialTankId={dialog.tankId}
         onCreated={onCreated}
+      />
+
+      <CancelRequestDialog
+        order={confirmOrder}
+        title={confirmOrder ? titleOf(confirmOrder) : ""}
+        unit={unit}
+        onKeep={keepRequest}
+        onConfirm={confirmCancel}
       />
     </>
   );

@@ -17,6 +17,8 @@ Branch `production-readiness/portal-fixes` (worktree `.worktrees/portal-fixes`, 
 
 `QA-OWNER-REQ-1` was cancelled from the owner's own signed-in browser with the row's **Cancel request** button, 6.5 s after opening Orders. Only `PortalOrderService.cancel` writes `cancelled_by_customer`. PD8 gives Cancel request no confirm step (like staff Decline), so one click cancels. No code change. Adding a confirm step would be a product change to PD8, so it's raised in the summary rather than made.
 
+**PD8: confirm step added by owner decision 2026-10-09.** Cancel request now opens "Cancel this delivery request?" (tank/product, window, quantity; "Keep request" focused first, destructive "Cancel request"; Esc or × keeps it). Details: `cancel-confirm-evidence.md`.
+
 ### B1: what happened to "Request delivery" on staging before this change
 
 `POST /api/portal/orders` → `PortalOrderService.submit` read `pipeline.get_ordering_state()` (the `order_intake_pipeline` flag). With the flag `disabled`, it answered 409 `ORDER_INTAKE_DISABLED`, and `/me.ordering_available` was false. Even past that check, `_ingest_common` step (0) short-circuited to `legacy_passthrough`. When it worked, the order landed `on_hold` / `awaiting_dispatcher_confirmation` (`web_portal`, step i3). Dispatchers see it in the awaiting-confirmation queue (`GET /api/orders?hold_reason=awaiting_dispatcher_confirmation`), confirm with `POST /api/orders/{id}/release-hold` (→ `placed`, portal shows Confirmed) and decline with `POST /api/orders/{id}/cancel`. The only notice was the orders WebSocket broadcast. No email existed.
@@ -107,4 +109,4 @@ Cleanup: coverage output removed; `tmp/portal-fixes/pkg` (downloaded wheels to r
 - SendGrid: `sendgrid-setup.md` (create a Mail Send key, verify the sender, store the secret with `read -rs`, tell the orchestrator).
 - Where the ordering switch lives: Customers → any customer → **Portal access** panel → "Customers can request deliveries online" (admin only). It's **tenant-wide**: switching it on one customer changes it for every customer, and the label says so. Staff Settings would be a better home once that module is in scope (Phase 3 owns it now).
 - Nearly-full tanks: when a fresh reading leaves less than 25 gal of room, no gallon amount passes both the 25 gal minimum and the room-left limit, so the customer can only choose **Fill to full** (the dialog hint explains this). Options: keep it, or lower the minimum for nearly-full tanks.
-- Possible product change (not made): a confirm step on the portal's Cancel request (PD8 has none). The owner's own click cancelled `QA-OWNER-REQ-1`.
+- Possible product change (not made): a confirm step on the portal's Cancel request (PD8 has none). The owner's own click cancelled `QA-OWNER-REQ-1`. → Done: confirm step added by owner decision 2026-10-09 (see PD8 note above).

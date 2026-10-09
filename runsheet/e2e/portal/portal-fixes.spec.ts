@@ -238,6 +238,61 @@ test.describe("portal fixes: layout, formats and identity", () => {
     );
   });
 
+  // Owner decision 2026-10-09 (PD8): Cancel request asks first. The fake
+  // refuses writes, so the confirm only proves exactly one cancel was sent.
+  for (const vp of [SIZES[0], SIZES[2]]) {
+    test(`orders: cancel asks first, keep and Esc send nothing (${vp.width})`, async ({
+      page,
+    }) => {
+      const sent: string[] = [];
+      page.on("request", (r) => {
+        if (r.method() === "POST") sent.push(new URL(r.url()).pathname);
+      });
+      await openPortal(page, "/portal/orders", vp, OWNER);
+      const cancel = page
+        .getByRole("button", { name: /^Cancel request for .+$/ })
+        .first();
+      const dialog = page.getByRole("dialog", {
+        name: "Cancel this delivery request?",
+      });
+      const keep = dialog.getByRole("button", { name: "Keep request" });
+
+      await cancel.click();
+      await expect(dialog).toBeVisible();
+      await expect(keep).toBeFocused();
+      await expect(dialog).toContainText(
+        /This cancels your request for 1,600 gal of .+ for .+, delivery .+\./,
+      );
+      expect(await problems(page)).toEqual([]);
+      const found = await seriousAxe(page);
+      expect(found, JSON.stringify(found, null, 2)).toEqual([]);
+      const dir = process.env.PORTAL_FIXES_SHOTS_DIR;
+      if (dir) {
+        await page.screenshot({
+          path: `${dir}/cancel-confirm-${vp.width}x${vp.height}.png`,
+        });
+      }
+
+      await keep.click();
+      await expect(dialog).toBeHidden();
+      await expect(cancel).toBeFocused();
+
+      await cancel.click();
+      await expect(keep).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      await expect(cancel).toBeFocused();
+      expect(sent).toEqual([]);
+
+      await cancel.click();
+      await dialog.getByRole("button", { name: "Cancel request" }).click();
+      await expect(dialog).toBeHidden();
+      await expect
+        .poll(() => sent)
+        .toEqual(["/api/portal/orders/QA-OWNER-REQ-1/cancel"]);
+    });
+  }
+
   test("request dialog names the tenant's zone for the times", async ({
     page,
   }) => {

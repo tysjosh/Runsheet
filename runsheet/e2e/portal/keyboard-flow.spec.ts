@@ -29,7 +29,8 @@ async function activateWithKeyboard(
 
 /**
  * R4.10: cancel the request this flow just sent (newest first, so the first
- * Cancel button), by keyboard. This also removes the QA request again. The
+ * Cancel button), by keyboard, through the confirm dialog. This also removes
+ * the QA request again. The
  * outcome is announced politely and focus stays in the list.
  */
 async function cancelNewestRequest(page: Page): Promise<void> {
@@ -44,6 +45,19 @@ async function cancelNewestRequest(page: Page): Promise<void> {
   await expect(cancel.first()).toBeVisible();
   const before = await cancel.count();
   await activateWithKeyboard(page, cancel.first());
+  // Owner decision 2026-10-09: a confirm step, "Keep request" focused first.
+  const confirm = page.getByRole("dialog", {
+    name: "Cancel this delivery request?",
+  });
+  await expect(confirm).toBeVisible();
+  await expect(
+    confirm.getByRole("button", { name: "Keep request" }),
+  ).toBeFocused();
+  await activateWithKeyboard(
+    page,
+    confirm.getByRole("button", { name: "Cancel request" }),
+  );
+  await expect(confirm).toBeHidden();
   await expect(
     page.getByRole("status").filter({
       hasText: /^Request for .+ cancelled\.$|^This request changed\./,
