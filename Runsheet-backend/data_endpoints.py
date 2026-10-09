@@ -9,7 +9,7 @@ Validates:
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, model_validator
-from typing import List, Optional
+from typing import List, Literal, Optional
 from enum import Enum
 from datetime import datetime
 import logging
@@ -1080,28 +1080,86 @@ async def get_support_tickets(request: Request, tenant: TenantContext = Depends(
 # No timeRange parameter: get_current_metrics reads one daily_performance
 # snapshot with no range dimension, so the old, unused param was removed (Data
 # info item). FastAPI ignores unknown query params, so ?timeRange= still works.
+#
+# ``data`` is null when the tenant has no snapshot yet (a 200, not an
+# error). ``as_of`` is the snapshot's timestamp so the UI can show its age.
+# A read failure returns the standard error envelope rather than an empty
+# success, so an outage never looks like "no data" (F13).
 async def get_analytics_metrics(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
     try:
-        metrics = await elasticsearch_service.get_current_metrics(tenant.tenant_id)
-    except Exception:
-        metrics = {}
+        snapshot = await elasticsearch_service.get_current_metrics_snapshot(tenant.tenant_id)
+    except AppException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting analytics metrics")
+        raise internal_error(message="Failed to fetch analytics metrics") from e
     return {
-        "data": metrics,
+        "data": snapshot["metrics"] if snapshot else None,
+        "as_of": snapshot.get("as_of") if snapshot else None,
         "success": True,
         "timestamp": utcnow().isoformat()
     }
 
 @router.get("/analytics/routes")
 @limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
-async def get_route_performance(request: Request, tenant: TenantContext = Depends(get_tenant_context)):
+async def get_route_performance(
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    # Trailing window of daily route docs to aggregate (F8).
+    days: int = Query(30, ge=1, le=365),
+):
     try:
-        routes = await elasticsearch_service.get_route_performance_data(tenant.tenant_id)
-    except Exception:
-        routes = []
+        routes = await elasticsearch_service.get_route_performance_data(
+            tenant.tenant_id, days=days
+        )
+    except AppException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting route performance")
+        raise internal_error(message="Failed to fetch route performance") from e
     return {
         "data": routes,
         "success": True,
         "timestamp": utcnow().isoformat()
+    }
+
+
+#: Overview trend metrics → ``daily_performance`` field and unit.
+_TIMESERIES_METRICS = {
+    "delivery_performance": ("delivery_performance_pct", "%"),
+    "average_delay": ("average_delay_minutes", "minutes"),
+    "fleet_utilization": ("fleet_utilization_pct", "%"),
+}
+
+
+@router.get("/analytics/timeseries")
+@limiter.limit(f"{settings.rate_limit_requests_per_minute}/minute")
+async def get_analytics_timeseries(
+    request: Request,
+    metric: Literal["delivery_performance", "average_delay", "fleet_utilization"],
+    tenant: TenantContext = Depends(get_tenant_context),
+    time_range: Literal["7d", "30d", "90d"] = Query("30d", alias="range"),
+):
+    """Daily series of one Overview metric from the daily snapshots (F3).
+
+    Days with no snapshot (or a null metric) come back as ``value: null``.
+    """
+    field, unit = _TIMESERIES_METRICS[metric]
+    try:
+        series = await elasticsearch_service.get_time_series_data(
+            tenant.tenant_id, "daily_performance", field, time_range
+        )
+    except AppException:
+        raise
+    except Exception as e:
+        logger.exception("Error getting analytics time series")
+        raise internal_error(message="Failed to fetch analytics time series") from e
+    return {
+        "data": series or [],
+        "metric": metric,
+        "unit": unit,
+        "success": True,
+        "timestamp": utcnow().isoformat(),
     }
 
 # Semantic Search

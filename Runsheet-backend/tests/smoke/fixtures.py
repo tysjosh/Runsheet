@@ -110,6 +110,7 @@ ROUTE_FIXTURES: Dict[str, RouteFixture] = {
     # ---- Analytics endpoints ----
     "GET /api/analytics/metrics": RouteFixture(),
     "GET /api/analytics/routes": RouteFixture(),
+    "GET /api/analytics/timeseries": RouteFixture(params={"metric": "delivery_performance"}),
     "GET /api/search": RouteFixture(params={"q": "test"}),
 
     # ---- Upload endpoints ----

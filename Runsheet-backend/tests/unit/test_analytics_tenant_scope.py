@@ -82,6 +82,12 @@ class _FakeESService:
         resp = await self.search_documents(index, query, size)
         return [hit["_source"] for hit in resp["hits"]["hits"]]
 
+    async def get_current_metrics_snapshot(self, tenant_id: str) -> Dict[str, Any]:
+        return {
+            "as_of": "2026-10-08T00:00:00+00:00",
+            "metrics": await self.get_current_metrics(tenant_id),
+        }
+
     async def get_current_metrics(self, tenant_id: str) -> Dict[str, Any]:
         query = {
             "query": {
@@ -95,10 +101,12 @@ class _FakeESService:
         }
         await self.search_documents("analytics_events", query)
         return {
-            "delivery_performance": {"title": "x", "value": "0%", "change": "0", "trend": "up"},
+            "delivery_performance": {"title": "x", "value": "0%"},
         }
 
-    async def get_route_performance_data(self, tenant_id: str) -> List[Dict[str, Any]]:
+    async def get_route_performance_data(
+        self, tenant_id: str, days: int = 30
+    ) -> List[Dict[str, Any]]:
         query = {
             "query": {
                 "bool": {
@@ -214,6 +222,7 @@ def _build_app(tenant_id: str) -> Tuple[FastAPI, _FakeESService]:
     [
         "/api/analytics/metrics",
         "/api/analytics/routes",
+        "/api/analytics/timeseries?metric=delivery_performance",
     ],
 )
 def test_analytics_endpoints_emit_tenant_filter(path: str) -> None:

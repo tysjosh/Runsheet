@@ -28,8 +28,8 @@ class _FakeES:
         self.semantic_sizes.append(size)
         return []
 
-    async def get_current_metrics(self, tenant_id) -> Dict[str, Any]:
-        return {"tenant": tenant_id}
+    async def get_current_metrics_snapshot(self, tenant_id) -> Dict[str, Any]:
+        return {"as_of": None, "metrics": {"tenant": tenant_id}}
 
 
 @pytest.fixture

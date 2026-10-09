@@ -27,6 +27,7 @@
 | POST | `/api/agent/{agent_id}/resume` | /api/agent | session_required | — | — | — |
 | GET | `/api/analytics/metrics` | /api/analytics | session_required | — | — | — |
 | GET | `/api/analytics/routes` | /api/analytics | session_required | — | — | — |
+| GET | `/api/analytics/timeseries` | /api/analytics | session_required | — | — | — |
 | POST | `/api/auth/account/change-password` | — | session_required | — | — | ChangePasswordResponse |
 | GET | `/api/auth/account/me` | — | session_required | — | — | AccountProfileResponse |
 | POST | `/api/auth/admin/password-reset-link` | — | session_required | — | — | PasswordResetLinkResponse |
