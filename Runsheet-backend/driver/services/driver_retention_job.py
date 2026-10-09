@@ -71,9 +71,7 @@ Validates: Requirements 10.13, 10.16, 10.17, 10.18, 10.20
 
 from __future__ import annotations
 
-import asyncio
 import calendar
-import inspect
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -223,13 +221,12 @@ def _format_cutoff(cutoff: datetime) -> str:
 class DriverRetentionJob:
     """Runs one ``delete_by_query`` per data class and logs one record each.
 
-    ``es_service`` is the shared :class:`ElasticsearchService`. The sweep goes
-    through its underlying client because the service exposes no
-    ``delete_by_query`` of its own — the same route
-    ``ops/services/feature_flags.py`` and ``services/data_seeder.py`` take. The
-    call is handed to a worker thread, because the client is synchronous and a
-    retention sweep over months of data is exactly the kind of call that must
-    not sit on the event loop.
+    ``es_service`` is the shared :class:`ElasticsearchService`. The sweep calls
+    its async :meth:`~services.elasticsearch_service.ElasticsearchService.delete_by_query`,
+    which deletes through the Postgres document store. It used to go through
+    the service's raw ``client``, which is the removed Elasticsearch cluster
+    (``services.no_cluster``): every class raised ``ClusterRemovedError`` and
+    nothing was ever deleted.
     """
 
     def __init__(self, *, es_service: Any) -> None:
@@ -307,47 +304,24 @@ class DriverRetentionJob:
         return deleted
 
     # ------------------------------------------------------------------
-    # The one Elasticsearch call
+    # The one store call
     # ------------------------------------------------------------------
 
     async def _delete_older_than(
         self, *, index: str, anchor_field: str, cutoff_text: str
     ) -> int:
-        """Run one ``delete_by_query`` and return the deleted count.
+        """Delete documents whose anchor is strictly before the cutoff.
 
-        ``conflicts=proceed`` so a document rewritten mid-sweep is skipped
-        rather than aborting the whole class, and ``ignore_unavailable`` so a
-        deployment missing an optional index gets a zero-delete sweep instead of
-        an error rather than failing the class for the whole cluster.
+        The store compares a string bound as text, which is chronological for
+        the UTC ISO-8601 stamps these indices hold. An index with no documents
+        is a zero-delete sweep, not an error.
         """
-        client = getattr(self._es, "client", None)
-        if client is None:
-            raise RuntimeError(
-                "Elasticsearch client unavailable for the retention sweep"
+        return int(
+            await self._es.delete_by_query(
+                index, {"range": {anchor_field: {"lt": cutoff_text}}}
             )
-
-        body = {"query": {"range": {anchor_field: {"lt": cutoff_text}}}}
-
-        def _call() -> Any:
-            return client.delete_by_query(
-                index=index,
-                body=body,
-                conflicts="proceed",
-                ignore_unavailable=True,
-                refresh=False,
-            )
-
-        response = await asyncio.to_thread(_call)
-        # A test double or a future async client may hand back an awaitable.
-        if inspect.isawaitable(response):
-            response = await response
-
-        if response is None:
-            return 0
-        try:
-            return int(response.get("deleted") or 0)
-        except (AttributeError, TypeError, ValueError):
-            return 0
+            or 0
+        )
 
 
 async def run_retention_cycle(job: DriverRetentionJob) -> None:

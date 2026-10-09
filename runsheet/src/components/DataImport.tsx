@@ -3,6 +3,7 @@ import { CheckCircle, ChevronRight, Database, History } from "lucide-react";
 // Lazy-load them so the wizard compiles even before they exist.
 import { lazy, Suspense, useState } from "react";
 import type { DataType, ImportResult, ValidationResult } from "../types/import";
+import { PageTitle } from "./ui/PageHeader";
 
 const DataTypeSelector = lazy(() => import("./import/DataTypeSelector"));
 const SourceUploader = lazy(() => import("./import/SourceUploader"));
@@ -312,9 +313,9 @@ export default function DataImport() {
       <div className="border-b border-gray-100 px-8 py-6 flex-shrink-0">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h1 className="text-2xl font-semibold text-primary mb-1">
+            <PageTitle className="text-2xl font-semibold text-primary mb-1">
               Data Import
-            </h1>
+            </PageTitle>
             <p className="text-gray-500">
               Migrate and onboard your data — import fleet records, inventory,
               and more from CSV files or Google Sheets.

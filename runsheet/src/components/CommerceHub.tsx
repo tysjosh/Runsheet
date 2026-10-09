@@ -4,24 +4,33 @@ import {
   BookOpen,
   Building2,
   CreditCard,
-  DollarSign,
   FileText,
   ListChecks,
   Shield,
   Sliders,
   TrendingUp,
 } from "lucide-react";
-import { lazy, Suspense, useEffect, useState } from "react";
-import { canSee, visibleByCanSee } from "../config/modules";
-import { getCurrentUserRoles } from "../utils/auth";
-import AccountDetailPage from "./commerce/AccountDetailPage";
+import { useRouter, useSearchParams } from "next/navigation";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { canSee } from "../config/modules";
+import {
+  getMarginAvailability,
+  getOpenMarginAlertCount,
+  type MarginAvailability,
+} from "../services/marginApi";
 import AccountsListPage from "./commerce/AccountsListPage";
-import InvoiceDetailPage from "./commerce/InvoiceDetailPage";
 import InvoicesListPage from "./commerce/InvoicesListPage";
 import PaymentsListPage from "./commerce/PaymentsListPage";
 import PriceBookEditor from "./commerce/PriceBookEditor";
 import LoadingSpinner from "./LoadingSpinner";
-import { PageHeader, type Tab, TabNavigation } from "./ui";
+import { useHubTabs } from "./shell/useHubTabs";
+import {
+  LoadErrorState,
+  PageChromeProvider,
+  PageHeader,
+  type Tab,
+  TabPanel,
+} from "./ui";
 
 const ARAgingDashboard = lazy(() => import("./commerce/ARAgingDashboard"));
 // Price-protection contracts and pricing rules are commercial features
@@ -37,6 +46,11 @@ const PricingRulesPage = lazy(() => import("./compliance/PricingRulesPage"));
 // it lives in the Commerce hub beside AR Aging rather than as its own
 // top-level sidebar destination.
 const ReconciliationPage = lazy(() => import("./ops/ReconciliationPage"));
+// Cost and margin (margin-feed): tenant admin only, gated by canSee("margin").
+const MarginHub = lazy(() => import("./commerce/margin/MarginHub"));
+
+/** The open-alert badge refreshes this often while the page is visible. */
+export const MARGIN_BADGE_REFRESH_MS = 5 * 60 * 1000;
 
 // Exported for the registry drift guard in `config/modules.test.ts`.
 export const TABS: Tab[] = [
@@ -76,132 +90,228 @@ export const TABS: Tab[] = [
     label: "Reconciliation",
     icon: <ListChecks className="w-4 h-4" />,
   },
+  {
+    id: "margin",
+    label: "Margin",
+    icon: <TrendingUp className="w-4 h-4" />,
+  },
 ];
 
-type TabId = string;
-
-export default function CommerceHub() {
-  const [activeTab, setActiveTab] = useState<TabId>("accounts");
-  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
-    null,
+function MarginAlertBadge({ count }: { count: number }) {
+  const label = `${count} open margin alert${count === 1 ? "" : "s"}`;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className="ml-1 rounded-full bg-red-100 px-1.5 text-xs font-semibold text-red-800"
+    >
+      {count}
+    </span>
   );
-  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(
-    null,
-  );
-  // `null` until resolved; `canSee` treats that as no roles.
-  const [roles, setRoles] = useState<readonly string[] | null>(null);
+}
 
+export interface CommerceHubProps {
+  /** Deep-linked tab (`?tab=`); falls back to the first visible tab. */
+  initialTab?: string;
+}
+
+/**
+ * Shown in place of the Margin tab's content when `?tab=margin` is opened but
+ * the tab isn't offered: the feed is off for the tenant (no Try again: there
+ * is nothing to retry), or the caller isn't a tenant admin (the standard
+ * no-access state).
+ */
+export function MarginUnavailable({
+  reason,
+}: {
+  reason: "disabled" | "forbidden";
+}) {
+  return (
+    <div className="p-4">
+      <LoadErrorState
+        embedded
+        entityLabel="Margin page"
+        homeHref="/dashboard/billing?tab=invoices"
+        homeLabel="Go to Invoices"
+        failure={
+          reason === "disabled"
+            ? {
+                kind: "module_disabled",
+                moduleName: "Margin",
+                status: 404,
+                code: "COMMERCE_DISABLED",
+                message: "Margin isn't turned on for this account.",
+              }
+            : {
+                kind: "forbidden",
+                status: 403,
+                message: "Margin is for tenant admins.",
+                details: { required_roles: ["admin"] },
+              }
+        }
+      />
+    </div>
+  );
+}
+
+export default function CommerceHub({ initialTab }: CommerceHubProps = {}) {
+  // Margin availability: probed once for admins (see getMarginAvailability).
+  // "disabled" hides the tab; until the probe answers the tab stays hidden so
+  // it doesn't flash in and out.
+  const [marginAvailability, setMarginAvailability] = useState<
+    MarginAvailability | "pending"
+  >("pending");
+  const {
+    roles,
+    tabs: allowedTabs,
+    active: effectiveTab,
+    setActive,
+  } = useHubTabs(TABS, {
+    fallback: initialTab,
+    visible: (tab, r) =>
+      canSee(tab.id, { roles: r }) &&
+      (tab.id !== "margin" ||
+        marginAvailability === "enabled" ||
+        marginAvailability === "unknown"),
+  });
+  const rawTab = useSearchParams()?.get("tab") ?? initialTab ?? null;
+  // Rows open the detail routes (task 1.10): the detail template has its own
+  // title row with Back, so it doesn't sit under the hub's tabs.
+  const router = useRouter();
+  const handleSelectAccount = (accountId: string) =>
+    router.push(`/dashboard/billing/accounts/${encodeURIComponent(accountId)}`);
+  const handleSelectInvoice = (invoiceId: string) =>
+    router.push(`/dashboard/billing/invoices/${encodeURIComponent(invoiceId)}`);
+
+  const marginAllowed = canSee("margin", { roles });
   useEffect(() => {
+    if (!marginAllowed) return;
     let cancelled = false;
-    (async () => {
-      const r = await getCurrentUserRoles();
-      if (!cancelled) setRoles(r);
-    })();
+    void getMarginAvailability().then((a) => {
+      if (!cancelled) setMarginAvailability(a);
+    });
     return () => {
       cancelled = true;
     };
+  }, [marginAllowed]);
+  const marginVisible =
+    marginAllowed &&
+    (marginAvailability === "enabled" || marginAvailability === "unknown");
+  // `?tab=margin` that can't be honoured: say why instead of silently
+  // showing the first tab.
+  const marginBlocked: "disabled" | "forbidden" | "pending" | null =
+    rawTab !== "margin" || roles === null
+      ? null
+      : !marginAllowed || marginAvailability === "forbidden"
+        ? "forbidden"
+        : marginAvailability === "disabled"
+          ? "disabled"
+          : marginAvailability === "pending"
+            ? "pending"
+            : null;
+  const [openMarginAlerts, setOpenMarginAlerts] = useState(0);
+  const refreshMarginAlerts = useCallback(async () => {
+    try {
+      setOpenMarginAlerts(await getOpenMarginAlertCount());
+    } catch {
+      // The badge is a convenience; the Alerts sub-tab reports errors.
+    }
   }, []);
 
-  const handleSelectAccount = (accountId: string) => {
-    setSelectedAccountId(accountId);
-  };
+  useEffect(() => {
+    if (!marginVisible) return;
+    void refreshMarginAlerts();
+    const id = setInterval(() => {
+      if (
+        typeof document === "undefined" ||
+        document.visibilityState === "visible"
+      ) {
+        void refreshMarginAlerts();
+      }
+    }, MARGIN_BADGE_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [marginVisible, refreshMarginAlerts]);
 
-  const handleSelectInvoice = (invoiceId: string) => {
-    setSelectedInvoiceId(invoiceId);
-  };
-
-  const handleBackToAccountList = () => {
-    setSelectedAccountId(null);
-  };
-
-  const handleBackToInvoiceList = () => {
-    setSelectedInvoiceId(null);
-  };
-
-  // Invoice → Account is in-hub navigation: accounts live as a tab in this hub
-  // rather than at a standalone route, so traversing an invoice's account
-  // switches tabs and selects the account (Req 12.1).
-  const handleViewAccountFromInvoice = (accountId: string) => {
-    setSelectedInvoiceId(null);
-    setSelectedAccountId(accountId);
-    setActiveTab("accounts");
-  };
-
-  const visibleTabs = visibleByCanSee(TABS, { roles });
+  const visibleTabs = allowedTabs.map((tab) =>
+    tab.id === "margin" && openMarginAlerts > 0
+      ? { ...tab, badge: <MarginAlertBadge count={openMarginAlerts} /> }
+      : tab,
+  );
   // Accounts is Tier 4, so it can be hidden while the hub itself stays visible
-  // for Invoices and Reconciliation. Fall back to the first visible tab rather
-  // than rendering an empty pane under a tab bar that no longer offers it.
-  const effectiveTab =
-    visibleTabs.some((t) => t.id === activeTab) || visibleTabs.length === 0
-      ? activeTab
-      : visibleTabs[0].id;
-  const shows = (id: string) => effectiveTab === id && canSee(id, { roles });
+  // for Invoices and Reconciliation; `useHubTabs` falls back to the first
+  // visible tab rather than an empty pane.
+  const shows = (id: string) =>
+    !marginBlocked &&
+    effectiveTab === id &&
+    allowedTabs.some((t) => t.id === id);
 
   return (
-    <div className="flex flex-col h-full">
-      <PageHeader
-        title="Billing & Commerce"
-        subtitle="Accounts, invoices, pricing, and receivables"
-        icon={<DollarSign className="w-5 h-5" />}
-      />
-      <TabNavigation
-        tabs={visibleTabs}
-        activeTab={effectiveTab}
-        onChange={(tabId) => {
-          setActiveTab(tabId);
-          setSelectedAccountId(null); // Reset account selection when changing tabs
-          setSelectedInvoiceId(null); // Reset invoice selection when changing tabs
-        }}
-      />
-      <div className="flex-1 overflow-auto">
-        {shows("accounts") &&
-          (selectedAccountId ? (
-            <AccountDetailPage
-              accountId={selectedAccountId}
-              onBack={handleBackToAccountList}
-            />
-          ) : (
+    <PageChromeProvider>
+      <div className="flex flex-col h-full">
+        <PageHeader
+          host
+          title="Billing"
+          help="Accounts, invoices, pricing, and receivables"
+          tabs={visibleTabs}
+          tab={effectiveTab}
+          onTabChange={setActive}
+          tabIdBase="billing"
+        />
+        <TabPanel
+          idBase="billing"
+          value={effectiveTab}
+          className="flex-1 overflow-auto"
+        >
+          {marginBlocked === "pending" && (
+            <LoadingSpinner message="Loading margin..." />
+          )}
+          {(marginBlocked === "disabled" || marginBlocked === "forbidden") && (
+            <MarginUnavailable reason={marginBlocked} />
+          )}
+          {shows("accounts") && (
             <AccountsListPage onSelectAccount={handleSelectAccount} />
-          ))}
-        {shows("invoices") &&
-          (selectedInvoiceId ? (
-            <InvoiceDetailPage
-              invoiceId={selectedInvoiceId}
-              onBack={handleBackToInvoiceList}
-              onViewAccount={handleViewAccountFromInvoice}
-            />
-          ) : (
+          )}
+          {shows("invoices") && (
             <InvoicesListPage onSelectInvoice={handleSelectInvoice} />
-          ))}
-        {shows("price-books") && <PriceBookEditor />}
-        {shows("pricing-rules") && (
-          <Suspense
-            fallback={<LoadingSpinner message="Loading pricing rules..." />}
-          >
-            <PricingRulesPage />
-          </Suspense>
-        )}
-        {shows("contracts") && (
-          <Suspense
-            fallback={<LoadingSpinner message="Loading contracts..." />}
-          >
-            <PriceProtectionContractsPage />
-          </Suspense>
-        )}
-        {shows("payments") && <PaymentsListPage />}
-        {shows("ar-aging") && (
-          <Suspense fallback={<LoadingSpinner message="Loading AR Aging..." />}>
-            <ARAgingDashboard />
-          </Suspense>
-        )}
-        {shows("reconciliation") && (
-          <Suspense
-            fallback={<LoadingSpinner message="Loading reconciliation..." />}
-          >
-            <ReconciliationPage />
-          </Suspense>
-        )}
+          )}
+          {shows("price-books") && <PriceBookEditor />}
+          {shows("pricing-rules") && (
+            <Suspense
+              fallback={<LoadingSpinner message="Loading pricing rules..." />}
+            >
+              <PricingRulesPage />
+            </Suspense>
+          )}
+          {shows("contracts") && (
+            <Suspense
+              fallback={<LoadingSpinner message="Loading contracts..." />}
+            >
+              <PriceProtectionContractsPage />
+            </Suspense>
+          )}
+          {shows("payments") && <PaymentsListPage />}
+          {shows("ar-aging") && (
+            <Suspense
+              fallback={<LoadingSpinner message="Loading AR Aging..." />}
+            >
+              <ARAgingDashboard />
+            </Suspense>
+          )}
+          {shows("reconciliation") && (
+            <Suspense
+              fallback={<LoadingSpinner message="Loading reconciliation..." />}
+            >
+              <ReconciliationPage />
+            </Suspense>
+          )}
+          {shows("margin") && (
+            <Suspense fallback={<LoadingSpinner message="Loading margin..." />}>
+              <MarginHub onAlertsChanged={refreshMarginAlerts} />
+            </Suspense>
+          )}
+        </TabPanel>
       </div>
-    </div>
+    </PageChromeProvider>
   );
 }

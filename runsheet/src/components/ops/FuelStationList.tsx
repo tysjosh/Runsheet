@@ -1,26 +1,23 @@
 "use client";
 
-import { ChevronDown, ChevronUp, MapPin, Pencil } from "lucide-react";
-import { useCallback, useState } from "react";
-import { type Column, Table } from "@/components/ui";
-import type {
-  FuelStation,
-  FuelType,
-  StationStatus,
-} from "../../services/fuelApi";
+import { MapPin, Pencil } from "lucide-react";
+import { useState } from "react";
 import {
+  type Column,
+  DataTable,
+  ProductChip,
+  StatusBadge,
+  type TableSort,
+} from "@/components/ui";
+import { gallons, number, pct } from "../../lib/format";
+import type { FuelStation, StationStatus } from "../../services/fuelApi";
+import {
+  displayDaysUntilEmpty,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
 } from "../../services/fuelApi";
-
-type SortField =
-  | "name"
-  | "fuel_type"
-  | "status"
-  | "stock_pct"
-  | "days_until_empty"
-  | "location_name";
-type SortOrder = "asc" | "desc";
+import type { StatusKey } from "../../styles/tokens";
+import { STATUS } from "../../styles/tokens";
 
 interface FuelStationListProps {
   stations: FuelStation[];
@@ -28,74 +25,41 @@ interface FuelStationListProps {
   onSelectStation?: (stationId: string) => void;
   /** Currently selected station ID */
   selectedStationId?: string | null;
-  /** Called when the Edit button is clicked for a station */
+  /** Called when the Edit action is chosen for a station */
   onEditStation?: (station: FuelStation) => void;
+  /** Skeleton rows while the first load runs. */
+  loading?: boolean;
 }
 
-const STATUS_CONFIG: Record<
+/** Station stock status → display status (hue + icon) and its label. */
+export const STATION_STATUS: Record<
   StationStatus,
-  { label: string; color: string; bg: string; barColor: string }
+  { status: StatusKey; label: string }
 > = {
-  normal: {
-    label: "Normal",
-    color: "text-success-dark",
-    bg: "bg-success-light",
-    barColor: "bg-success",
-  },
-  low: {
-    label: "Low",
-    color: "text-warning-dark",
-    bg: "bg-warning-light",
-    barColor: "bg-warning",
-  },
-  critical: {
-    label: "Critical",
-    color: "text-error-dark",
-    bg: "bg-error-light",
-    barColor: "bg-error",
-  },
-  empty: {
-    label: "Empty",
-    color: "text-gray-700",
-    bg: "bg-gray-100",
-    barColor: "bg-gray-400",
-  },
+  normal: { status: "ok", label: "Normal" },
+  low: { status: "warning", label: "Low" },
+  critical: { status: "critical", label: "Critical" },
+  empty: { status: "exception", label: "Empty" },
 };
 
-const FUEL_TYPE_LABELS: Record<FuelType, string> = {
-  DIESEL_2: "Diesel #2 (ULSD)",
-  GASOLINE_REG: "Regular Unleaded",
-  GASOLINE_PREM: "Premium Unleaded",
-  HEATING_OIL: "Heating Oil",
-  PROPANE: "Propane",
-  KEROSENE: "Kerosene",
-  OFF_ROAD_DIESEL: "Off-Road Diesel",
-  DEF: "DEF",
-};
-
-function getCapacityGallons(station: FuelStation): number {
-  return getFuelStationCapacityGallons(station);
+export function getStockPercentage(station: FuelStation): number {
+  const capacity = getFuelStationCapacityGallons(station);
+  if (capacity <= 0) return 0;
+  return (getFuelStationCurrentStockGallons(station) / capacity) * 100;
 }
 
-function getCurrentStockGallons(station: FuelStation): number {
-  return getFuelStationCurrentStockGallons(station);
-}
-
-function getStockPercentage(station: FuelStation): number {
-  const capacityGallons = getCapacityGallons(station);
-  if (capacityGallons <= 0) return 0;
-  return (getCurrentStockGallons(station) / capacityGallons) * 100;
-}
-
-function formatGallons(gallons: number): string {
-  if (gallons == null || Number.isNaN(gallons)) return "0";
-  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K`;
-  return gallons.toFixed(0);
-}
+type SortKey =
+  | "name"
+  | "fuel_type"
+  | "status"
+  | "stock_pct"
+  | "days_until_empty"
+  | "location_name";
 
 /**
- * Station list with stock percentage bars, status color-coding
- * (green/yellow/red/gray), fuel type, and location.
+ * Station list (DataTable): product chip, stock bar coloured by status with
+ * the percentage and gallons as text, a status badge, days left and
+ * location. Sorting is on the column headers (`aria-sort` on `th`).
  *
  * Validates: Requirements 6.1, 6.4
  */
@@ -104,158 +68,116 @@ export default function FuelStationList({
   onSelectStation,
   selectedStationId,
   onEditStation,
+  loading = false,
 }: FuelStationListProps) {
-  const [sortField, setSortField] = useState<SortField>("stock_pct");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
-
-  const handleSort = useCallback(
-    (field: SortField) => {
-      if (sortField === field) {
-        setSortOrder((prev) => (prev === "asc" ? "desc" : "asc"));
-      } else {
-        setSortField(field);
-        setSortOrder(field === "stock_pct" ? "asc" : "desc");
-      }
-    },
-    [sortField],
-  );
-
-  const sorted = [...stations].sort((a, b) => {
-    let cmp = 0;
-    switch (sortField) {
-      case "stock_pct":
-        cmp = getStockPercentage(a) - getStockPercentage(b);
-        break;
-      case "days_until_empty":
-        cmp = a.days_until_empty - b.days_until_empty;
-        break;
-      default:
-        cmp = String(a[sortField] ?? "").localeCompare(
-          String(b[sortField] ?? ""),
-        );
-    }
-    return sortOrder === "asc" ? cmp : -cmp;
+  const [sort, setSort] = useState<TableSort>({
+    key: "stock_pct",
+    direction: "asc",
   });
 
-  const SortIcon = ({ field }: { field: SortField }) => {
-    if (sortField !== field) return null;
-    return sortOrder === "asc" ? (
-      <ChevronUp className="w-3 h-3 inline ml-1" />
-    ) : (
-      <ChevronDown className="w-3 h-3 inline ml-1" />
-    );
-  };
-
-  const SortableHeader = ({
-    field,
-    label,
-  }: {
-    field: SortField;
-    label: string;
-  }) => (
-    <button
-      type="button"
-      onClick={() => handleSort(field)}
-      aria-sort={
-        sortField === field
-          ? sortOrder === "asc"
-            ? "ascending"
-            : "descending"
-          : "none"
+  const sorted = [...stations].sort((a, b) => {
+    const key = sort.key as SortKey;
+    let cmp = 0;
+    if (key === "stock_pct")
+      cmp = getStockPercentage(a) - getStockPercentage(b);
+    else if (key === "days_until_empty") {
+      // Stations with no consumption ("—") sort last in either order (F5).
+      const da = displayDaysUntilEmpty(a);
+      const db = displayDaysUntilEmpty(b);
+      if (da == null || db == null) {
+        if (da == null && db == null) return 0;
+        return da == null ? 1 : -1;
       }
-      className="flex items-center text-xs font-medium text-gray-600 uppercase tracking-wider"
-    >
-      {label}
-      <SortIcon field={field} />
-    </button>
-  );
+      cmp = da - db;
+    } else cmp = String(a[key] ?? "").localeCompare(String(b[key] ?? ""));
+    return sort.direction === "asc" ? cmp : -cmp;
+  });
 
   const columns: Column<FuelStation>[] = [
     {
       key: "name",
-      label: <SortableHeader field="name" label="Station" />,
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm font-medium text-primary",
-      render: (station) => station.name,
+      header: "Station",
+      sortable: true,
+      truncate: true,
+      title: (s) => s.name,
+      className: "font-medium text-text",
+      cell: (s) => s.name,
     },
     {
       key: "fuel_type",
-      label: <SortableHeader field="fuel_type" label="Fuel Type" />,
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-700",
-      render: (station) =>
-        FUEL_TYPE_LABELS[station.fuel_type] ?? station.fuel_type,
+      header: "Product",
+      sortable: true,
+      width: 200,
+      cell: (s) => <ProductChip code={s.fuel_type} variant="chip" />,
     },
     {
       key: "stock_pct",
-      label: <SortableHeader field="stock_pct" label="Stock Level" />,
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      render: (station) => {
-        const stockPct = getStockPercentage(station);
-        const config = STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
+      header: "Stock",
+      sortable: true,
+      width: 240,
+      cell: (s) => {
+        const p = getStockPercentage(s);
+        const cfg = STATION_STATUS[s.status] ?? STATION_STATUS.normal;
         return (
-          <>
-            <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
+            <div
+              className="h-2 w-20 shrink-0 overflow-hidden rounded-full bg-slate-200"
+              role="progressbar"
+              aria-valuenow={Math.round(p)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-label={`Stock level ${pct(p)}`}
+            >
               <div
-                className="flex-1 h-2 bg-gray-200 rounded-full overflow-hidden"
-                role="progressbar"
-                aria-valuenow={Math.round(stockPct)}
-                aria-valuemin={0}
-                aria-valuemax={100}
-                aria-label={`Stock level ${Math.round(stockPct)}%`}
-              >
-                <div
-                  className={`h-full rounded-full transition-all ${config.barColor}`}
-                  style={{ width: `${Math.min(stockPct, 100)}%` }}
-                />
-              </div>
-              <span className="text-xs text-gray-600 w-16 text-right">
-                {stockPct.toFixed(1)}%
-              </span>
+                className="h-full rounded-full"
+                style={{
+                  width: `${Math.min(p, 100)}%`,
+                  backgroundColor: STATUS[cfg.status].dot,
+                }}
+              />
             </div>
-            <div className="text-xs text-gray-500 mt-0.5">
-              {formatGallons(getCurrentStockGallons(station))} /{" "}
-              {formatGallons(getCapacityGallons(station))} gal
-            </div>
-          </>
+            <span className="whitespace-nowrap text-xs tabular-nums text-slate-700">
+              {pct(p)} · {number(getFuelStationCurrentStockGallons(s))} /{" "}
+              {gallons(getFuelStationCapacityGallons(s))}
+            </span>
+          </div>
         );
       },
     },
     {
       key: "status",
-      label: <SortableHeader field="status" label="Status" />,
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      render: (station) => {
-        const config = STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
-        return (
-          <span
-            className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${config.bg} ${config.color}`}
-          >
-            {config.label}
-          </span>
-        );
+      header: "Status",
+      sortable: true,
+      width: 110,
+      cell: (s) => {
+        const cfg = STATION_STATUS[s.status] ?? STATION_STATUS.normal;
+        return <StatusBadge status={cfg.status} label={cfg.label} />;
       },
     },
     {
       key: "days_until_empty",
-      label: <SortableHeader field="days_until_empty" label="Days Left" />,
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-700",
-      render: (station) =>
-        station.days_until_empty > 0
-          ? `${station.days_until_empty.toFixed(1)} days`
-          : "—",
+      header: "Days left",
+      sortable: true,
+      align: "right",
+      width: 100,
+      className: "tabular-nums text-slate-700",
+      cell: (s) => {
+        const days = displayDaysUntilEmpty(s);
+        return days != null ? `${number(days, { decimals: 1 })} d` : "—";
+      },
     },
     {
       key: "location_name",
-      label: <SortableHeader field="location_name" label="Location" />,
-      headerClassName: "cursor-pointer select-none hover:bg-gray-100",
-      className: "text-sm text-gray-600",
-      render: (station) =>
-        station.location_name ? (
-          <span className="flex items-center gap-1">
-            <MapPin className="w-3 h-3 text-gray-500" aria-hidden="true" />
-            {station.location_name}
+      header: "Location",
+      sortable: true,
+      truncate: true,
+      title: (s) => s.location_name ?? undefined,
+      className: "text-slate-700",
+      cell: (s) =>
+        s.location_name ? (
+          <span className="inline-flex items-center gap-1">
+            <MapPin className="h-3 w-3 text-slate-500" aria-hidden="true" />
+            {s.location_name}
           </span>
         ) : (
           "—"
@@ -263,47 +185,36 @@ export default function FuelStationList({
     },
   ];
 
-  if (onEditStation) {
-    columns.push({
-      key: "actions",
-      label: "Actions",
-      align: "right",
-      render: (station) => (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onEditStation(station);
-          }}
-          className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-gray-600 bg-gray-100 rounded-md hover:bg-gray-200 hover:text-gray-800 transition-colors"
-          aria-label={`Edit ${station.name}`}
-        >
-          <Pencil className="w-3 h-3" aria-hidden="true" />
-          Edit
-        </button>
-      ),
-    });
-  }
-
   return (
-    <Table<FuelStation>
+    <DataTable<FuelStation>
       ariaLabel="Fuel station list"
       columns={columns}
       data={sorted}
-      variant="compact"
-      getRowId={(station) => station.station_id}
+      loading={loading}
+      getRowId={(s) => s.station_id}
       selectedId={selectedStationId ?? undefined}
-      onRowClick={
-        onSelectStation
-          ? (station) => onSelectStation(station.station_id)
+      sort={sort}
+      onSortChange={setSort}
+      rowLabel={(s) => s.name}
+      rowMenu={
+        onEditStation
+          ? (s) => [
+              {
+                id: "edit",
+                label: "Edit station",
+                icon: <Pencil className="h-3.5 w-3.5" />,
+                onSelect: () => onEditStation(s),
+              },
+            ]
           : undefined
       }
+      onRowClick={
+        onSelectStation ? (s) => onSelectStation(s.station_id) : undefined
+      }
       emptyState={
-        <div className="text-gray-500">
-          <p className="text-lg font-medium text-gray-500">No stations found</p>
-          <p className="text-sm text-gray-500 mt-1">
-            Try adjusting your filters
-          </p>
+        <div className="text-text-muted">
+          <p className="text-sm font-medium">No stations found</p>
+          <p className="mt-1 text-xs">Try adjusting your filters</p>
         </div>
       }
     />

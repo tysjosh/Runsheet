@@ -14,11 +14,12 @@ These tests exercise:
 * Dyed-diesel assignments to clear-only compartments are rejected with
   ``dyed.compartment_incompatible`` and stripped from the plan.
 * Non-dyed-diesel assignments are never checked (pass through unchanged).
-* When no enforcer is configured, all assignments pass through (graceful
-  degradation).
+* When no enforcer is configured, a plan carrying dyed diesel is blocked
+  with ``DyedDieselCheckUnavailable`` (fail closed, OI-02); a plan with no
+  dyed diesel passes through.
 * Rejected volume is charged to ``unserved_demand_liters``.
-* If the enforcer raises an exception, the assignment is allowed
-  (fail-open).
+* If the enforcer raises an exception, the plan is blocked with
+  ``DyedDieselCheckUnavailable`` and an ERROR is logged (fail closed, OI-02).
 
 Validates: Requirements 6.3, 6.4.
 """
@@ -35,6 +36,7 @@ from Agents.support.compartment_models import (
     LoadingPlan,
 )
 from compliance.services.dyed_diesel_enforcer import (
+    DyedDieselCheckUnavailable,
     DyedDieselEnforcer,
     ValidationResult,
 )
@@ -171,8 +173,8 @@ class TestEnforceDyedDieselCompliance:
     """Tests for the _enforce_dyed_diesel_compliance method."""
 
     @pytest.mark.asyncio
-    async def test_no_enforcer_passes_all_assignments(self):
-        """When no enforcer is configured, all assignments pass through."""
+    async def test_no_enforcer_blocks_dyed_plan(self, caplog):
+        """No enforcer wired and dyed diesel on the plan: blocked (OI-02)."""
         deps = _make_deps()
         agent = _make_agent(deps)
         # No enforcer set — _dyed_diesel_enforcer attribute doesn't exist
@@ -180,13 +182,53 @@ class TestEnforceDyedDieselCompliance:
         dyed_assignment = _make_assignment(fuel_grade="OFF_ROAD_DIESEL")
         plan = _make_loading_plan([dyed_assignment])
 
-        result = await agent._enforce_dyed_diesel_compliance(
+        with caplog.at_level("ERROR"):
+            with pytest.raises(DyedDieselCheckUnavailable) as excinfo:
+                await agent._enforce_dyed_diesel_compliance(
+                    loading_plan=plan,
+                    tenant_id="tenant_1",
+                )
+
+        assert excinfo.value.reason == "enforcer_not_wired"
+        assert excinfo.value.details["plan_id"] == "plan_1"
+        assert excinfo.value.details["truck_id"] == "truck_1"
+        assert any(
+            r.levelname == "ERROR" and "blocking plan plan_1" in r.getMessage()
+            for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_enforcer_passes_non_dyed_plan(self):
+        """No enforcer wired but no dyed diesel: the check does not apply."""
+        deps = _make_deps()
+        agent = _make_agent(deps)
+
+        clear = _make_assignment(fuel_grade="DIESEL_2")
+        plan = _make_loading_plan([clear])
+
+        result, stripped = await agent._enforce_dyed_diesel_compliance(
             loading_plan=plan,
             tenant_id="tenant_1",
         )
 
-        assert len(result.assignments) == 1
-        assert result.assignments[0] is dyed_assignment
+        assert result is plan
+        assert stripped == []
+
+    @pytest.mark.asyncio
+    async def test_enforcer_not_a_dyed_diesel_enforcer_blocks_dyed_plan(self):
+        """A wired object that is not a DyedDieselEnforcer cannot verify: blocked."""
+        deps = _make_deps()
+        agent = _make_agent(deps)
+        agent.set_dyed_diesel_enforcer(object())
+
+        plan = _make_loading_plan([_make_assignment(fuel_grade="DYED_DIESEL")])
+
+        with pytest.raises(DyedDieselCheckUnavailable) as excinfo:
+            await agent._enforce_dyed_diesel_compliance(
+                loading_plan=plan,
+                tenant_id="tenant_1",
+            )
+        assert excinfo.value.reason == "enforcer_not_wired"
 
     @pytest.mark.asyncio
     async def test_non_dyed_product_not_checked(self):
@@ -202,7 +244,7 @@ class TestEnforceDyedDieselCompliance:
         clear_assignment = _make_assignment(fuel_grade="DIESEL_2")
         plan = _make_loading_plan([clear_assignment])
 
-        result = await agent._enforce_dyed_diesel_compliance(
+        result, stripped = await agent._enforce_dyed_diesel_compliance(
             loading_plan=plan,
             tenant_id="tenant_1",
         )
@@ -229,7 +271,7 @@ class TestEnforceDyedDieselCompliance:
         )
         plan = _make_loading_plan([dyed_assignment])
 
-        result = await agent._enforce_dyed_diesel_compliance(
+        result, stripped = await agent._enforce_dyed_diesel_compliance(
             loading_plan=plan,
             tenant_id="tenant_1",
         )
@@ -269,13 +311,14 @@ class TestEnforceDyedDieselCompliance:
         )
         plan = _make_loading_plan([dyed_assignment])
 
-        result = await agent._enforce_dyed_diesel_compliance(
+        result, stripped = await agent._enforce_dyed_diesel_compliance(
             loading_plan=plan,
             tenant_id="tenant_1",
         )
 
         # Assignment should be stripped
         assert len(result.assignments) == 0
+        assert stripped == [dyed_assignment]
         # Rejected volume charged to unserved_demand_liters
         assert result.unserved_demand_liters == 5000.0
 
@@ -322,7 +365,7 @@ class TestEnforceDyedDieselCompliance:
 
         plan = _make_loading_plan([clear_diesel, dyed_compatible, dyed_rejected])
 
-        result = await agent._enforce_dyed_diesel_compliance(
+        result, stripped = await agent._enforce_dyed_diesel_compliance(
             loading_plan=plan,
             tenant_id="tenant_1",
         )
@@ -334,8 +377,8 @@ class TestEnforceDyedDieselCompliance:
         assert result.unserved_demand_liters == 2000.0
 
     @pytest.mark.asyncio
-    async def test_enforcer_exception_fails_open(self):
-        """If the enforcer raises, the assignment is allowed (fail-open)."""
+    async def test_enforcer_exception_blocks_plan(self, caplog):
+        """If the enforcer raises, the plan is blocked (fail closed, OI-02)."""
         deps = _make_deps()
         agent = _make_agent(deps)
 
@@ -349,14 +392,23 @@ class TestEnforceDyedDieselCompliance:
         dyed_assignment = _make_assignment(fuel_grade="OFF_ROAD_DIESEL")
         plan = _make_loading_plan([dyed_assignment])
 
-        result = await agent._enforce_dyed_diesel_compliance(
-            loading_plan=plan,
-            tenant_id="tenant_1",
-        )
+        with caplog.at_level("ERROR"):
+            with pytest.raises(DyedDieselCheckUnavailable) as excinfo:
+                await agent._enforce_dyed_diesel_compliance(
+                    loading_plan=plan,
+                    tenant_id="tenant_1",
+                )
 
-        # Assignment should pass through despite the exception
-        assert len(result.assignments) == 1
-        assert result.unserved_demand_liters == 0.0
+        exc = excinfo.value
+        assert exc.reason == "enforcer_error"
+        assert exc.details["compartment_id"] == "comp_1"
+        assert exc.details["cause"] == "RuntimeError"
+        assert isinstance(exc.__cause__, RuntimeError)
+        assert exc.status_code == 503
+        assert any(
+            r.levelname == "ERROR" and "blocking the plan" in r.getMessage()
+            for r in caplog.records
+        )
 
     @pytest.mark.asyncio
     async def test_all_dyed_product_codes_checked(self):
@@ -404,3 +456,121 @@ class TestBootstrapWiring:
         """CompartmentLoadingAgent exposes set_dyed_diesel_enforcer."""
         assert hasattr(CompartmentLoadingAgent, "set_dyed_diesel_enforcer")
         assert callable(CompartmentLoadingAgent.set_dyed_diesel_enforcer)
+
+
+# ---------------------------------------------------------------------------
+# Tests: evaluate() withholds a blocked plan (OI-02)
+# ---------------------------------------------------------------------------
+
+
+def _hit(truck_id: str, capacity: float) -> Dict[str, Any]:
+    return {
+        "_source": {
+            "compartment_id": "c0",
+            "truck_id": truck_id,
+            "capacity_liters": capacity,
+            "allowed_grades": ["AGO"],
+            "position_index": 0,
+            "tenant_id": "tenant-1",
+        }
+    }
+
+
+def _order_doc(order_id: str, product_code: str) -> Dict[str, Any]:
+    return {
+        "order_id": order_id,
+        "customer_id": f"cust-{order_id}",
+        "customer_tank_id": None,
+        "product_code": product_code,
+        "gallons_requested": 300.0,
+        "fill_to_full": False,
+        "status": "placed",
+        "tenant_id": "tenant-1",
+    }
+
+
+class TestEvaluateFailClosed:
+    @pytest.mark.asyncio
+    async def test_evaluate_blocks_dyed_plan_when_enforcer_raises(self):
+        """The dyed truck's plan is withheld; the clear truck's plan proceeds."""
+        from Agents.overlay.data_contracts import RiskSignal
+        from Agents.support.fuel_distribution_models import (
+            DeliveryPriority,
+            DeliveryPriorityList,
+            FuelGrade,
+            PriorityBucket,
+        )
+
+        deps = _make_deps()
+        orders = [
+            _order_doc("ord_D", "OFF_ROAD_DIESEL"),
+            _order_doc("ord_C", "DIESEL_2"),
+        ]
+        # One 1200 L compartment per truck: the two products cannot share a
+        # compartment, so each order lands on its own truck.
+        hits = [_hit("truck-A", 1200.0), _hit("truck-B", 1200.0)]
+
+        async def _search(index, query=None, size=None):
+            if index == "fuel_orders_current":
+                return {"hits": {"hits": [{"_source": o} for o in orders]}}
+            if index == "truck_compartments":
+                return {"hits": {"hits": hits}}
+            return {"hits": {"hits": []}}
+
+        deps["es_service"].search_documents = AsyncMock(side_effect=_search)
+        agent = _make_agent(deps)
+        agent._compartment_state_repo = MagicMock()
+        agent._compartment_state_repo.mark_loaded = AsyncMock()
+
+        enforcer = MagicMock(spec=DyedDieselEnforcer)
+        enforcer.validate_load_plan = AsyncMock(
+            side_effect=RuntimeError("ES connection failed")
+        )
+        agent.set_dyed_diesel_enforcer(enforcer)
+
+        agent._priority_buffer.append(DeliveryPriorityList(
+            priorities=[
+                DeliveryPriority(
+                    station_id="ord_D", fuel_grade=FuelGrade.AGO,
+                    priority_score=0.9, priority_bucket=PriorityBucket.CRITICAL,
+                ),
+                DeliveryPriority(
+                    station_id="ord_C", fuel_grade=FuelGrade.AGO,
+                    priority_score=0.8, priority_bucket=PriorityBucket.CRITICAL,
+                ),
+            ],
+            tenant_id="tenant-1",
+            run_id="run-1",
+        ))
+
+        proposals = await agent.evaluate([])
+
+        persisted = [
+            c.args[2] for c in deps["es_service"].index_document.await_args_list
+            if c.args and c.args[0] == "mvp_load_plans"
+        ]
+        assert [p["truck_id"] for p in persisted] == ["truck-B"]
+        assert {a["order_id"] for a in persisted[0]["assignments"]} == {"ord_C"}
+        assert len(proposals) == 1
+        assert proposals[0].actions[0]["parameters"]["truck_id"] == "truck-B"
+
+        reasons = agent.cycle_metrics.get("degradation_reasons") or []
+        [blocked] = [
+            r for r in reasons if r["reason_code"] == "dyed_diesel_check_unavailable"
+        ]
+        assert blocked["detail"]
+        assert "truck-A" in blocked["detail"]
+        assert blocked["blocked_trucks"] == ["truck-A"]
+        assert blocked["blocked_orders"] == ["ord_D"]
+
+        assert [
+            (e["order_id"], e["reason"]) for e in agent.last_unplaced_orders
+        ] == [("ord_D", "dyed_diesel_check_unavailable")]
+        fail_signals = [
+            c.args[0] for c in deps["signal_bus"].publish.call_args_list
+            if isinstance(c.args[0], RiskSignal)
+            and c.args[0].entity_type == "fuel_order"
+        ]
+        assert [(s.entity_id, s.context["reason"]) for s in fail_signals] == [
+            ("ord_D", "dyed_diesel_check_unavailable")
+        ]

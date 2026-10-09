@@ -2,8 +2,8 @@
 
 /**
  * Several packages this app imports publish their `react-native` entry point as
- * an untranspiled `.mjs` bundle — `lucide-react-native` (the icons in
- * `components/DispatchOrderCard.tsx`) and the `@rn-primitives/*` primitives the
+ * an untranspiled `.mjs` bundle — `lucide-react-native` (the screen and chip
+ * icons) and the `@rn-primitives/*` primitives the
  * copied `components/ui/` layer is built on. `jest-expo` transforms `.js`,
  * `.ts`, and `.tsx` only and ignores `node_modules` apart from its own
  * whitelist, so those bundles reach the runtime unparsed and any suite that

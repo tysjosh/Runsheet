@@ -7,6 +7,7 @@ import {
   Plus,
   SkipForward,
 } from "lucide-react";
+import { number as fmtNumber } from "../../lib/format";
 import type { ImportResult } from "../../types/import";
 
 // ─── Props ───────────────────────────────────────────────────────────────────
@@ -146,7 +147,7 @@ export default function ImportComplete({
               <div>
                 <p className="text-xs text-gray-500">Duration</p>
                 <p className="text-sm font-medium text-primary">
-                  {result.duration_seconds.toFixed(1)}s
+                  {fmtNumber(result.duration_seconds, { decimals: 1 })}s
                 </p>
               </div>
             </div>

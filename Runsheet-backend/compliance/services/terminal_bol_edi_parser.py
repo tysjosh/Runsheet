@@ -37,8 +37,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-class EDIParseError(Exception):
-    """Raised when an EDI payload cannot be parsed by any registered strategy."""
+class EDIParseError(ValueError):
+    """Raised when an EDI payload cannot be parsed by any registered strategy.
+
+    A ``ValueError`` so the endpoint's existing ``ValueError`` → 422
+    ``terminal_bols.invalid_edi`` mapping covers it rather than a 500 (C8).
+    """
 
     def __init__(self, message: str, payload_preview: Optional[str] = None):
         self.payload_preview = payload_preview

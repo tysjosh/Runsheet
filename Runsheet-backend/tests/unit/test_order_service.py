@@ -8,11 +8,12 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, create_autospec, patch
 
 import pytest
 
 from fuel.services.order_service import OrderService
+from fuel.websocket.orders_ws import OrdersWSManager
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +62,10 @@ def _build_service(
     order_repo.append_event = AsyncMock()
     order_repo.upsert_with_last_event_timestamp = AsyncMock(return_value=True)
 
-    ws_manager = AsyncMock()
-    ws_manager.broadcast = AsyncMock(return_value=1)
+    # Autospec so a call that doesn't fit the real manager's API fails here
+    # instead of being swallowed by the service (N-new-1).
+    ws_manager = create_autospec(OrdersWSManager, instance=True)
+    ws_manager.broadcast_order_status_changed.return_value = 1
 
     feature_flag_service = AsyncMock()
     feature_flag_service.get_overlay_state = AsyncMock(return_value=overlay_state)
@@ -151,13 +154,18 @@ class TestApplyStatusTransition:
 
         await service.apply_status_transition(order, "confirmed")
 
-        ws.broadcast.assert_called_once()
-        msg = ws.broadcast.call_args[0][0]
-        assert msg["type"] == "order_status_changed"
-        assert msg["data"]["old_status"] == "placed"
-        assert msg["data"]["new_status"] == "confirmed"
-        assert msg["data"]["order_id"] == "ord_abc123"
-        assert msg["tenant_id"] == "tenant_1"
+        ws.broadcast.assert_not_called()
+        ws.broadcast_order_status_changed.assert_awaited_once()
+        data = ws.broadcast_order_status_changed.await_args.args[0]
+        assert data["old_status"] == "placed"
+        assert data["new_status"] == "confirmed"
+        assert data["status"] == "confirmed"
+        assert data["order_id"] == "ord_abc123"
+        assert data["tenant_id"] == "tenant_1"
+        # The full order, JSON-encoded (datetimes become ISO strings).
+        assert data["trace_id"] == "trace_001"
+        assert data["delivery_window_start"] == "2026-05-11T08:00:00+00:00"
+        assert data["updated_at"] == _FIXED_NOW.isoformat()
 
     @pytest.mark.asyncio
     async def test_invalid_transition_raises_409(self):
@@ -352,7 +360,7 @@ class TestDriverCounterUpdates:
 
         assert result["status"] == "failed"
         # Broadcast still happened
-        ws.broadcast.assert_called_once()
+        ws.broadcast_order_status_changed.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +534,70 @@ class TestReleaseHold:
         assert result["hold_reason"] == "hook_a_failed"
         assert call_order == ["a"]  # hook_b was never called
 
+    @staticmethod
+    def _linked_on_hold() -> Dict[str, Any]:
+        order = _make_order(
+            status="on_hold", hold_reason="credit_check_failed",
+            assigned_driver_id="drv-1",
+        )
+        order.update(
+            assigned_run_id="run-1", assigned_asset_id="truck-1",
+            assigned_claim_id="claim-1",
+        )
+        return order
+
+    @pytest.mark.asyncio
+    async def test_release_clears_plan_links_keeps_driver_and_audits(self):
+        """OI-18 (OQ10): release leaves the applied plan in the same write."""
+        service, repo, ws, _ = _build_service()
+        order = self._linked_on_hold()
+
+        result = await service.release_hold(order, "user_1")
+
+        assert result["status"] == "placed"
+        assert result["assigned_run_id"] is None
+        assert result["assigned_asset_id"] is None
+        assert result["assigned_claim_id"] is None
+        assert result["assigned_driver_id"] == "drv-1"
+        persisted = repo.upsert_with_last_event_timestamp.call_args.args[1]
+        assert persisted["assigned_run_id"] is None
+        assert persisted["assigned_asset_id"] is None
+        event = repo.append_event.call_args.args[1]
+        assert event["event_payload"]["released_run_id"] == "run-1"
+        assert event["event_payload"]["released_asset_id"] == "truck-1"
+        assert event["event_payload"]["reason"] == "released_from_hold"
+
+    @pytest.mark.asyncio
+    async def test_failed_hook_keeps_plan_links(self):
+        service, repo, ws, _ = _build_service()
+
+        async def failing_hook(order):
+            return "credit_still_bad"
+
+        service.register_intake_hook(failing_hook)
+        order = self._linked_on_hold()
+
+        result = await service.release_hold(order, "user_1")
+
+        assert result["status"] == "on_hold"
+        assert result["assigned_run_id"] == "run-1"
+        assert result["assigned_asset_id"] == "truck-1"
+        repo.append_event.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refused_transition_restores_the_links(self):
+        service, repo, ws, _ = _build_service()
+        order = self._linked_on_hold()
+        order["status"] = "delivered"  # delivered → placed is not allowed
+
+        with pytest.raises(Exception):
+            await service.release_hold(order, "user_1")
+
+        assert order["assigned_run_id"] == "run-1"
+        assert order["assigned_asset_id"] == "truck-1"
+        assert order["assigned_claim_id"] == "claim-1"
+        repo.upsert_with_last_event_timestamp.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Tests: Broadcast failure resilience
@@ -539,7 +611,7 @@ class TestBroadcastResilience:
     async def test_broadcast_failure_does_not_block(self):
         """WS broadcast failure does not prevent the transition."""
         service, repo, ws, _ = _build_service()
-        ws.broadcast = AsyncMock(side_effect=RuntimeError("WS down"))
+        ws.broadcast_order_status_changed.side_effect = RuntimeError("WS down")
         order = _make_order(status="placed")
 
         result = await service.apply_status_transition(order, "confirmed")

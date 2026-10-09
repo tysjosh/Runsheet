@@ -46,6 +46,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict
 
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from integrations.stripe_connector import (
     StripeConnector,
     StripeSignatureVerificationError,
@@ -98,18 +100,32 @@ ConnectorFactory = Callable[[str], Awaitable[Optional[StripeConnector]]]
 PaymentMapper = Callable[[str, List[str]], Awaitable[Dict[str, Dict[str, Any]]]]
 
 
+#: ``async (path_tenant_id, event) -> {portal, handled, reason}``: the
+#: customer-portal reconciler (``PortalPaymentReconciler.handle``, design
+#: §6.3). ``portal`` is false when a ``charge.*`` event names no portal
+#: attempt, so the endpoint falls through to the existing handling.
+PortalPaymentHandler = Callable[[str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
+
+#: ``charge.*`` events the portal handler sees first (R6.15).
+PORTAL_CHARGE_EVENT_TYPES = frozenset({"charge.refunded", "charge.dispute.created"})
+#: ``metadata.source`` stamped on every portal PaymentIntent.
+PORTAL_PAYMENT_SOURCE = "runsheet_portal"
+
+
 # ---------------------------------------------------------------------------
 # Module-level wiring (same pattern as integrations_endpoints.py)
 # ---------------------------------------------------------------------------
 
 _connector_factory: Optional[ConnectorFactory] = None
 _payment_mapper: Optional[PaymentMapper] = None
+_portal_payment_handler: Optional[PortalPaymentHandler] = None
 
 
 def configure_stripe_endpoints(
     *,
     connector_factory: ConnectorFactory,
     payment_mapper: Optional[PaymentMapper] = None,
+    portal_payment_handler: Optional[PortalPaymentHandler] = None,
 ) -> None:
     """Wire the Stripe connector factory into the REST routers.
 
@@ -129,13 +145,18 @@ def configure_stripe_endpoints(
             commerce ``payment_id`` or flag it ``unmapped`` (Req 12.3).
             When omitted, payments are returned without canonical mapping
             (all ``unmapped``).
+        portal_payment_handler: optional customer-portal reconciler
+            (design §6.3). When ``None``, portal events fall through to
+            the existing path, which ignores them as
+            ``missing_reconciliation_id``.
     """
 
-    global _connector_factory, _payment_mapper
+    global _connector_factory, _payment_mapper, _portal_payment_handler
     if connector_factory is None:
         raise ValueError("connector_factory must not be None")
     _connector_factory = connector_factory
     _payment_mapper = payment_mapper
+    _portal_payment_handler = portal_payment_handler
 
 
 def _get_connector_factory() -> ConnectorFactory:
@@ -161,23 +182,19 @@ async def _resolve_connector_or_404(tenant_id: str) -> StripeConnector:
         logger.error(
             "StripeConnector factory failed tenant=%s: %s", tenant_id, exc
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="stripe_connector_unavailable",
+            message="Stripe connector factory raised an error.",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "stripe_connector_unavailable",
-                "message": "Stripe connector factory raised an error.",
-            },
         )
     if connector is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "stripe_integration_not_configured",
-                "message": (
-                    "No active Stripe integration for this tenant. "
-                    "Connect Stripe from the Integration Marketplace first."
-                ),
-            },
+        raise AppException(
+            ErrorCode.STRIPE_INTEGRATION_NOT_CONFIGURED,
+            (
+                "No active Stripe integration for this tenant. "
+                "Connect Stripe from the Integration Marketplace first."
+            ),
+            status_code=404,
         )
     return connector
 
@@ -291,16 +308,14 @@ async def get_public_config(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="stripe_envelope_corrupt",
+            message=(
+                "Stripe integration envelope is missing the "
+                "publishable_key. Disconnect and reconnect the "
+                "integration."
+            ),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "stripe_envelope_corrupt",
-                "message": (
-                    "Stripe integration envelope is missing the "
-                    "publishable_key. Disconnect and reconnect the "
-                    "integration."
-                ),
-            },
         )
     return StripePublicConfigResponse(publishable_key=publishable_key)
 
@@ -316,7 +331,7 @@ def _parse_iso8601_timestamp(raw: Optional[str], *, field_name: str) -> Optional
     Accepts the "Z" suffix for UTC (common from JS ``Date.toISOString()``)
     and bare offset forms. Naive datetimes are treated as UTC to keep the
     Stripe ``created`` epoch conversion deterministic across deployments.
-    Raises :class:`HTTPException` 400 on invalid input.
+    Raises :class:`AppException` 400 on invalid input.
     """
 
     if raw is None:
@@ -328,15 +343,13 @@ def _parse_iso8601_timestamp(raw: Optional[str], *, field_name: str) -> Optional
     try:
         parsed = datetime.fromisoformat(candidate)
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="invalid_timestamp",
+            message=(
+                f"{field_name} must be an ISO-8601 timestamp "
+                f"(got {raw!r}): {exc}"
+            ),
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_timestamp",
-                "message": (
-                    f"{field_name} must be an ISO-8601 timestamp "
-                    f"(got {raw!r}): {exc}"
-                ),
-            },
         )
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
@@ -422,15 +435,13 @@ async def list_payments(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="stripe_list_payments_failed",
+            message=(
+                "Unable to list Stripe PaymentIntents for this tenant. "
+                "Retry or verify the Stripe credentials."
+            ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "stripe_list_payments_failed",
-                "message": (
-                    "Unable to list Stripe PaymentIntents for this tenant. "
-                    "Retry or verify the Stripe credentials."
-                ),
-            },
         )
 
     items = [StripePaymentItem(**item) for item in page.get("items", [])]
@@ -491,6 +502,44 @@ async def _apply_canonical_mapping(
 # ---------------------------------------------------------------------------
 
 
+async def _route_portal_event(
+    tenant_id: str, event: Any
+) -> Optional[StripeWebhookResponse]:
+    """Hand a verified portal event to the portal handler (design §6.3).
+
+    Returns the response when the portal handled the event, else ``None``
+    so the caller continues into the existing ``handle_webhook_event``
+    path unchanged (R6.12). The event is a plain dict: every read is
+    null-safe.
+    """
+
+    handler = _portal_payment_handler
+    if handler is None or not isinstance(event, dict):
+        return None
+    etype = event.get("type") or ""
+    data = event.get("data") or {}
+    obj = (data.get("object") if isinstance(data, dict) else None) or {}
+    meta = (obj.get("metadata") if isinstance(obj, dict) else None) or {}
+    is_portal_intent = (
+        isinstance(etype, str)
+        and etype.startswith("payment_intent.")
+        and isinstance(meta, dict)
+        and meta.get("source") == PORTAL_PAYMENT_SOURCE
+    )
+    if not is_portal_intent and etype not in PORTAL_CHARGE_EVENT_TYPES:
+        return None
+    summary = await handler(tenant_id, event) or {}
+    if not is_portal_intent and not summary.get("portal"):
+        # A charge.* event for a non-portal payment: existing path.
+        return None
+    return StripeWebhookResponse(
+        received=True,
+        handled=bool(summary.get("handled")),
+        event_type=str(etype),
+        reason=summary.get("reason"),
+    )
+
+
 @webhook_router.post(
     "/webhooks/stripe/{tenant_id}",
     response_model=StripeWebhookResponse,
@@ -528,12 +577,10 @@ async def receive_stripe_webhook(
 
     signature_header = request.headers.get("stripe-signature")
     if not signature_header:
-        raise HTTPException(
+        raise AppException(
+            error_code="missing_stripe_signature",
+            message="Stripe-Signature header is required.",
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "missing_stripe_signature",
-                "message": "Stripe-Signature header is required.",
-            },
         )
 
     try:
@@ -544,12 +591,10 @@ async def receive_stripe_webhook(
             tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="invalid_request_body",
+            message="Failed to read the webhook request body.",
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_request_body",
-                "message": "Failed to read the webhook request body.",
-            },
         )
 
     connector = await _resolve_connector_or_404(tenant_id)
@@ -564,13 +609,18 @@ async def receive_stripe_webhook(
             tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="invalid_signature",
+            message=str(exc),
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_signature",
-                "message": str(exc),
-            },
         )
+
+    # Customer-portal routing (design §6.3). Deliberately outside the
+    # try/except below: a portal handler error is a real 500, so Stripe
+    # retries instead of the event being swallowed as ``handler_error``.
+    portal_response = await _route_portal_event(tenant_id, event)
+    if portal_response is not None:
+        return portal_response
 
     summary: Dict[str, Any] = {}
     try:
@@ -606,6 +656,9 @@ async def receive_stripe_webhook(
 
 __all__ = [
     "ConnectorFactory",
+    "PORTAL_CHARGE_EVENT_TYPES",
+    "PORTAL_PAYMENT_SOURCE",
+    "PortalPaymentHandler",
     "StripePaymentItem",
     "StripePaymentsListResponse",
     "StripePublicConfigResponse",

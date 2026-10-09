@@ -33,6 +33,14 @@ class ErrorCode(str, Enum):
     
     RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
     """Requested resource does not exist (HTTP 404)"""
+    RESOURCE_ALREADY_EXISTS = "RESOURCE_ALREADY_EXISTS"
+    """A create used an id that is already taken, in any tenant (HTTP 409)"""
+    ASSET_CONFLICT = "ASSET_CONFLICT"
+    """The asset is already assigned to another active job (HTTP 409)"""
+    CONFLICT = "CONFLICT"
+    """Generic conflict for a framework or raw HTTPException 409 (HTTP 409)"""
+    METHOD_NOT_ALLOWED = "METHOD_NOT_ALLOWED"
+    """The route exists but not for this HTTP method (HTTP 405)"""
     
     # Authentication errors (4xx)
     UNAUTHORIZED = "UNAUTHORIZED"
@@ -43,6 +51,8 @@ class ErrorCode(str, Enum):
     
     RATE_LIMITED = "RATE_LIMITED"
     """Too many requests (HTTP 429)"""
+    EXPORT_TOO_LARGE = "EXPORT_TOO_LARGE"
+    """A CSV export matches more rows than the export cap (HTTP 413)"""
     
     # External service errors (5xx)
     ELASTICSEARCH_UNAVAILABLE = "ELASTICSEARCH_UNAVAILABLE"
@@ -50,6 +60,9 @@ class ErrorCode(str, Enum):
     
     AI_SERVICE_UNAVAILABLE = "AI_SERVICE_UNAVAILABLE"
     """Gemini API unavailable (HTTP 503)"""
+
+    AI_RATE_LIMITED = "AI_RATE_LIMITED"
+    """The LLM provider rate-limited or exhausted its quota (HTTP 429)"""
     
     SESSION_STORE_UNAVAILABLE = "SESSION_STORE_UNAVAILABLE"
     """Redis/DynamoDB unavailable (HTTP 503)"""
@@ -105,8 +118,20 @@ class ErrorCode(str, Enum):
     INVALID_STATUS_TRANSITION = "INVALID_STATUS_TRANSITION"
     """Requested status transition is not allowed by the order state machine (HTTP 409)"""
 
+    LOADING_PLAN_EXECUTION_FAILED = "LOADING_PLAN_EXECUTION_FAILED"
+    """An approved loading plan was not (fully) applied to its orders (HTTP 409, design K10)"""
+
+    APPROVAL_EXPIRED = "APPROVAL_EXPIRED"
+    """An approve/reject arrived after the approval's expiry_time (HTTP 409, N7)"""
+    ORDERS_NOT_CONFIRMED = "ORDERS_NOT_CONFIRMED"
+    """A plan being dispatched still has ``placed`` orders; confirm them first (HTTP 409, OI-16)"""
+    ORDER_CHANGED_CONCURRENTLY = "ORDER_CHANGED_CONCURRENTLY"
+    """An order changed twice while a guarded write was retrying; reload and retry (HTTP 409, OI-41)"""
+
     CHANNEL_DISABLED = "CHANNEL_DISABLED"
     """Intake channel is disabled and cannot accept orders (HTTP 403)"""
+    ORDER_INTAKE_DISABLED = "ORDER_INTAKE_DISABLED"
+    """The tenant's order_intake_pipeline flag is disabled, so the order was not stored (HTTP 409)"""
 
     INSUFFICIENT_ROLE = "INSUFFICIENT_ROLE"
     """Caller lacks the required role for this operation (HTTP 403)"""
@@ -141,6 +166,24 @@ class ErrorCode(str, Enum):
 
     COMMERCE_INVOICE_ALREADY_VOIDED = "COMMERCE_INVOICE_ALREADY_VOIDED"
     """Attempted to void an invoice that is already voided (HTTP 409)"""
+
+    COMMERCE_INVOICE_NUMBERING_UNAVAILABLE = "COMMERCE_INVOICE_NUMBERING_UNAVAILABLE"
+    """The invoice-number counter is configured but could not be allocated (HTTP 503).
+
+    503 rather than 409: the caller did nothing wrong and the request is worth
+    retrying unchanged. The invoice stays in ``draft`` — finalizing it without a
+    number would produce an open invoice that no accounting system can reference,
+    and the previous behaviour did exactly that while returning 200.
+    """
+
+    DYED_DIESEL_CHECK_UNAVAILABLE = "DYED_DIESEL_CHECK_UNAVAILABLE"
+    """The dyed-diesel compliance check could not run, so the loading plan was blocked (HTTP 503).
+
+    Fail closed (OI-02): a plan carrying dyed diesel is never produced as
+    compliant when the DyedDieselEnforcer is not wired or raised. 503 because
+    the dispatcher did nothing wrong and the plan is worth retrying once the
+    compliance service is back.
+    """
 
     COMMERCE_PAYMENT_DUPLICATE = "COMMERCE_PAYMENT_DUPLICATE"
     """Duplicate payment detected via IdempotencyService (HTTP 409)"""
@@ -204,6 +247,89 @@ class ErrorCode(str, Enum):
 
     KFACTOR_VARIANCE_HISTORY_FAILED = "kfactor.variance_history_failed"
     """Per-tank K-factor variance history could not be loaded (HTTP 500)"""
+
+    PRICING_RACK_PRICE_UNAVAILABLE = "pricing.rack_price_unavailable"
+    """No rack price for the terminal/product and none supplied (HTTP 422)"""
+
+    # Compliance / commerce 4xx codes moved from HTTPException detail payloads
+    # to the standard envelope (C12/C-2). Values are the shipped wire strings.
+    TERMINAL_BOLS_EMPTY_PAYLOAD = "terminal_bols.empty_payload"
+    """EDI body is empty (HTTP 400)"""
+
+    TERMINAL_BOLS_INVALID_EDI = "terminal_bols.invalid_edi"
+    """Body is not a parseable EDI document (HTTP 422)"""
+
+    TERMINAL_BOLS_EMPTY_FILE = "terminal_bols.empty_file"
+    """Uploaded BOL file is empty (HTTP 400)"""
+
+    TERMINAL_BOLS_INVALID_UPLOAD = "terminal_bols.invalid_upload"
+    """Uploaded BOL could not be ingested (HTTP 422)"""
+
+    TERMINAL_BOLS_INVALID_CONFIRM = "terminal_bols.invalid_confirm"
+    """BOL confirmation payload is invalid (HTTP 422)"""
+
+    TERMINAL_BOLS_INVALID_LINK = "terminal_bols.invalid_link"
+    """BOL link payload is invalid (HTTP 422)"""
+
+    ASSET_CERTIFICATIONS_INVALID_PAYLOAD = "asset_certifications.invalid_payload"
+    """Asset certification payload failed validation (HTTP 422)"""
+
+    METERS_INVALID_PAYLOAD = "meters.invalid_payload"
+    """Meter registration payload failed validation (HTTP 422)"""
+
+    KFACTOR_INVALID_ADJUSTMENT = "kfactor.invalid_adjustment"
+    """K-factor adjustment is invalid (HTTP 422)"""
+
+    KFACTOR_VARIANCE_COMPUTATION_ERROR = "kfactor.variance_computation_error"
+    """K-factor variance could not be computed from the inputs (HTTP 422)"""
+
+    KFACTOR_SUGGEST_ERROR = "kfactor.suggest_error"
+    """K-factor suggestion could not be computed from the inputs (HTTP 422)"""
+
+    PRICE_PROTECTION_CONTRACT_INVALID_PAYLOAD = "price_protection_contract.invalid_payload"
+    """Price-protection contract payload failed validation (HTTP 422)"""
+
+    PRICE_PROTECTION_CONTRACT_NOT_FOUND = "price_protection_contract.not_found"
+    """Price-protection contract does not exist for the tenant (HTTP 404)"""
+
+    PRICE_PROTECTION_CONTRACT_NO_MUTABLE_FIELDS = "price_protection_contract.no_mutable_fields"
+    """Contract update carried no mutable fields (HTTP 422)"""
+
+    PRICE_PROTECTION_CONTRACT_INVALID_STATUS_TRANSITION = "price_protection_contract.invalid_status_transition"
+    """Contract status transition is not allowed (HTTP 422)"""
+
+    PRICING_RULE_INVALID_PAYLOAD = "pricing_rule.invalid_payload"
+    """Pricing rule payload failed validation (HTTP 422)"""
+
+    PRICING_NO_RULE_MATCHED = "pricing.no_rule_matched"
+    """No pricing rule matched the delivery (HTTP 422)"""
+
+    PRICING_NOT_IMPLEMENTED = "pricing.not_implemented"
+    """Pricing strategy is not implemented (HTTP 422)"""
+
+    STRIPE_INTEGRATION_NOT_CONFIGURED = "stripe_integration_not_configured"
+    """Stripe integration is not configured for the tenant (HTTP 404)"""
+
+    INVALID_EXPIRES_AT = "INVALID_EXPIRES_AT"
+    """expires_at is not a valid ISO 8601 datetime (HTTP 422)"""
+
+    MISSING_AUTHORIZED_BY = "MISSING_AUTHORIZED_BY"
+    """authorized_by is required (HTTP 422)"""
+
+    INVALID_QBO_PUSH_STATE = "INVALID_QBO_PUSH_STATE"
+    """Invoice is not in a QBO push state that allows the action (HTTP 409)"""
+
+    INVALID_PAYMENT_METHOD = "INVALID_PAYMENT_METHOD"
+    """Payment method is not supported (HTTP 422)"""
+
+    INVALID_MOMENT = "INVALID_MOMENT"
+    """moment is not a valid ISO 8601 datetime (HTTP 422)"""
+
+    COMMERCE_PRICE_BOOK_NO_RULE = "commerce.pricing.no_rule"
+    """Price book has no rule for the product/account/moment (HTTP 422)"""
+
+    COMMERCE_PRICE_BOOK_UNKNOWN_PRODUCT = "commerce.pricing.unknown_product"
+    """Price book product code is unknown (HTTP 422)"""
 
     # Driver Mobile App errors (4xx / 202)
     #
@@ -287,6 +413,98 @@ class ErrorCode(str, Enum):
     DRIVER_NOT_DISPATCH_ELIGIBLE = "DRIVER_NOT_DISPATCH_ELIGIBLE"
     """Driver fails Dispatch_Eligibility for the requested operation (HTTP 409)"""
 
+    DUPLICATE_METER_NUMBER = "DUPLICATE_METER_NUMBER"
+    """A meter with this meter_number is already registered for the tenant (HTTP 409)"""
+    # Driver transitions serialized with board writes (dispatch-board K8.6);
+    # ORDER_CHANGED_CONCURRENTLY (OI-41) is shared and defined above.
+    BOARD_ROUTE_UPDATING = "BOARD_ROUTE_UPDATING"
+    """The dispatcher is re-publishing the board route this order is on (HTTP 409)"""
+    # Dispatch Board (dispatch-board K11, K2.4).
+    DISPATCH_BOARD_DISABLED = "DISPATCH_BOARD_DISABLED"
+    """The Dispatch Board is not enabled for the tenant (HTTP 404)"""
+    DISPATCH_BOARD_READ_ONLY = "DISPATCH_BOARD_READ_ONLY"
+    """The Dispatch Board is in shadow mode; writes are refused (HTTP 409)"""
+    DISPATCH_BOARD_MODE_UNAVAILABLE = "DISPATCH_BOARD_MODE_UNAVAILABLE"
+    """The Dispatch Board mode could not be read for a write (HTTP 503)"""
+    BOARD_LANE_CONFLICT = "BOARD_LANE_CONFLICT"
+    """A board lane changed since the client's expected version (HTTP 409)"""
+    BOARD_COMMAND_BLOCKED = "BOARD_COMMAND_BLOCKED"
+    """A board command has a blocking check and was not committed (HTTP 422)"""
+    BOARD_PUBLISH_IN_PROGRESS = "BOARD_PUBLISH_IN_PROGRESS"
+    """A board lane is publishing or in recovery; edits are refused (HTTP 409)"""
+    BOARD_PUBLISH_NOT_READY = "BOARD_PUBLISH_NOT_READY"
+    """A board lane is not ready to publish (HTTP 409)"""
+    BOARD_UNDO_STALE = "BOARD_UNDO_STALE"
+    """Undo or redo no longer applies to the current lane content (HTTP 409)"""
+    BOARD_OWNED_PLAN = "BOARD_OWNED_PLAN"
+    """The plan was published from the Dispatch Board and is managed there (HTTP 409)"""
+
+    # Commerce feature-flag gates. 404 so a tenant without the module cannot
+    # tell the surface exists. The string values are what the UI matches on.
+    COMMERCE_DISABLED = "COMMERCE_DISABLED"
+    """Commerce backbone is not enabled for the tenant (HTTP 404)"""
+
+    CUSTOMERS_DISABLED = "CUSTOMERS_DISABLED"
+    """Commerce customers module is not enabled for the tenant (HTTP 404)"""
+
+    PRICING_DISABLED = "PRICING_DISABLED"
+    """Commerce pricing engine is not enabled for the tenant (HTTP 404)"""
+
+    INVOICING_DISABLED = "INVOICING_DISABLED"
+    """Commerce invoicing module is not enabled for the tenant (HTTP 404)"""
+
+    # Customer portal (OI-06, design §11)
+    PORTAL_DISABLED = "PORTAL_DISABLED"
+    """Customer portal (or the commerce backbone it needs) is off (HTTP 404)"""
+
+    PORTAL_ROUTE_FORBIDDEN = "PORTAL_ROUTE_FORBIDDEN"
+    """A customer session called a route outside the portal allowlist (HTTP 403)"""
+
+    PORTAL_IDENTITY_INVALID = "PORTAL_IDENTITY_INVALID"
+    """A customer session holds another role or no customer_id (HTTP 403)"""
+
+    PORTAL_ACCESS_SUSPENDED = "PORTAL_ACCESS_SUSPENDED"
+    """Portal grant revoked or the customer is archived (HTTP 403)"""
+
+    PORTAL_UNAVAILABLE = "PORTAL_UNAVAILABLE"
+    """The portal principal check could not reach its store (HTTP 503)"""
+
+    PORTAL_EMAIL_IN_USE = "PORTAL_EMAIL_IN_USE"
+    """The invited email belongs to an identity that can't become this portal user (HTTP 409)"""
+
+    PORTAL_USER_LIMIT_REACHED = "PORTAL_USER_LIMIT_REACHED"
+    """The customer already has the maximum number of active portal users (HTTP 409)"""
+
+    PORTAL_CUSTOMER_ARCHIVED = "PORTAL_CUSTOMER_ARCHIVED"
+    """Portal users can't be invited for an archived customer (HTTP 409)"""
+
+    ORDER_NOT_CANCELLABLE = "ORDER_NOT_CANCELLABLE"
+    """The portal order is no longer awaiting confirmation (HTTP 409)"""
+
+    ORDER_REQUEST_REJECTED = "ORDER_REQUEST_REJECTED"
+    """A portal order request was rejected by intake validation or a hook (HTTP 422)"""
+
+    INVOICE_NOT_PAYABLE = "INVOICE_NOT_PAYABLE"
+    """The invoice is paid, void or otherwise not payable (HTTP 409)"""
+
+    PAYMENT_AMOUNT_INVALID = "PAYMENT_AMOUNT_INVALID"
+    """The requested payment amount is outside the allowed range (HTTP 422)"""
+
+    PAYMENT_IN_PROGRESS = "PAYMENT_IN_PROGRESS"
+    """Another payment attempt for the invoice is in flight (HTTP 409)"""
+
+    PORTAL_PAYMENTS_UNAVAILABLE = "PORTAL_PAYMENTS_UNAVAILABLE"
+    """No enabled payment provider is configured for portal payments (HTTP 409)"""
+
+    PAYMENT_PROVIDER_ERROR = "PAYMENT_PROVIDER_ERROR"
+    """The payment provider call failed (HTTP 502)"""
+    # Margin feed (margin-feed design, "Error handling summary").
+    MARGIN_IMPORT_TOO_LARGE = "MARGIN_IMPORT_TOO_LARGE"
+    """A cost-entry CSV import exceeds 5 MB or 10,000 rows (HTTP 413)"""
+
+    MARGIN_RECOMPUTE_RUNNING = "MARGIN_RECOMPUTE_RUNNING"
+    """A margin recompute run is already running for the tenant (HTTP 409)"""
+
     # Internal errors (5xx)
     INTERNAL_ERROR = "INTERNAL_ERROR"
     """Unexpected server error (HTTP 500)"""
@@ -300,11 +518,17 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.VALIDATION_ERROR: 400,
     ErrorCode.INVALID_REQUEST: 400,
     ErrorCode.RESOURCE_NOT_FOUND: 404,
+    ErrorCode.RESOURCE_ALREADY_EXISTS: 409,
+    ErrorCode.ASSET_CONFLICT: 409,
+    ErrorCode.CONFLICT: 409,
+    ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.RATE_LIMITED: 429,
+    ErrorCode.EXPORT_TOO_LARGE: 413,
     ErrorCode.ELASTICSEARCH_UNAVAILABLE: 503,
     ErrorCode.AI_SERVICE_UNAVAILABLE: 503,
+    ErrorCode.AI_RATE_LIMITED: 429,
     ErrorCode.SESSION_STORE_UNAVAILABLE: 503,
     ErrorCode.INTERNAL_ERROR: 500,
     ErrorCode.CIRCUIT_OPEN: 503,
@@ -326,6 +550,8 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.COMMERCE_CREDIT_OVERRIDE_EXPIRED: 409,
     ErrorCode.COMMERCE_INVOICE_INVALID_STATE: 409,
     ErrorCode.COMMERCE_INVOICE_ALREADY_VOIDED: 409,
+    ErrorCode.COMMERCE_INVOICE_NUMBERING_UNAVAILABLE: 503,
+    ErrorCode.DYED_DIESEL_CHECK_UNAVAILABLE: 503,
     ErrorCode.COMMERCE_PAYMENT_DUPLICATE: 409,
     ErrorCode.COMMERCE_PAYMENT_AMOUNT_EXCEEDS_INVOICE: 422,
     # Order Intake Pipeline error codes
@@ -337,7 +563,12 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.MISSING_CLIENT_EVENT_ID: 400,
     ErrorCode.MISSING_HOLD_REASON: 400,
     ErrorCode.INVALID_STATUS_TRANSITION: 409,
+    ErrorCode.LOADING_PLAN_EXECUTION_FAILED: 409,
+    ErrorCode.APPROVAL_EXPIRED: 409,
+    ErrorCode.ORDERS_NOT_CONFIRMED: 409,
+    ErrorCode.ORDER_CHANGED_CONCURRENTLY: 409,
     ErrorCode.CHANNEL_DISABLED: 403,
+    ErrorCode.ORDER_INTAKE_DISABLED: 409,
     ErrorCode.INSUFFICIENT_ROLE: 403,
     ErrorCode.DRIVER_UNAVAILABLE: 409,
     ErrorCode.LEGACY_ROUTE_SUNSET: 410,
@@ -361,6 +592,33 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.TERMINAL_NOT_FOUND: 404,
     ErrorCode.SUPPLIER_CONTRACT_NOT_FOUND: 404,
     ErrorCode.KFACTOR_VARIANCE_HISTORY_FAILED: 500,
+    ErrorCode.PRICING_RACK_PRICE_UNAVAILABLE: 422,
+    ErrorCode.TERMINAL_BOLS_EMPTY_PAYLOAD: 400,
+    ErrorCode.TERMINAL_BOLS_INVALID_EDI: 422,
+    ErrorCode.TERMINAL_BOLS_EMPTY_FILE: 400,
+    ErrorCode.TERMINAL_BOLS_INVALID_UPLOAD: 422,
+    ErrorCode.TERMINAL_BOLS_INVALID_CONFIRM: 422,
+    ErrorCode.TERMINAL_BOLS_INVALID_LINK: 422,
+    ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD: 422,
+    ErrorCode.METERS_INVALID_PAYLOAD: 422,
+    ErrorCode.KFACTOR_INVALID_ADJUSTMENT: 422,
+    ErrorCode.KFACTOR_VARIANCE_COMPUTATION_ERROR: 422,
+    ErrorCode.KFACTOR_SUGGEST_ERROR: 422,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_PAYLOAD: 422,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_NOT_FOUND: 404,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_NO_MUTABLE_FIELDS: 422,
+    ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_STATUS_TRANSITION: 422,
+    ErrorCode.PRICING_RULE_INVALID_PAYLOAD: 422,
+    ErrorCode.PRICING_NO_RULE_MATCHED: 422,
+    ErrorCode.PRICING_NOT_IMPLEMENTED: 422,
+    ErrorCode.STRIPE_INTEGRATION_NOT_CONFIGURED: 404,
+    ErrorCode.INVALID_EXPIRES_AT: 422,
+    ErrorCode.MISSING_AUTHORIZED_BY: 422,
+    ErrorCode.INVALID_QBO_PUSH_STATE: 409,
+    ErrorCode.INVALID_PAYMENT_METHOD: 422,
+    ErrorCode.INVALID_MOMENT: 422,
+    ErrorCode.COMMERCE_PRICE_BOOK_NO_RULE: 422,
+    ErrorCode.COMMERCE_PRICE_BOOK_UNKNOWN_PRODUCT: 422,
     # Driver Mobile App error codes
     ErrorCode.SESSION_EXPIRED: 401,
     ErrorCode.DRIVER_IDENTITY_MISSING: 403,
@@ -388,6 +646,39 @@ ERROR_CODE_STATUS_MAP: dict[ErrorCode, int] = {
     ErrorCode.HOS_LIMIT_REACHED: 409,
     ErrorCode.HOS_FIGURES_UNAVAILABLE: 409,
     ErrorCode.DRIVER_NOT_DISPATCH_ELIGIBLE: 409,
+    ErrorCode.DUPLICATE_METER_NUMBER: 409,
+    ErrorCode.BOARD_ROUTE_UPDATING: 409,
+    ErrorCode.DISPATCH_BOARD_DISABLED: 404,
+    ErrorCode.DISPATCH_BOARD_READ_ONLY: 409,
+    ErrorCode.DISPATCH_BOARD_MODE_UNAVAILABLE: 503,
+    ErrorCode.BOARD_LANE_CONFLICT: 409,
+    ErrorCode.BOARD_COMMAND_BLOCKED: 422,
+    ErrorCode.BOARD_PUBLISH_IN_PROGRESS: 409,
+    ErrorCode.BOARD_PUBLISH_NOT_READY: 409,
+    ErrorCode.BOARD_UNDO_STALE: 409,
+    ErrorCode.BOARD_OWNED_PLAN: 409,
+    ErrorCode.COMMERCE_DISABLED: 404,
+    ErrorCode.CUSTOMERS_DISABLED: 404,
+    ErrorCode.PRICING_DISABLED: 404,
+    ErrorCode.INVOICING_DISABLED: 404,
+    # Customer portal (OI-06)
+    ErrorCode.PORTAL_DISABLED: 404,
+    ErrorCode.PORTAL_ROUTE_FORBIDDEN: 403,
+    ErrorCode.PORTAL_IDENTITY_INVALID: 403,
+    ErrorCode.PORTAL_ACCESS_SUSPENDED: 403,
+    ErrorCode.PORTAL_UNAVAILABLE: 503,
+    ErrorCode.PORTAL_EMAIL_IN_USE: 409,
+    ErrorCode.PORTAL_USER_LIMIT_REACHED: 409,
+    ErrorCode.PORTAL_CUSTOMER_ARCHIVED: 409,
+    ErrorCode.ORDER_NOT_CANCELLABLE: 409,
+    ErrorCode.ORDER_REQUEST_REJECTED: 422,
+    ErrorCode.INVOICE_NOT_PAYABLE: 409,
+    ErrorCode.PAYMENT_AMOUNT_INVALID: 422,
+    ErrorCode.PAYMENT_IN_PROGRESS: 409,
+    ErrorCode.PORTAL_PAYMENTS_UNAVAILABLE: 409,
+    ErrorCode.PAYMENT_PROVIDER_ERROR: 502,
+    ErrorCode.MARGIN_IMPORT_TOO_LARGE: 413,
+    ErrorCode.MARGIN_RECOMPUTE_RUNNING: 409,
 }
 
 

@@ -48,6 +48,7 @@ from errors.exceptions import (
     channel_disabled,
     invalid_customer_tank_ref,
     missing_client_event_id,
+    order_intake_disabled,
     order_payload_invalid,
     security_tenant_id_mismatch,
     webhook_signature_invalid,
@@ -57,7 +58,7 @@ from fuel.intake.adapter_base import (
     IntakeAdapterRegistry,
     IntakeContext,
 )
-from fuel.order_models import FuelOrder
+from fuel.order_models import PORTAL_REVIEW_HOLD_REASON, FuelOrder
 from fuel.services.order_id_generator import mint_event_id, mint_order_id
 from ops.webhooks.hmac_util import verify_hmac_sha256_hex
 from fuel.services.order_metrics import (
@@ -163,6 +164,49 @@ class _CsvImportChannel:
     channel_type: str = "csv"
     supported_schema_versions: List[str] = field(default_factory=lambda: ["1.0"])
     enabled: bool = True
+
+
+@dataclass
+class _PortalChannel:
+    """Ephemeral channel for customer-portal requests (``web_portal``).
+
+    The portal session is already verified and scoped by the portal guard,
+    so, like the CSV importer, it needs no persisted HMAC intake channel.
+    """
+
+    tenant_id: str
+    channel_id: str = "web-portal"
+    channel_type: str = "web_portal"
+    supported_schema_versions: List[str] = field(default_factory=lambda: ["1.0"])
+    enabled: bool = True
+
+
+def portal_event_id(user_id: str, client_event_id: str) -> str:
+    """Tenant-scoped idempotency key of a portal request, namespaced per user.
+
+    Two portal users of one tenant who happen to send the same
+    ``client_event_id`` never collide (customer portal design §4.2, D5).
+    """
+    return f"portal:{user_id}:{client_event_id}"
+
+
+def portal_order_id(tenant_id: str, user_id: str, client_event_id: str) -> str:
+    """Deterministic ``order_id`` of a portal request (design D5).
+
+    A replay of the same ``client_event_id`` by the same user maps to the
+    same order, so the portal can answer it with the original order without
+    a lookup table.
+    """
+    digest = hashlib.sha256(
+        f"{tenant_id}|{user_id}|{client_event_id}".encode()
+    ).hexdigest()[:32]
+    return f"ord_portal_{digest}"
+
+
+def _portal_client_event_id(event_id: str, user_id: Optional[str]) -> str:
+    """Recover the client id from :func:`portal_event_id`'s namespaced key."""
+    prefix = f"portal:{user_id}:"
+    return event_id[len(prefix):] if event_id.startswith(prefix) else event_id
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +491,37 @@ class OrderIntakePipeline:
             client_event_id=client_event_id,
         )
 
+    async def ingest_portal(
+        self,
+        *,
+        scope: Any,
+        payload: Dict[str, Any],
+        request_id: str,
+        client_event_id: str,
+    ) -> IntakeResponse:
+        """Ingest one customer-portal delivery request (design §4.2).
+
+        ``scope`` is the verified ``PortalScope``; the actor is its user and
+        the idempotency key is :func:`portal_event_id`. The order id is
+        :func:`portal_order_id`, an existing order with that id is answered as
+        ``duplicate`` without hooks or writes, and an order no hook held lands
+        on the portal review hold.
+        """
+        if not client_event_id:
+            raise missing_client_event_id(details={"path": "web_portal"})
+        # Portal ordering has its own per-tenant setting, checked by
+        # PortalOrderService before this call (portal-fixes B2). The
+        # ``order_intake_pipeline`` rollout flag gates the staff and
+        # integration channels, so it doesn't short-circuit this one.
+        return await self._ingest_common(
+            channel=_PortalChannel(tenant_id=scope.tenant_id),
+            payload=payload,
+            request_id=request_id,
+            actor_user_id=scope.user_id,
+            client_event_id=portal_event_id(scope.user_id, client_event_id),
+            honour_overlay_flag=False,
+        )
+
     # ------------------------------------------------------------------
     # Core pipeline logic
     # ------------------------------------------------------------------
@@ -459,8 +534,13 @@ class OrderIntakePipeline:
         actor_user_id: Optional[str],
         client_event_id: Optional[str],
         schema_version_override: Optional[str] = None,
+        honour_overlay_flag: bool = True,
     ) -> IntakeResponse:
         """Shared pipeline logic for all intake paths.
+
+        ``honour_overlay_flag=False`` skips step (0); only the customer
+        portal passes it, because portal ordering is governed by its own
+        tenant setting.
 
         Steps:
             (0) Check ``overlay.order_intake_pipeline`` feature flag state:
@@ -489,7 +569,9 @@ class OrderIntakePipeline:
         ingest_start = time.monotonic()
 
         # (0) Check overlay.order_intake_pipeline feature flag state
-        overlay_state = await self._get_overlay_state(tenant_id)
+        overlay_state = (
+            await self._get_overlay_state(tenant_id) if honour_overlay_flag else "active_auto"
+        )
 
         # ``disabled`` → short-circuit. The caller is responsible for deciding
         # what to do with a ``legacy_passthrough`` response.
@@ -583,6 +665,34 @@ class OrderIntakePipeline:
             result.order_doc, context, event_id
         )
 
+        # (g2) Portal existing-id guard (customer portal review H3). The id is
+        # deterministic, so an existing order means this request was already
+        # accepted (e.g. two concurrent first submits, or the idempotency
+        # marker was lost). Answer ``duplicate`` without hooks or writes, like
+        # the CSV ``stale`` branch below, so it can never be overwritten. A
+        # repository error propagates: treating it as "missing" would reopen
+        # the overwrite.
+        if intake_channel_type == "web_portal":
+            from fuel.order_repository import FuelOrderRepository
+
+            existing = await FuelOrderRepository(self._es).get(
+                tenant_id, order_doc["order_id"]
+            )
+            if existing is not None:
+                await self._idempotency_service.mark_processed(
+                    event_id, tenant_id=tenant_id
+                )
+                orders_intake_processed_total.labels(
+                    tenant_id=tenant_id,
+                    intake_channel=intake_channel_type,
+                    status="duplicate",
+                ).inc()
+                return IntakeResponse(
+                    event_id=event_id,
+                    status="duplicate",
+                    order_id=order_doc["order_id"],
+                )
+
         # ERP files can contain a newer snapshot of an order imported earlier.
         # Reuse the same source-linked order_id, preserve lifecycle state, and
         # refuse an older/equal source version before it can overwrite current
@@ -611,17 +721,7 @@ class OrderIntakePipeline:
         )
 
         # (i) Verify customer_tank_id ownership (when present)
-        if order_doc.get("customer_tank_id"):
-            tank_exists = await self._customer_tank_repo.get(
-                tenant_id, order_doc["customer_tank_id"]
-            )
-            if not tank_exists:
-                raise invalid_customer_tank_ref(
-                    details={
-                        "customer_tank_id": order_doc["customer_tank_id"],
-                        "tenant_id": tenant_id,
-                    },
-                )
+        await self._verify_customer_tank(order_doc, tenant_id)
 
         # (i2) Run registered IntakeHook.before_accept hooks.
         # Commerce hooks (PricingHook, CreditCheckHook) run here.
@@ -634,6 +734,15 @@ class OrderIntakePipeline:
                 # Re-raise hook exceptions — they signal order rejection
                 # (e.g. PricingError.no_rule_matched).
                 raise hook_exc
+
+        # (i3) Portal review hold (customer portal design §4.2, D9). Inline,
+        # not a hook, so it doesn't depend on hook registration order across
+        # bootstrap modules. Only an order no hook held is stamped: a hold a
+        # hook set (e.g. credit) is never replaced, because release-hold does
+        # not re-run that check.
+        if intake_channel_type == "web_portal" and order_doc.get("status") == "placed":
+            order_doc["status"] = "on_hold"
+            order_doc["hold_reason"] = PORTAL_REVIEW_HOLD_REASON
 
         # (j) Validate via FuelOrder.model_validate BEFORE writing.
         #
@@ -728,6 +837,110 @@ class OrderIntakePipeline:
         )
 
     # ------------------------------------------------------------------
+    # Dry-run validation (bulk ``dry_run``)
+    # ------------------------------------------------------------------
+
+    async def validate_dispatcher_payload(
+        self,
+        tenant: Any,
+        payload: Dict[str, Any],
+        request_id: str,
+    ) -> None:
+        """Run the dispatcher path's value checks with no side effects.
+
+        Used by the bulk endpoint's ``dry_run`` so a row is reported valid
+        only when the real run would accept it (finding F2, decision D11).
+        Runs, in order: the intake flag check, dispatcher channel resolution,
+        the schema whitelist and adapter transform, ``_complete_order_doc``,
+        the customer-tank ownership check and ``FuelOrder.model_validate``.
+
+        It deliberately skips idempotency, hooks, writes, events, broadcasts
+        and metrics: a dry run consumes no ``client_event_id`` and changes
+        nothing.
+
+        Raises:
+            AppException: ``ORDER_INTAKE_DISABLED`` when the flag is
+                disabled, ``ORDER_PAYLOAD_INVALID`` when the adapter or the
+                ``FuelOrder`` rules reject the payload, and
+                ``INVALID_CUSTOMER_TANK_REF`` for a tank the tenant does not
+                own. Channel resolution errors propagate unchanged.
+        """
+        tenant_id = getattr(tenant, "tenant_id", None) or tenant.get("tenant_id")
+        user_id = getattr(tenant, "user_id", None) or tenant.get("user_id")
+
+        if await self._get_overlay_state(tenant_id) == "disabled":
+            raise order_intake_disabled()
+
+        channel = await self._resolve_dispatcher_channel(tenant_id)
+        context = IntakeContext(
+            tenant_id=tenant_id,
+            channel=channel,
+            trace_id=request_id,
+            request_id=request_id,
+            actor_user_id=user_id,
+        )
+        schema_version = payload.get("schema_version", "1.0")
+        try:
+            self._assert_schema_supported(schema_version, channel)
+            adapter = self._adapter_registry.get(channel.channel_type, schema_version)
+            result = adapter.transform(payload, context)
+        except AdapterError as exc:
+            # The real run parks this payload in the poison queue; a dry run
+            # reports it as invalid instead, naming only the rule.
+            raise order_payload_invalid(invalid_fields=[exc.error_type]) from exc
+
+        order_doc = self._complete_order_doc(result.order_doc, context, "dry_run")
+        await self._verify_customer_tank(order_doc, tenant_id)
+        try:
+            FuelOrder.model_validate(order_doc)
+        except ValidationError as exc:
+            raise order_payload_invalid(
+                invalid_fields=extract_invalid_fields(exc),
+            ) from exc
+
+    async def verify_customer_tank(
+        self, order_doc: Dict[str, Any], tenant_id: str
+    ) -> None:
+        """Public form of the step (i) tank check, for import validate (OI-26).
+
+        Raises the same ``AppException`` commit would raise.
+        """
+        await self._verify_customer_tank(order_doc, tenant_id)
+
+    async def _verify_customer_tank(
+        self, order_doc: Dict[str, Any], tenant_id: str
+    ) -> None:
+        """Refuse a ``customer_tank_id`` the order may not use (step (i)).
+
+        The tank must exist in the tenant and, when both sides name a
+        customer, belong to the order's customer (finding F3). The mismatch
+        error carries only the caller's own ``customer_tank_id``, never the
+        tank's owning customer.
+        """
+        tank_id = order_doc.get("customer_tank_id")
+        if not tank_id:
+            return
+        tank = await self._customer_tank_repo.get(tenant_id, tank_id)
+        if not tank:
+            raise invalid_customer_tank_ref(
+                details={
+                    "customer_tank_id": tank_id,
+                    "tenant_id": tenant_id,
+                },
+            )
+        # The repository returns a CustomerTank model; older fakes return dicts.
+        tank_customer = (
+            tank.get("customer_id") if isinstance(tank, dict)
+            else getattr(tank, "customer_id", None)
+        )
+        order_customer = order_doc.get("customer_id")
+        if order_customer and tank_customer and order_customer != tank_customer:
+            raise invalid_customer_tank_ref(
+                message="Referenced customer tank belongs to a different customer",
+                details={"customer_tank_id": tank_id},
+            )
+
+    # ------------------------------------------------------------------
     # Platform-assigned field stamping
     # ------------------------------------------------------------------
 
@@ -764,6 +977,12 @@ class OrderIntakePipeline:
                 ).encode()
             ).hexdigest()[:32]
             order_doc["order_id"] = f"ord_import_{digest}"
+        elif getattr(context.channel, "channel_type", None) == "web_portal":
+            order_doc["order_id"] = portal_order_id(
+                context.tenant_id,
+                context.actor_user_id,
+                _portal_client_event_id(event_id, context.actor_user_id),
+            )
         else:
             order_doc["order_id"] = mint_order_id()
         order_doc["tenant_id"] = context.tenant_id
@@ -824,6 +1043,8 @@ class OrderIntakePipeline:
             "assigned_driver_id",
             "assigned_asset_id",
             "assigned_run_id",
+            # Owner of the run links (loading-plan-executor FREEZE rule 2).
+            "assigned_claim_id",
             "hold_reason",
             "pod_otp",
             "pod_otp_generated_at",
@@ -863,6 +1084,15 @@ class OrderIntakePipeline:
 
     #: The overlay flag key used for the order intake pipeline rollout.
     OVERLAY_FLAG_KEY = "order_intake_pipeline"
+
+    async def get_ordering_state(self, tenant_id: str) -> str:
+        """Public read of the intake overlay state for ``tenant_id``.
+
+        Wraps :meth:`_get_overlay_state`, so it fails closed to
+        ``"disabled"``. The customer portal uses it to tell a customer
+        whether delivery requests can be submitted (``/api/portal/me``).
+        """
+        return await self._get_overlay_state(tenant_id)
 
     async def _get_overlay_state(self, tenant_id: str) -> str:
         """Return the overlay state for the order intake pipeline.

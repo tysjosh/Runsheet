@@ -17,14 +17,28 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_ops
+from commerce.models.invoice import InvoiceStatus
 from commerce.services.invoice_service import InvoiceService
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
+from middleware.rate_limiter import limiter
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    KeysetPage,
+    KeysetSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
+from services.date_range import parse_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +109,9 @@ async def require_invoicing_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     if not settings.commerce_invoicing_enabled:
@@ -109,12 +120,9 @@ async def require_invoicing_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "INVOICING_DISABLED",
-                "message": "Commerce invoicing module is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.INVOICING_DISABLED,
+            "Commerce invoicing module is not enabled for this tenant",
         )
 
     # Invoices are capability 6 of the delivery pipeline, not a deferrable ERP
@@ -173,7 +181,8 @@ def _get_request_id(request: Request) -> str:
 async def list_invoices(
     request: Request,
     tenant: TenantContext = Depends(require_invoicing_enabled),
-    status: Optional[str] = Query(
+    # Enum-typed so an unknown value is 422, not an empty 200 (N-CFV-5).
+    status: Optional[InvoiceStatus] = Query(
         default=None,
         description="Filter by status: draft|open|partial|paid|overdue|void",
     ),
@@ -194,6 +203,20 @@ async def list_invoices(
     limit: int = Query(
         default=50, ge=1, le=200, description="Page size (default 50, max 200)"
     ),
+    start_date: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only invoices created at or after this YYYY-MM-DD or ISO-8601 "
+            "datetime (UTC when no offset is given)."
+        ),
+    ),
+    end_date: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only invoices created on or before this date (a YYYY-MM-DD value "
+            "includes the whole day) or ISO-8601 datetime."
+        ),
+    ),
 ) -> dict:
     """List Invoices with cursor/limit pagination.
 
@@ -203,13 +226,18 @@ async def list_invoices(
 
     Validates: Constraint C3
     """
+    date_range = parse_date_range(start_date, end_date)
     service = _get_invoice_service()
 
     result = await service.list(
         tenant_id=tenant.tenant_id,
-        status=status,
+        status=status.value if status else None,
         customer_id=customer_id,
         account_id=account_id,
+        qbo_push_state=qbo_push_state,
+        created_from=date_range.gte,
+        created_before=date_range.lt,
+        created_until=date_range.lte,
         cursor=cursor,
         limit=limit,
     )
@@ -220,6 +248,97 @@ async def list_invoices(
         "limit": result["limit"],
         "request_id": _get_request_id(request),
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/commerce/invoices/export (data-export §3.5)
+# ---------------------------------------------------------------------------
+
+
+def _invoice_total_gallons(row: Dict[str, Any]) -> Any:
+    lines = row.get("line_items") or []
+    quantities = [
+        line.get("quantity_gallons") for line in lines
+        if isinstance(line, dict)
+        and isinstance(line.get("quantity_gallons"), (int, float))
+    ]
+    return sum(quantities) if quantities else None
+
+
+_INVOICE_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "invoice_number", "invoice_id", "created_at", "issued_at", "due_date",
+        "status", "customer_id", "account_id", "order_id",
+    )
+] + [ExportColumn("total_gallons", _invoice_total_gallons)] + [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "subtotal_cents", "tax_cents", "total_cents", "amount_paid_cents",
+        "remaining_cents", "qbo_push_state", "voided_at",
+    )
+]
+
+
+def _invoice_export_source(
+    service: Any, tenant_id: str, filters: Dict[str, Any]
+) -> KeysetSource:
+    """KeysetSource over the existing invoice id cursor, with an exact count."""
+    async def fetch(after, page_size, with_total):
+        result = await service.list(
+            tenant_id=tenant_id, **filters,
+            cursor=after[1] if after else None, limit=page_size,
+        )
+        items = result["items"]
+        next_cursor = result.get("next_cursor")
+        return KeysetPage(
+            rows=items, raw_count=len(items), total=None,
+            last_key=(None, next_cursor) if next_cursor else None,
+        )
+
+    async def count() -> int:
+        return await service.count(tenant_id=tenant_id, **filters)
+
+    return KeysetSource(fetch, count=count)
+
+
+@router.get("/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_invoices(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", base=require_invoicing_enabled)
+    ),
+    status: Optional[InvoiceStatus] = Query(default=None),
+    customer_id: Optional[str] = Query(default=None),
+    account_id: Optional[str] = Query(default=None),
+    qbo_push_state: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+):
+    """CSV invoice register matching the list filters (admin only)."""
+    date_range = parse_date_range(start_date, end_date)
+    service_filters = {
+        "status": status.value if status else None,
+        "customer_id": customer_id,
+        "account_id": account_id,
+        "qbo_push_state": qbo_push_state,
+        "created_from": date_range.gte,
+        "created_before": date_range.lt,
+        "created_until": date_range.lte,
+    }
+    source = _invoice_export_source(
+        _get_invoice_service(), tenant.tenant_id, service_filters
+    )
+    filters = {
+        "status": service_filters["status"], "customer_id": customer_id,
+        "account_id": account_id, "qbo_push_state": qbo_push_state,
+        "start_date": start_date, "end_date": end_date,
+    }
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="invoices",
+        columns=_INVOICE_EXPORT_COLUMNS, source=source, filters=filters,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -336,12 +455,10 @@ async def void_invoice(
     """
     # Validate that authorized_by is provided when force=true
     if body.force and not body.authorized_by:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.MISSING_AUTHORIZED_BY,
+            "authorized_by is required when force=true",
             status_code=422,
-            detail={
-                "error_code": "MISSING_AUTHORIZED_BY",
-                "message": "authorized_by is required when force=true",
-            },
         )
 
     service = _get_invoice_service()
@@ -451,14 +568,14 @@ async def retry_qbo_push(
 
     current_push_state = invoice.get("qbo_push_state")
     if current_push_state != "dead_letter":
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.INVALID_QBO_PUSH_STATE,
+            (
+                f"Cannot retry QBO push: invoice qbo_push_state is "
+                f"'{current_push_state}', expected 'dead_letter'"
+            ),
             status_code=409,
-            detail={
-                "error_code": "INVALID_QBO_PUSH_STATE",
-                "message": (
-                    f"Cannot retry QBO push: invoice qbo_push_state is "
-                    f"'{current_push_state}', expected 'dead_letter'"
-                ),
+            details={
                 "invoice_id": invoice_id,
                 "current_qbo_push_state": current_push_state,
             },

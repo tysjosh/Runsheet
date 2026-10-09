@@ -67,9 +67,9 @@ class TestFleetManagerMetrics:
         manager = ConnectionManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         count = await manager.broadcast_location_update(
-            truck_id="T-1", latitude=1.0, longitude=2.0
+            truck_id="T-1", latitude=1.0, longitude=2.0, tenant_id="t1"
         )
 
         assert count == 1
@@ -124,8 +124,8 @@ class TestFleetManagerMetrics:
         manager = ConnectionManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
-        count = await manager.broadcast_batch_update([{"truck_id": "T-1"}])
+        await manager.connect(ws, tenant_id="t1")
+        count = await manager.broadcast_batch_update([{"truck_id": "T-1"}], tenant_id="t1")
 
         assert count == 1
 
@@ -165,8 +165,8 @@ class TestOpsManagerMetrics:
         manager = OpsWebSocketManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
-        count = await manager.broadcast_shipment_update({"shipment_id": "S-1"})
+        await manager.connect(ws, tenant_id="t1")
+        count = await manager.broadcast_shipment_update({"shipment_id": "S-1", "tenant_id": "t1"})
 
         assert count == 1
         metrics = manager.get_metrics()
@@ -177,10 +177,10 @@ class TestOpsManagerMetrics:
         manager = OpsWebSocketManager(max_pending_messages=3)
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         manager._clients[ws]["pending_count"] = 3
 
-        count = await manager.broadcast_shipment_update({"shipment_id": "S-1"})
+        count = await manager.broadcast_shipment_update({"shipment_id": "S-1", "tenant_id": "t1"})
 
         assert count == 0
         assert manager.get_metrics()["messages_dropped_total"] == 1
@@ -191,17 +191,17 @@ class TestOpsManagerMetrics:
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="t1")
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "t1",
             "pending_count": 0,
             "subscriptions": set(),
             "_alive": True,
         }
 
-        count = await manager.broadcast_rider_update({"rider_id": "R-1"})
+        count = await manager.broadcast_rider_update({"rider_id": "R-1", "tenant_id": "t1"})
 
         assert count == 1
         assert ws_dead not in manager._clients
@@ -341,8 +341,8 @@ class TestAgentActivityManagerMetrics:
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
-        count = await manager.broadcast_activity({"agent_id": "test"})
+        await manager.connect(ws, tenant_id="t1")
+        count = await manager.broadcast_activity({"agent_id": "test", "tenant_id": "t1"})
 
         assert count == 1
         metrics = manager.get_metrics()
@@ -353,10 +353,10 @@ class TestAgentActivityManagerMetrics:
         manager = AgentActivityWSManager(max_pending_messages=3)
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         manager._clients[ws]["pending_count"] = 3
 
-        count = await manager.broadcast_activity({"agent_id": "test"})
+        count = await manager.broadcast_activity({"agent_id": "test", "tenant_id": "t1"})
 
         assert count == 0
         assert manager.get_metrics()["messages_dropped_total"] == 1
@@ -367,15 +367,17 @@ class TestAgentActivityManagerMetrics:
         ws_alive = _make_websocket()
         ws_dead = _make_websocket(fail_send=True)
 
-        await manager.connect(ws_alive)
+        await manager.connect(ws_alive, tenant_id="t1")
         manager._clients[ws_dead] = {
             "connected_at": datetime.now(timezone.utc),
             "last_send": None,
-            "tenant_id": "",
+            "tenant_id": "t1",
             "pending_count": 0,
         }
 
-        count = await manager.broadcast_event("fuel_alert", {"station_id": "S-1"})
+        count = await manager.broadcast_event(
+            "fuel_alert", {"station_id": "S-1", "tenant_id": "t1"}
+        )
 
         assert count == 1
         assert ws_dead not in manager._clients
@@ -395,9 +397,9 @@ class TestAgentActivityManagerMetrics:
         manager = AgentActivityWSManager()
         ws = _make_websocket()
 
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         count = await manager.broadcast_approval_event(
-            "approval_created", {"action_id": "abc"}
+            "approval_created", {"action_id": "abc", "tenant_id": "t1"}
         )
 
         assert count == 1

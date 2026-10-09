@@ -77,6 +77,13 @@ class _InMemoryElasticsearch:
         self.documents[(index, document_id)] = deepcopy(document)
         return {"result": "created"}
 
+    async def create_document(self, index, document_id, document):
+        # Create-if-absent, like the real store (ids are global).
+        if (index, document_id) in self.documents:
+            return False
+        await self.index_document(index, document_id, document)
+        return True
+
     async def get_document(self, index, document_id):
         document = self.documents.get((index, document_id))
         return deepcopy(document) if document is not None else None
@@ -90,6 +97,33 @@ class _InMemoryElasticsearch:
 
     async def delete_document(self, index, document_id):
         return self.documents.pop((index, document_id), None) is not None
+
+    async def upsert_if_newer(
+        self, index, document_id, document, *, timestamp_field="last_event_timestamp"
+    ):
+        """Timestamp-guarded upsert, matching the real facade's semantics.
+
+        ``FuelOrderRepository`` used to build a painless ``scripted_upsert`` and
+        call ``client.update`` directly, which would have kept writing to
+        Elasticsearch after the document plane moved to Postgres. It now goes
+        through ``ElasticsearchService.upsert_if_newer``, so this fake implements
+        it — including the part that reads like an off-by-one: an EQUAL timestamp
+        is discarded, because at-least-once delivery makes an equal timestamp the
+        common case for a redelivery and applying it would undo a later event.
+        """
+        key = (index, document_id)
+        current = self.documents.get(key)
+        incoming = document.get(timestamp_field)
+        if current is not None:
+            stored = current.get(timestamp_field)
+            if stored is not None and incoming is not None and incoming <= stored:
+                return False
+            merged = deepcopy(current)
+            merged.update(deepcopy(document))
+            self.documents[key] = merged
+            return True
+        self.documents[key] = deepcopy(document)
+        return True
 
     async def search_documents(self, index, query, size=10):
         terms = _collect_terms(query)

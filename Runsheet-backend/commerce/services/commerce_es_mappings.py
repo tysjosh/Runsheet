@@ -97,6 +97,8 @@ ACCOUNTS_CURRENT_MAPPING = {
             "credit_balance_cents":       {"type": "long"},
             "credit_state":               {"type": "keyword"},
             "credit_override_expires_at": {"type": "date"},
+            "credit_override_reason":     {"type": "text"},
+            "credit_override_authorized_by": {"type": "keyword"},
             "net_terms_days":             {"type": "integer"},
             "tier":                       {"type": "keyword"},
             "billing_address":            {
@@ -214,6 +216,10 @@ INVOICES_CURRENT_MAPPING = {
             # the breakdown for this invoice. Persisted for IRS /
             # operator audit (Req 6.7).
             "exemptions_applied":  {"type": "keyword"},
+            # Non-blocking compliance warnings appended post-generation
+            # (e.g. meter.calibration_expired — Req 8.5). ``enabled: False``
+            # mirrors tax_breakdown: rendered on the invoice, never queried.
+            "warnings":            {"type": "object", "enabled": False},
             "issued_at":           {"type": "date"},
             "due_date":            {"type": "date"},
             "finalized_at":        {"type": "date"},
@@ -352,6 +358,9 @@ AR_AGING_SNAPSHOTS_MAPPING = {
             "tenant_id":                  {"type": "keyword"},
             "snapshot_date":              {"type": "date"},
             "total_open_cents":           {"type": "long"},
+            # Not yet due; absent on snapshots from before due_date aging.
+            "bucket_current_cents":       {"type": "long"},
+            # Key kept for compatibility: 1-30 days past due.
             "bucket_0_30_cents":          {"type": "long"},
             "bucket_31_60_cents":         {"type": "long"},
             "bucket_61_90_cents":         {"type": "long"},
@@ -393,43 +402,3 @@ COMMERCE_INDEX_MAPPINGS = {
 # ---------------------------------------------------------------------------
 
 
-def setup_commerce_indices(es_service) -> None:
-    """Create Commerce Backbone ES indices if they don't already exist.
-
-    Follows the same tenant-prefixed alias strategy as setup_fuel_ops_indices
-    in fuel_ops_es_mappings.py. On Elasticsearch Serverless deployments,
-    shard/replica settings are stripped before creation via
-    ``ElasticsearchService.strip_serverless_incompatible_settings``.
-
-    Args:
-        es_service: An ElasticsearchService instance with ``.client`` and
-            ``.is_serverless`` attributes.
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    es_client = es_service.client
-    is_serverless = es_service.is_serverless
-
-    # Skip indices retired in Phase 6 (migrated to Postgres + dropped) so
-    # startup does not silently recreate a dropped index.
-    try:
-        from config.settings import get_settings
-        retired = set(get_settings().retired_es_indices or [])
-    except Exception:  # noqa: BLE001
-        retired = set()
-
-    for index_name, mapping in COMMERCE_INDEX_MAPPINGS.items():
-        if index_name in retired:
-            logger.info("Skipping retired commerce index: %s", index_name)
-            continue
-        try:
-            if not es_client.indices.exists(index=index_name):
-                body = mapping
-                if is_serverless:
-                    body = ElasticsearchService.strip_serverless_incompatible_settings(body)
-                es_client.indices.create(index=index_name, body=body)
-                logger.info(f"Created commerce index: {index_name}")
-            else:
-                logger.info(f"Commerce index already exists: {index_name}")
-        except Exception:
-            logger.exception("Failed to create commerce index %s", index_name)

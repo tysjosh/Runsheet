@@ -16,13 +16,20 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.legacy_flags import is_legacy_ng_delivery_enabled
 from config.settings import get_settings
+from auth.authorization import require_role
 from auth.tenant_scope import require_tenant_scope
-from errors.exceptions import legacy_ng_delivery_disabled, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    legacy_ng_delivery_disabled,
+    tenant_disabled,
+    validation_error,
+)
 from middleware.rate_limiter import limiter
 from ops.middleware.pii_masker import PIIMasker, log_pii_access
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context, inject_tenant_filter
@@ -84,11 +91,11 @@ async def require_ops_enabled(
        (``shipments_current`` / ``riders_current`` / Dinee replay + drift).
        When the flag is off the whole surface 404s with
        ``LEGACY_NG_DELIVERY_DISABLED``. Ops platform monitoring
-       (``/monitoring/*``, ``/metrics/prometheus``) and the per-tenant
+       (``/monitoring/poison-queue``, ``/metrics/prometheus``) and the per-tenant
        feature-flag admin routes deliberately do NOT depend on this, so
        operators can still observe and manage a disabled surface.
        Audit reference: product-owner-audit-2026-05-08 recommendation #1.
-    2. Per-tenant ops rollout flag — raises HTTPException(404) with
+    2. Per-tenant ops rollout flag — raises AppException(404) with
        TENANT_DISABLED when the Ops Intelligence Layer is disabled for the
        requesting tenant.
 
@@ -129,13 +136,7 @@ async def require_ops_enabled(
                 "Ops API request blocked: tenant_id=%s is disabled",
                 tenant.tenant_id,
             )
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error_code": "TENANT_DISABLED",
-                    "message": "Ops intelligence is not enabled for this tenant",
-                },
-            )
+            raise tenant_disabled()
     return tenant
 
 
@@ -291,9 +292,9 @@ async def get_sla_breaches(
     query["size"] = size
     query["sort"] = [{"estimated_delivery": {"order": "asc"}}]
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -366,9 +367,9 @@ async def get_shipment_failures(
                     )
                     event_query["size"] = 1
                     event_query["sort"] = [{"event_timestamp": {"order": "desc"}}]
-                    event_result = es.client.search(
-                        index=OpsElasticsearchService.SHIPMENT_EVENTS,
-                        body=event_query,
+                    event_result = await es.search_documents(
+                        OpsElasticsearchService.SHIPMENT_EVENTS,
+                        event_query,
                         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
                     )
                     if event_result["hits"]["hits"]:
@@ -406,9 +407,9 @@ async def get_shipment_failures(
     query["size"] = size
     query["sort"] = [{"updated_at": {"order": "desc"}}]
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -433,9 +434,9 @@ async def get_shipment_failures(
                 )
                 event_query["size"] = 1
                 event_query["sort"] = [{"event_timestamp": {"order": "desc"}}]
-                event_result = es.client.search(
-                    index=OpsElasticsearchService.SHIPMENT_EVENTS,
-                    body=event_query,
+                event_result = await es.search_documents(
+                    OpsElasticsearchService.SHIPMENT_EVENTS,
+                    event_query,
                     request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
                 )
                 if event_result["hits"]["hits"]:
@@ -528,9 +529,9 @@ async def list_shipments(
     query["size"] = size
     query["sort"] = [{sort_by: {"order": sort_order}}]
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -570,8 +571,11 @@ async def get_shipment(
     pg = await read_hybrid_get("shipment", tenant.tenant_id, shipment_id)
     if pg is not _NOT_CUT_OVER:
         if pg is None:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Shipment not found")
+            raise AppException(
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                message="Shipment not found",
+                status_code=404,
+            )
         shipment_data = pg
     else:
         # Fetch the shipment document (tenant-scoped)
@@ -581,15 +585,18 @@ async def get_shipment(
         )
         shipment_query["size"] = 1
 
-        shipment_result = es.client.search(
-            index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-            body=shipment_query,
+        shipment_result = await es.search_documents(
+            OpsElasticsearchService.SHIPMENTS_CURRENT,
+            shipment_query,
             request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
         )
 
         if not shipment_result["hits"]["hits"]:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=404, detail="Shipment not found")
+            raise AppException(
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                message="Shipment not found",
+                status_code=404,
+            )
 
         shipment_data = shipment_result["hits"]["hits"][0]["_source"]
 
@@ -601,9 +608,9 @@ async def get_shipment(
     events_query["size"] = 1000
     events_query["sort"] = [{"event_timestamp": {"order": "asc"}}]
 
-    events_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENT_EVENTS,
-        body=events_query,
+    events_result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENT_EVENTS,
+        events_query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -653,9 +660,9 @@ async def get_rider_utilization(
     query["size"] = size
     query["sort"] = [{"last_seen": {"order": "desc"}}]
 
-    result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.RIDERS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -728,9 +735,9 @@ async def list_riders(
     query["size"] = size
     query["sort"] = [{"last_seen": {"order": "desc"}}]
 
-    result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.RIDERS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -768,15 +775,18 @@ async def get_rider(
     )
     rider_query["size"] = 1
 
-    rider_result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT,
-        body=rider_query,
+    rider_result = await es.search_documents(
+        OpsElasticsearchService.RIDERS_CURRENT,
+        rider_query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
     if not rider_result["hits"]["hits"]:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Rider not found")
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message="Rider not found",
+            status_code=404,
+        )
 
     rider_data = rider_result["hits"]["hits"][0]["_source"]
 
@@ -791,9 +801,9 @@ async def get_rider(
     shipments_query["size"] = 100
     shipments_query["sort"] = [{"updated_at": {"order": "desc"}}]
 
-    shipments_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=shipments_query,
+    shipments_result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        shipments_query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -852,9 +862,9 @@ async def list_events(
     query["size"] = size
     query["sort"] = [{"event_timestamp": {"order": "desc"}}]
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENT_EVENTS,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENT_EVENTS,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -994,9 +1004,9 @@ async def get_shipment_metrics(
         }
     }
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -1101,9 +1111,9 @@ async def get_sla_metrics(
         }
     }
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -1189,9 +1199,9 @@ async def get_rider_metrics(
         }
     }
 
-    result = es.client.search(
-        index=OpsElasticsearchService.RIDERS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.RIDERS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -1285,9 +1295,9 @@ async def get_failure_metrics(
         }
     }
 
-    result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENTS_CURRENT,
-        body=query,
+    result = await es.search_documents(
+        OpsElasticsearchService.SHIPMENTS_CURRENT,
+        query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -1331,186 +1341,29 @@ async def get_prometheus_metrics(request: Request):
 
 # ---------------------------------------------------------------------------
 # Monitoring Endpoints
-# Validates: Requirements 23.1-23.3
+# Validates: Requirement 23.3
 # These return simple dicts (not paginated) since they're operational metrics.
+#
+# /monitoring/ingestion and /monitoring/indexing were deleted (UI revamp task
+# 0.2): they queried Elasticsearch indices dropped by migration 0007, so
+# ingestion 500'd with UnsupportedAggregationError and indexing reported a fake
+# 100% success rate.
 # ---------------------------------------------------------------------------
-
-@router.get("/monitoring/ingestion")
-@limiter.limit(_ops_rate)
-async def get_ingestion_metrics(
-    request: Request,
-    window: str = Query("5m", description="Time window for metrics (e.g. 5m, 1h, 24h)"),
-):
-    """
-    Ingestion health: events received, processed, failed, avg latency.
-    Validates: Req 23.1
-    """
-    es = _get_es()
-
-    # Parse window into an ES range value (e.g. "5m" -> "now-5m")
-    range_value = f"now-{window}"
-
-    # Count events ingested in the window across shipment_events
-    events_query = {
-        "query": {"range": {"ingested_at": {"gte": range_value}}},
-        "size": 0,
-        "aggs": {
-            "avg_latency": {
-                "avg": {
-                    "script": {
-                        "source": (
-                            "if (doc['ingested_at'].size() > 0 && doc['event_timestamp'].size() > 0) {"
-                            "  return doc['ingested_at'].value.toInstant().toEpochMilli() "
-                            "    - doc['event_timestamp'].value.toInstant().toEpochMilli();"
-                            "} return 0;"
-                        ),
-                        "lang": "painless",
-                    }
-                }
-            },
-        },
-    }
-
-    events_result = es.client.search(
-        index=OpsElasticsearchService.SHIPMENT_EVENTS,
-        body=events_query,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-    )
-
-    total_events = events_result["hits"]["total"]["value"]
-    avg_latency_ms = events_result.get("aggregations", {}).get("avg_latency", {}).get("value")
-
-    # Count poison queue entries in the window (failed events)
-    poison_query = {
-        "query": {"range": {"created_at": {"gte": range_value}}},
-        "size": 0,
-    }
-    poison_result = es.client.search(
-        index=OpsElasticsearchService.POISON_QUEUE,
-        body=poison_query,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-    )
-    failed_events = poison_result["hits"]["total"]["value"]
-
-    return {
-        "data": {
-            "window": window,
-            "events_received": total_events + failed_events,
-            "events_processed": total_events,
-            "events_failed": failed_events,
-            "avg_processing_latency_ms": round(avg_latency_ms, 2) if avg_latency_ms is not None else None,
-        },
-        "request_id": _get_request_id(request),
-    }
-
-
-@router.get("/monitoring/indexing")
-@limiter.limit(_ops_rate)
-async def get_indexing_metrics(
-    request: Request,
-    window: str = Query("5m", description="Time window for metrics (e.g. 5m, 1h, 24h)"),
-):
-    """
-    Indexing health: documents indexed, errors, bulk success rate, avg latency.
-    Validates: Req 23.2
-    """
-    es = _get_es()
-
-    range_value = f"now-{window}"
-
-    # Count documents indexed across all ops indices in the window
-    indices = [
-        OpsElasticsearchService.SHIPMENTS_CURRENT,
-        OpsElasticsearchService.SHIPMENT_EVENTS,
-        OpsElasticsearchService.RIDERS_CURRENT,
-    ]
-
-    total_indexed = 0
-    per_index: dict = {}
-    for index_name in indices:
-        count_query = {
-            "query": {"range": {"ingested_at": {"gte": range_value}}},
-            "size": 0,
-            "aggs": {
-                "avg_latency": {
-                    "avg": {
-                        "script": {
-                            "source": (
-                                "if (doc['ingested_at'].size() > 0 && doc['last_event_timestamp'].size() > 0) {"
-                                "  return doc['ingested_at'].value.toInstant().toEpochMilli() "
-                                "    - doc['last_event_timestamp'].value.toInstant().toEpochMilli();"
-                                "} return 0;"
-                            ),
-                            "lang": "painless",
-                        }
-                    }
-                },
-            },
-        }
-        try:
-            result = es.client.search(
-                index=index_name,
-                body=count_query,
-                request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-            )
-            count = result["hits"]["total"]["value"]
-            avg_lat = result.get("aggregations", {}).get("avg_latency", {}).get("value")
-            total_indexed += count
-            per_index[index_name] = {
-                "documents_indexed": count,
-                "avg_indexing_latency_ms": round(avg_lat, 2) if avg_lat is not None else None,
-            }
-        except Exception as exc:
-            logger.warning("Failed to query index %s for monitoring: %s", index_name, exc)
-            per_index[index_name] = {"documents_indexed": 0, "error": str(exc)}
-
-    # Count indexing errors from poison queue
-    poison_query = {
-        "query": {
-            "bool": {
-                "must": [
-                    {"range": {"created_at": {"gte": range_value}}},
-                    {"term": {"error_type": "indexing_error"}},
-                ]
-            }
-        },
-        "size": 0,
-    }
-    try:
-        poison_result = es.client.search(
-            index=OpsElasticsearchService.POISON_QUEUE,
-            body=poison_query,
-            request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
-        )
-        indexing_errors = poison_result["hits"]["total"]["value"]
-    except Exception as exc:
-        logger.warning("Failed to query poison queue for indexing errors: %s", exc)
-        indexing_errors = 0
-
-    total_attempted = total_indexed + indexing_errors
-    success_rate = round((total_indexed / total_attempted) * 100, 2) if total_attempted > 0 else 100.0
-
-    return {
-        "data": {
-            "window": window,
-            "total_documents_indexed": total_indexed,
-            "indexing_errors": indexing_errors,
-            "bulk_success_rate_pct": success_rate,
-            "per_index": per_index,
-        },
-        "request_id": _get_request_id(request),
-    }
-
 
 @router.get("/monitoring/poison-queue")
 @limiter.limit(_ops_rate)
 async def get_poison_queue_metrics(
     request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
 ):
     """
     Poison queue health: depth, oldest event age, retry stats.
+
+    The queue is platform-wide (not tenant-filtered), so only Runsheet staff
+    (``platform_admin``) may read it.
     Validates: Req 23.3
     """
+    require_role(tenant, "platform_admin")
     es = _get_es()
 
     # Total queue depth (pending + retrying)
@@ -1538,9 +1391,9 @@ async def get_poison_queue_metrics(
         },
     }
 
-    result = es.client.search(
-        index=OpsElasticsearchService.POISON_QUEUE,
-        body=depth_query,
+    result = await es.search_documents(
+        OpsElasticsearchService.POISON_QUEUE,
+        depth_query,
         request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
     )
 
@@ -1611,7 +1464,11 @@ async def enable_feature_flag(
     )
 
     if _feature_flag_service is None:
-        raise HTTPException(status_code=503, detail="Feature flag service not configured")
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Feature flag service not configured",
+            status_code=503,
+        )
 
     await _feature_flag_service.enable(tenant_id, tenant.user_id)
 
@@ -1645,7 +1502,11 @@ async def disable_feature_flag(
     )
 
     if _feature_flag_service is None:
-        raise HTTPException(status_code=503, detail="Feature flag service not configured")
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Feature flag service not configured",
+            status_code=503,
+        )
 
     await _feature_flag_service.disable(tenant_id, tenant.user_id)
 
@@ -1705,7 +1566,11 @@ async def rollback_feature_flag(
     )
 
     if _feature_flag_service is None:
-        raise HTTPException(status_code=503, detail="Feature flag service not configured")
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Feature flag service not configured",
+            status_code=503,
+        )
 
     await _feature_flag_service.rollback(tenant_id, tenant.user_id, purge_data=purge_data)
 
@@ -1762,9 +1627,10 @@ async def trigger_replay(
     """
     replay_svc = get_replay_service()
     if replay_svc is None:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Replay service not configured",
             status_code=503,
-            detail="Replay service not configured",
         )
 
     # Parse and validate time range
@@ -1813,18 +1679,27 @@ async def get_replay_status(
     """
     replay_svc = get_replay_service()
     if replay_svc is None:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.INTERNAL_ERROR,
+            message="Replay service not configured",
             status_code=503,
-            detail="Replay service not configured",
         )
 
     job = await replay_svc.get_job_status(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="Replay job not found")
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message="Replay job not found",
+            status_code=404,
+        )
 
     # Ensure the caller can only see their own tenant's jobs
     if job.tenant_id != tenant.tenant_id:
-        raise HTTPException(status_code=404, detail="Replay job not found")
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message="Replay job not found",
+            status_code=404,
+        )
 
     return {
         "data": job.model_dump(mode="json"),

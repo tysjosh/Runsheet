@@ -58,6 +58,8 @@ MVP_TANK_FORECASTS_MAPPING = {
             "customer_type_multiplier":  {"type": "float"},
             "baseline_source":           {"type": "keyword"},
             "weather_fallback":          {"type": "boolean"},
+            # Canonical product code of the customer tank (F10).
+            "product_code":              {"type": "keyword"},
             # Scheduled_Delivery entries folded into the projected level
             # (Req 1.4.3). Nested so individual fields remain queryable.
             "scheduled_deliveries": {
@@ -89,6 +91,9 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
                     "priority_score":  {"type": "float"},
                     "priority_bucket": {"type": "keyword"},
                     "reasons":         {"type": "keyword"},
+                    # Scored order and its canonical product (F10).
+                    "order_id":        {"type": "keyword"},
+                    "product_code":    {"type": "keyword"},
                     # --- Phase 5 extensions (fuel-ops hardening Capability 3) ---
                     # Safe-to-delay tolerance (Req 3.1.3).
                     "safe_to_delay_days":    {"type": "integer"},
@@ -122,10 +127,45 @@ MVP_DELIVERY_PRIORITIES_MAPPING = {
     },
 }
 
+# Dispatch Board fields (dispatch-board design K2.4, K7.3a). Board-published
+# plans and routes live in the same indices as agent plans; agent writes omit
+# these fields and readers treat a missing ``source`` as ``agent``. Each group
+# is spread into both the create-time mapping and MVP_ADDITIVE_MAPPING_UPDATES
+# so the two can't drift.
+_BOARD_PLAN_FIELDS = {
+    "source":                {"type": "keyword"},   # agent | dispatch_board
+    "board_draft_id":        {"type": "keyword"},
+    "board_load_id":         {"type": "keyword"},
+    "service_date":          {"type": "date"},
+    "shift_id":              {"type": "keyword"},
+    "load_seq":              {"type": "integer"},
+    "driver_id":             {"type": "keyword"},
+    "revision":              {"type": "integer"},
+    "supersedes_plan_id":    {"type": "keyword"},
+    "superseded_by_plan_id": {"type": "keyword"},
+}
+_BOARD_ROUTE_FIELDS = {
+    "source":              {"type": "keyword"},
+    "board_load_id":       {"type": "keyword"},
+    "service_date":        {"type": "date"},
+    "revision":            {"type": "integer"},
+    "supersedes_route_id": {"type": "keyword"},
+}
+#: Redispatch recovery markers on plans, routes and executions (K2.4,
+#: freeze rule 10): which attempt retired or staged a document, and the status
+#: a rollback restores.
+_BOARD_RECOVERY_FIELDS = {
+    "superseded_by_attempt": {"type": "keyword"},
+    "status_before_retire":  {"type": "keyword"},
+    "created_by_attempt":    {"type": "keyword"},
+}
+
 MVP_LOAD_PLANS_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
+            **_BOARD_PLAN_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
             "plan_id":  {"type": "keyword"},
             "truck_id": {"type": "keyword"},
             # Sourcing provenance carried on LoadingPlan. Declared here and in
@@ -167,6 +207,18 @@ MVP_LOAD_PLANS_MAPPING = {
             "estimated_cost":         {"type": "object", "dynamic": True},
             "actual_cost":            {"type": "object", "dynamic": True},
             "cost_variance_pct":      {"type": "float"},
+            # Loading-plan executor claim, lease and result (design K4).
+            # Declared here and in MVP_ADDITIVE_MAPPING_UPDATES so existing
+            # indices gain them too. applied_by/applied_at are separate from
+            # approved_by/approved_at, which MVP dispatch overwrites (R7.6).
+            "execution_status":       {"type": "keyword"},
+            "execution_attempt_id":   {"type": "keyword"},
+            "execution_claimed_at":   {"type": "date"},
+            "execution_action_id":    {"type": "keyword"},
+            "execution_approved_at":  {"type": "date"},
+            "applied_by":             {"type": "keyword"},
+            "applied_at":             {"type": "date"},
+            "execution_result":       {"type": "object", "dynamic": True},
         },
     },
     "settings": {
@@ -179,6 +231,8 @@ MVP_ROUTES_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
+            **_BOARD_ROUTE_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
             "route_id": {"type": "keyword"},
             "truck_id": {"type": "keyword"},
             "plan_id":  {"type": "keyword"},
@@ -469,6 +523,7 @@ MVP_PLAN_EXECUTIONS_MAPPING = {
     "mappings": {
         "dynamic": "strict",
         "properties": {
+            **_BOARD_RECOVERY_FIELDS,
             "execution_id":    {"type": "keyword"},
             "plan_id":         {"type": "keyword"},
             "route_id":        {"type": "keyword"},
@@ -576,11 +631,29 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
                     # still reports "complete" with nothing persisted.
                     "product_code": {"type": "keyword"},
                 },
-            }
+            },
+            # Loading-plan executor fields (design K4). Same trap as
+            # product_code: mvp_load_plans is dynamic:strict, so declaring
+            # them only in MVP_LOAD_PLANS_MAPPING would reject every plan
+            # claim on an existing cluster.
+            "execution_status":      {"type": "keyword"},
+            "execution_attempt_id":  {"type": "keyword"},
+            "execution_claimed_at":  {"type": "date"},
+            "execution_action_id":   {"type": "keyword"},
+            "execution_approved_at": {"type": "date"},
+            "applied_by":            {"type": "keyword"},
+            "applied_at":            {"type": "date"},
+            "execution_result":      {"type": "object", "dynamic": True},
+            # Dispatch Board (K2.4).
+            **_BOARD_PLAN_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
         }
     },
     MVP_ROUTES_INDEX: {
         "properties": {
+            # Dispatch Board (K2.4).
+            **_BOARD_ROUTE_FIELDS,
+            **_BOARD_RECOVERY_FIELDS,
             "stops": {
                 "type": "nested",
                 "properties": {"order_ids": {"type": "keyword"}},
@@ -613,39 +686,32 @@ MVP_ADDITIVE_MAPPING_UPDATES = {
             "allowed_product_codes": {"type": "keyword"},
         }
     },
+    # Dispatch Board redispatch recovery markers (K2.4, freeze rule 10).
+    MVP_PLAN_EXECUTIONS_INDEX: {
+        "properties": {
+            **_BOARD_RECOVERY_FIELDS,
+        }
+    },
+    # F10: canonical product codes on forecasts and priority entries, and the
+    # order each priority entry scores. Both indices are dynamic:strict, so a
+    # field declared only in the create-time mapping would reject every write
+    # on an existing cluster.
+    MVP_TANK_FORECASTS_INDEX: {
+        "properties": {
+            "product_code": {"type": "keyword"},
+        }
+    },
+    MVP_DELIVERY_PRIORITIES_INDEX: {
+        "properties": {
+            "priorities": {
+                "type": "nested",
+                "properties": {
+                    "order_id": {"type": "keyword"},
+                    "product_code": {"type": "keyword"},
+                },
+            },
+        }
+    },
 }
 
 
-def setup_mvp_indices(es_service) -> None:
-    """Create MVP ES indices if they don't already exist.
-
-    Follows the same pattern as setup_overlay_indices in overlay_es_mappings.py.
-
-    Args:
-        es_service: An ElasticsearchService instance.
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    es_client = es_service.client
-    is_serverless = es_service.is_serverless
-
-    for index_name, mapping in MVP_INDEX_MAPPINGS.items():
-        try:
-            if not es_client.indices.exists(index=index_name):
-                if is_serverless:
-                    mapping = ElasticsearchService.strip_serverless_incompatible_settings(mapping)
-                es_client.indices.create(index=index_name, body=mapping)
-                logger.info(f"Created MVP index: {index_name}")
-            else:
-                logger.info(f"MVP index already exists: {index_name}")
-                additive_update = MVP_ADDITIVE_MAPPING_UPDATES.get(index_name)
-                if additive_update:
-                    es_client.indices.put_mapping(
-                        index=index_name,
-                        body=additive_update,
-                    )
-                    logger.info(
-                        "Applied additive MVP mapping update: %s", index_name
-                    )
-        except Exception:
-            logger.exception("Failed to create MVP index %s", index_name)

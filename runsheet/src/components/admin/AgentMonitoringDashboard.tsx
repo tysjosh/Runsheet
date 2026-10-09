@@ -14,6 +14,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { dateTime, number, pct } from "../../lib/format";
 import {
   type ActivityLogEntry,
   type ActivityStats,
@@ -34,17 +35,12 @@ import { Badge, Button, type Column, Modal, PageHeader, Table } from "../ui";
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${(ms / 60000).toFixed(1)}m`;
+  if (ms < 60000) return `${number(ms / 1000, { decimals: 1 })}s`;
+  return `${number(ms / 60000, { decimals: 1 })}m`;
 }
 
 function formatTimestamp(timestamp: string): string {
-  return new Date(timestamp).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return dateTime(timestamp);
 }
 
 function getStatusBadge(status: string) {
@@ -401,7 +397,7 @@ export default function AgentMonitoringDashboard() {
               </span>
             </div>
             <div className="text-2xl font-bold text-gray-900">
-              {(stats.success_rate * 100).toFixed(1)}%
+              {pct(stats.success_rate, { fraction: true, decimals: 1 })}
             </div>
           </div>
 
@@ -557,7 +553,7 @@ export default function AgentMonitoringDashboard() {
                 Reject
               </Button>
               <Button
-                variant="success"
+                variant="primary"
                 onClick={() => handleApprove(selectedApproval.action_id)}
                 disabled={loading}
               >

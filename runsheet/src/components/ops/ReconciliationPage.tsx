@@ -34,26 +34,31 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   ChevronUp,
   Copy,
   Download,
   FileText,
   Loader2,
   RefreshCw,
-  Search,
   ShieldCheck,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type Column,
+  DataTable,
+  Drawer,
   EntityLink,
-  Table,
-  ToastContainer,
-  useToasts,
+  ExportCsvButton,
+  Field,
+  FilterPopover,
+  IconButton,
+  INPUT_CLASS,
+  NumberField,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { dateTime, number } from "../../lib/format";
 import type {
   BOLDownloadResponse,
   HashChainMismatch,
@@ -68,6 +73,11 @@ import {
   listReconciliationRecords,
   verifyPodHashChain,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
+
+const SEARCH_CLASS =
+  "h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -85,24 +95,18 @@ const VARIANCE_ALERT_FLAG = "variance_exceeds_threshold";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Format a gallon quantity for table display. Nulls (e.g. invoiced
- * gallons before the QBO webhook fires) render as an em-dash.
- */
+/** Gallons: "12.3K" from 10,000 up, else at most one decimal ("987.7"). */
 export function formatGallons(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  if (value >= 10_000) return `${(value / 1_000).toFixed(1)}K`;
-  return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  if (value == null || !Number.isFinite(value)) return "—";
+  if (value >= 10_000) return `${number(value / 1_000, { decimals: 1 })}K`;
+  const tenths = Math.round(value * 10) / 10;
+  return number(tenths, { decimals: Number.isInteger(tenths) ? 0 : 1 });
 }
 
-/**
- * Format a variance percentage for display. Nulls (missing invoice
- * leg) render as an em-dash so the operator can distinguish "pending"
- * from "zero".
- */
+/** Variance percentage with two decimals: "3.20%". */
 export function formatVariancePct(value: number | null | undefined): string {
-  if (value == null || Number.isNaN(value)) return "—";
-  return `${value.toFixed(2)}%`;
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${number(value, { decimals: 2 })}%`;
 }
 
 /**
@@ -146,18 +150,7 @@ export function isAlertedRow(
 }
 
 function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+  return dateTime(iso);
 }
 
 // ─── Filters Row ─────────────────────────────────────────────────────────────
@@ -184,151 +177,102 @@ function FiltersRow({
   onRefresh,
   loading,
 }: FiltersRowProps) {
-  const inputClass =
-    "pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white w-40";
-  const numberClass =
-    "px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white w-32";
-
+  const popoverCount =
+    (filters.plan_id ? 1 : 0) +
+    (filters.pod_id ? 1 : 0) +
+    (filters.min_variance_pct != null ? 1 : 0);
   return (
-    <div className="flex flex-wrap items-end gap-3">
-      <div>
-        <label
-          htmlFor="rec-filter-order"
-          className="block text-xs font-medium text-gray-600 mb-1"
-        >
-          Order ID
-        </label>
-        <div className="relative">
-          <Search
-            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
-            aria-hidden="true"
-          />
-          <input
-            id="rec-filter-order"
-            type="text"
-            placeholder="e.g. ORD-0042"
-            className={inputClass}
-            value={filters.order_id ?? ""}
-            onChange={(e) =>
-              onChange({
-                ...filters,
-                order_id: e.target.value.trim() || undefined,
-              })
-            }
-          />
-        </div>
-      </div>
-
-      <div>
-        <label
-          htmlFor="rec-filter-plan"
-          className="block text-xs font-medium text-gray-600 mb-1"
-        >
-          Plan ID
-        </label>
-        <div className="relative">
-          <Search
-            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
-            aria-hidden="true"
-          />
-          <input
-            id="rec-filter-plan"
-            type="text"
-            placeholder="e.g. plan-0042"
-            className={inputClass}
-            value={filters.plan_id ?? ""}
-            onChange={(e) =>
-              onChange({
-                ...filters,
-                plan_id: e.target.value.trim() || undefined,
-              })
-            }
-          />
-        </div>
-      </div>
-
-      <div>
-        <label
-          htmlFor="rec-filter-pod"
-          className="block text-xs font-medium text-gray-600 mb-1"
-        >
-          POD ID
-        </label>
-        <div className="relative">
-          <Search
-            className="w-3.5 h-3.5 text-gray-500 absolute left-2.5 top-1/2 -translate-y-1/2"
-            aria-hidden="true"
-          />
-          <input
-            id="rec-filter-pod"
-            type="text"
-            placeholder="e.g. pod-0042"
-            className={inputClass}
-            value={filters.pod_id ?? ""}
-            onChange={(e) =>
-              onChange({
-                ...filters,
-                pod_id: e.target.value.trim() || undefined,
-              })
-            }
-          />
-        </div>
-      </div>
-
-      <div>
-        <label
-          htmlFor="rec-filter-variance"
-          className="block text-xs font-medium text-gray-600 mb-1"
-        >
-          Min Variance %
-        </label>
+    <Toolbar
+      label="Reconciliation"
+      search={
         <input
-          id="rec-filter-variance"
-          type="number"
-          min="0"
-          step="0.1"
-          placeholder={`≥ ${DEFAULT_ALERT_PCT}`}
-          className={numberClass}
-          value={filters.min_variance_pct ?? ""}
-          onChange={(e) => {
-            const raw = e.target.value;
-            if (raw === "") {
-              onChange({ ...filters, min_variance_pct: undefined });
-              return;
-            }
-            const parsed = Number(raw);
+          id="rec-filter-order"
+          type="search"
+          aria-label="Order ID"
+          placeholder="Order ID, e.g. ORD-0042"
+          className={SEARCH_CLASS}
+          value={filters.order_id ?? ""}
+          onChange={(e) =>
             onChange({
               ...filters,
-              min_variance_pct:
-                Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined,
-            });
-          }}
+              order_id: e.target.value.trim() || undefined,
+            })
+          }
         />
-      </div>
-
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={onReset}
-          className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200"
+      }
+      filters={
+        <FilterPopover
+          count={popoverCount}
+          label="Reconciliation filters"
+          onClear={onReset}
         >
-          Reset
-        </button>
-        <button
-          type="button"
+          <div className="grid w-80 grid-cols-2 gap-3">
+            <Field label="Plan ID" id="rec-filter-plan">
+              <input
+                id="rec-filter-plan"
+                type="text"
+                placeholder="e.g. plan-0042"
+                className={INPUT_CLASS}
+                value={filters.plan_id ?? ""}
+                onChange={(e) =>
+                  onChange({
+                    ...filters,
+                    plan_id: e.target.value.trim() || undefined,
+                  })
+                }
+              />
+            </Field>
+            <Field label="POD ID" id="rec-filter-pod">
+              <input
+                id="rec-filter-pod"
+                type="text"
+                placeholder="e.g. pod-0042"
+                className={INPUT_CLASS}
+                value={filters.pod_id ?? ""}
+                onChange={(e) =>
+                  onChange({
+                    ...filters,
+                    pod_id: e.target.value.trim() || undefined,
+                  })
+                }
+              />
+            </Field>
+            <Field
+              label="Min variance %"
+              id="rec-filter-variance"
+              help={`Alerts start at ${number(DEFAULT_ALERT_PCT)}%.`}
+            >
+              <NumberField
+                id="rec-filter-variance"
+                value={filters.min_variance_pct ?? null}
+                onChange={(n) =>
+                  onChange({
+                    ...filters,
+                    min_variance_pct: n != null && n >= 0 ? n : undefined,
+                  })
+                }
+                unit="%"
+                decimals={1}
+                min={0}
+              />
+            </Field>
+          </div>
+        </FilterPopover>
+      }
+      end={
+        <IconButton
+          label="Refresh reconciliation records"
+          size="sm"
           onClick={onRefresh}
           disabled={loading}
-          className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200 disabled:opacity-50"
-          aria-label="Refresh reconciliation records"
-        >
-          <RefreshCw
-            className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
-            aria-hidden="true"
-          />
-          Refresh
-        </button>
-      </div>
-    </div>
+          icon={
+            <RefreshCw
+              className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+            />
+          }
+        />
+      }
+    />
   );
 }
 
@@ -388,32 +332,11 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
   const bolReady = bol?.status === "generated" && !!bol.download_url;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/30"
-      onClick={onClose}
-    >
-      <div
-        className="bg-white w-full max-w-xl h-full overflow-y-auto shadow-xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100 sticky top-0 bg-white">
-          <div>
-            <h2 className="text-lg font-semibold text-primary">
-              POD {record.pod_id}
-            </h2>
-            <p className="text-xs text-gray-500">
-              Reconciliation {record.reconciliation_id}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close POD detail"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
+    <Drawer open onClose={onClose} title={`POD ${record.pod_id}`} width={576}>
+      <div>
+        <p className="px-6 pt-3 text-xs text-gray-500">
+          Reconciliation {record.reconciliation_id}
+        </p>
 
         <div className="px-6 py-4 space-y-4">
           {alerted && (
@@ -630,7 +553,7 @@ function PodDetailDrawer({ record, onClose, onError }: PodDetailDrawerProps) {
           </section>
         </div>
       </div>
-    </div>
+    </Drawer>
   );
 }
 
@@ -1080,13 +1003,36 @@ function ReconciliationChain({
 interface ReconciliationTableProps {
   records: ReconciliationRecord[];
   onSelect: (record: ReconciliationRecord) => void;
+  loading?: boolean;
+  pagination?: {
+    page: number;
+    totalPages: number;
+    onPageChange: (page: number) => void;
+  };
 }
 
-function ReconciliationTable({ records, onSelect }: ReconciliationTableProps) {
+function ReconciliationTable({
+  records,
+  onSelect,
+  loading,
+  pagination,
+}: ReconciliationTableProps) {
   const columns: Column<ReconciliationRecord>[] = [
     {
+      key: "alert",
+      header: "Variance",
+      width: 140,
+      cell: (record) =>
+        isAlertedRow(record) ? (
+          <StatusBadge status="critical" label="Over threshold" />
+        ) : (
+          <StatusBadge status="ok" label="Within" />
+        ),
+    },
+    {
       key: "chain",
-      label: "Chain (order → plan → pod → invoice)",
+      label: "Chain",
+      title: () => "Order → plan → POD → invoice",
       className: "break-all",
       render: (record) => (
         <ReconciliationChain record={record} stopPropagation />
@@ -1225,60 +1171,20 @@ function ReconciliationTable({ records, onSelect }: ReconciliationTableProps) {
   ];
 
   return (
-    <Table<ReconciliationRecord>
+    <DataTable<ReconciliationRecord>
       ariaLabel="Reconciliation records"
-      variant="compact"
-      className="border border-gray-200 rounded-lg"
       columns={columns}
       data={records}
+      loading={loading}
       getRowId={(record) => record.reconciliation_id}
       rowTestId={(record) => `reconciliation-row-${record.reconciliation_id}`}
-      rowClassName={(record) => (isAlertedRow(record) ? "bg-error-light" : "")}
+      pagination={pagination}
       emptyState={
         <span className="text-gray-500">
           No reconciliation records match the current filters.
         </span>
       }
     />
-  );
-}
-
-// ─── Summary Bar ─────────────────────────────────────────────────────────────
-
-interface SummaryBarProps {
-  total: number;
-  pageCount: number;
-  alertedCount: number;
-}
-
-function SummaryBar({ total, pageCount, alertedCount }: SummaryBarProps) {
-  return (
-    <div className="grid grid-cols-3 gap-3">
-      <div className="border border-gray-200 rounded-lg px-4 py-3 bg-white">
-        <div className="text-xs text-gray-500 uppercase tracking-wide">
-          Total records
-        </div>
-        <div className="text-xl font-semibold text-gray-900">{total}</div>
-      </div>
-      <div className="border border-gray-200 rounded-lg px-4 py-3 bg-white">
-        <div className="text-xs text-gray-500 uppercase tracking-wide">
-          On this page
-        </div>
-        <div className="text-xl font-semibold text-gray-900">{pageCount}</div>
-      </div>
-      <div
-        className={`border rounded-lg px-4 py-3 ${alertedCount > 0 ? "border-error-light bg-error-light" : "border-gray-200 bg-white"}`}
-      >
-        <div className="text-xs uppercase tracking-wide text-gray-500">
-          Alerted on this page
-        </div>
-        <div
-          className={`text-xl font-semibold ${alertedCount > 0 ? "text-error-dark" : "text-gray-900"}`}
-        >
-          {alertedCount}
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -1292,8 +1198,6 @@ export interface ReconciliationPageProps {
 export default function ReconciliationPage({
   initialFilters,
 }: ReconciliationPageProps = {}) {
-  const { toasts, addToast, dismissToast } = useToasts();
-
   const [filters, setFilters] = useState<ReconciliationFiltersState>(
     initialFilters ?? {},
   );
@@ -1326,16 +1230,15 @@ export default function ReconciliationPage({
       setTotal(res.total);
       setHasNext(res.has_next);
     } catch (err) {
-      const message =
+      setError(
         err instanceof Error
           ? err.message
-          : "Failed to load reconciliation records.";
-      setError(message);
-      addToast(message, "error");
+          : "Failed to load reconciliation records.",
+      );
     } finally {
       setLoading(false);
     }
-  }, [queryFilters, addToast]);
+  }, [queryFilters]);
 
   useEffect(() => {
     refresh();
@@ -1359,102 +1262,98 @@ export default function ReconciliationPage({
     [records],
   );
 
+  const actions = useMemo(
+    () => (
+      <ExportCsvButton
+        type="reconciliation"
+        params={{
+          order_id: filters.order_id,
+          plan_id: filters.plan_id,
+          pod_id: filters.pod_id,
+          min_variance_pct: filters.min_variance_pct,
+        }}
+        subject="reconciliation"
+        allowedRoles={["admin", "dispatcher"]}
+      />
+    ),
+    [filters],
+  );
+  // Summary cards → title-row counts (design.md §6 rule 3).
+  const counts = useMemo(
+    () => (
+      <span className="whitespace-nowrap">
+        {number(total)} records · {number(alertedCount)} over threshold on this
+        page
+      </span>
+    ),
+    [total, alertedCount],
+  );
+  const embedded = usePageChrome({ actions, counts });
+
+  const totalPages = Math.max(
+    page + (hasNext ? 1 : 0),
+    Math.ceil(total / PAGE_SIZE),
+  );
+
   return (
-    <div className="flex flex-col h-full bg-gray-50">
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-
-      <div className="border-b border-gray-200 bg-white px-6 py-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-semibold text-primary">
-              Reconciliation
-            </h1>
-            <p className="text-sm text-gray-500 mt-0.5">
-              Four-way variance tracking: ordered → loaded → delivered →
-              invoiced gallons.
-            </p>
-          </div>
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center gap-3 border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Reconciliation
+          </PageTitle>
+          <span className="text-xs text-text-muted">{counts}</span>
+          <div className="ml-auto">{actions}</div>
         </div>
-        <div className="mt-4">
-          <FiltersRow
-            filters={filters}
-            onChange={handleFiltersChange}
-            onReset={handleResetFilters}
-            onRefresh={refresh}
-            loading={loading}
-          />
-        </div>
-      </div>
-
-      <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
-        <SummaryBar
-          total={total}
-          pageCount={records.length}
-          alertedCount={alertedCount}
-        />
-
-        {error && !loading && (
-          <div className="flex items-start gap-2 p-3 rounded-lg bg-error-light border border-error-light text-sm text-error-dark">
+      )}
+      <FiltersRow
+        filters={filters}
+        onChange={handleFiltersChange}
+        onReset={handleResetFilters}
+        onRefresh={refresh}
+        loading={loading}
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        {error && !loading ? (
+          <div
+            role="alert"
+            className="m-4 flex items-start gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800"
+          >
             <AlertTriangle
-              className="w-4 h-4 mt-0.5 flex-shrink-0"
+              className="mt-0.5 h-4 w-4 flex-shrink-0"
               aria-hidden="true"
             />
             <div>
               <div className="font-medium">Could not load reconciliation.</div>
-              <div className="text-xs mt-0.5">{error}</div>
+              <div className="mt-0.5 text-xs">{error}</div>
+              <button
+                type="button"
+                onClick={refresh}
+                className="mt-1 text-xs font-semibold text-link hover:underline"
+              >
+                Try again
+              </button>
             </div>
           </div>
-        )}
-
-        {loading ? (
-          <div className="flex items-center justify-center py-12 text-sm text-gray-500">
-            <Loader2 className="w-5 h-5 animate-spin mr-2" aria-hidden="true" />
-            Loading reconciliation records…
-          </div>
         ) : (
-          <ReconciliationTable records={records} onSelect={setSelected} />
+          <ReconciliationTable
+            records={records}
+            onSelect={setSelected}
+            loading={loading}
+            pagination={
+              totalPages > 1
+                ? { page, totalPages, onPageChange: setPage }
+                : undefined
+            }
+          />
         )}
-
-        <div className="flex items-center justify-between pt-2">
-          <div className="text-xs text-gray-500">
-            Page {page}
-            {total > 0 && (
-              <span>
-                {" "}
-                · Showing {records.length} of {total} records
-              </span>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              disabled={loading || page <= 1}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm text-gray-700 hover:text-gray-900 border border-gray-200 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Previous page"
-            >
-              <ChevronLeft className="w-4 h-4" aria-hidden="true" />
-              Prev
-            </button>
-            <button
-              type="button"
-              onClick={() => setPage((p) => p + 1)}
-              disabled={loading || !hasNext}
-              className="inline-flex items-center gap-1 px-3 py-1.5 text-sm text-gray-700 hover:text-gray-900 border border-gray-200 rounded-md hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
-              aria-label="Next page"
-            >
-              Next
-              <ChevronRight className="w-4 h-4" aria-hidden="true" />
-            </button>
-          </div>
-        </div>
       </div>
 
       {selected && (
         <PodDetailDrawer
           record={selected}
           onClose={() => setSelected(null)}
-          onError={(msg) => addToast(msg, "error")}
+          onError={(msg) => notify({ type: "error", message: msg })}
         />
       )}
     </div>

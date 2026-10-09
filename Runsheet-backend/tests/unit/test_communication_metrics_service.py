@@ -31,6 +31,46 @@ def _make_es_mock() -> MagicMock:
     return es
 
 
+def _respond_with(*documents: dict) -> AsyncMock:
+    """A search response carrying ``documents`` as hits.
+
+    The latency metrics used to ask Elasticsearch for ``bucket_script`` and
+    ``avg_bucket`` pipeline aggregations, and one of them computed its latency in a
+    painless ``runtime_mappings`` field. The Postgres document store implements
+    neither: the pipelines raised (and were caught, yielding an empty metric) and
+    the runtime field was silently dropped, so ``stats`` aggregated a field that did
+    not exist and the endpoint reported zero seconds as though measured.
+
+    The pairing and subtraction happen in Python now, so these tests supply events
+    rather than pre-aggregated numbers — which also means they exercise the
+    arithmetic instead of the response parsing.
+    """
+    return AsyncMock(
+        return_value={
+            "hits": {
+                "hits": [{"_source": document} for document in documents],
+                "total": {"value": len(documents)},
+            }
+        }
+    )
+
+
+def _job_event(job_id: str, event_type: str, stamp: str) -> dict:
+    return {"job_id": job_id, "event_type": event_type, "event_timestamp": stamp}
+
+
+def _notification(channel: str, created: str, sent: str) -> dict:
+    return {"channel": channel, "created_at": created, "sent_at": sent}
+
+
+def _pair(job_id: str, start_type: str, end_type: str, seconds: int) -> list:
+    """An event pair ``seconds`` apart, on 2026-01-01."""
+    return [
+        _job_event(job_id, start_type, "2026-01-01T00:00:00+00:00"),
+        _job_event(job_id, end_type, f"2026-01-01T00:00:{seconds:02d}+00:00"),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # compute_ack_latency
 # ---------------------------------------------------------------------------
@@ -91,65 +131,56 @@ class TestComputeAckLatency:
     async def test_returns_overall_stats(self):
         """compute_ack_latency returns overall latency statistics."""
         es = _make_es_mock()
-        es.search_documents = AsyncMock(return_value={
-            "hits": {"hits": [], "total": {"value": 0}},
-            "aggregations": {
-                "latency_stats": {
-                    "count": 5,
-                    "min": 10000,
-                    "max": 60000,
-                    "avg": 30000,
-                    "sum": 150000,
-                },
-                "by_time_bucket": {"buckets": []},
-                "by_job": {"buckets": []},
-            },
-        })
+        es.search_documents = _respond_with(
+            *_pair("JOB-1", "assignment", "ack", 10),
+            *_pair("JOB-2", "assignment", "ack", 30),
+            *_pair("JOB-3", "assignment", "ack", 50),
+        )
         service = CommunicationMetricsService(es)
 
         result = await service.compute_ack_latency("tenant-1")
 
         assert result["overall"]["avg_seconds"] == 30.0
         assert result["overall"]["min_seconds"] == 10.0
-        assert result["overall"]["max_seconds"] == 60.0
-        assert result["overall"]["count"] == 5
+        assert result["overall"]["max_seconds"] == 50.0
+        assert result["overall"]["count"] == 3
 
     async def test_returns_time_buckets(self):
         """compute_ack_latency returns time-bucketed latency data."""
         es = _make_es_mock()
-        es.search_documents = AsyncMock(return_value={
-            "hits": {"hits": [], "total": {"value": 0}},
-            "aggregations": {
-                "latency_stats": {"count": 0, "min": None, "max": None, "avg": None},
-                "by_job": {"buckets": []},
-                "by_time_bucket": {
-                    "buckets": [
-                        {
-                            "key_as_string": "2025-01-01T00:00:00.000Z",
-                            "key": 1735689600000,
-                            "doc_count": 10,
-                            "by_job_in_bucket": {"buckets": []},
-                            "avg_latency": {"value": 25000},
-                        },
-                        {
-                            "key_as_string": "2025-01-02T00:00:00.000Z",
-                            "key": 1735776000000,
-                            "doc_count": 8,
-                            "by_job_in_bucket": {"buckets": []},
-                            "avg_latency": {"value": 35000},
-                        },
-                    ]
-                },
-            },
-        })
+        es.search_documents = _respond_with(
+            _job_event("JOB-1", "assignment", "2026-01-01T00:00:00+00:00"),
+            _job_event("JOB-1", "ack", "2026-01-01T00:00:25+00:00"),
+            _job_event("JOB-2", "assignment", "2026-01-02T00:00:00+00:00"),
+            _job_event("JOB-2", "ack", "2026-01-02T00:00:35+00:00"),
+        )
         service = CommunicationMetricsService(es)
 
         result = await service.compute_ack_latency("tenant-1")
 
         assert len(result["buckets"]) == 2
-        assert result["buckets"][0]["timestamp"] == "2025-01-01T00:00:00.000Z"
+        assert result["buckets"][0]["timestamp"] == "2026-01-01T00:00:00Z"
         assert result["buckets"][0]["avg_latency_seconds"] == 25.0
         assert result["buckets"][1]["avg_latency_seconds"] == 35.0
+
+    async def test_a_job_missing_one_half_of_the_pair_is_excluded(self):
+        """``bucket_script`` produced no value when a buckets_path was missing.
+
+        So an unacknowledged assignment contributed nothing rather than counting as
+        zero latency — counting it would make the average improve as
+        acknowledgements got worse.
+        """
+        es = _make_es_mock()
+        es.search_documents = _respond_with(
+            _job_event("JOB-1", "assignment", "2026-01-01T00:00:00+00:00"),
+            *_pair("JOB-2", "assignment", "ack", 20),
+        )
+        service = CommunicationMetricsService(es)
+
+        result = await service.compute_ack_latency("tenant-1")
+
+        assert result["overall"]["count"] == 1
+        assert result["overall"]["avg_seconds"] == 20.0
 
     async def test_handles_es_error_gracefully(self):
         """compute_ack_latency returns empty result on ES error."""
@@ -161,16 +192,44 @@ class TestComputeAckLatency:
 
         assert result == {"buckets": [], "overall": {}}
 
-    async def test_uses_aggregations_with_size_zero(self):
-        """compute_ack_latency uses size=0 for aggregation-only query."""
+    async def test_it_fetches_only_the_three_fields_it_pairs_on(self):
+        """Was ``size: 0`` with pipeline aggregations; now it reads the events.
+
+        ``_source`` is narrowed because job events carry an arbitrary payload, and
+        pulling ten thousand full documents to subtract two timestamps would make a
+        metric endpoint the heaviest read in the system.
+        """
         es = _make_es_mock()
         service = CommunicationMetricsService(es)
 
         await service.compute_ack_latency("tenant-1")
 
-        call_args = es.search_documents.call_args
-        query = call_args[0][1]
-        assert query["size"] == 0
+        query = es.search_documents.call_args[0][1]
+        assert query["size"] == CommunicationMetricsService.MAX_EVENTS_SCANNED
+        assert set(query["_source"]) == {"job_id", "event_type", "event_timestamp"}
+        assert query["sort"] == [{"event_timestamp": {"order": "asc"}}]
+
+    async def test_it_warns_rather_than_truncating_silently(self, caplog):
+        """Past the scan cap the metric covers part of the range.
+
+        A quietly truncated latency metric is indistinguishable from a genuinely
+        fast day, so it says so.
+        """
+        es = _make_es_mock()
+        es.search_documents = AsyncMock(
+            return_value={
+                "hits": {
+                    "hits": [{"_source": event} for event in _pair("JOB-1", "assignment", "ack", 10)],
+                    "total": {"value": CommunicationMetricsService.MAX_EVENTS_SCANNED + 1},
+                }
+            }
+        )
+        service = CommunicationMetricsService(es)
+
+        with caplog.at_level("WARNING"):
+            await service.compute_ack_latency("tenant-1")
+
+        assert "scan cap" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -207,48 +266,29 @@ class TestComputeNotificationSendLatency:
         assert {"exists": {"field": "created_at"}} in must
 
     async def test_returns_by_channel_stats(self):
-        """compute_notification_send_latency returns per-channel latency stats."""
+        """compute_notification_send_latency returns per-channel latency stats.
+
+        The numbers are the assertion, and they are why this test matters: the
+        painless ``runtime_mappings`` field this method used was silently dropped by
+        the Postgres store, so every one of these came back null or zero with no
+        error raised.
+        """
         es = _make_es_mock()
-        es.search_documents = AsyncMock(return_value={
-            "hits": {"hits": [], "total": {"value": 0}},
-            "aggregations": {
-                "by_channel": {
-                    "buckets": [
-                        {
-                            "key": "sms",
-                            "doc_count": 10,
-                            "latency_stats": {
-                                "count": 10,
-                                "min": 500,
-                                "max": 5000,
-                                "avg": 2000,
-                                "sum": 20000,
-                            },
-                        },
-                        {
-                            "key": "email",
-                            "doc_count": 5,
-                            "latency_stats": {
-                                "count": 5,
-                                "min": 1000,
-                                "max": 8000,
-                                "avg": 3000,
-                                "sum": 15000,
-                            },
-                        },
-                    ]
-                },
-                "by_time_bucket": {"buckets": []},
-            },
-        })
+        es.search_documents = _respond_with(
+            _notification("sms", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"),
+            _notification("sms", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:03+00:00"),
+            _notification("email", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:03+00:00"),
+        )
         service = CommunicationMetricsService(es)
 
         result = await service.compute_notification_send_latency("tenant-1")
 
-        assert "sms" in result["by_channel"]
-        assert result["by_channel"]["sms"]["avg_seconds"] == 2.0
-        assert result["by_channel"]["sms"]["count"] == 10
-        assert "email" in result["by_channel"]
+        assert result["by_channel"]["sms"] == {
+            "avg_seconds": 2.0,
+            "min_seconds": 1.0,
+            "max_seconds": 3.0,
+            "count": 2,
+        }
         assert result["by_channel"]["email"]["avg_seconds"] == 3.0
 
     async def test_applies_date_range_filter(self):
@@ -286,44 +326,33 @@ class TestComputeNotificationSendLatency:
     async def test_returns_time_buckets_with_channel_breakdown(self):
         """compute_notification_send_latency returns time buckets with per-channel data."""
         es = _make_es_mock()
-        es.search_documents = AsyncMock(return_value={
-            "hits": {"hits": [], "total": {"value": 0}},
-            "aggregations": {
-                "by_channel": {"buckets": []},
-                "by_time_bucket": {
-                    "buckets": [
-                        {
-                            "key_as_string": "2025-01-01T00:00:00.000Z",
-                            "key": 1735689600000,
-                            "doc_count": 15,
-                            "by_channel": {
-                                "buckets": [
-                                    {
-                                        "key": "sms",
-                                        "doc_count": 10,
-                                        "latency_stats": {
-                                            "count": 10,
-                                            "avg": 2000,
-                                            "min": 500,
-                                            "max": 5000,
-                                        },
-                                    }
-                                ]
-                            },
-                        }
-                    ]
-                },
-            },
-        })
+        es.search_documents = _respond_with(
+            _notification("sms", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:01+00:00"),
+            _notification("sms", "2026-01-01T06:00:00+00:00", "2026-01-01T06:00:03+00:00"),
+        )
         service = CommunicationMetricsService(es)
 
         result = await service.compute_notification_send_latency("tenant-1")
 
         assert len(result["buckets"]) == 1
         bucket = result["buckets"][0]
-        assert bucket["timestamp"] == "2025-01-01T00:00:00.000Z"
-        assert "sms" in bucket["by_channel"]
-        assert bucket["by_channel"]["sms"]["avg_seconds"] == 2.0
+        assert bucket["timestamp"] == "2026-01-01T00:00:00Z"
+        assert bucket["doc_count"] == 2
+        assert bucket["by_channel"]["sms"] == {"avg_seconds": 2.0, "count": 2}
+
+    async def test_a_queued_notification_is_excluded(self):
+        """The painless field emitted nothing without both timestamps, so a
+        notification that never sent contributed to no statistic — rather than
+        counting as zero latency, which would improve the metric."""
+        es = _make_es_mock()
+        es.search_documents = _respond_with(
+            {"channel": "sms", "created_at": "2026-01-01T00:00:00+00:00"},
+        )
+        service = CommunicationMetricsService(es)
+
+        result = await service.compute_notification_send_latency("tenant-1")
+
+        assert result == {"by_channel": {}, "buckets": []}
 
 
 # ---------------------------------------------------------------------------
@@ -361,28 +390,40 @@ class TestComputeDriverResponseLatency:
     async def test_returns_overall_stats(self):
         """compute_driver_response_latency returns overall latency statistics."""
         es = _make_es_mock()
-        es.search_documents = AsyncMock(return_value={
-            "hits": {"hits": [], "total": {"value": 0}},
-            "aggregations": {
-                "latency_stats": {
-                    "count": 3,
-                    "min": 5000,
-                    "max": 120000,
-                    "avg": 45000,
-                    "sum": 135000,
-                },
-                "by_time_bucket": {"buckets": []},
-                "by_job": {"buckets": []},
-            },
-        })
+        es.search_documents = _respond_with(
+            *_pair("JOB-1", "assignment", "accept", 10),
+            *_pair("JOB-2", "assignment", "reject", 20),
+            *_pair("JOB-3", "assignment", "accept", 30),
+        )
         service = CommunicationMetricsService(es)
 
         result = await service.compute_driver_response_latency("tenant-1")
 
-        assert result["overall"]["avg_seconds"] == 45.0
-        assert result["overall"]["min_seconds"] == 5.0
-        assert result["overall"]["max_seconds"] == 120.0
+        assert result["overall"]["avg_seconds"] == 20.0
+        assert result["overall"]["min_seconds"] == 10.0
+        assert result["overall"]["max_seconds"] == 30.0
         assert result["overall"]["count"] == 3
+
+    async def test_a_reject_counts_as_a_response(self):
+        """Excluding rejections would report only the drivers who said yes."""
+        es = _make_es_mock()
+        es.search_documents = _respond_with(*_pair("JOB-1", "assignment", "reject", 15))
+        service = CommunicationMetricsService(es)
+
+        result = await service.compute_driver_response_latency("tenant-1")
+
+        assert result["overall"]["count"] == 1
+        assert result["overall"]["avg_seconds"] == 15.0
+
+    async def test_an_ack_is_not_a_response(self):
+        """The two metrics measure different things and must not share events."""
+        es = _make_es_mock()
+        es.search_documents = _respond_with(*_pair("JOB-1", "assignment", "ack", 15))
+        service = CommunicationMetricsService(es)
+
+        result = await service.compute_driver_response_latency("tenant-1")
+
+        assert result["overall"]["count"] == 0
 
     async def test_applies_date_range_filter(self):
         """compute_driver_response_latency applies date range filter."""

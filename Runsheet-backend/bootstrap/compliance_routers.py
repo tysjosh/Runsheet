@@ -1,16 +1,16 @@
 """Registration of the Compliance Backbone REST surface, behind its flag.
 
 Lives here rather than in ``main.py`` for two reasons: ``main.py`` carries a
-line-count ceiling that is meant to ratchet down, and these eight routers are
+line-count ceiling that is meant to ratchet down, and these nine routers are
 referenced nowhere else, so nothing is lost by moving both the imports and the
 registration out of the top-level module.
 
 What this gates, and what it deliberately does not
 --------------------------------------------------
 
-``compliance_backbone_enabled`` controls the eight compliance **routers**:
+``compliance_backbone_enabled`` controls the nine compliance **routers**:
 IFTA, terminal BOL, k-factor, driver qualification, asset certification, meter
-tickets, asset compliance, and tax admin. None is exercised by the seven MVP
+tickets, asset compliance, tax admin, and the admin HOS/DVIR record lists. None is exercised by the seven MVP
 capabilities, so an MVP pilot can drop all 34 endpoints.
 
 It does NOT gate the compliance *services*, which the delivery pipeline imports
@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 def _compliance_routers() -> Tuple["APIRouter", ...]:
-    """Import and return the eight compliance routers.
+    """Import and return the nine compliance routers.
 
     Imported inside the function so a module-level import cycle cannot form
     between ``main`` and the compliance package, and so nothing is imported at
@@ -55,6 +55,9 @@ def _compliance_routers() -> Tuple["APIRouter", ...]:
         router as asset_compliance_router,
     )
     from compliance.api.driver_endpoints import router as driver_router
+    from compliance.api.driver_records_endpoints import (
+        router as driver_records_router,
+    )
     from compliance.api.ifta_endpoints import router as ifta_router
     from compliance.api.kfactor_endpoints import router as kfactor_router
     from compliance.api.meter_endpoints import router as meter_router
@@ -72,6 +75,7 @@ def _compliance_routers() -> Tuple["APIRouter", ...]:
         asset_cert_router,
         meter_router,
         asset_compliance_router,
+        driver_records_router,
     )
 
 

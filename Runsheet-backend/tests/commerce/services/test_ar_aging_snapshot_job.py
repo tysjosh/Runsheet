@@ -137,19 +137,36 @@ class TestARAgingSnapshotJob:
         assert ar_aging_service.write_daily_snapshot.call_count == 2
 
     @pytest.mark.asyncio
-    async def test_handles_es_search_failure_gracefully(self):
-        """Returns 0 when the ES aggregation query fails."""
+    async def test_es_search_failure_raises_so_no_success_is_recorded(self):
+        """A failed tenant scan raises (F1): run_periodic(record="success")
+        must not record it as a successful run."""
         es = _make_es_service()
         ar_aging_service = _make_ar_aging_service()
 
         es.search_documents = AsyncMock(side_effect=Exception("Connection refused"))
 
-        result = await run_ar_aging_snapshot_cycle(
-            es_service=es, ar_aging_service=ar_aging_service
+        with pytest.raises(RuntimeError, match="tenant scan failed"):
+            await run_ar_aging_snapshot_cycle(
+                es_service=es, ar_aging_service=ar_aging_service
+            )
+
+        ar_aging_service.write_daily_snapshot.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_every_tenant_failing_raises(self):
+        es = _make_es_service()
+        ar_aging_service = _make_ar_aging_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_agg_response(["tenant_a", "tenant_b"])
+        )
+        ar_aging_service.write_daily_snapshot = AsyncMock(
+            side_effect=Exception("ES timeout")
         )
 
-        assert result == 0
-        ar_aging_service.write_daily_snapshot.assert_not_called()
+        with pytest.raises(RuntimeError, match="all 2 tenant"):
+            await run_ar_aging_snapshot_cycle(
+                es_service=es, ar_aging_service=ar_aging_service
+            )
 
     @pytest.mark.asyncio
     async def test_handles_empty_aggregation_response(self):

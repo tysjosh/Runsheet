@@ -33,14 +33,20 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
 from compliance.services.kfactor_calibration_service import (
+    DeliveryNotFoundError,
     KFactorCalibrationService,
 )
-from errors.exceptions import AppException, kfactor_variance_history_failed
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    kfactor_variance_history_failed,
+    resource_not_found,
+)
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -145,12 +151,10 @@ async def get_calibration_dashboard(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.dashboard_failed",
+            message="Failed to retrieve K-factor calibration dashboard.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.dashboard_failed",
-                "message": "Failed to retrieve K-factor calibration dashboard.",
-            },
         )
 
     logger.info(
@@ -196,6 +200,7 @@ async def approve_kfactor_adjustment(
     operator_id = getattr(tenant, "user_id", None) or tenant.tenant_id
 
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         adjustment = await svc.approve_adjustment(
             tank_id=tank_id,
             new_kfactor=body.new_kfactor,
@@ -205,12 +210,10 @@ async def approve_kfactor_adjustment(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.KFACTOR_INVALID_ADJUSTMENT,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "kfactor.invalid_adjustment",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -219,12 +222,10 @@ async def approve_kfactor_adjustment(
             tank_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.approve_failed",
+            message="Failed to approve K-factor adjustment.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.approve_failed",
-                "message": "Failed to approve K-factor adjustment.",
-            },
         )
 
     logger.info(
@@ -269,27 +270,33 @@ async def get_variance(
     svc = _get_kfactor_service()
 
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         variance = await svc.compute_variance(
             delivery_id=delivery_id,
             tenant_id=tenant.tenant_id,
         )
     except AppException:
         raise
+    except DeliveryNotFoundError as exc:
+        raise resource_not_found(str(exc), details={"delivery_id": delivery_id})
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.KFACTOR_VARIANCE_COMPUTATION_ERROR,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "kfactor.variance_computation_error",
-                "message": str(exc),
-            },
         )
     except RuntimeError as exc:
-        raise HTTPException(
+        # A 5xx body never carries exception text (OI-36); it goes to the log.
+        logger.warning(
+            "kfactor.variance: weather provider unavailable for tenant=%s tank=%s: %s",
+            tenant.tenant_id,
+            tank_id,
+            exc,
+        )
+        raise AppException(
+            error_code="kfactor.weather_provider_unavailable",
+            message="The weather provider is unavailable. Try again later.",
             status_code=503,
-            detail={
-                "error_code": "kfactor.weather_provider_unavailable",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -300,12 +307,10 @@ async def get_variance(
             delivery_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.variance_failed",
+            message="Failed to compute K-factor variance.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.variance_failed",
-                "message": "Failed to compute K-factor variance.",
-            },
         )
 
     logger.info(
@@ -354,6 +359,7 @@ async def get_variance_history(
     """
     svc = _get_kfactor_service()
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         history = await svc.get_variance_history(
             tank_id=tank_id, tenant_id=tenant.tenant_id, limit=limit
         )
@@ -401,6 +407,7 @@ async def suggest_kfactor(
     svc = _get_kfactor_service()
 
     try:
+        await svc.require_tank(tank_id, tenant.tenant_id)
         suggested = await svc.suggest_new_kfactor(
             tank_id=tank_id,
             tenant_id=tenant.tenant_id,
@@ -408,12 +415,10 @@ async def suggest_kfactor(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.KFACTOR_SUGGEST_ERROR,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "kfactor.suggest_error",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -422,12 +427,10 @@ async def suggest_kfactor(
             tank_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="kfactor.suggest_failed",
+            message="Failed to compute suggested K-factor.",
             status_code=500,
-            detail={
-                "error_code": "kfactor.suggest_failed",
-                "message": "Failed to compute suggested K-factor.",
-            },
         )
 
     logger.info(

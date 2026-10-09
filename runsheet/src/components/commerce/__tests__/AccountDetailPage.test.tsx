@@ -13,6 +13,12 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+const mockPush = jest.fn();
+const mockBack = jest.fn();
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ push: mockPush, back: mockBack }),
+}));
+
 jest.mock("../../../services/commerceApi", () => ({
   getAccount: jest.fn(),
   getAccountAging: jest.fn(),
@@ -20,6 +26,7 @@ jest.mock("../../../services/commerceApi", () => ({
   deleteCreditOverride: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import {
   applyCreditOverride,
   deleteCreditOverride,
@@ -115,12 +122,42 @@ describe("AccountDetailPage", () => {
     expect(screen.getByText("$1,500.00")).toBeInTheDocument(); // 90+
   });
 
+  // F12: aged by days past due_date, with a Current (not yet due) card.
+  it("shows the Current bucket and days-past-due labels", async () => {
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture({ bucket_current_cents: 70000 }),
+      request_id: "r2",
+    } as any);
+
+    render(<AccountDetailPage accountId="acc_001" />);
+
+    expect(
+      await screen.findByText("Current (not yet due)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("$700.00")).toBeInTheDocument();
+    for (const label of [
+      "1–30 days past due",
+      "31–60 days past due",
+      "61–90 days past due",
+      "90+ days past due",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    expect(screen.queryByText("0–30 Days")).not.toBeInTheDocument();
+  });
+
   it("shows loading state initially", () => {
     mockGetAccount.mockReturnValue(new Promise(() => {}));
     mockGetAccountAging.mockReturnValue(new Promise(() => {}));
 
     render(<AccountDetailPage accountId="acc_001" />);
-    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Loading account details"),
+    ).toBeInTheDocument();
   });
 
   it("shows error state on fetch failure", async () => {
@@ -133,6 +170,52 @@ describe("AccountDetailPage", () => {
       expect(screen.getByRole("alert")).toBeInTheDocument();
       expect(screen.getByText(/Server error/)).toBeInTheDocument();
     });
+  });
+
+  it("shows the account header and a staff-access state on 403", async () => {
+    const forbidden = new ApiError(
+      "Caller lacks a required role for this operation",
+      403,
+      "INSUFFICIENT_ROLE",
+    );
+    mockGetAccount.mockRejectedValue(forbidden);
+    mockGetAccountAging.mockRejectedValue(forbidden);
+
+    render(<AccountDetailPage accountId="acc_001" />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Runsheet staff access required",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Account" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("acc_001")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Go back/ }));
+    expect(mockBack).toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Go to Billing" })).toHaveAttribute(
+      "href",
+      "/dashboard/billing",
+    );
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("shows a not-found state on 404", async () => {
+    const onBack = jest.fn();
+    mockGetAccount.mockRejectedValue(new ApiError("Account not found", 404));
+    mockGetAccountAging.mockRejectedValue(
+      new ApiError("Account not found", 404),
+    );
+
+    render(<AccountDetailPage accountId="acc_missing" onBack={onBack} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Account not found" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Go back/ }));
+    expect(onBack).toHaveBeenCalled();
   });
 
   it("opens credit override drawer when button is clicked", async () => {
@@ -155,7 +238,9 @@ describe("AccountDetailPage", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeInTheDocument();
-      expect(screen.getByText("Apply Credit Override")).toBeInTheDocument();
+      expect(
+        screen.getByRole("heading", { name: "Apply credit override" }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -191,7 +276,7 @@ describe("AccountDetailPage", () => {
     });
 
     // Fill form
-    const reasonInput = screen.getByLabelText("Reason");
+    const reasonInput = screen.getByLabelText(/^Reason/);
     fireEvent.change(reasonInput, { target: { value: "VIP customer" } });
 
     // Submit
@@ -284,7 +369,61 @@ describe("AccountDetailPage", () => {
     const customerLink = screen.getByRole("link", { name: /cust_001/ });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/cust_001",
+      "/dashboard/customers/cust_001",
     );
+  });
+});
+
+describe("AccountDetailPage — credit override FormDialog (task 3.4)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture(),
+      request_id: "r2",
+    } as any);
+  });
+
+  it("requires a reason inline and keeps the dialog open", async () => {
+    render(<AccountDetailPage accountId="acc_001" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Credit override/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Apply override" }));
+    expect(await screen.findByText("Enter a reason.")).toBeInTheDocument();
+    expect(mockApplyCreditOverride).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+
+  it("shows an API error in the dialog and closes on success with the new state", async () => {
+    mockApplyCreditOverride
+      .mockRejectedValueOnce(new ApiError("Override limit reached", 409))
+      .mockResolvedValueOnce({
+        data: accountFixture({
+          credit_state: "override",
+          credit_override_expires_at: "2026-12-01T00:00:00Z",
+        }),
+        request_id: "r3",
+      } as any);
+    render(<AccountDetailPage accountId="acc_001" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Credit override/i }),
+    );
+    fireEvent.change(screen.getByLabelText(/^Reason/), {
+      target: { value: "Seasonal peak" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply override" }));
+    expect(
+      await screen.findByText("Override limit reached"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Apply override" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(
+      screen.getByText(/Credit override active until/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Override")).toBeInTheDocument();
   });
 });

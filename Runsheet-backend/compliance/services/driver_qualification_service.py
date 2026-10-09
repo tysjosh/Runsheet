@@ -23,6 +23,7 @@ Validates: Requirement 5.1
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -31,16 +32,26 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.models.driver import Driver, DriverStatus
 from compliance.services.compliance_es_mappings import DRIVERS_INDEX
-from errors.exceptions import resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
+from services.keyset_pagination import (
+    next_cursor_from_hits,
+    search_after_for_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+# Shape of a server-assigned DQ driver id (compliance/models/driver.py
+# ``_generate_driver_id``: ``driver_<uuid4>``). Anything else is treated as an
+# ops driver id and resolved through ``external_refs.ops_driver_id`` (B10).
+_DQ_DRIVER_ID_RE = re.compile(r"^driver_[0-9a-f-]{36}$")
 
 _DEFAULT_PAGE_LIMIT = 50
 _MAX_PAGE_LIMIT = 200
@@ -143,8 +154,30 @@ class DQFDashboard(BaseModel):
     expiring_within_30_days: int = 0
     expiring_within_7_days: int = 0
     drug_test_overdue: int = 0
+    #: Drivers with a qualification expiring within 60 days and none past due
+    #: (the 60-day window; an expired driver is in ``expired_drivers``). C10.
+    expiring_drivers: int = 0
     drivers: List[DriverDashboardEntry] = Field(default_factory=list)
     generated_at: datetime = Field(default_factory=utcnow)
+
+
+def _effective_status(
+    status: str,
+    cdl_expiry: Optional[date],
+    medical_expiry: Optional[date],
+    today: date,
+) -> str:
+    """Return ``expired`` for an active driver whose CDL or medical card is past due.
+
+    Any other status (``suspended``, ``expired``) is returned unchanged, so a
+    suspension is never overwritten. Expiring today is still valid (C10, D4).
+    """
+    if status != "active":
+        return status
+    for expiry in (cdl_expiry, medical_expiry):
+        if expiry is not None and expiry < today:
+            return "expired"
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -194,10 +227,18 @@ class DriverQualificationService:
         """Create a new Driver record in the drivers index.
 
         Validates the input via the Driver Pydantic model, assigns a
-        server-generated ``driver_id``, and persists to ES.
+        server-generated ``driver_id``, and persists to ES. An ``active``
+        driver whose CDL or medical card is already past due is stored as
+        ``expired`` (C10).
 
         Validates: Requirement 5.1
         """
+        status = _effective_status(
+            status,
+            self._parse_date(cdl_expiry_date),
+            self._parse_date(medical_card_expiry_date),
+            date.today(),
+        )
         # Validate via Pydantic model (raises ValueError on invalid input)
         driver = Driver(
             tenant_id=tenant_id,
@@ -343,7 +384,9 @@ class DriverQualificationService:
 
         # Cursor-based pagination using search_after
         if cursor:
-            base_query["search_after"] = [cursor, cursor]
+            base_query["search_after"] = await search_after_for_cursor(
+                self._es, DRIVERS_INDEX, cursor, base_query["sort"]
+            )
 
         query = inject_tenant_filter(base_query, tenant_id)
 
@@ -355,11 +398,9 @@ class DriverQualificationService:
         items = [hit["_source"] for hit in hits]
 
         # Determine next cursor
-        next_cursor: Optional[str] = None
-        if hits and len(hits) == limit:
-            last_sort = hits[-1].get("sort")
-            if last_sort and len(last_sort) >= 2:
-                next_cursor = hits[-1]["_source"]["driver_id"]
+        next_cursor = next_cursor_from_hits(
+            hits, limit, id_field="driver_id"
+        )
 
         return {
             "items": items,
@@ -394,7 +435,8 @@ class DriverQualificationService:
 
         Only non-sentinel fields are applied. Uses the sentinel pattern
         (``...``) to distinguish "not provided" from "set to None" for
-        optional date fields.
+        optional date fields. If the merged record is ``active`` with a
+        past-due CDL or medical card, ``expired`` is stored (C10).
 
         Validates: Requirement 5.1, Constraint C3
         """
@@ -493,6 +535,23 @@ class DriverQualificationService:
 
         if not partial:
             return existing
+
+        # An update that leaves an active driver with a past-due CDL or
+        # medical card (moved date, or status set back to active) stores
+        # ``expired`` (C10). Evaluated on the merged record.
+        merged_status = partial.get("status", existing.get("status", "active"))
+        effective = _effective_status(
+            merged_status,
+            self._parse_date(partial.get("cdl_expiry_date", existing.get("cdl_expiry_date"))),
+            self._parse_date(
+                partial.get(
+                    "medical_card_expiry_date", existing.get("medical_card_expiry_date")
+                )
+            ),
+            date.today(),
+        )
+        if effective != merged_status:
+            partial["status"] = effective
 
         partial["updated_at"] = utcnow().isoformat()
 
@@ -654,15 +713,32 @@ class DriverQualificationService:
         always surfaced as ``expired`` regardless of individual expiry dates,
         since they are not road-legal for assignment (Req 4.3).
 
+        ``driver_id`` may be a DQ id (``driver_<uuid4>``) or an ops driver id
+        (``DRV-001``) from the profile read. An ops id, or a DQ-shaped id with
+        no DQ record, resolves through ``external_refs.ops_driver_id`` within
+        the tenant (B10). The summary's ``driver_id`` is the DQ record's id.
+
         Raises ``resource_not_found`` when the driver has no compliance
         qualification record in this tenant; callers correlating from the ops
         utilization store treat that as an unresolved reference.
 
         Validates: Requirements 4.2, 4.3.
         """
-        driver = await self.get(tenant_id, driver_id)
-        today = date.today()
+        driver = await self._get_for_summary(tenant_id, driver_id)
+        return self.summarize_qualifications(driver, date.today(), driver_id)
 
+    def summarize_qualifications(
+        self,
+        driver: Dict[str, Any],
+        today: date,
+        driver_id: Optional[str] = None,
+    ) -> DriverQualificationSummary:
+        """Collapse one DQ record into its qualification summary (no I/O).
+
+        The rule :meth:`get_qualification_summary` applies, shared with the
+        driver qualification CSV export (OI-57) so both report the same
+        ``overall_status``.
+        """
         qualifications: List[QualificationAlert] = []
         worst = "valid"
 
@@ -707,11 +783,52 @@ class DriverQualificationService:
         overall_status = "expired" if driver_status in ("suspended", "expired") else worst
 
         return DriverQualificationSummary(
-            driver_id=driver_id,
+            driver_id=driver.get("driver_id") or driver_id,
             full_name=driver.get("full_name", ""),
             driver_status=driver_status,
             overall_status=overall_status,
             qualifications=qualifications,
+        )
+
+    async def _get_for_summary(self, tenant_id: str, driver_id: str) -> Dict[str, Any]:
+        """Resolve a DQ id or an ops driver id to the tenant's DQ record (B10).
+
+        A DQ-shaped id is read directly; when it isn't DQ-shaped, or no DQ
+        record has it, the tenant's drivers are searched for
+        ``external_refs.ops_driver_id == driver_id``.
+
+        Raises:
+            AppException: ``resource_not_found`` when neither lookup matches.
+        """
+        if _DQ_DRIVER_ID_RE.match(driver_id):
+            try:
+                return await self.get(tenant_id, driver_id)
+            except AppException as exc:
+                if exc.error_code != ErrorCode.RESOURCE_NOT_FOUND:
+                    raise
+
+        query = inject_tenant_filter(
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"external_refs.ops_driver_id": driver_id}},
+                        ]
+                    }
+                },
+                "size": 1,
+            },
+            tenant_id,
+        )
+        response = await self._es.search_documents(DRIVERS_INDEX, query, size=1)
+        hits = response["hits"]["hits"]
+        # Re-check the tenant on the row itself, in case a backend ignores the
+        # filter: an id must never resolve to another tenant's driver.
+        if hits and hits[0]["_source"].get("tenant_id") == tenant_id:
+            return hits[0]["_source"]
+        raise resource_not_found(
+            f"Driver '{driver_id}' not found",
+            details={"driver_id": driver_id},
         )
 
     @staticmethod
@@ -1079,6 +1196,12 @@ class DriverQualificationService:
         The expiry threshold counts only consider active drivers, since
         suspended/expired drivers are already flagged.
 
+        An ``active`` driver with any tracked qualification past due counts
+        once in ``expired_drivers`` (not in ``active_drivers``) and appears in
+        the list with status ``expired``. The expiring windows count only
+        ``0 <= days <= threshold``; ``expiring_drivers`` is the 60-day window
+        (C10, D4).
+
         Validates: Requirement 5.9
         """
         today = date.today()
@@ -1089,7 +1212,9 @@ class DriverQualificationService:
         total_drivers = len(all_drivers)
         active_drivers = 0
         suspended_drivers = 0
-        expired_drivers = 0
+        # Drivers with status ``expired`` plus active drivers holding an
+        # already-expired qualification (counted once each).
+        expired_ids: set = set()
 
         # Sets to track unique drivers expiring within thresholds
         expiring_60: set = set()
@@ -1103,7 +1228,17 @@ class DriverQualificationService:
         for driver_doc in all_drivers:
             driver_id = driver_doc.get("driver_id", "")
             full_name = driver_doc.get("full_name", "")
-            status = driver_doc.get("status", "active")
+            stored_status = driver_doc.get("status", "active")
+            status = stored_status
+
+            # An active driver with any tracked qualification past due is
+            # reported as expired, once, and not as active (C10, D4).
+            if stored_status == "active" and any(
+                (expiry := self._parse_date(driver_doc.get(field_name))) is not None
+                and expiry < today
+                for field_name, _ in self._QUALIFICATION_FIELDS
+            ):
+                status = "expired"
 
             # Count by status
             if status == "active":
@@ -1111,13 +1246,15 @@ class DriverQualificationService:
             elif status == "suspended":
                 suspended_drivers += 1
             elif status == "expired":
-                expired_drivers += 1
+                expired_ids.add(driver_id)
 
             # Build qualification alerts for this driver
             qualifications: List[QualificationAlert] = []
 
-            # Only check expiry thresholds for active drivers
-            if status == "active":
+            # Only check expiry thresholds for drivers stored as active; one
+            # that is expired by date still gets its alert list, but isn't
+            # counted in the expiring windows.
+            if stored_status == "active":
                 # Check qualification expiry dates
                 for field_name, qualification_type in self._QUALIFICATION_FIELDS:
                     expiry_raw = driver_doc.get(field_name)
@@ -1158,13 +1295,15 @@ class DriverQualificationService:
                         status=qual_status,
                     ))
 
-                    # Track for aggregate counts
-                    if days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
-                        expiring_60.add(driver_id)
-                    if days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
-                        expiring_30.add(driver_id)
-                    if days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
-                        expiring_7.add(driver_id)
+                    # Track for aggregate counts: only not-yet-expired
+                    # qualifications of drivers that aren't expired (D4).
+                    if status == "active" and days_until_expiry >= 0:
+                        if days_until_expiry <= ALERT_THRESHOLD_WARNING_DAYS:
+                            expiring_60.add(driver_id)
+                        if days_until_expiry <= ALERT_THRESHOLD_URGENT_DAYS:
+                            expiring_30.add(driver_id)
+                        if days_until_expiry <= ALERT_THRESHOLD_CRITICAL_DAYS:
+                            expiring_7.add(driver_id)
 
                 # Check drug test overdue (same logic as check_drug_test_overdue)
                 last_drug_test_raw = driver_doc.get("last_drug_test_date")
@@ -1219,6 +1358,8 @@ class DriverQualificationService:
             d.full_name
         ))
 
+        expired_drivers = len(expired_ids)
+
         dashboard = DQFDashboard(
             tenant_id=tenant_id,
             total_drivers=total_drivers,
@@ -1229,6 +1370,7 @@ class DriverQualificationService:
             expiring_within_30_days=len(expiring_30),
             expiring_within_7_days=len(expiring_7),
             drug_test_overdue=drug_test_overdue_count,
+            expiring_drivers=len(expiring_60),
             drivers=driver_entries,
         )
 

@@ -15,13 +15,43 @@ Requirements covered:
 """
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from scheduling.models import JobStatus
+from scheduling.services.job_writes import update_job_fields
 from scheduling.services.scheduling_es_mappings import JOBS_CURRENT_INDEX
 
 logger = logging.getLogger(__name__)
+
+#: Fields read for delay metrics and the fleet summary's delayed trucks.
+_DELAY_SOURCE_FIELDS = (
+    "job_id",
+    "job_type",
+    "status",
+    "estimated_arrival",
+    "delay_duration_minutes",
+    "tenant_id",
+    "scheduled_time",
+    "asset_assigned",
+)
+
+
+def _minutes_until(value: Any) -> Optional[int]:
+    """Whole minutes from now until ``value`` (ISO 8601), rounded up and
+    floored at 0. A naive timestamp is read as UTC. None if it doesn't parse.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        eta_dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if eta_dt.tzinfo is None:
+        eta_dt = eta_dt.replace(tzinfo=timezone.utc)
+    seconds = (eta_dt - datetime.now(timezone.utc)).total_seconds()
+    return max(0, math.ceil(seconds / 60))
 
 
 class DelayDetectionService:
@@ -115,28 +145,19 @@ class DelayDetectionService:
                 "updated_at": now_iso,
             }
 
+            # Document store + Postgres current-state row, so a PG-served read
+            # (get_delayed_jobs / delay metrics) reflects it and the sweep does
+            # not re-detect the same job every cycle. Merges into job_doc for
+            # the broadcast.
             try:
-                await self._es.update_document(
-                    JOBS_CURRENT_INDEX, job_id, update_fields
+                await update_job_fields(
+                    self._es, job_id, update_fields, job_doc=job_doc
                 )
             except Exception as exc:
                 logger.error(
                     "Failed to mark job %s as delayed: %s", job_id, exc
                 )
                 continue
-
-            # Mirror the delay transition to the Postgres source-of-truth so a
-            # PG-served read (get_delayed_jobs / delay metrics) reflects it and
-            # the sweep does not re-detect the same job every cycle.
-            from commerce.services.commerce_persistence_bridge import (
-                mirror_current_state_fields,
-            )
-            await mirror_current_state_fields(
-                "job", job_doc.get("tenant_id"), job_id, update_fields
-            )
-
-            # Merge updates into doc for broadcast
-            job_doc.update(update_fields)
             newly_delayed.append(job_doc)
 
             # Broadcast delay_alert via WebSocket
@@ -170,8 +191,11 @@ class DelayDetectionService:
             tenant_id: Tenant scope from JWT.
 
         Returns:
-            Dict with job_id, estimated_arrival, delayed, and
-            delay_duration_minutes.
+            Dict with job_id, estimated_arrival, delayed,
+            delay_duration_minutes, status and scheduled_time. For an
+            in_progress job whose estimated_arrival parses, it also carries
+            ``eta_minutes`` (whole minutes until arrival, rounded up, never
+            negative). It is omitted otherwise.
 
         Raises:
             AppException: 404 if job not found for this tenant.
@@ -212,7 +236,7 @@ class DelayDetectionService:
             )
 
         source = hits[0]["_source"]
-        return {
+        result = {
             "job_id": source["job_id"],
             "estimated_arrival": source.get("estimated_arrival"),
             "delayed": source.get("delayed", False),
@@ -220,6 +244,13 @@ class DelayDetectionService:
             "status": source.get("status"),
             "scheduled_time": source.get("scheduled_time"),
         }
+        eta_minutes = _minutes_until(source.get("estimated_arrival"))
+        if (
+            source.get("status") == JobStatus.IN_PROGRESS.value
+            and eta_minutes is not None
+        ):
+            result["eta_minutes"] = eta_minutes
+        return result
 
     # ------------------------------------------------------------------
     # Delay Metrics  (Requirement 7.5)
@@ -266,6 +297,20 @@ class DelayDetectionService:
         if pg_jobs is not _NOT_CUT_OVER:
             return agg.delay_metrics(pg_jobs)
 
+        # ES path: fetch the delayed jobs and aggregate in Python with the same
+        # code as the PG path, because an open job's delay must be computed
+        # at read time (F10); an ES avg over the stored field cannot do that.
+        jobs = await self.fetch_delayed_jobs(tenant_id, start_date, end_date)
+        return agg.delay_metrics(jobs)
+
+    async def fetch_delayed_jobs(
+        self,
+        tenant_id: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+    ) -> list[dict]:
+        """Delayed jobs for ``tenant_id`` (document store), optionally
+        filtered on ``scheduled_time``. Bounded at 1000 rows."""
         must_clauses: list[dict] = [
             {"term": {"tenant_id": tenant_id}},
             {"term": {"delayed": True}},
@@ -282,49 +327,14 @@ class DelayDetectionService:
 
         query: dict = {
             "query": {"bool": {"must": must_clauses}},
-            "size": 0,
-            "aggs": {
-                "avg_delay": {
-                    "avg": {"field": "delay_duration_minutes"}
-                },
-                "delays_by_job_type": {
-                    "terms": {"field": "job_type", "size": 20},
-                    "aggs": {
-                        "avg_delay": {
-                            "avg": {"field": "delay_duration_minutes"}
-                        }
-                    },
-                },
-            },
+            "size": 1000,
+            "_source": list(_DELAY_SOURCE_FIELDS),
         }
 
         response = await self._es.search_documents(
-            JOBS_CURRENT_INDEX, query, size=0
+            JOBS_CURRENT_INDEX, query, size=1000
         )
-
-        total_delayed = response["hits"]["total"]["value"]
-        aggs = response.get("aggregations", {})
-
-        avg_delay_minutes = 0.0
-        avg_delay_agg = aggs.get("avg_delay", {})
-        if avg_delay_agg.get("value") is not None:
-            avg_delay_minutes = round(avg_delay_agg["value"], 2)
-
-        delays_by_job_type: list[dict] = []
-        job_type_buckets = aggs.get("delays_by_job_type", {}).get("buckets", [])
-        for bucket in job_type_buckets:
-            bucket_avg = bucket.get("avg_delay", {}).get("value")
-            delays_by_job_type.append({
-                "job_type": bucket["key"],
-                "count": bucket["doc_count"],
-                "avg_delay_minutes": round(bucket_avg, 2) if bucket_avg is not None else 0.0,
-            })
-
-        return {
-            "total_delayed": total_delayed,
-            "avg_delay_minutes": avg_delay_minutes,
-            "delays_by_job_type": delays_by_job_type,
-        }
+        return [hit["_source"] for hit in response["hits"]["hits"]]
 
     # ------------------------------------------------------------------
     # Internal: WebSocket broadcast
@@ -355,6 +365,7 @@ class DelayDetectionService:
                         "delay_duration_minutes": delay_minutes,
                         "tenant_id": job_data.get("tenant_id"),
                     },
+                    tenant_id=job_data.get("tenant_id", ""),
                 )
             except Exception as exc:
                 logger.warning(

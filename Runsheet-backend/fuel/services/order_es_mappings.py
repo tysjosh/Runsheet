@@ -103,6 +103,7 @@ FUEL_ORDERS_CURRENT_MAPPING = {
             "assigned_driver_id": {"type": "keyword"},
             "assigned_asset_id": {"type": "keyword"},
             "assigned_run_id": {"type": "keyword"},
+            "assigned_claim_id": {"type": "keyword"},
             # POD one-time code, provisioned by PODOTPService when the order
             # transitions to ``dispatched`` in a tenant with otp_required
             # (driver-mobile-app R5.25). The mapping is ``dynamic: strict``, so
@@ -346,46 +347,3 @@ ORDER_INTAKE_INDEX_MAPPINGS: dict[str, dict] = {
 # ---------------------------------------------------------------------------
 
 
-def setup_order_intake_indices(es_service) -> None:
-    """Create Order Intake Pipeline ES indices if they don't already exist.
-
-    Follows the same pattern as ``setup_fuel_ops_indices`` in
-    ``fuel_ops_es_mappings.py``. On Elasticsearch Serverless deployments,
-    shard/replica settings are stripped before creation via
-    ``ElasticsearchService.strip_serverless_incompatible_settings``.
-
-    Every date field in these indices MUST be written via
-    ``services.time_utils.utcnow()`` at the application layer.
-
-    Args:
-        es_service: An ElasticsearchService instance with ``.client`` and
-            ``.is_serverless`` attributes.
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    es_client = es_service.client
-    is_serverless = es_service.is_serverless
-
-    # Skip indices that have been retired (migrated to Postgres + dropped in
-    # Phase 6) so startup does not silently recreate a dropped index.
-    try:
-        from config.settings import get_settings
-        retired = set(get_settings().retired_es_indices or [])
-    except Exception:  # noqa: BLE001
-        retired = set()
-
-    for index_name, mapping in ORDER_INTAKE_INDEX_MAPPINGS.items():
-        if index_name in retired:
-            logger.info("Skipping retired order-intake index: %s", index_name)
-            continue
-        try:
-            if not es_client.indices.exists(index=index_name):
-                body = mapping
-                if is_serverless:
-                    body = ElasticsearchService.strip_serverless_incompatible_settings(body)
-                es_client.indices.create(index=index_name, body=body)
-                logger.info("Created order-intake index: %s", index_name)
-            else:
-                logger.info("Order-intake index already exists: %s", index_name)
-        except Exception as e:
-            logger.error("Failed to create order-intake index %s: %s", index_name, e)

@@ -100,6 +100,42 @@ def test_upload_csv_stamps_tenant_on_every_document() -> None:
     assert all(doc.get("tenant_id") == TENANT_A for doc in documents), documents
 
 
+def test_upload_csv_reports_rows_the_store_refused() -> None:
+    """A row whose id another tenant owns is refused by the store (L1); the
+    response must not count it as uploaded."""
+    from services.data_seeder import DataSeeder
+
+    app = _build_app(tenant_id=TENANT_A)
+    csv_bytes = (
+        "order_id,customer,status,value,items\n"
+        "ORD-1,Alice,pending,100,widgets\n"
+        "ORD-2,Bob,pending,200,gadgets\n"
+    ).encode("utf-8")
+    es = MagicMock()
+    es.bulk_index_documents = AsyncMock(return_value={
+        "success": False, "total": 2, "successful": 1, "failed": 1,
+        "errors": [{"position": 1, "reason": "id already exists"}],
+    })
+    seeder = DataSeeder.__new__(DataSeeder)
+    seeder.es_service = es
+    with patch("services.data_seeder.data_seeder", seeder):
+        with TestClient(app) as client:
+            resp = client.post(
+                "/api/upload/csv",
+                files={"file": ("orders.csv", csv_bytes, "text/csv")},
+                data={"data_type": "orders", "batch_id": "batch-1",
+                      "operational_time": "09:00"},
+            )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["success"] is False
+    assert body["data"]["recordCount"] == 1
+    assert body["data"]["failed"] == 1
+    assert body["data"]["errors"] == [{"position": 1, "reason": "id already exists"}]
+    assert body["message"] == "Uploaded 1 of 2 orders records; 1 refused"
+
+
 def test_upload_csv_under_different_tenant_stamps_that_tenant() -> None:
     """Tenant id is scoped per-request; tenant-B's upload carries tenant-B's id."""
     app = _build_app(tenant_id=TENANT_B)
@@ -366,6 +402,17 @@ async def test_ingestion_stamps_tenant_on_history_writes() -> None:
         index_calls.append((index, doc_id, dict(document)))
 
     es.index_document = _index
+
+    # The current-location write is a merge into the asset doc (N-FF-1).
+    async def _update(index: str, doc_id: str, partial: Dict[str, Any]):
+        index_calls.append((index, doc_id, dict(partial)))
+
+    es.update_document = _update
+
+    async def _get(index: str, doc_id: str):
+        return None
+
+    es.get_document = _get
 
     service = DataIngestionService(es_service=es, connection_manager=None)
 

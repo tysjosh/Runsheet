@@ -272,6 +272,28 @@ class TestEvaluate:
         assert result == []
 
     @pytest.mark.asyncio
+    async def test_revenue_guard_margin_review_proposal_logs_no_experiment(self):
+        """margin-feed: RevenueGuard's advisory ``margin.review.*`` proposal
+        reaches this agent (it subscribes to every PolicyChangeProposal) and
+        must not start a policy experiment."""
+        agent, deps = _make_agent()
+        agent._log_experiment = AsyncMock()
+        proposal = PolicyChangeProposal(
+            source_agent="revenue_guard",
+            parameter="margin.review.CUST-1.DIESEL_2",
+            old_value={"flag": "below_floor", "consecutive": 3},
+            new_value={"action": "review_pricing"},
+            evidence=["mr_1", "mr_2", "mr_3"],
+            rollback_plan={"action": "none", "reason": "advisory only"},
+            confidence=0.9,
+            tenant_id="tenant-1",
+        )
+        result = await agent.evaluate([proposal])
+        assert result == []
+        agent._log_experiment.assert_not_called()
+        deps["es_service"].index_document.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_tracks_outcome_history_per_source_agent(self):
         """Req 8.1: track outcome history per source agent."""
         agent, _ = _make_agent()
@@ -598,7 +620,7 @@ class TestUpdateExperimentStatus:
         call_args = deps["es_service"].update_document.call_args
         assert call_args[0][0] == POLICY_EXPERIMENTS_INDEX
         assert call_args[0][1] == "exp-001"
-        doc = call_args[0][2]["doc"]
+        doc = call_args[0][2]
         assert doc["status"] == "graduated"
 
     @pytest.mark.asyncio
@@ -609,7 +631,7 @@ class TestUpdateExperimentStatus:
         )
 
         call_args = deps["es_service"].update_document.call_args
-        doc = call_args[0][2]["doc"]
+        doc = call_args[0][2]
         assert doc["rollback_reason"] == "KPI degraded"
 
     @pytest.mark.asyncio
@@ -618,7 +640,7 @@ class TestUpdateExperimentStatus:
         await agent._update_experiment_status("exp-001", "graduated")
 
         call_args = deps["es_service"].update_document.call_args
-        doc = call_args[0][2]["doc"]
+        doc = call_args[0][2]
         assert "rollback_reason" not in doc
 
     @pytest.mark.asyncio

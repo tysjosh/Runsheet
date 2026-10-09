@@ -237,12 +237,42 @@ class TestRegisterExceptionHandlers:
         
         register_exception_handlers(mock_app)
         
-        # Should have called add_exception_handler twice
-        assert mock_app.add_exception_handler.call_count == 2
+        # AppException, HTTPException, RequestValidationError and Exception (OI-35)
+        assert mock_app.add_exception_handler.call_count == 4
         
-        # Check that AppException handler was registered
         calls = mock_app.add_exception_handler.call_args_list
         exception_types = [call[0][0] for call in calls]
         
+        from fastapi.exceptions import RequestValidationError
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
         assert AppException in exception_types
+        assert StarletteHTTPException in exception_types
+        assert RequestValidationError in exception_types
         assert Exception in exception_types
+
+
+class TestAppExceptionHeaders:
+    """Staging finding F5: a throttled 429 must carry Retry-After."""
+
+    def test_app_exception_headers_are_sent(self):
+        from fastapi import FastAPI
+        from starlette.testclient import TestClient
+
+        from errors import exceptions
+
+        app = FastAPI()
+        register_exception_handlers(app)
+
+        @app.get("/throttled")
+        async def throttled():
+            raise exceptions.too_many_attempts(7)
+
+        resp = TestClient(app).get("/throttled")
+        assert resp.status_code == 429
+        assert resp.headers["Retry-After"] == "7"
+        body = resp.json()
+        assert body["error_code"] == "RATE_LIMITED"
+        assert body["message"] == "Too many attempts, try again in 7 seconds"
+        assert body["details"] == {"retry_after_seconds": 7}
+        assert body["request_id"]

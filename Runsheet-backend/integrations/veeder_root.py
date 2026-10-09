@@ -85,6 +85,9 @@ from uuid import uuid4
 import httpx
 
 from Agents.overlay.data_contracts import RiskSignal, Severity
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_fields,
+)
 from fuel.services.fuel_ops_es_mappings import (
     ATG_READINGS_INDEX,
     CUSTOMER_TANKS_INDEX,
@@ -1344,6 +1347,9 @@ class VeederRootConnector(IntegrationConnector):
             await self._es.update_document(
                 self._customer_tanks_index, customer_tank_id, partial
             )
+            await mirror_current_state_fields(
+                "customer_tank", self._tenant_id, customer_tank_id, partial
+            )
             return True
         except Exception as exc:
             logger.warning(
@@ -1385,6 +1391,15 @@ class VeederRootConnector(IntegrationConnector):
         try:
             await self._es.update_document(
                 self._fuel_stations_index, station_id, partial
+            )
+            # ``station_id`` is the document key on this path. Stations created
+            # through ``FuelService.create_station`` are keyed
+            # ``station_id::fuel_type`` instead and are therefore missed by BOTH
+            # writes — a pre-existing Elasticsearch bug that the mirror
+            # faithfully reproduces rather than papering over, so the two stores
+            # stay comparable under the parity check.
+            await mirror_current_state_fields(
+                "fuel_station", self._tenant_id, station_id, partial
             )
             return True
         except Exception as exc:

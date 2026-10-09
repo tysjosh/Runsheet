@@ -342,6 +342,25 @@ class TestCreatePlan:
         call_args = planner._activity_log.log.call_args[0][0]
         assert call_args["details"]["event"] == "plan_created"
 
+    async def test_plan_created_entry_carries_tenant_scope(self):
+        """L2: the entry is tenant-stamped so the live push is tenant-only."""
+        planner = _make_planner()
+        await planner.create_plan(
+            "Test", ["fleet"], tenant_id="t-a", user_id="u1", session_id="s1"
+        )
+        entry = planner._activity_log.log.call_args[0][0]
+        assert entry["tenant_id"] == "t-a"
+        assert entry["user_id"] == "u1"
+        assert entry["session_id"] == "s1"
+
+    async def test_rollback_entry_carries_tenant(self):
+        planner = _make_planner()
+        plan = ExecutionPlan(plan_id="p1", goal="Test", steps=[])
+        await planner.rollback_plan(plan, tenant_id="t-a")
+        entry = planner._activity_log.log.call_args[0][0]
+        assert entry["details"]["event"] == "plan_rolled_back"
+        assert entry["tenant_id"] == "t-a"
+
     async def test_empty_domains_creates_empty_plan(self):
         planner = _make_planner()
         plan = await planner.create_plan("Test", [])
@@ -424,6 +443,42 @@ class TestExecutePlan:
         assert cp.process_mutation.call_count == 3
         assert steps[0].recovery_attempts == 3
         assert steps[0].status == StepStatus.FAILED
+
+    async def test_failed_step_result_never_contains_exception_text(self):
+        """Plan results are shown to the user; provider errors carry raw
+        JSON and traceback text (staging finding F3)."""
+        cp = _make_confirmation_protocol()
+        cp.process_mutation = AsyncMock(
+            side_effect=RuntimeError('VertexAIException {"quotaId": "x"} /opt/venv')
+        )
+        planner = ExecutionPlanner(
+            activity_log_service=_make_activity_log(),
+            confirmation_protocol=cp,
+        )
+        steps = [_step(1)]
+
+        await planner.execute_plan(ExecutionPlan(plan_id="p1", goal="Test", steps=steps), "t1")
+
+        assert steps[0].result == "This step could not be completed."
+
+    async def test_unrecoverable_error_is_not_rerun(self):
+        from Agents.llm_errors import AgentServiceError
+
+        cp = _make_confirmation_protocol()
+        cp.process_mutation = AsyncMock(
+            side_effect=AgentServiceError("AI_RATE_LIMITED", retry_after_seconds=60)
+        )
+        planner = ExecutionPlanner(
+            activity_log_service=_make_activity_log(),
+            confirmation_protocol=cp,
+        )
+        steps = [_step(1)]
+
+        await planner.execute_plan(ExecutionPlan(plan_id="p1", goal="Test", steps=steps), "t1")
+
+        assert cp.process_mutation.call_count == 1
+        assert steps[0].status == StepStatus.FAILED
+        assert "too many requests" in steps[0].result
 
     async def test_partial_failure_status(self):
         cp = _make_confirmation_protocol()

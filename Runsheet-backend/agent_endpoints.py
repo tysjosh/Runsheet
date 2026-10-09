@@ -27,7 +27,18 @@ from errors.exceptions import (
 )
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
-from Agents.api_authz import agent_admin_dependency, agent_ops_dependency
+from Agents.approval_queue_service import (
+    ApprovalExpiredError,
+    ApprovalForbiddenError,
+    ApprovalNotFoundError,
+    LoadingPlanExecutionError,
+)
+
+from Agents.api_authz import (
+    agent_admin_dependency,
+    agent_ops_dependency,
+    agent_platform_admin_dependency,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -172,17 +183,29 @@ async def list_approvals(
     tenant: TenantContext = Depends(get_tenant_context),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
+    include_unresolved: bool = Query(
+        False,
+        description=(
+            "Also list incomplete/failed entries and approved loading plans "
+            "(loading-plan-executor K7)"
+        ),
+    ),
 ):
     """
     List pending approval requests for a tenant.
 
     Returns pending approval entries sorted by ``proposed_at`` descending.
+    With ``include_unresolved`` the list also carries entries that still need
+    a dispatcher (``incomplete``, ``failed``, ``approved`` loading plans).
 
     Validates: Requirement 2.3
     """
     svc = _get_approval_queue()
     try:
-        result = await svc.list_pending(tenant_id=tenant.tenant_id, page=page, size=size)
+        result = await svc.list_pending(
+            tenant_id=tenant.tenant_id, page=page, size=size,
+            include_unresolved=include_unresolved,
+        )
         # Dual-field deprecation: add unified PaginatedResponse fields
         from schemas.common import paginated_response_dict
 
@@ -196,9 +219,24 @@ async def list_approvals(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
+        # Detail stays in the log: str(exc) never goes to the client (F3).
         logger.exception("Failed to list approvals")
-        raise internal_error(message="Failed to list approvals", details={"error": str(e)})
+        raise internal_error(message="Failed to list approvals")
+
+
+def _approval_expired(exc: ApprovalExpiredError) -> AppException:
+    """409 ``APPROVAL_EXPIRED`` for a decision after ``expiry_time`` (N7).
+
+    409 rather than 410: the entry still exists and can be read, now as
+    ``expired``.
+    """
+    return AppException(
+        error_code=ErrorCode.APPROVAL_EXPIRED,
+        message="This approval expired before a decision was made.",
+        status_code=409,
+        details={"action_id": exc.action_id, "expiry_time": exc.expiry_time},
+    )
 
 
 @router.post("/approvals/{action_id}/approve")
@@ -222,16 +260,50 @@ async def approve_action(
     svc = _get_approval_queue()
     actor = tenant.user_id or reviewer_id or "unknown"
     try:
-        result = await svc.approve(action_id=action_id, reviewer_id=actor)
+        # K10: the loading-plan actor is the verified session user only;
+        # agent_actor is never set from this endpoint (R7.3, R7.4).
+        result = await svc.approve(
+            action_id=action_id,
+            reviewer_id=actor,
+            tenant_id=tenant.tenant_id,
+            session_user_id=tenant.user_id,
+        )
         return result
+    except LoadingPlanExecutionError as exc:
+        # Fixed-template message and structured details only (R11.2, R11.5).
+        res = exc.result
+        raise AppException(
+            error_code=ErrorCode.LOADING_PLAN_EXECUTION_FAILED,
+            message=res.message,
+            status_code=409,
+            details={
+                "action_id": action_id,
+                "plan_id": res.plan_id,
+                "reason": res.reason,
+                "failures": list(res.failures),
+                "retryable": res.retryable,
+                "writes_made": res.writes_made,
+                "status": (exc.entry or {}).get("status"),
+            },
+        )
+    except ApprovalExpiredError as exc:
+        raise _approval_expired(exc)
+    except ApprovalForbiddenError:
+        raise AppException(
+            error_code=ErrorCode.FORBIDDEN,
+            message="A signed-in user is required to approve a loading plan",
+            status_code=403,
+        )
+    except ApprovalNotFoundError:
+        raise resource_not_found(message="Approval not found", details={"action_id": action_id})
     except ValueError as e:
         raise validation_error(message=str(e))
     except RuntimeError as e:
         # Concurrency conflict
         raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to approve action %s", action_id)
-        raise internal_error(message="Failed to approve action", details={"action_id": action_id, "error": str(e)})
+        raise internal_error(message="Failed to approve action", details={"action_id": action_id})
 
 
 @router.post("/approvals/{action_id}/reject")
@@ -257,16 +329,21 @@ async def reject_action(
     actor = tenant.user_id or reviewer_id or "unknown"
     try:
         result = await svc.reject(
-            action_id=action_id, reviewer_id=actor, reason=reason
+            action_id=action_id, reviewer_id=actor, reason=reason,
+            tenant_id=tenant.tenant_id,
         )
         return result
+    except ApprovalExpiredError as exc:
+        raise _approval_expired(exc)
+    except ApprovalNotFoundError:
+        raise resource_not_found(message="Approval not found", details={"action_id": action_id})
     except ValueError as e:
         raise validation_error(message=str(e))
     except RuntimeError as e:
         raise AppException(error_code=ErrorCode.VALIDATION_ERROR, message=str(e), status_code=409)
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to reject action %s", action_id)
-        raise internal_error(message="Failed to reject action", details={"action_id": action_id, "error": str(e)})
+        raise internal_error(message="Failed to reject action", details={"action_id": action_id})
 
 
 # ===================================================================
@@ -331,9 +408,9 @@ async def list_activity(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to query activity log")
-        raise internal_error(message="Failed to query activity log", details={"error": str(e)})
+        raise internal_error(message="Failed to query activity log")
 
 
 @router.get("/activity/stats")
@@ -353,9 +430,9 @@ async def get_activity_stats(
     try:
         result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to get activity stats")
-        raise internal_error(message="Failed to get activity stats", details={"error": str(e)})
+        raise internal_error(message="Failed to get activity stats")
 
 
 # ===================================================================
@@ -414,9 +491,9 @@ async def update_autonomy_level(
         previous_level = await svc.set_level(tenant_id=tenant.tenant_id, level=body.level)
     except ValueError as e:
         raise validation_error(message=str(e))
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to update autonomy level")
-        raise internal_error(message="Failed to update autonomy level", details={"error": str(e)})
+        raise internal_error(message="Failed to update autonomy level")
 
     # Log the change to the activity log (Requirement 10.5)
     try:
@@ -501,9 +578,9 @@ async def list_memories(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to list memories")
-        raise internal_error(message="Failed to list memories", details={"error": str(e)})
+        raise internal_error(message="Failed to list memories")
 
 
 @router.delete("/memory/{memory_id}", dependencies=[Depends(agent_admin_dependency)])
@@ -530,9 +607,9 @@ async def delete_memory(
         return {"deleted": True, "memory_id": memory_id}
     except AppException:
         raise
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to delete memory %s", memory_id)
-        raise internal_error(message="Failed to delete memory", details={"memory_id": memory_id, "error": str(e)})
+        raise internal_error(message="Failed to delete memory", details={"memory_id": memory_id})
 
 
 # ===================================================================
@@ -595,9 +672,9 @@ async def list_feedback(
                 request_id=pagination.get("request_id", "unknown"),
             )
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to list feedback")
-        raise internal_error(message="Failed to list feedback", details={"error": str(e)})
+        raise internal_error(message="Failed to list feedback")
 
 
 @router.get("/feedback/stats")
@@ -617,9 +694,9 @@ async def get_feedback_stats(
     try:
         result = await svc.get_stats(tenant_id=tenant.tenant_id)
         return result
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to get feedback stats")
-        raise internal_error(message="Failed to get feedback stats", details={"error": str(e)})
+        raise internal_error(message="Failed to get feedback stats")
 
 
 # ===================================================================
@@ -658,12 +735,18 @@ async def get_agent_health(request: Request):
     return {"agents": health}
 
 
-@router.post("/{agent_id}/pause", dependencies=[Depends(agent_admin_dependency)])
-async def pause_agent(agent_id: str, request: Request):
+@router.post("/{agent_id}/pause", dependencies=[Depends(agent_platform_admin_dependency)])
+async def pause_agent(
+    agent_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
     """
     Pause an autonomous agent.
 
-    Stops the agent's polling loop. The agent can be resumed later.
+    Stops the agent's polling loop for every tenant (the agents are
+    process-wide), so it needs ``platform_admin``. The agent can be resumed
+    later. The audit entry carries the verified session identity.
 
     Validates: Requirement 9.6
     """
@@ -690,24 +773,29 @@ async def pause_agent(agent_id: str, request: Request):
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": None,
-            "user_id": request.headers.get("x-user-id", "system"),
+            "tenant_id": tenant.tenant_id,
+            "user_id": tenant.user_id,
             "session_id": None,
-            "details": {"action": "pause"},
+            "details": {"action": "pause", "scope": "platform"},
         })
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to pause agent %s", agent_id)
-        raise internal_error(message="Failed to pause agent", details={"agent_id": agent_id, "error": str(e)})
+        raise internal_error(message="Failed to pause agent", details={"agent_id": agent_id})
 
     return {"agent_id": agent_id, "status": "stopped"}
 
 
-@router.post("/{agent_id}/resume", dependencies=[Depends(agent_admin_dependency)])
-async def resume_agent(agent_id: str, request: Request):
+@router.post("/{agent_id}/resume", dependencies=[Depends(agent_platform_admin_dependency)])
+async def resume_agent(
+    agent_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+):
     """
     Resume a paused autonomous agent.
 
-    Restarts the agent's polling loop.
+    Restarts the agent's polling loop for every tenant, so it needs
+    ``platform_admin``. The audit entry carries the verified session identity.
 
     Validates: Requirement 9.6
     """
@@ -734,13 +822,13 @@ async def resume_agent(agent_id: str, request: Request):
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": None,
-            "user_id": request.headers.get("x-user-id", "system"),
+            "tenant_id": tenant.tenant_id,
+            "user_id": tenant.user_id,
             "session_id": None,
-            "details": {"action": "resume"},
+            "details": {"action": "resume", "scope": "platform"},
         })
-    except Exception as e:
+    except Exception:
         logger.exception("Failed to resume agent %s", agent_id)
-        raise internal_error(message="Failed to resume agent", details={"agent_id": agent_id, "error": str(e)})
+        raise internal_error(message="Failed to resume agent", details={"agent_id": agent_id})
 
     return {"agent_id": agent_id, "status": "running"}

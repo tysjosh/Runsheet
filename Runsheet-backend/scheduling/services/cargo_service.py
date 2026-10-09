@@ -21,7 +21,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from errors.exceptions import resource_not_found, validation_error
+from persistence.document_matcher import matches
 from scheduling.models import CargoItem, CargoItemStatus
+from scheduling.services.job_writes import atomic_update_job, update_job_fields
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     JOB_EVENTS_INDEX,
@@ -103,11 +105,13 @@ class CargoService:
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # Update the job document with the new manifest
-        await self._es.update_document(
-            JOBS_CURRENT_INDEX,
+        # Update the job document with the new manifest, and its Postgres
+        # current-state row (GET /jobs/{id} reads it under read-cutover).
+        await update_job_fields(
+            self._es,
             job_id,
             {"cargo_manifest": manifest, "updated_at": now},
+            job_doc=dict(job_doc),
         )
 
         # Append cargo_updated event
@@ -173,36 +177,30 @@ class CargoService:
                 details={"job_id": job_id, "item_id": item_id},
             )
 
-        # Use painless script to update the specific item in the nested array
-        painless_script = """
-            for (int i = 0; i < ctx._source.cargo_manifest.size(); i++) {
-                if (ctx._source.cargo_manifest[i].item_id == params.item_id) {
-                    ctx._source.cargo_manifest[i].item_status = params.new_status;
-                    break;
-                }
-            }
-            ctx._source.updated_at = params.now;
-        """
-
+        # Set the item's status under a row lock. This replaces a painless
+        # script sent to ``es.client``, which has no cluster behind it (B3). A
+        # locked read-modify-write can't lose a concurrent change to another
+        # item, which a read-then-update_document could.
         now = datetime.now(timezone.utc).isoformat()
 
-        es_client = self._es.client
-        es_client.update(
-            index=JOBS_CURRENT_INDEX,
-            id=job_id,
-            body={
-                "script": {
-                    "source": painless_script,
-                    "lang": "painless",
-                    "params": {
-                        "item_id": item_id,
-                        "new_status": new_status.value,
-                        "now": now,
-                    },
-                }
-            },
-            refresh=True,
+        def _set_item_status(doc: dict) -> Optional[dict]:
+            for entry in doc.get("cargo_manifest") or []:
+                if entry.get("item_id") == item_id:
+                    entry["item_status"] = new_status.value
+                    doc["updated_at"] = now
+                    return doc
+            return None  # removed since the read: leave the doc unchanged
+
+        # Mirrors the updated job to its Postgres current-state row, which
+        # GET /jobs/{id} reads; the store-only write left it stale (N-FF-2).
+        updated_job, applied = await atomic_update_job(
+            self._es, job_id, _set_item_status
         )
+        if not applied:
+            raise resource_not_found(
+                f"Cargo item '{item_id}' not found in job '{job_id}'",
+                details={"job_id": job_id, "item_id": item_id},
+            )
 
         # Append cargo_status_changed event
         await self._append_event(
@@ -237,6 +235,7 @@ class CargoService:
                         "old_status": old_status,
                         "new_status": new_status.value,
                     },
+                    tenant_id=tenant_id,
                 )
             except Exception as exc:
                 logger.warning(
@@ -244,8 +243,12 @@ class CargoService:
                     job_id, item_id, exc,
                 )
 
-        # Check if all items are now delivered
-        all_delivered = await self._check_all_delivered(job_id, tenant_id)
+        # Check if all items are now delivered, on the state just written
+        updated_manifest = (updated_job or {}).get("cargo_manifest") or []
+        all_delivered = bool(updated_manifest) and all(
+            entry.get("item_status") == CargoItemStatus.DELIVERED.value
+            for entry in updated_manifest
+        )
         if all_delivered:
             await self._broadcast_cargo_complete(job_id, job_doc)
 
@@ -297,6 +300,7 @@ class CargoService:
             )
 
         from_offset = (page - 1) * size
+        item_query = {"bool": {"must": nested_filters}}
 
         query = {
             "query": {
@@ -306,11 +310,7 @@ class CargoService:
                         {
                             "nested": {
                                 "path": "cargo_manifest",
-                                "query": {
-                                    "bool": {
-                                        "must": nested_filters,
-                                    }
-                                },
+                                "query": item_query,
                                 "inner_hits": {
                                     "size": 100,
                                 },
@@ -334,9 +334,7 @@ class CargoService:
         results: list[dict] = []
         for hit in hits:
             source = hit["_source"]
-            inner_hits = hit.get("inner_hits", {}).get("cargo_manifest", {}).get("hits", {}).get("hits", [])
-            for inner_hit in inner_hits:
-                cargo_item = inner_hit["_source"]
+            for cargo_item in self._matching_cargo_items(hit, item_query):
                 results.append({
                     "job_id": source.get("job_id"),
                     "job_type": source.get("job_type"),
@@ -361,6 +359,27 @@ class CargoService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _matching_cargo_items(hit: dict, item_query: dict) -> list[dict]:
+        """The ``cargo_manifest`` elements of ``hit`` that satisfy ``item_query``.
+
+        Elasticsearch returns them as ``inner_hits``. The Postgres document
+        store selects the job by the same one-element rule but emits no
+        ``inner_hits``, so the elements are picked from ``_source`` with the
+        matcher that shares its semantics. Without this the search returned a
+        non-zero total with empty ``data`` (review R2).
+        """
+        if "inner_hits" in hit:
+            inner = hit["inner_hits"].get("cargo_manifest", {}).get("hits", {}).get("hits", [])
+            return [inner_hit["_source"] for inner_hit in inner]
+        manifest = hit["_source"].get("cargo_manifest") or []
+        if isinstance(manifest, dict):
+            manifest = [manifest]
+        return [
+            item for item in manifest
+            if isinstance(item, dict) and matches({"cargo_manifest": item}, item_query)
+        ]
 
     async def _get_job_doc(self, job_id: str, tenant_id: str) -> dict:
         """Fetch a raw job document from jobs_current with tenant filter.
@@ -399,31 +418,6 @@ class CargoService:
             )
 
         return hits[0]["_source"]
-
-    async def _check_all_delivered(
-        self, job_id: str, tenant_id: str
-    ) -> bool:
-        """Check if every item in the manifest has item_status=delivered.
-
-        Re-fetches the job to get the latest state after the painless update.
-
-        Args:
-            job_id: The job to check.
-            tenant_id: Tenant scope.
-
-        Returns:
-            True if all items are delivered, False otherwise.
-        """
-        job_doc = await self._get_job_doc(job_id, tenant_id)
-        manifest = job_doc.get("cargo_manifest") or []
-
-        if not manifest:
-            return False
-
-        return all(
-            item.get("item_status") == CargoItemStatus.DELIVERED.value
-            for item in manifest
-        )
 
     async def _append_event(
         self,
@@ -488,6 +482,7 @@ class CargoService:
                         "destination": job_doc.get("destination"),
                         "asset_assigned": job_doc.get("asset_assigned"),
                     },
+                    tenant_id=job_doc.get("tenant_id", ""),
                 )
             except Exception as exc:
                 logger.warning(

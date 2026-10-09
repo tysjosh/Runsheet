@@ -156,11 +156,22 @@ export class ApiTimeoutError extends Error {
 // Custom error class for API errors
 export class ApiError extends Error {
   status: number;
+  /** Machine-readable error code from the response body (e.g. `CUSTOMERS_DISABLED`). */
+  code?: string;
+  /** The error envelope's `details` object, when the body had one. */
+  details?: Record<string, unknown>;
 
-  constructor(message: string, status: number) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: Record<string, unknown>,
+  ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
+    this.code = code;
+    this.details = details;
   }
 }
 
@@ -352,31 +363,49 @@ export interface InventoryItem {
   lastUpdated: string;
 }
 
-export interface AnalyticsMetrics {
-  delivery_performance: {
-    title: string;
-    value: string;
-    change: string;
-    trend: "up" | "down";
-  };
-  average_delay: {
-    title: string;
-    value: string;
-    change: string;
-    trend: "up" | "down";
-  };
-  fleet_utilization: {
-    title: string;
-    value: string;
-    change: string;
-    trend: "up" | "down";
-  };
-  customer_satisfaction: {
-    title: string;
-    value: string;
-    change: string;
-    trend: "up" | "down";
-  };
+/** One Overview KPI. `value` is null when the snapshot could not compute it
+ * (e.g. no drivers on record, or no order carried a delivery window). */
+export interface AnalyticsMetric {
+  title: string;
+  value: string | null;
+}
+
+export type AnalyticsMetricKey =
+  | "delivery_performance"
+  | "average_delay"
+  | "fleet_utilization";
+
+/** Latest daily snapshot. Keys may be absent. There is no customer
+ * satisfaction metric: no rating source exists (F3). */
+export type AnalyticsMetrics = Partial<
+  Record<AnalyticsMetricKey, AnalyticsMetric>
+>;
+
+/** `data` is null when the tenant has no snapshot yet; `as_of` is the
+ * snapshot's timestamp. */
+export type AnalyticsMetricsResponse = ApiResponse<AnalyticsMetrics | null> & {
+  as_of?: string | null;
+};
+
+export interface AnalyticsTimeSeriesPoint {
+  timestamp: string;
+  /** null for a day with no snapshot (a gap, not a zero). */
+  value: number | null;
+}
+
+export type AnalyticsTimeSeriesResponse = ApiResponse<
+  AnalyticsTimeSeriesPoint[]
+> & {
+  metric?: AnalyticsMetricKey;
+  unit?: string;
+};
+
+export interface RoutePerformanceEntry {
+  /** Human label, e.g. "RUN-1 · Ada". */
+  name: string;
+  route_id?: string;
+  performance: number;
+  orders_scored?: number;
 }
 
 class ApiService {
@@ -679,16 +708,30 @@ class ApiService {
   // update were never implemented: `POST /api/support/tickets` returns 405.
 
   // Analytics
-  async getAnalyticsMetrics(
-    timeRange: string = "7d",
-  ): Promise<ApiResponse<AnalyticsMetrics>> {
-    return this.request<AnalyticsMetrics>(
-      `/analytics/metrics?timeRange=${timeRange}`,
+  // No timeRange: the backend ignores it (B6, OI-50).
+  async getAnalyticsMetrics(): Promise<AnalyticsMetricsResponse> {
+    return this.request<AnalyticsMetrics | null>(
+      "/analytics/metrics",
+    ) as Promise<AnalyticsMetricsResponse>;
+  }
+
+  /** Route performance over the trailing `days` (weighted by orders). */
+  async getAnalyticsRoutePerformance(
+    days = 30,
+  ): Promise<ApiResponse<RoutePerformanceEntry[]>> {
+    return this.request<RoutePerformanceEntry[]>(
+      `/analytics/routes?days=${encodeURIComponent(String(days))}`,
     );
   }
 
-  async getAnalyticsRoutePerformance(): Promise<ApiResponse<any[]>> {
-    return this.request<any[]>("/analytics/routes");
+  /** Daily series of one Overview metric from the daily snapshots. */
+  async getAnalyticsTimeSeries(
+    metric: AnalyticsMetricKey,
+    range: "7d" | "30d" | "90d" = "30d",
+  ): Promise<AnalyticsTimeSeriesResponse> {
+    return this.request<AnalyticsTimeSeriesPoint[]>(
+      `/analytics/timeseries?metric=${encodeURIComponent(metric)}&range=${encodeURIComponent(range)}`,
+    ) as Promise<AnalyticsTimeSeriesResponse>;
   }
 
   // Data Upload - Legacy methods (keeping for compatibility)

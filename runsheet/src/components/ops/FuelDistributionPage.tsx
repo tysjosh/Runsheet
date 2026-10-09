@@ -30,10 +30,8 @@
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ChevronUp,
   DollarSign,
   Droplets,
   Eye,
@@ -51,16 +49,49 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  Button,
   type Column,
-  PageHeader,
+  DataTable,
+  Field,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
+  NumberField,
+  ProductChip,
+  ProductSelect,
+  Select,
   type Tab,
   Table,
-  TabNavigation,
+  TabPanel,
+  Tabs,
   ToastContainer,
+  Toolbar,
   useToasts,
+  useUrlTab,
 } from "@/components/ui";
 import type { ExecutionUpdateData } from "../../hooks/usePlanExecutionSocket";
 import { usePlanExecutionSocket } from "../../hooks/usePlanExecutionSocket";
+import {
+  dateTime as formatDateTime,
+  money as formatMoney,
+  number as formatNumber,
+  pct as formatPct,
+  productName,
+} from "../../lib/format";
+import { PRODUCT_CODES } from "../../styles/tokens";
+
+/** Money in the plan's currency (an ISO code; anything else falls back to USD). */
+function planCost(value: number, currency?: string | null): string {
+  return formatMoney(value, {
+    currency: currency && /^[A-Z]{3}$/.test(currency) ? currency : "USD",
+  });
+}
+
+/** Signed percentage with one decimal: "4.2%". */
+function pct1(value: number): string {
+  return `${formatNumber(value, { decimals: 1 })}%`;
+}
+
 import type {
   CombinableGroup,
   CombinableGroupListResponse,
@@ -80,13 +111,13 @@ import type {
   PriorityClustersResponse,
   PriorityEntry,
   PriorityListEntry,
-  ReplanDiff,
   ReplanDiffResponse,
   ReplanRequest,
   ReplanResponse,
   RouteAssignment,
   SafeToDelayBucket,
   StopVariance,
+  UnplacedOrder,
 } from "../../services/fuelApi";
 import {
   approvePlan,
@@ -111,6 +142,8 @@ import {
 import { getCurrentTenantId } from "../../services/tenant";
 import { getCurrentUserId } from "../../utils/auth";
 import AssetPicker from "./AssetPicker";
+import { approveErrorMessage } from "./dispatchErrors";
+import { ReplanDiffBody } from "./ReplanDiffBody";
 import StationPicker from "./StationPicker";
 import StormModeBanner from "./StormModeBanner";
 
@@ -119,6 +152,28 @@ import StormModeBanner from "./StormModeBanner";
 const PAGE_SIZE = 10;
 const GENERATED_PLAN_REFRESH_ATTEMPTS = 4;
 const GENERATED_PLAN_REFRESH_DELAY_MS = 750;
+const UNPLACED_ORDERS_SHOWN = 5;
+
+/** Short labels for the loading stage's per-order reasons (OI-02, OI-39). */
+const UNPLACED_REASON_LABELS: Record<string, string> = {
+  no_truck_capacity: "no truck capacity",
+  no_compatible_compartment: "no compatible compartment",
+  dyed_diesel_compartment_incompatible:
+    "compartment not dyed-diesel compatible",
+  dyed_diesel_check_unavailable: "dyed-diesel check unavailable",
+};
+
+/** "N order(s) not loaded: ORD-1 (reason), …, +k more" for the generate toast. */
+function describeUnplacedOrders(orders: UnplacedOrder[]): string {
+  const items = orders.slice(0, UNPLACED_ORDERS_SHOWN).map((o) => {
+    const label = UNPLACED_REASON_LABELS[o.reason] ?? o.reason;
+    const who = o.order_id ?? o.station_id;
+    return `${who} (${label}${o.partial ? ", partly" : ""})`;
+  });
+  const more = orders.length - UNPLACED_ORDERS_SHOWN;
+  if (more > 0) items.push(`+${more} more`);
+  return `${orders.length} order(s) not loaded: ${items.join(", ")}`;
+}
 
 function activeTenantId(): string {
   return getCurrentTenantId();
@@ -143,8 +198,6 @@ const TABS: Tab[] = [
   { id: "clusters", label: "Clusters", icon: <Layers className="w-4 h-4" /> },
 ];
 
-type TabId = string;
-
 const URGENCY_CONFIG: Record<string, { color: string; bg: string }> = {
   low: { color: "text-success-dark", bg: "bg-success-light" },
   medium: { color: "text-warning-dark", bg: "bg-warning-light" },
@@ -155,6 +208,8 @@ const URGENCY_CONFIG: Record<string, { color: string; bg: string }> = {
 const STATUS_BADGE_CONFIG: Record<string, { color: string; bg: string }> = {
   draft: { color: "text-gray-700", bg: "bg-gray-100" },
   proposed: { color: "text-gray-700", bg: "bg-gray-100" },
+  // R12.7 (K13): an approved loading plan whose orders are linked but not yet dispatched.
+  scheduled: { color: "text-warning-dark", bg: "bg-warning-light" },
   dispatched: { color: "text-info-dark", bg: "bg-info-light" },
   completed: { color: "text-success-dark", bg: "bg-success-light" },
   rejected: { color: "text-error-dark", bg: "bg-error-light" },
@@ -162,8 +217,33 @@ const STATUS_BADGE_CONFIG: Record<string, { color: string; bg: string }> = {
 
 const VARIANCE_THRESHOLD = 5; // 5% threshold for color coding
 
-// Statuses that allow approve/reject actions
-const APPROVABLE_STATUSES = ["draft", "proposed"];
+// Statuses that allow approve (dispatch) and reject actions (R12.7, K13).
+// A `scheduled` plan can still be dispatched but no longer rejected.
+const DISPATCHABLE_STATUSES = ["draft", "proposed", "scheduled"];
+const REJECTABLE_STATUSES = ["draft", "proposed"];
+// A plan keeps draft/proposed until the loading-plan executor finalizes it, so
+// a running, partly applied or just-applied plan would still look rejectable.
+// The backend reject CAS refuses these with 409 and stays the authoritative
+// guard; the page just stops offering a button that can only fail. Approve
+// stays, so an incomplete plan keeps its recovery path.
+const NON_REJECTABLE_EXECUTION_STATUSES = [
+  "in_progress",
+  "incomplete",
+  "succeeded",
+];
+
+/** Plan documents carry ``execution_status`` once the executor has touched them. */
+type WithExecutionStatus = { execution_status?: string | null };
+
+function isRejectable(
+  status: string,
+  executionStatus?: string | null,
+): boolean {
+  return (
+    REJECTABLE_STATUSES.includes(status) &&
+    !NON_REJECTABLE_EXECUTION_STATUSES.includes(executionStatus ?? "")
+  );
+}
 
 // ─── Status Badge Component ──────────────────────────────────────────────────
 
@@ -182,72 +262,37 @@ function StatusBadge({ status }: { status: string }) {
 
 interface RejectDialogProps {
   planId: string;
-  onConfirm: (reason: string) => void;
+  /** Rejects with the reason; throws to keep the dialog open with the error. */
+  onConfirm: (reason: string) => Promise<void>;
   onCancel: () => void;
-  loading: boolean;
 }
 
-function RejectDialog({
-  planId,
-  onConfirm,
-  onCancel,
-  loading,
-}: RejectDialogProps) {
-  const [reason, setReason] = useState("");
-
+function RejectDialog({ planId, onConfirm, onCancel }: RejectDialogProps) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">Reject Plan</h2>
-          <button
-            onClick={onCancel}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close rejection dialog"
-            disabled={loading}
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="px-6 py-4 space-y-4">
-          <p className="text-sm text-gray-600">
-            Are you sure you want to reject plan{" "}
-            <span className="font-medium">{planId}</span>?
-          </p>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Reason (optional)
-            </label>
-            <textarea
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Enter rejection reason..."
-              rows={3}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white resize-none"
-              disabled={loading}
-            />
-          </div>
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onCancel}
-              disabled={loading}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={() => onConfirm(reason)}
-              disabled={loading}
-              className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
-            >
-              {loading ? "Rejecting..." : "Reject Plan"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <FormDialog<{ reason: string }>
+      open
+      size="sm"
+      title="Reject plan"
+      help={`Reject plan ${planId}? Its loads go back to planning.`}
+      submitLabel="Reject plan"
+      initialValues={{ reason: "" }}
+      // The page's handler toasts the result; a failure shows in the banner.
+      successMessage={null}
+      onSubmit={(v) => onConfirm(v.reason)}
+      onClose={onCancel}
+    >
+      {({ values, set }) => (
+        <Field label="Reason (optional)">
+          <textarea
+            value={values.reason}
+            onChange={(e) => set("reason", e.target.value)}
+            placeholder="Why is this plan rejected?"
+            rows={3}
+            className={`${INPUT_CLASS} h-auto resize-none py-2`}
+          />
+        </Field>
+      )}
+    </FormDialog>
   );
 }
 
@@ -259,139 +304,123 @@ interface CostConfigPanelProps {
   addToast: (message: string, type: "success" | "error") => void;
 }
 
-function CostConfigPanel({ onClose, onSave, addToast }: CostConfigPanelProps) {
-  const [config, setConfig] = useState<CostConfig>({
-    fuel_consumption_rate: 0.35,
-    fuel_price_per_liter: 1.5,
-    driver_hourly_rate: 25,
-    currency: "USD",
-  });
-  const [saving, setSaving] = useState(false);
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      await updateCostConfig(activeTenantId(), config);
-      addToast("Cost configuration saved", "success");
-      onSave();
-      onClose();
-    } catch (err) {
-      addToast(
-        err instanceof Error ? err.message : "Failed to save cost config",
-        "error",
-      );
-    } finally {
-      setSaving(false);
-    }
+export function CostConfigPanel({
+  onClose,
+  onSave,
+  addToast,
+}: CostConfigPanelProps) {
+  type Values = {
+    fuel_consumption_rate: number | null;
+    fuel_price_per_liter: number | null;
+    driver_hourly_rate: number | null;
+    currency: string;
   };
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
+  const submit = async (v: Values) => {
+    const config: CostConfig = {
+      fuel_consumption_rate: v.fuel_consumption_rate ?? 0,
+      fuel_price_per_liter: v.fuel_price_per_liter ?? 0,
+      driver_hourly_rate: v.driver_hourly_rate ?? 0,
+      currency: v.currency,
+    };
+    await updateCostConfig(activeTenantId(), config);
+  };
+  // Cost configuration (review finding, task 3.10): an sm FormDialog with
+  // NumberFields instead of a bespoke modal with `type=number` inputs.
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">
-            Cost Configuration
-          </h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close cost configuration"
+    <FormDialog<Values, void>
+      open
+      size="sm"
+      title="Cost configuration"
+      help="Used to estimate fuel and driver cost for each plan."
+      submitLabel="Save configuration"
+      successMessage={null}
+      initialValues={{
+        fuel_consumption_rate: 0.35,
+        fuel_price_per_liter: 1.5,
+        driver_hourly_rate: 25,
+        currency: "USD",
+      }}
+      validate={(v) => ({
+        fuel_consumption_rate:
+          v.fuel_consumption_rate == null || v.fuel_consumption_rate <= 0
+            ? "Enter a consumption rate above 0."
+            : undefined,
+        fuel_price_per_liter:
+          v.fuel_price_per_liter == null || v.fuel_price_per_liter < 0
+            ? "Enter a fuel price."
+            : undefined,
+        driver_hourly_rate:
+          v.driver_hourly_rate == null || v.driver_hourly_rate < 0
+            ? "Enter a driver rate."
+            : undefined,
+      })}
+      onSubmit={submit}
+      onSaved={() => {
+        addToast("Cost configuration saved", "success");
+        onSave();
+      }}
+      onClose={onClose}
+    >
+      {({ values, set, errors }) => (
+        <>
+          <Field
+            label="Fuel consumption"
+            required
+            error={errors.fuel_consumption_rate}
           >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-        <div className="px-6 py-4 space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Fuel Consumption Rate (L/km)
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              value={config.fuel_consumption_rate}
-              onChange={(e) =>
-                setConfig({
-                  ...config,
-                  fuel_consumption_rate: parseFloat(e.target.value) || 0,
-                })
-              }
-              className={inputClass}
+            <NumberField
+              id="cost-consumption"
+              value={values.fuel_consumption_rate}
+              onChange={(n) => set("fuel_consumption_rate", n)}
+              unit="L/km"
+              decimals={2}
+              min={0}
             />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Fuel Price per Liter ({config.currency})
-            </label>
-            <input
-              type="number"
-              step="0.01"
-              value={config.fuel_price_per_liter}
-              onChange={(e) =>
-                setConfig({
-                  ...config,
-                  fuel_price_per_liter: parseFloat(e.target.value) || 0,
-                })
-              }
-              className={inputClass}
+          </Field>
+          <Field
+            label="Fuel price per litre"
+            required
+            span={1}
+            error={errors.fuel_price_per_liter}
+          >
+            <NumberField
+              id="cost-fuel-price"
+              value={values.fuel_price_per_liter}
+              onChange={(n) => set("fuel_price_per_liter", n)}
+              unit={values.currency}
+              decimals={2}
+              min={0}
             />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Driver Hourly Rate ({config.currency})
-            </label>
-            <input
-              type="number"
-              step="0.5"
-              value={config.driver_hourly_rate}
-              onChange={(e) =>
-                setConfig({
-                  ...config,
-                  driver_hourly_rate: parseFloat(e.target.value) || 0,
-                })
-              }
-              className={inputClass}
+          </Field>
+          <Field
+            label="Driver hourly rate"
+            required
+            span={1}
+            error={errors.driver_hourly_rate}
+          >
+            <NumberField
+              id="cost-driver-rate"
+              value={values.driver_hourly_rate}
+              onChange={(n) => set("driver_hourly_rate", n)}
+              unit={values.currency}
+              decimals={2}
+              min={0}
             />
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Currency
-            </label>
-            <select
-              value={config.currency}
-              onChange={(e) =>
-                setConfig({ ...config, currency: e.target.value })
-              }
-              className={inputClass}
-            >
-              <option value="USD">USD</option>
-              <option value="EUR">EUR</option>
-              <option value="GBP">GBP</option>
-              <option value="CAD">CAD</option>
-            </select>
-          </div>
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-            >
-              {saving ? "Saving..." : "Save Configuration"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
+          </Field>
+          <Field label="Currency">
+            <Select
+              id="cost-currency"
+              value={values.currency}
+              onChange={(v) => set("currency", v)}
+              options={["USD", "EUR", "GBP", "CAD"].map((c) => ({
+                value: c,
+                label: c,
+              }))}
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }
 
@@ -435,7 +464,7 @@ function ExecutionProgress({ planId, executionData }: ExecutionProgressProps) {
       {/* Last update info */}
       {executionData?.updated_at && (
         <p className="text-xs text-gray-500">
-          Last update: {new Date(executionData.updated_at).toLocaleString()}
+          Last update: {formatDateTime(executionData.updated_at)}
         </p>
       )}
 
@@ -534,7 +563,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
       className: "font-medium",
       render: (sv) => (
         <span className={varianceColor(sv.quantity_variance_pct)}>
-          {sv.quantity_variance_pct.toFixed(1)}%
+          {pct1(sv.quantity_variance_pct)}
         </span>
       ),
     },
@@ -551,7 +580,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
               : "text-error"
           }
         >
-          {sv.time_variance_minutes.toFixed(0)}
+          {formatNumber(sv.time_variance_minutes)}
         </span>
       ),
     },
@@ -588,7 +617,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
           <p
             className={`text-lg font-semibold ${varianceColor(outcome.aggregate_quantity_variance_pct)}`}
           >
-            {outcome.aggregate_quantity_variance_pct.toFixed(1)}%
+            {pct1(outcome.aggregate_quantity_variance_pct)}
           </p>
         </div>
         <div className="bg-white rounded-lg p-3 border border-gray-100">
@@ -596,7 +625,7 @@ function OutcomeComparison({ planId }: OutcomeComparisonProps) {
           <p
             className={`text-lg font-semibold ${Math.abs(outcome.aggregate_time_variance_minutes) <= 15 ? "text-success" : "text-error"}`}
           >
-            {outcome.aggregate_time_variance_minutes.toFixed(0)} min
+            {formatNumber(outcome.aggregate_time_variance_minutes)} min
           </p>
         </div>
         <div className="bg-white rounded-lg p-3 border border-gray-100">
@@ -699,13 +728,14 @@ function CostBreakdownSection({
     {
       id: "fuel",
       label: "Fuel Cost",
-      estimatedDisplay: `${estimated.currency ?? "$"}${estimated.fuel_cost.toFixed(2)}`,
-      actualDisplay: actual
-        ? `${actual.currency ?? "$"}${actual.fuel_cost.toFixed(2)}`
-        : "",
+      estimatedDisplay: planCost(estimated.fuel_cost, estimated.currency),
+      actualDisplay: actual ? planCost(actual.fuel_cost, actual.currency) : "",
       varianceDisplay: actual
         ? estimated.fuel_cost > 0
-          ? `${(((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) * 100).toFixed(1)}%`
+          ? pct1(
+              ((actual.fuel_cost - estimated.fuel_cost) / estimated.fuel_cost) *
+                100,
+            )
           : "—"
         : "",
       varianceColor: actual
@@ -721,13 +751,17 @@ function CostBreakdownSection({
     {
       id: "driver",
       label: "Driver Cost",
-      estimatedDisplay: `${estimated.currency ?? "$"}${estimated.driver_cost.toFixed(2)}`,
+      estimatedDisplay: planCost(estimated.driver_cost, estimated.currency),
       actualDisplay: actual
-        ? `${actual.currency ?? "$"}${actual.driver_cost.toFixed(2)}`
+        ? planCost(actual.driver_cost, actual.currency)
         : "",
       varianceDisplay: actual
         ? estimated.driver_cost > 0
-          ? `${(((actual.driver_cost - estimated.driver_cost) / estimated.driver_cost) * 100).toFixed(1)}%`
+          ? pct1(
+              ((actual.driver_cost - estimated.driver_cost) /
+                estimated.driver_cost) *
+                100,
+            )
           : "—"
         : "",
       varianceColor: actual
@@ -744,17 +778,19 @@ function CostBreakdownSection({
     {
       id: "total",
       label: "Total",
-      estimatedDisplay: `${estimated.currency ?? "$"}${(
+      estimatedDisplay: planCost(
         estimated.total_estimated_cost ??
-          estimated.fuel_cost + estimated.driver_cost
-      ).toFixed(2)}`,
+          estimated.fuel_cost + estimated.driver_cost,
+        estimated.currency,
+      ),
       actualDisplay: actual
-        ? `${actual.currency ?? "$"}${(
-            actual.total_actual_cost ?? actual.fuel_cost + actual.driver_cost
-          ).toFixed(2)}`
+        ? planCost(
+            actual.total_actual_cost ?? actual.fuel_cost + actual.driver_cost,
+            actual.currency,
+          )
         : "",
       varianceDisplay:
-        cost_variance_pct != null ? `${cost_variance_pct.toFixed(1)}%` : "—",
+        cost_variance_pct != null ? pct1(cost_variance_pct) : "—",
       varianceColor:
         cost_variance_pct != null &&
         Math.abs(cost_variance_pct) <= VARIANCE_THRESHOLD
@@ -840,166 +876,128 @@ interface ReplanFormProps {
 }
 
 function ReplanForm({ planId, onClose, onSuccess }: ReplanFormProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [form, setForm] = useState<ReplanRequest>({
-    disruption_type: "",
-    description: "",
-    entity_id: "",
-  });
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!form.disruption_type || !form.description || !form.entity_id) {
-      setError("All fields are required.");
-      return;
-    }
-    setError("");
-    setSubmitting(true);
-    try {
-      const res = await replan(planId, form, activeTenantId());
-      onSuccess(res);
-      onClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to submit replan");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
+  const entityLabel = (type: string) =>
+    type === "truck_breakdown"
+      ? "Truck"
+      : type === "station_closure" || type === "demand_spike"
+        ? "Station"
+        : "Entity ID";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">Replan</h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close replan form"
+    <FormDialog<ReplanRequest & Record<string, unknown>, ReplanResponse>
+      open
+      size="md"
+      title="Replan"
+      help={`Report a disruption on plan ${planId} and generate a new plan around it.`}
+      submitLabel="Submit replan"
+      initialValues={{ disruption_type: "", description: "", entity_id: "" }}
+      validate={(v) => ({
+        disruption_type: v.disruption_type
+          ? undefined
+          : "Choose a disruption type.",
+        description: v.description.trim()
+          ? undefined
+          : "Describe the disruption.",
+        entity_id: v.entity_id
+          ? undefined
+          : `Choose the affected ${entityLabel(v.disruption_type).toLowerCase()}.`,
+      })}
+      onSubmit={(v) =>
+        replan(
+          planId,
+          {
+            disruption_type: v.disruption_type,
+            description: v.description,
+            entity_id: v.entity_id,
+          },
+          activeTenantId(),
+        )
+      }
+      // The page's success handler toasts.
+      successMessage={null}
+      onSaved={onSuccess}
+      onClose={onClose}
+    >
+      {({ values, set, setValues, errors }) => (
+        <>
+          <Field
+            label="Disruption type"
+            required
+            error={errors.disruption_type}
           >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Disruption Type
-            </label>
             <select
-              value={form.disruption_type}
+              value={values.disruption_type}
               onChange={(e) =>
-                // Changing the disruption type changes what the entity refers
-                // to (truck vs station vs free-form), so clear the prior pick.
-                setForm({
-                  ...form,
+                // A new type changes what the entity refers to (truck vs
+                // station vs free-form), so clear the prior pick.
+                setValues((prev) => ({
+                  ...prev,
                   disruption_type: e.target.value,
                   entity_id: "",
-                })
+                }))
               }
-              className={inputClass}
-              required
+              className={INPUT_CLASS}
             >
-              <option value="">Select type...</option>
-              <option value="truck_breakdown">Truck Breakdown</option>
-              <option value="station_closure">Station Closure</option>
-              <option value="demand_spike">Demand Spike</option>
-              <option value="road_closure">Road Closure</option>
+              <option value="">Select type…</option>
+              <option value="truck_breakdown">Truck breakdown</option>
+              <option value="station_closure">Station closure</option>
+              <option value="demand_spike">Demand spike</option>
+              <option value="road_closure">Road closure</option>
               <option value="other">Other</option>
             </select>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Description
-            </label>
+          </Field>
+          <Field label="Description" required error={errors.description}>
             <textarea
-              value={form.description}
-              onChange={(e) =>
-                setForm({ ...form, description: e.target.value })
-              }
-              placeholder="Describe the disruption..."
+              value={values.description}
+              onChange={(e) => set("description", e.target.value)}
+              placeholder="Describe the disruption…"
               rows={3}
-              className={`${inputClass} resize-none`}
-              required
+              className={`${INPUT_CLASS} h-auto resize-none py-2`}
             />
-          </div>
-
-          <div>
-            <label
-              htmlFor="replan-entity"
-              className="block text-xs font-medium text-gray-600 mb-1"
+          </Field>
+          {values.disruption_type === "truck_breakdown" ? (
+            <Field
+              label="Truck"
+              required
+              error={errors.entity_id}
+              id="replan-entity"
             >
-              {form.disruption_type === "truck_breakdown"
-                ? "Truck"
-                : form.disruption_type === "station_closure" ||
-                    form.disruption_type === "demand_spike"
-                  ? "Station"
-                  : "Entity ID"}
-            </label>
-            {form.disruption_type === "truck_breakdown" ? (
               <AssetPicker
                 id="replan-entity"
                 assetType="vehicle"
-                value={form.entity_id || null}
-                onChange={(entityId) =>
-                  setForm({ ...form, entity_id: entityId })
-                }
+                value={values.entity_id || null}
+                onChange={(entityId) => set("entity_id", entityId)}
                 aria-label="Truck"
               />
-            ) : form.disruption_type === "station_closure" ||
-              form.disruption_type === "demand_spike" ? (
+            </Field>
+          ) : values.disruption_type === "station_closure" ||
+            values.disruption_type === "demand_spike" ? (
+            <Field
+              label="Station"
+              required
+              error={errors.entity_id}
+              id="replan-entity"
+            >
               <StationPicker
                 id="replan-entity"
-                value={form.entity_id || null}
-                onChange={(entityId) =>
-                  setForm({ ...form, entity_id: entityId })
-                }
+                value={values.entity_id || null}
+                onChange={(entityId) => set("entity_id", entityId)}
                 aria-label="Station"
               />
-            ) : (
+            </Field>
+          ) : (
+            <Field label="Entity ID" required error={errors.entity_id}>
               <input
-                id="replan-entity"
                 type="text"
-                value={form.entity_id}
-                onChange={(e) =>
-                  setForm({ ...form, entity_id: e.target.value })
-                }
+                value={values.entity_id}
+                onChange={(e) => set("entity_id", e.target.value)}
                 placeholder="Affected entity (e.g. road segment or route ID)"
-                className={inputClass}
-                required
+                className={INPUT_CLASS}
               />
-            )}
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-            >
-              {submitting ? "Submitting..." : "Submit Replan"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+            </Field>
+          )}
+        </>
+      )}
+    </FormDialog>
   );
 }
 
@@ -1018,31 +1016,30 @@ interface EmergencyStopModalProps {
   onSuccess: (response: EmergencyStopResponse) => void;
 }
 
-function EmergencyStopModal({
+export function EmergencyStopModal({
   routeId,
   onClose,
   onSuccess,
 }: EmergencyStopModalProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
+  type Values = {
+    destination_type: "station" | "customer_tank";
+    destination_id: string;
+    fuel_grade: string;
+    requested_gallons: number | null;
+    priority_reason: string;
+    sla_by: string;
+  };
   const [destinationType, setDestinationType] = useState<
     "station" | "customer_tank"
   >("station");
-  const [form, setForm] = useState<EmergencyStopRequest>({
-    fuel_grade: "",
-    requested_gallons: 0,
-    priority_reason: "",
-  });
 
   // Destination picker state (Req 6.2.4). Fetches once on mount and
-  // re-fetches whenever ``destinationType`` flips. ``null`` items means
-  // "still loading"; ``fetchFailed`` drops to a free-text fallback with
-  // a warning banner so dispatchers are never blocked by a transient
-  // destinations-list failure.
+  // re-fetches whenever the destination type flips. ``null`` items means
+  // "still loading"; a failed fetch drops to a free-text fallback with a
+  // warning so dispatchers are never blocked by a transient failure.
   const [destinations, setDestinations] = useState<
     DeliveryDestination[] | null
   >(null);
-  const [destinationsLoading, setDestinationsLoading] = useState(false);
   const [destinationsFailed, setDestinationsFailed] = useState(false);
 
   useEffect(() => {
@@ -1050,7 +1047,6 @@ function EmergencyStopModal({
     const apiType: DeliveryDestinationType =
       destinationType === "station" ? "retail_station" : "customer_tank";
     setDestinations(null);
-    setDestinationsLoading(true);
     setDestinationsFailed(false);
     listDeliveryDestinations({ destination_type: apiType })
       .then((res) => {
@@ -1060,488 +1056,214 @@ function EmergencyStopModal({
         if (cancelled) return;
         console.error("Failed to load delivery destinations", err);
         setDestinationsFailed(true);
-      })
-      .finally(() => {
-        if (!cancelled) setDestinationsLoading(false);
       });
     return () => {
       cancelled = true;
     };
   }, [destinationType]);
 
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-
-    const destinationValue =
-      destinationType === "station" ? form.station_id : form.customer_tank_id;
-    if (!destinationValue) {
-      setError("Destination id is required.");
-      return;
-    }
-    if (!form.fuel_grade.trim()) {
-      setError("Fuel grade is required.");
-      return;
-    }
-    if (!form.requested_gallons || form.requested_gallons <= 0) {
-      setError("Requested gallons must be greater than zero.");
-      return;
-    }
-    if (!form.priority_reason.trim()) {
-      setError("Priority reason is required.");
-      return;
-    }
-
+  const submit = async (v: Values): Promise<EmergencyStopResponse> => {
     const payload: EmergencyStopRequest = {
-      fuel_grade: form.fuel_grade.trim(),
-      requested_gallons: Number(form.requested_gallons),
-      priority_reason: form.priority_reason.trim(),
+      fuel_grade: v.fuel_grade,
+      requested_gallons: v.requested_gallons ?? 0,
+      priority_reason: v.priority_reason.trim(),
     };
-    if (destinationType === "station") {
-      payload.station_id = form.station_id;
-    } else {
-      payload.customer_tank_id = form.customer_tank_id;
+    if (v.destination_type === "station") payload.station_id = v.destination_id;
+    else payload.customer_tank_id = v.destination_id;
+    if (v.sla_by) {
+      const t = new Date(v.sla_by);
+      if (!Number.isNaN(t.getTime())) payload.SLA_by = t.toISOString();
     }
-    if (form.SLA_by?.trim()) {
-      payload.SLA_by = form.SLA_by.trim();
-    }
-
-    setSubmitting(true);
     try {
-      const res = await insertEmergencyStop(routeId, payload);
-      onSuccess(res);
-      onClose();
+      return await insertEmergencyStop(routeId, payload);
     } catch (err) {
       // The backend surfaces structured reason codes on HTTP 409
-      // (``capacity_insufficient`` / ``sla_breach`` / ``truck_off_duty``).
-      // ``fuelRequest`` packs those into ``ApiError.message`` — we surface
-      // the human-readable label when we recognize it.
+      // (capacity_insufficient / sla_breach / truck_off_duty), packed into
+      // ApiError.message: show the readable label when we recognise it.
       const raw =
         err instanceof Error ? err.message : "Failed to insert emergency stop";
-      const friendly = EMERGENCY_STOP_REASON_LABELS[raw] ?? raw;
-      setError(friendly);
-    } finally {
-      setSubmitting(false);
+      throw new Error(EMERGENCY_STOP_REASON_LABELS[raw] ?? raw);
     }
   };
 
+  const label = destinationType === "station" ? "Station" : "Customer tank";
+
+  // Emergency stop (review finding, task 3.10): an md FormDialog with the
+  // product picked by name (ProductSelect) and whole gallons (NumberField)
+  // instead of a raw-code text box and a fractional `type=number`.
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <div className="flex items-center gap-2">
-            <Siren className="w-4 h-4 text-error" />
-            <h2 className="text-lg font-semibold text-primary">
-              Emergency Stop
-            </h2>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close emergency stop form"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Destination Type
-            </label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                onClick={() => setDestinationType("station")}
-                className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
-                  destinationType === "station"
-                    ? "bg-primary text-white border-primary"
-                    : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                Station
-              </button>
-              <button
-                type="button"
-                onClick={() => setDestinationType("customer_tank")}
-                className={`flex-1 px-3 py-2 text-xs font-medium rounded-lg border transition-colors ${
-                  destinationType === "customer_tank"
-                    ? "bg-primary text-white border-primary"
-                    : "bg-white text-gray-600 border-gray-200 hover:bg-gray-50"
-                }`}
-              >
-                Customer Tank
-              </button>
-            </div>
-          </div>
-
-          <div>
-            <label
-              htmlFor="emergency-stop-destination"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              {destinationType === "station"
-                ? "Station ID"
-                : "Customer Tank ID"}
-            </label>
-            {destinationsFailed ? (
-              <>
-                <div
-                  className="mb-1 flex items-start gap-2 px-2 py-1.5 text-[11px] text-warning-dark bg-warning-light border border-warning-light rounded"
-                  role="status"
-                >
-                  <AlertTriangle
-                    className="w-3.5 h-3.5 mt-0.5 flex-shrink-0"
-                    aria-hidden="true"
-                  />
-                  <span>Could not load destinations; enter ID manually.</span>
-                </div>
-                <input
-                  id="emergency-stop-destination"
-                  type="text"
-                  value={
-                    destinationType === "station"
-                      ? (form.station_id ?? "")
-                      : (form.customer_tank_id ?? "")
-                  }
-                  onChange={(e) =>
-                    setForm((prev) => ({
+    <FormDialog<Values, EmergencyStopResponse>
+      open
+      size="md"
+      title="Emergency stop"
+      help="Insert an urgent stop into this route. The server checks compartment capacity, SLA windows and driver hours."
+      submitLabel="Insert stop"
+      successMessage={null}
+      initialValues={{
+        destination_type: "station",
+        destination_id: "",
+        fuel_grade: "",
+        requested_gallons: null,
+        priority_reason: "",
+        sla_by: "",
+      }}
+      validate={(v) => ({
+        destination_id: v.destination_id.trim()
+          ? undefined
+          : `Pick a ${v.destination_type === "station" ? "station" : "customer tank"}.`,
+        fuel_grade: v.fuel_grade ? undefined : "Pick a product.",
+        requested_gallons:
+          v.requested_gallons && v.requested_gallons > 0
+            ? undefined
+            : "Requested gallons must be greater than zero.",
+        priority_reason: v.priority_reason.trim()
+          ? undefined
+          : "Priority reason is required.",
+      })}
+      onSubmit={submit}
+      onSaved={onSuccess}
+      onClose={onClose}
+    >
+      {({ values, set, setValues, errors }) => (
+        <>
+          <fieldset className="col-span-2">
+            <legend className="mb-1 text-xs font-medium text-slate-700">
+              Destination type
+            </legend>
+            <div className="inline-flex rounded-lg border border-slate-300 p-0.5">
+              {(["station", "customer_tank"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  aria-pressed={values.destination_type === t}
+                  onClick={() => {
+                    setDestinationType(t);
+                    setValues((prev) => ({
                       ...prev,
-                      station_id:
-                        destinationType === "station"
-                          ? e.target.value
-                          : prev.station_id,
-                      customer_tank_id:
-                        destinationType === "customer_tank"
-                          ? e.target.value
-                          : prev.customer_tank_id,
-                    }))
-                  }
-                  placeholder={
-                    destinationType === "station"
-                      ? "e.g. STN-042"
-                      : "e.g. CT-0193"
-                  }
-                  className={inputClass}
-                  required
-                />
-              </>
-            ) : destinationsLoading || destinations === null ? (
-              <select
-                id="emergency-stop-destination"
-                aria-label="Destination (loading)"
-                className={inputClass}
-                value=""
-                disabled
-              >
-                <option value="">Loading destinations…</option>
-              </select>
-            ) : (
-              <select
-                id="emergency-stop-destination"
-                className={inputClass}
-                data-testid="emergency-stop-destination-select"
-                value={
-                  destinationType === "station"
-                    ? (form.station_id ?? "")
-                    : (form.customer_tank_id ?? "")
-                }
-                onChange={(e) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    station_id:
-                      destinationType === "station"
-                        ? e.target.value
-                        : prev.station_id,
-                    customer_tank_id:
-                      destinationType === "customer_tank"
-                        ? e.target.value
-                        : prev.customer_tank_id,
-                  }))
-                }
-                required
-              >
-                <option value="">
-                  {destinations.length === 0
-                    ? `No ${
-                        destinationType === "station"
-                          ? "stations"
-                          : "customer tanks"
-                      } available`
-                    : `Select a ${
-                        destinationType === "station"
-                          ? "station"
-                          : "customer tank"
-                      }…`}
-                </option>
-                {destinations.map((d) => (
-                  <option key={d.destination_id} value={d.destination_id}>
-                    {d.name?.trim() ? d.name : d.destination_id}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Fuel Grade
-              </label>
+                      destination_type: t,
+                      destination_id: "",
+                    }));
+                  }}
+                  className={`h-7 rounded-md px-3 text-xs font-semibold ${
+                    values.destination_type === t
+                      ? "bg-primary text-on-primary"
+                      : "text-slate-700 hover:bg-slate-100"
+                  }`}
+                >
+                  {t === "station" ? "Station" : "Customer tank"}
+                </button>
+              ))}
+            </div>
+          </fieldset>
+          <Field
+            label={label}
+            required
+            id="emergency-stop-destination"
+            error={errors.destination_id}
+            help={
+              destinationsFailed
+                ? "Couldn't load destinations; enter the ID."
+                : undefined
+            }
+          >
+            {destinationsFailed ? (
               <input
+                id="emergency-stop-destination"
                 type="text"
-                value={form.fuel_grade}
-                onChange={(e) =>
-                  setForm({ ...form, fuel_grade: e.target.value })
+                value={values.destination_id}
+                onChange={(e) => set("destination_id", e.target.value)}
+                placeholder={
+                  destinationType === "station"
+                    ? "e.g. STN-042"
+                    : "e.g. CT-0193"
                 }
-                placeholder="DIESEL_2 / PROPANE / ..."
-                className={inputClass}
-                required
+                className={INPUT_CLASS}
               />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">
-                Requested Gallons
-              </label>
-              <input
-                type="number"
-                min="0.01"
-                step="0.1"
-                value={form.requested_gallons || ""}
-                onChange={(e) =>
-                  setForm({
-                    ...form,
-                    requested_gallons: parseFloat(e.target.value) || 0,
-                  })
+            ) : (
+              <Select
+                id="emergency-stop-destination"
+                data-testid="emergency-stop-destination-select"
+                value={values.destination_id}
+                disabled={destinations === null}
+                onChange={(v) => set("destination_id", v)}
+                placeholder={
+                  destinations === null
+                    ? "Loading destinations…"
+                    : destinations.length === 0
+                      ? `No ${destinationType === "station" ? "stations" : "customer tanks"} available`
+                      : `Select a ${destinationType === "station" ? "station" : "customer tank"}…`
                 }
-                placeholder="200"
-                className={inputClass}
-                required
+                options={(destinations ?? []).map((d) => ({
+                  value: d.destination_id,
+                  label: d.name?.trim() ? d.name : d.destination_id,
+                }))}
               />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              Priority Reason
-            </label>
+            )}
+          </Field>
+          <Field
+            label="Product"
+            required
+            span={1}
+            id="emergency-stop-product"
+            error={errors.fuel_grade}
+          >
+            <ProductSelect
+              id="emergency-stop-product"
+              value={values.fuel_grade || null}
+              onChange={(code) => set("fuel_grade", code)}
+            />
+          </Field>
+          <Field
+            label="Requested gallons"
+            required
+            span={1}
+            id="emergency-stop-gallons"
+            error={errors.requested_gallons}
+          >
+            <NumberField
+              id="emergency-stop-gallons"
+              value={values.requested_gallons}
+              onChange={(n) => set("requested_gallons", n)}
+              unit="gal"
+              decimals={0}
+              min={1}
+            />
+          </Field>
+          <Field
+            label="Priority reason"
+            required
+            id="emergency-stop-reason"
+            error={errors.priority_reason}
+          >
             <textarea
-              value={form.priority_reason}
-              onChange={(e) =>
-                setForm({ ...form, priority_reason: e.target.value })
-              }
+              id="emergency-stop-reason"
+              value={values.priority_reason}
+              onChange={(e) => set("priority_reason", e.target.value)}
               placeholder="Why is this insertion urgent?"
               rows={2}
-              className={`${inputClass} resize-none`}
-              required
+              className={`${INPUT_CLASS} h-auto resize-none py-2`}
             />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-gray-600 mb-1">
-              SLA By (optional, ISO-8601)
-            </label>
+          </Field>
+          <Field
+            label="Deliver by"
+            id="emergency-stop-sla"
+            help="Optional SLA time"
+          >
             <input
-              type="text"
-              value={form.SLA_by ?? ""}
-              onChange={(e) => setForm({ ...form, SLA_by: e.target.value })}
-              placeholder="2024-05-01T18:00:00Z"
-              className={inputClass}
+              id="emergency-stop-sla"
+              type="datetime-local"
+              value={values.sla_by}
+              onChange={(e) => set("sla_by", e.target.value)}
+              className={INPUT_CLASS}
             />
-            <p className="mt-1 text-[11px] text-gray-500">
-              Backend may respond with 409 + reason codes
-              (capacity_insufficient, sla_breach, truck_off_duty).
-            </p>
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white bg-error hover:bg-error-dark rounded-lg disabled:opacity-50"
-            >
-              {submitting ? "Inserting..." : "Insert Emergency Stop"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }
 
 // ─── Replan Diff Panel (Task 4.10 / Req 2.5.3) ───────────────────────────────
-
-interface ReplanDiffSectionProps<T> {
-  title: string;
-  items: T[];
-  emptyLabel?: string;
-  render: (item: T, index: number) => React.ReactNode;
-  initiallyOpen?: boolean;
-}
-
-function ReplanDiffSection<T>({
-  title,
-  items,
-  emptyLabel,
-  render,
-  initiallyOpen = false,
-}: ReplanDiffSectionProps<T>) {
-  const [open, setOpen] = useState(initiallyOpen && items.length > 0);
-  const isEmpty = items.length === 0;
-
-  return (
-    <div className="border border-gray-100 rounded-lg overflow-hidden">
-      <button
-        type="button"
-        onClick={() => !isEmpty && setOpen((o) => !o)}
-        disabled={isEmpty}
-        className={`w-full flex items-center justify-between px-4 py-2.5 text-sm font-medium transition-colors ${
-          isEmpty
-            ? "text-gray-500 cursor-default"
-            : "text-primary hover:bg-gray-50"
-        }`}
-        aria-expanded={open}
-      >
-        <span className="flex items-center gap-2">
-          {title}
-          <span
-            className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
-              isEmpty
-                ? "bg-gray-50 text-gray-500"
-                : "bg-info-light text-info-dark"
-            }`}
-          >
-            {items.length}
-          </span>
-        </span>
-        {!isEmpty &&
-          (open ? (
-            <ChevronUp className="w-4 h-4 text-gray-500" />
-          ) : (
-            <ChevronDown className="w-4 h-4 text-gray-500" />
-          ))}
-      </button>
-      {open && !isEmpty && (
-        <div className="border-t border-gray-100 divide-y divide-gray-100">
-          {items.map((item, i) => (
-            <div key={i} className="px-4 py-2 text-xs text-gray-700">
-              {render(item, i)}
-            </div>
-          ))}
-        </div>
-      )}
-      {isEmpty && emptyLabel && (
-        <div className="px-4 py-2 text-[11px] text-gray-500">{emptyLabel}</div>
-      )}
-    </div>
-  );
-}
-
-function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
-  return (
-    <div className="space-y-2">
-      <ReplanDiffSection
-        title="Added stops"
-        items={diff.added_stops ?? []}
-        render={(s) => (
-          <div className="flex items-center justify-between">
-            <span className="font-medium text-primary">{s.stop_id}</span>
-            <span className="text-gray-500">
-              index {s.index}
-              {s.gallons != null ? ` · ${s.gallons.toFixed(0)} gal` : ""}
-              {s.product_code ? ` · ${s.product_code}` : ""}
-              {s.eta ? ` · ETA ${new Date(s.eta).toLocaleString()}` : ""}
-            </span>
-          </div>
-        )}
-        initiallyOpen
-      />
-      <ReplanDiffSection
-        title="Removed stops"
-        items={diff.removed_stops ?? []}
-        render={(s) => (
-          <div className="flex items-center justify-between">
-            <span className="font-medium text-primary">{s.stop_id}</span>
-            <span className="text-gray-500">
-              was index {s.index}
-              {s.gallons != null ? ` · ${s.gallons.toFixed(0)} gal` : ""}
-            </span>
-          </div>
-        )}
-        initiallyOpen
-      />
-      <ReplanDiffSection
-        title="Reordered stops"
-        items={diff.reordered_stops ?? []}
-        render={(s) => (
-          <div className="flex items-center justify-between">
-            <span className="font-medium text-primary">{s.stop_id}</span>
-            <span className="text-gray-500">
-              {s.before_index} → {s.after_index}
-            </span>
-          </div>
-        )}
-        initiallyOpen
-      />
-      <ReplanDiffSection
-        title="Reassigned stops"
-        items={diff.reassigned_stops ?? []}
-        render={(s) => (
-          <div className="flex items-center justify-between">
-            <span className="font-medium text-primary">{s.stop_id}</span>
-            <span className="text-gray-500">
-              {s.from_truck_id} → {s.to_truck_id}
-            </span>
-          </div>
-        )}
-      />
-      <ReplanDiffSection
-        title="Quantity changes"
-        items={diff.quantity_changes ?? []}
-        render={(s) => (
-          <div className="flex items-center justify-between">
-            <span className="font-medium text-primary">{s.stop_id}</span>
-            <span className="text-gray-500">
-              {s.before_gallons.toFixed(0)} → {s.after_gallons.toFixed(0)} gal
-              {s.product_code ? ` · ${s.product_code}` : ""}
-            </span>
-          </div>
-        )}
-      />
-      <ReplanDiffSection
-        title="ETA shifts"
-        items={diff.eta_shifts ?? []}
-        render={(s) => (
-          <div className="flex items-center justify-between">
-            <span className="font-medium text-primary">{s.stop_id}</span>
-            <span className="text-gray-500">
-              {new Date(s.before_eta).toLocaleString()} →{" "}
-              {new Date(s.after_eta).toLocaleString()} (
-              {s.shift_minutes >= 0 ? "+" : ""}
-              {s.shift_minutes.toFixed(0)} min)
-            </span>
-          </div>
-        )}
-      />
-    </div>
-  );
-}
 
 interface ReplanDiffPanelProps {
   /**
@@ -1651,9 +1373,7 @@ function ReplanDiffPanel({ seedEventId }: ReplanDiffPanelProps) {
             <span>event_id: {diff.event_id}</span>
             <span>original: {diff.diff.original_route_id}</span>
             <span>patched: {diff.diff.patched_route_id}</span>
-            <span>
-              generated: {new Date(diff.diff.generated_at).toLocaleString()}
-            </span>
+            <span>generated: {formatDateTime(diff.diff.generated_at)}</span>
           </div>
           <ReplanDiffBody diff={diff.diff} />
         </>
@@ -1688,14 +1408,14 @@ const compartmentColumns: Column<CompartmentAssignment>[] = [
     label: "Quantity (gal)",
     align: "right",
     className: "text-gray-700",
-    render: (a) => getAssignmentQuantityGallons(a).toLocaleString(),
+    render: (a) => formatNumber(getAssignmentQuantityGallons(a)),
   },
   {
     key: "capacity",
     label: "Capacity (gal)",
     align: "right",
     className: "text-gray-700",
-    render: (a) => getAssignmentCapacityGallons(a).toLocaleString(),
+    render: (a) => formatNumber(getAssignmentCapacityGallons(a)),
   },
 ];
 
@@ -1781,6 +1501,8 @@ function PlanDetailView({
   if (!plan) return null;
 
   const currentStatus = planStatus || (plan as any).status || "draft";
+  const executionStatus = (plan.loading_plan as WithExecutionStatus | null)
+    ?.execution_status;
 
   return (
     <div className="space-y-6">
@@ -1793,23 +1515,23 @@ function PlanDetailView({
           <ChevronLeft className="w-4 h-4" /> Back to plans
         </button>
         <div className="flex items-center gap-2">
-          {APPROVABLE_STATUSES.includes(currentStatus) && (
-            <>
-              <button
-                onClick={() => onApprove(planId)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors"
-              >
-                <Check className="w-3 h-3" />
-                Approve
-              </button>
-              <button
-                onClick={() => onReject(planId)}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
-              >
-                <X className="w-3 h-3" />
-                Reject
-              </button>
-            </>
+          {DISPATCHABLE_STATUSES.includes(currentStatus) && (
+            <button
+              onClick={() => onApprove(planId)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors"
+            >
+              <Check className="w-3 h-3" />
+              Approve
+            </button>
+          )}
+          {isRejectable(currentStatus, executionStatus) && (
+            <button
+              onClick={() => onReject(planId)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
+            >
+              <X className="w-3 h-3" />
+              Reject
+            </button>
           )}
           <button
             onClick={onReplan}
@@ -1862,11 +1584,11 @@ function PlanDetailView({
             </div>
             <div>
               <span className="text-gray-500">Utilization:</span>{" "}
-              {plan.loading_plan.total_utilization_pct.toFixed(1)}%
+              {pct1(plan.loading_plan.total_utilization_pct)}
             </div>
             <div>
               <span className="text-gray-500">Weight:</span>{" "}
-              {plan.loading_plan.total_weight_kg.toFixed(0)} kg
+              {formatNumber(plan.loading_plan.total_weight_kg)} kg
             </div>
           </div>
           {plan.loading_plan.assignments.length > 0 && (
@@ -1905,7 +1627,7 @@ function PlanDetailView({
                       </span>
                       <div className="flex items-center gap-2">
                         <span className="text-xs text-gray-500">
-                          {route.distance_km.toFixed(1)} km
+                          {formatNumber(route.distance_km, { decimals: 1 })} km
                         </span>
                         {route.route_id && onEmergencyStop && (
                           <button
@@ -2037,7 +1759,7 @@ function PaginationControls({
 
 // ─── Plans Tab ───────────────────────────────────────────────────────────────
 
-function PlansTab() {
+function PlansTab({ subNav }: { subNav?: React.ReactNode }) {
   // Plan list state (fetched from backend)
   const [planList, setPlanList] = useState<PlanListItem[]>([]);
   const [planPagination, setPlanPagination] = useState<PaginationMeta | null>(
@@ -2056,7 +1778,6 @@ function PlansTab() {
   const [error, setError] = useState("");
   const [showReplan, setShowReplan] = useState(false);
   const [showRejectDialog, setShowRejectDialog] = useState<string | null>(null);
-  const [rejectLoading, setRejectLoading] = useState(false);
   const [approveLoading, setApproveLoading] = useState<string | null>(null);
   const [showCostConfig, setShowCostConfig] = useState(false);
 
@@ -2123,18 +1844,38 @@ function PlansTab() {
       // backend reports that as `degraded` rather than folding it into
       // `complete`, so an unconditional success toast here would be the last
       // place the silent skip got laundered into success.
-      if (response.degraded || response.status === "degraded") {
+      if (response.status === "failed") {
+        // A stage raised and the run stopped; never report that as success.
+        addToast(
+          `Plan generation failed: ${
+            response.error_message ?? response.failed_agent ?? "unknown error"
+          }`,
+          "error",
+        );
+      } else if (response.degraded || response.status === "degraded") {
+        // Prefer the backend's readable details (e.g. a plan blocked because
+        // the dyed-diesel check was unavailable) over bare stage names.
+        const details = (response.degradation_reasons ?? [])
+          .flatMap((d) => d.reasons ?? [])
+          .map((r) => (typeof r?.detail === "string" ? r.detail : ""))
+          .filter((detail) => detail.length > 0);
         const stages = (response.degradation_reasons ?? [])
           .map((d) => d.agent_id)
           .join(", ");
         addToast(
-          stages
-            ? `Plan generated with problems: ${stages} produced nothing`
-            : "Plan generated with problems: a stage produced nothing",
+          details.length > 0
+            ? `Plan generated with problems: ${details.join("; ")}`
+            : stages
+              ? `Plan generated with problems: ${stages} produced nothing`
+              : "Plan generated with problems: a stage produced nothing",
           "error",
         );
       } else {
         addToast("Plan generated successfully", "success");
+      }
+      const unplaced = response.unplaced_orders ?? [];
+      if (unplaced.length > 0) {
+        addToast(describeUnplacedOrders(unplaced), "error");
       }
 
       // Reset to page 1 and clear status filter to show the new plan
@@ -2181,10 +1922,7 @@ function PlansTab() {
           setSelectedPlanStatus("dispatched");
         }
       } catch (err) {
-        addToast(
-          err instanceof Error ? err.message : "Failed to approve plan",
-          "error",
-        );
+        addToast(approveErrorMessage(err), "error");
       } finally {
         setApproveLoading(null);
       }
@@ -2196,32 +1934,22 @@ function PlansTab() {
   const handleReject = useCallback(
     async (reason: string) => {
       if (!showRejectDialog) return;
-      setRejectLoading(true);
-      try {
-        const dispatcherId = await getCurrentUserId();
-        if (!dispatcherId) {
-          addToast("Your session has expired. Please sign in again.", "error");
-          return;
-        }
-        await rejectPlan(
-          showRejectDialog,
-          activeTenantId(),
-          dispatcherId,
-          reason || undefined,
-        );
-        addToast(`Plan ${showRejectDialog} rejected`, "success");
-        setShowRejectDialog(null);
-        refreshPlanList();
-        if (selectedPlanId === showRejectDialog) {
-          setSelectedPlanStatus("rejected");
-        }
-      } catch (err) {
-        addToast(
-          err instanceof Error ? err.message : "Failed to reject plan",
-          "error",
-        );
-      } finally {
-        setRejectLoading(false);
+      // Failures throw: the reject dialog stays open and shows the message.
+      const dispatcherId = await getCurrentUserId();
+      if (!dispatcherId) {
+        throw new Error("Your session has expired. Please sign in again.");
+      }
+      await rejectPlan(
+        showRejectDialog,
+        activeTenantId(),
+        dispatcherId,
+        reason || undefined,
+      );
+      addToast(`Plan ${showRejectDialog} rejected`, "success");
+      setShowRejectDialog(null);
+      refreshPlanList();
+      if (selectedPlanId === showRejectDialog) {
+        setSelectedPlanStatus("rejected");
       }
     },
     [showRejectDialog, addToast, refreshPlanList, selectedPlanId],
@@ -2292,181 +2020,213 @@ function PlansTab() {
             planId={showRejectDialog}
             onConfirm={handleReject}
             onCancel={() => setShowRejectDialog(null)}
-            loading={rejectLoading}
           />
         )}
       </>
     );
   }
 
-  return (
-    <div className="space-y-4">
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-
-      {/* Header with generate button and settings */}
-      <div className="flex items-center justify-between">
-        <h3 className="text-sm font-semibold text-primary">
-          Distribution Plans
-        </h3>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowCostConfig(true)}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
-            aria-label="Cost configuration settings"
+  const planColumns: Column<PlanListItem>[] = [
+    {
+      key: "plan_id",
+      header: "Plan",
+      width: 150,
+      truncate: true,
+      title: (p) => p.plan_id,
+      className: "font-semibold text-slate-900",
+      cell: (p) => p.plan_id,
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 130,
+      cell: (p) => <StatusBadge status={p.status} />,
+    },
+    {
+      key: "truck_id",
+      header: "Truck",
+      width: 130,
+      truncate: true,
+      cell: (p) => p.truck_id || "—",
+    },
+    {
+      key: "run_id",
+      header: "Run",
+      truncate: true,
+      className: "text-slate-700",
+      cell: (p) => p.run_id || "—",
+    },
+    {
+      key: "created_at",
+      header: "Created",
+      width: 130,
+      className: "whitespace-nowrap tabular-nums text-slate-700",
+      cell: (p) => (p.created_at ? formatDateTime(p.created_at) : "—"),
+    },
+    {
+      key: "utilization",
+      header: "Utilization",
+      width: 100,
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (p) =>
+        p.total_utilization_pct != null
+          ? formatPct(p.total_utilization_pct)
+          : "—",
+    },
+    {
+      key: "cost",
+      header: "Cost",
+      width: 110,
+      align: "right",
+      className: "tabular-nums text-slate-700",
+      cell: (p) =>
+        p.status === "completed" && p.actual_cost != null
+          ? `Actual ${formatMoney(p.actual_cost, { decimals: 0 })}`
+          : p.status === "dispatched" && p.estimated_cost != null
+            ? `Est. ${formatMoney(p.estimated_cost, { decimals: 0 })}`
+            : "—",
+    },
+    {
+      key: "actions",
+      header: <span className="sr-only">Actions</span>,
+      width: 230,
+      align: "right",
+      cell: (p) => (
+        <div
+          className="flex items-center justify-end gap-1.5"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Approve for draft/proposed/scheduled; Reject for draft/proposed with no executor run in flight or applied (R12.7) */}
+          {DISPATCHABLE_STATUSES.includes(p.status) && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => handleApprove(p.plan_id)}
+              loading={approveLoading === p.plan_id}
+              icon={<Check className="h-3 w-3" />}
+              aria-label={`Approve plan ${p.plan_id}`}
+            >
+              Approve
+            </Button>
+          )}
+          {isRejectable(
+            p.status,
+            (p as WithExecutionStatus).execution_status,
+          ) && (
+            <Button
+              size="sm"
+              variant="danger"
+              onClick={() => setShowRejectDialog(p.plan_id)}
+              icon={<X className="h-3 w-3" />}
+              aria-label={`Reject plan ${p.plan_id}`}
+            >
+              Reject
+            </Button>
+          )}
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              setSelectedPlanId(p.plan_id);
+              setSelectedPlanStatus(p.status);
+            }}
+            icon={<Eye className="h-3 w-3" />}
+            aria-label={`View plan ${p.plan_id}`}
           >
-            <Settings className="w-4 h-4" />
-          </button>
-          <button
-            onClick={handleGenerate}
-            disabled={generating}
-            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-          >
-            {generating ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Play className="w-4 h-4" />
-            )}
-            {generating ? "Generating..." : "Generate Plan"}
-          </button>
+            View
+          </Button>
         </div>
-      </div>
+      ),
+    },
+  ];
 
-      {/* Status filter */}
-      <div className="flex items-center gap-3">
-        <select
-          value={statusFilter}
-          onChange={(e) => {
-            setStatusFilter(e.target.value);
-            setPlanPage(1);
-          }}
-          className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white"
-        >
-          <option value="">All statuses</option>
-          <option value="draft">Draft</option>
-          <option value="proposed">Proposed</option>
-          <option value="dispatched">Dispatched</option>
-          <option value="completed">Completed</option>
-          <option value="rejected">Rejected</option>
-        </select>
-        <button
-          onClick={refreshPlanList}
-          className="p-1.5 text-gray-500 hover:text-gray-600 rounded"
-          aria-label="Refresh plan list"
-        >
-          <RefreshCw className="w-4 h-4" />
-        </button>
-      </div>
+  return (
+    <div className="flex min-h-0 flex-col">
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
+      {/* One toolbar row: the sub-view switch, then this view's controls. */}
+      <Toolbar
+        label="Plans"
+        views={subNav}
+        end={
+          <>
+            <select
+              value={statusFilter}
+              onChange={(e) => {
+                setStatusFilter(e.target.value);
+                setPlanPage(1);
+              }}
+              aria-label="Filter plans by status"
+              className="h-7 rounded-lg border border-slate-300 bg-surface px-2 text-xs font-semibold text-slate-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+            >
+              <option value="">All statuses</option>
+              <option value="draft">Draft</option>
+              <option value="proposed">Proposed</option>
+              <option value="scheduled">Scheduled</option>
+              <option value="dispatched">Dispatched</option>
+              <option value="completed">Completed</option>
+              <option value="rejected">Rejected</option>
+            </select>
+            <IconButton
+              label="Refresh plan list"
+              size="sm"
+              onClick={refreshPlanList}
+              icon={<RefreshCw className="h-3.5 w-3.5" />}
+            />
+            <IconButton
+              label="Cost configuration settings"
+              size="sm"
+              onClick={() => setShowCostConfig(true)}
+              icon={<Settings className="h-3.5 w-3.5" />}
+            />
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={handleGenerate}
+              loading={generating}
+              icon={<Play className="h-3.5 w-3.5" />}
+            >
+              {generating ? "Generating..." : "Generate Plan"}
+            </Button>
+          </>
+        }
+      />
 
       {error && (
-        <p className="text-sm text-error bg-error-light px-4 py-3 rounded-lg">
+        <p
+          role="alert"
+          className="mx-4 mt-3 rounded-lg bg-red-50 px-4 py-2 text-sm text-red-800"
+        >
           {error}
         </p>
       )}
 
-      {/* Plan list */}
-      {listLoading ? (
-        <div className="flex items-center justify-center py-16">
-          <Loader2 className="w-6 h-6 text-gray-500 animate-spin" />
-        </div>
-      ) : planList.length === 0 ? (
-        <div className="flex flex-col items-center justify-center py-16 text-gray-500">
-          <Truck className="w-8 h-8 mb-2" />
-          <p className="text-sm">No plans found</p>
-          <p className="text-xs mt-1">
-            Click &quot;Generate Plan&quot; to create a distribution plan
-          </p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {planList.map((p) => (
-            <div
-              key={p.plan_id}
-              className="flex items-center justify-between border border-gray-100 rounded-lg p-4 hover:border-gray-200 transition-colors"
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <p className="text-sm font-medium text-primary truncate">
-                    {p.plan_id}
-                  </p>
-                  <StatusBadge status={p.status} />
-                </div>
-                <div className="flex items-center gap-4 mt-1 text-xs text-gray-500">
-                  {p.truck_id && <span>Truck: {p.truck_id}</span>}
-                  {p.run_id && <span>Run: {p.run_id}</span>}
-                  {p.created_at && (
-                    <span>{new Date(p.created_at).toLocaleDateString()}</span>
-                  )}
-                  {p.total_utilization_pct != null && (
-                    <span>{p.total_utilization_pct.toFixed(0)}% util</span>
-                  )}
-                  {/* Cost summary in list view */}
-                  {p.status === "completed" && p.actual_cost != null && (
-                    <span className="text-success font-medium">
-                      Actual: ${p.actual_cost.toFixed(0)}
-                    </span>
-                  )}
-                  {p.status === "dispatched" && p.estimated_cost != null && (
-                    <span className="text-info font-medium">
-                      Est: ${p.estimated_cost.toFixed(0)}
-                    </span>
-                  )}
-                </div>
-              </div>
-              <div className="flex items-center gap-2 ml-4">
-                {/* Approve/Reject buttons for draft/proposed plans */}
-                {APPROVABLE_STATUSES.includes(p.status) && (
-                  <>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleApprove(p.plan_id);
-                      }}
-                      disabled={approveLoading === p.plan_id}
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-success hover:bg-success-dark rounded-lg transition-colors disabled:opacity-50"
-                      aria-label={`Approve plan ${p.plan_id}`}
-                    >
-                      {approveLoading === p.plan_id ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <Check className="w-3 h-3" />
-                      )}
-                      Approve
-                    </button>
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowRejectDialog(p.plan_id);
-                      }}
-                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium text-white bg-error hover:bg-error-dark rounded-lg transition-colors"
-                      aria-label={`Reject plan ${p.plan_id}`}
-                    >
-                      <X className="w-3 h-3" />
-                      Reject
-                    </button>
-                  </>
-                )}
-                <button
-                  onClick={() => {
-                    setSelectedPlanId(p.plan_id);
-                    setSelectedPlanStatus(p.status);
-                  }}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
-                  aria-label={`View plan ${p.plan_id}`}
-                >
-                  <Eye className="w-3 h-3" />
-                  View
-                </button>
-              </div>
-            </div>
-          ))}
-
-          {/* Pagination */}
-          {planPagination && (
-            <PaginationControls
-              pagination={planPagination}
-              onPageChange={setPlanPage}
-            />
-          )}
+      <DataTable<PlanListItem>
+        ariaLabel="Distribution plans"
+        columns={planColumns}
+        data={planList}
+        getRowId={(p) => p.plan_id}
+        loading={listLoading}
+        onRowClick={(p) => {
+          setSelectedPlanId(p.plan_id);
+          setSelectedPlanStatus(p.status);
+        }}
+        emptyState={
+          <div className="flex flex-col items-center text-text-muted">
+            <Truck aria-hidden="true" className="mb-2 h-8 w-8" />
+            <p className="text-sm">No plans found</p>
+            <p className="mt-1 text-xs">
+              Click &quot;Generate Plan&quot; to create a distribution plan
+            </p>
+          </div>
+        }
+      />
+      {!listLoading && planList.length > 0 && planPagination && (
+        <div className="px-4 py-2">
+          <PaginationControls
+            pagination={planPagination}
+            onPageChange={setPlanPage}
+          />
         </div>
       )}
 
@@ -2476,7 +2236,6 @@ function PlansTab() {
           planId={showRejectDialog}
           onConfirm={handleReject}
           onCancel={() => setShowRejectDialog(null)}
-          loading={rejectLoading}
         />
       )}
 
@@ -2512,27 +2271,30 @@ const forecastColumns: Column<Forecast>[] = [
     label: "Runout P50 (hrs)",
     align: "right",
     className: "text-sm text-gray-700",
-    render: (f) => ((f as any).hours_to_runout_p50 ?? 0).toFixed(1),
+    render: (f) =>
+      formatNumber((f as any).hours_to_runout_p50 ?? 0, { decimals: 1 }),
   },
   {
     key: "runout_p90",
     label: "Runout P90 (hrs)",
     align: "right",
     className: "text-sm text-gray-700",
-    render: (f) => ((f as any).hours_to_runout_p90 ?? 0).toFixed(1),
+    render: (f) =>
+      formatNumber((f as any).hours_to_runout_p90 ?? 0, { decimals: 1 }),
   },
   {
     key: "risk_24h",
     label: "Risk 24h",
     align: "right",
     className: "text-sm text-gray-700",
-    render: (f) => `${(((f as any).runout_risk_24h ?? 0) * 100).toFixed(0)}%`,
+    render: (f) =>
+      formatPct((f as any).runout_risk_24h ?? 0, { fraction: true }),
   },
   {
     key: "timestamp",
     label: "Timestamp",
     className: "text-xs text-gray-500",
-    render: (f) => (f.timestamp ? new Date(f.timestamp).toLocaleString() : "—"),
+    render: (f) => (f.timestamp ? formatDateTime(f.timestamp) : "—"),
   },
 ];
 
@@ -2835,7 +2597,7 @@ function PrioritiesTab() {
       className: "text-xs text-gray-500",
       render: (c) =>
         c.centroid
-          ? `${c.centroid.lat.toFixed(4)}, ${c.centroid.lon.toFixed(4)}`
+          ? `${formatNumber(c.centroid.lat, { decimals: 4 })}, ${formatNumber(c.centroid.lon, { decimals: 4 })}`
           : "—",
     },
     {
@@ -2849,8 +2611,13 @@ function PrioritiesTab() {
               key={`${m.station_id ?? m.customer_tank_id ?? i}-${i}`}
               className="inline-flex items-center gap-1 px-2 py-0.5 bg-gray-100 rounded text-[11px]"
             >
-              {m.station_id ?? m.customer_tank_id ?? "?"}
-              {m.fuel_grade ? ` · ${m.fuel_grade}` : ""}
+              {m.station_name ?? m.station_id ?? m.customer_tank_id ?? "?"}
+              {m.fuel_grade && (
+                <>
+                  <span aria-hidden="true">·</span>
+                  <ProductChip code={m.fuel_grade} className="text-[11px]" />
+                </>
+              )}
             </span>
           ))}
           {c.members.length > 8 && (
@@ -2888,7 +2655,7 @@ function PrioritiesTab() {
       label: "Priority Score",
       align: "right",
       className: "text-sm text-gray-700",
-      render: (p) => (p.priority_score ?? 0).toFixed(2),
+      render: (p) => formatNumber(p.priority_score ?? 0, { decimals: 2 }),
     },
     {
       key: "urgency",
@@ -2941,8 +2708,7 @@ function PrioritiesTab() {
       key: "timestamp",
       label: "Timestamp",
       className: "text-xs text-gray-500",
-      render: (p) =>
-        p.timestamp ? new Date(p.timestamp).toLocaleString() : "—",
+      render: (p) => (p.timestamp ? formatDateTime(p.timestamp) : "—"),
     },
   ];
 
@@ -3114,7 +2880,8 @@ const priorityClusterColumns: Column<PriorityClusterItem>[] = [
     className: "text-gray-600",
     render: (cluster) => (
       <>
-        {cluster.centroid.lat.toFixed(5)},{cluster.centroid.lon.toFixed(5)}
+        {formatNumber(cluster.centroid.lat, { decimals: 5 })},
+        {formatNumber(cluster.centroid.lon, { decimals: 5 })}
       </>
     ),
   },
@@ -3163,9 +2930,6 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
     loadClusters(epsMiles, minSamples);
   };
 
-  const inputClass =
-    "w-full px-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
   const generatedAt = (data as { generated_at?: string } | null)?.generated_at;
 
   return (
@@ -3189,16 +2953,15 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
             htmlFor="priority-clusters-eps"
             className="block text-[11px] font-medium text-gray-600 mb-1"
           >
-            eps_miles
+            Cluster radius
           </label>
-          <input
+          <NumberField
             id="priority-clusters-eps"
-            type="number"
-            min="0.5"
-            step="0.5"
             value={epsMiles}
-            onChange={(e) => setEpsMiles(parseFloat(e.target.value) || 0)}
-            className={inputClass}
+            onChange={(n) => setEpsMiles(n != null && n > 0 ? n : 0)}
+            unit="mi"
+            decimals={1}
+            min={0.5}
           />
         </div>
         <div>
@@ -3206,18 +2969,14 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
             htmlFor="priority-clusters-min-samples"
             className="block text-[11px] font-medium text-gray-600 mb-1"
           >
-            min_samples
+            Minimum stops
           </label>
-          <input
+          <NumberField
             id="priority-clusters-min-samples"
-            type="number"
-            min="1"
-            step="1"
             value={minSamples}
-            onChange={(e) =>
-              setMinSamples(Math.max(1, parseInt(e.target.value, 10) || 1))
-            }
-            className={inputClass}
+            onChange={(n) => setMinSamples(Math.max(1, n || 1))}
+            decimals={0}
+            min={1}
           />
         </div>
         <button
@@ -3246,8 +3005,7 @@ function PriorityClustersPanel({ addError }: PriorityClustersPanelProps) {
             min_samples: {data.min_samples}
           </span>
           <span className="inline-flex items-center px-2 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">
-            generated_at:{" "}
-            {generatedAt ? new Date(generatedAt).toLocaleString() : "—"}
+            generated_at: {generatedAt ? formatDateTime(generatedAt) : "—"}
           </span>
         </div>
       )}
@@ -3391,7 +3149,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
             htmlFor="combinable-groups-run-id"
             className="block text-[11px] font-medium text-gray-600 mb-1"
           >
-            run_id
+            Plan run
           </label>
           <input
             id="combinable-groups-run-id"
@@ -3407,15 +3165,17 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
             htmlFor="combinable-groups-fuel-grade"
             className="block text-[11px] font-medium text-gray-600 mb-1"
           >
-            fuel_grade
+            Product
           </label>
-          <input
+          <Select
             id="combinable-groups-fuel-grade"
-            type="text"
             value={fuelGrade}
-            onChange={(e) => setFuelGrade(e.target.value)}
-            placeholder="DIESEL_2 / PROPANE / ..."
-            className={inputClass}
+            onChange={setFuelGrade}
+            placeholder="Any product"
+            options={PRODUCT_CODES.map((code) => ({
+              value: code,
+              label: productName(code),
+            }))}
           />
         </div>
         <div>
@@ -3423,18 +3183,14 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
             htmlFor="combinable-groups-min-members"
             className="block text-[11px] font-medium text-gray-600 mb-1"
           >
-            min_members
+            Minimum members
           </label>
-          <input
+          <NumberField
             id="combinable-groups-min-members"
-            type="number"
-            min="1"
-            step="1"
             value={minMembers}
-            onChange={(e) =>
-              setMinMembers(Math.max(1, parseInt(e.target.value, 10) || 1))
-            }
-            className={inputClass}
+            onChange={(n) => setMinMembers(Math.max(1, n || 1))}
+            decimals={0}
+            min={1}
           />
         </div>
         <button
@@ -3478,26 +3234,18 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                     {group.group_id}
                   </span>
                   {group.fuel_grades.map((grade) => (
-                    <span
-                      key={grade}
-                      className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-700"
-                    >
-                      {grade}
-                    </span>
+                    <ProductChip key={grade} code={grade} />
                   ))}
                 </div>
                 <span className="inline-flex items-center gap-1 text-sm font-medium text-primary whitespace-nowrap">
                   <DollarSign className="w-3.5 h-3.5 text-gray-500" />
                   <Droplets className="w-3.5 h-3.5 text-gray-500" />
-                  {group.estimated_combined_gallons.toLocaleString(undefined, {
-                    maximumFractionDigits: 0,
-                  })}{" "}
-                  gal
+                  {formatNumber(group.estimated_combined_gallons)} gal
                 </span>
               </div>
               <p className="text-[11px] text-gray-500 mb-2">
-                Centroid: {group.centroid.lat.toFixed(5)},
-                {group.centroid.lon.toFixed(5)}
+                Centroid: {formatNumber(group.centroid.lat, { decimals: 5 })},
+                {formatNumber(group.centroid.lon, { decimals: 5 })}
               </p>
               <ul className="divide-y divide-gray-50 border border-gray-50 rounded">
                 {group.members.map((member, idx) => {
@@ -3527,7 +3275,7 @@ function CombinableGroupsPanel({ addError }: CombinableGroupsPanelProps) {
                         <span className="text-gray-600">
                           score:{" "}
                           {priorityScore != null
-                            ? priorityScore.toFixed(2)
+                            ? formatNumber(priorityScore, { decimals: 2 })
                             : "—"}
                         </span>
                         {bucket && urgencyStyle ? (
@@ -3606,35 +3354,54 @@ function ClustersTab() {
 
 // ─── Main Page Component ─────────────────────────────────────────────────────
 
+/**
+ * Dispatch → Plans (UI revamp R8.7, §7.2). Dispatch owns the title row, so
+ * this view has no header and no tab row of its own: Plans, Forecasts,
+ * Priorities and Clusters are a segmented control in a single toolbar row,
+ * synced to `?sub=` so a refresh or a shared link keeps the sub-view.
+ */
 export default function FuelDistributionPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("plans");
-
+  const ids = TABS.map((t) => t.id);
+  const [activeTab, setActiveTab] = useUrlTab(ids, {
+    param: "sub",
+    fallback: "plans",
+  });
+  // The sub-view switch sits in each view's single toolbar row, next to
+  // that view's own controls (Plans: status, refresh, costs, Generate).
+  const subNav = (
+    <Tabs
+      tabs={TABS}
+      value={activeTab}
+      onChange={setActiveTab}
+      param="sub"
+      label="Plan views"
+      idBase="plans-sub"
+    />
+  );
   return (
-    <div className="flex-1 flex flex-col h-full bg-gray-50">
-      {/* Storm_Mode banner (Task 11.7, Req 9.4.1) — pinned to the top of
-          operations control pages, visible only when the backend reports
-          Storm_Mode is active. The override form is gated on the verified
-          session's role claims (Req 8.6). */}
+    <div className="flex h-full flex-1 flex-col bg-surface">
+      {/* Storm_Mode banner (Task 11.7, Req 9.4.1): 0 px unless the backend
+          reports Storm_Mode is active. The override form is gated on the
+          verified session's role claims (Req 8.6). */}
       <StormModeBanner />
-
-      <PageHeader
-        title="Fuel Distribution"
-        subtitle="Plan generation, forecasts, and delivery priorities"
-        icon={<Droplets className="w-5 h-5" />}
-      />
-      <TabNavigation
-        tabs={TABS}
-        activeTab={activeTab}
-        onChange={setActiveTab}
-      />
-
-      {/* Tab content */}
-      <div className="flex-1 min-h-0 overflow-auto bg-white border-t border-gray-200 px-6 py-6">
-        {activeTab === "plans" && <PlansTab />}
-        {activeTab === "forecasts" && <ForecastsTab />}
-        {activeTab === "priorities" && <PrioritiesTab />}
-        {activeTab === "clusters" && <ClustersTab />}
-      </div>
+      <TabPanel
+        idBase="plans-sub"
+        value={activeTab}
+        className="min-h-0 flex-1 overflow-auto bg-surface"
+      >
+        {activeTab === "plans" ? (
+          <PlansTab subNav={subNav} />
+        ) : (
+          <>
+            <Toolbar label="Plans" views={subNav} />
+            <div className="px-4 py-3">
+              {activeTab === "forecasts" && <ForecastsTab />}
+              {activeTab === "priorities" && <PrioritiesTab />}
+              {activeTab === "clusters" && <ClustersTab />}
+            </div>
+          </>
+        )}
+      </TabPanel>
     </div>
   );
 }

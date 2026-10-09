@@ -1,0 +1,848 @@
+"""One process runs the periodic jobs, so the API can run more than one task.
+
+Every background job in this application starts unconditionally in every
+process, which is why the API was pinned to ``desiredCount: 1`` and every ECS
+deploy therefore needed a stop-then-start downtime window. Two processes meant
+two AR-aging snapshots for the same day, two overdue sweeps racing invoices whose
+``invoice_events`` carries a unique ``(invoice_id, sequence_number)`` — so a race
+*raises* — and two copies of every autonomous agent re-escalating the same entity
+because the cooldown tracker is per-process memory.
+
+These tests pin the properties that make leadership trustworthy:
+
+1. **Key derivation is stable across processes.** ``hash(str)`` is salted per
+   process by ``PYTHONHASHSEED``, so deriving the lock key that way would give
+   two replicas different keys, no contention, and both running every job. This
+   is the single most dangerous way for the whole mechanism to fail silently.
+2. **Ownership is re-verified, not assumed.** The lock is session-scoped and the
+   work runs on other pooled sessions. A failover releasing the lock must be
+   noticed.
+3. **A follower skips, it does not exit.** Leadership has to be able to move to a
+   process later without restarting it.
+4. **A backend without advisory locks still runs jobs.** SQLite under test has no
+   second process to contend with; failing closed would disable every job in the
+   suite.
+"""
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import subprocess
+import sys
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from persistence.leader_election import (
+    LOCK_CLASS_ID,
+    LOCK_UNSUPPORTED,
+    SWEEPS_ROLE,
+    RoleLock,
+    SweepLeader,
+    get_sweep_leader,
+    is_sweep_leader,
+    role_object_id,
+    run_periodic,
+    set_sweep_leader,
+    wait_for_leadership,
+)
+
+
+class _Session:
+    """Session double whose advisory-lock call returns a scripted answer.
+
+    ``pg_backend_pid()`` answers ``pid``, so a test can simulate the
+    lock-holding connection being replaced by changing that attribute.
+    """
+
+    def __init__(self, granted=True, raises=False, pid=4242):
+        self._granted = granted
+        self._raises = raises
+        self.pid = pid
+        self.statements = []
+
+    async def execute(self, statement, params=None):
+        if self._raises:
+            raise RuntimeError("advisory locks not implemented")
+        sql = str(statement)
+        self.statements.append((sql, params))
+        result = MagicMock()
+        result.scalar.return_value = (
+            self.pid if "pg_backend_pid" in sql else self._granted
+        )
+        return result
+
+    async def rollback(self):
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_leader():
+    """Keep the process-wide leader unset unless a test sets it."""
+    original = get_sweep_leader()
+    set_sweep_leader(None)
+    yield
+    set_sweep_leader(original)
+
+
+# ---------------------------------------------------------------------------
+# 1. Key derivation
+# ---------------------------------------------------------------------------
+
+
+class TestKeyDerivation:
+    def test_same_name_gives_the_same_key(self):
+        assert role_object_id("a.b") == role_object_id("a.b")
+
+    def test_different_names_give_different_keys(self):
+        assert role_object_id("a.b") != role_object_id("a.c")
+
+    def test_key_fits_a_signed_32_bit_integer(self):
+        """``pg_try_advisory_lock(classid, objid)`` takes ``integer``."""
+        for name in (SWEEPS_ROLE, "x", "y" * 500, ""):
+            key = role_object_id(name)
+            assert -(2**31) <= key < 2**31, (name, key)
+
+    def test_key_is_stable_across_processes_not_salted_by_pythonhashseed(self):
+        """The failure this guards against is total and silent.
+
+        ``hash(str)`` is randomised per interpreter unless PYTHONHASHSEED is
+        fixed. Deriving the lock key that way would give two replicas two
+        different keys: neither would ever contend, both would believe they were
+        leader, and every sweep would run twice with nothing logged. So derive
+        the key in two subprocesses with *different* hash seeds and require the
+        same answer.
+        """
+        code = (
+            "from persistence.leader_election import role_object_id, SWEEPS_ROLE;"
+            "print(role_object_id(SWEEPS_ROLE))"
+        )
+        outs = []
+        for seed in ("0", "1", "12345"):
+            proc = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True,
+                text=True,
+                env={"PYTHONHASHSEED": seed, "ENVIRONMENT": "test", "PATH": "/usr/bin:/bin"},
+                cwd=".",
+            )
+            assert proc.returncode == 0, proc.stderr
+            outs.append(proc.stdout.strip())
+
+        assert len(set(outs)) == 1, (
+            f"role_object_id is not stable across PYTHONHASHSEED values: {outs}. "
+            "Two replicas would derive different keys, never contend, and both "
+            "would run every periodic job."
+        )
+        assert outs[0] == str(role_object_id(SWEEPS_ROLE))
+
+
+# ---------------------------------------------------------------------------
+# 2. The lock itself
+# ---------------------------------------------------------------------------
+
+
+class TestRoleLock:
+    @pytest.mark.asyncio
+    async def test_acquire_uses_the_two_argument_form_and_the_shared_class_id(self):
+        """The two-arg form lives in its own key space, which is what keeps a
+        role lock from colliding with the outbox relay's bigint key."""
+        lock = RoleLock(SWEEPS_ROLE)
+        session = _Session(granted=True)
+        assert await lock.acquire(session) is True
+
+        sql, params = session.statements[0]
+        assert "pg_try_advisory_lock(:classid, :objid)" in sql
+        assert params == {"classid": LOCK_CLASS_ID, "objid": lock.object_id}
+
+    @pytest.mark.asyncio
+    async def test_lock_held_elsewhere_is_not_acquired(self):
+        lock = RoleLock(SWEEPS_ROLE)
+        assert await lock.acquire(_Session(granted=False)) is False
+        assert lock.held is False
+
+    @pytest.mark.asyncio
+    async def test_a_backend_without_advisory_locks_is_allowed(self):
+        lock = RoleLock(SWEEPS_ROLE)
+        assert await lock.acquire(_Session(raises=True)) is True
+        assert lock._pid == LOCK_UNSUPPORTED
+
+    @pytest.mark.asyncio
+    async def test_unsupported_backend_never_reports_a_lost_lock(self):
+        lock = RoleLock(SWEEPS_ROLE)
+        await lock.acquire(_Session(raises=True))
+        assert await lock.still_held(_Session(raises=True)) is True
+
+    @pytest.mark.asyncio
+    async def test_still_held_is_true_while_the_pid_is_unchanged(self):
+        lock = RoleLock(SWEEPS_ROLE)
+        session = _Session(granted=True, pid=111)
+        await lock.acquire(session)
+        assert await lock.still_held(session) is True
+
+    @pytest.mark.asyncio
+    async def test_a_replaced_connection_means_the_lock_is_gone(self):
+        """This is the Aurora-failover case, and the one a startup-only check
+        misses: the lock session dies, Postgres releases the lock, another
+        process legitimately takes it, and a loop that checked once keeps going."""
+        lock = RoleLock(SWEEPS_ROLE)
+        session = _Session(granted=True, pid=111)
+        await lock.acquire(session)
+
+        session.pid = 222  # SQLAlchemy handed the session a new connection
+        assert await lock.still_held(session) is False
+        assert lock.held is False
+
+    @pytest.mark.asyncio
+    async def test_a_dead_connection_means_the_lock_is_gone(self):
+        lock = RoleLock(SWEEPS_ROLE)
+        session = _Session(granted=True, pid=111)
+        await lock.acquire(session)
+
+        assert await lock.still_held(_Session(raises=True)) is False
+
+    @pytest.mark.asyncio
+    async def test_a_granted_lock_whose_pid_probe_fails_is_not_held(self):
+        """Reporting held here would disable verification for the process's life."""
+        lock = RoleLock(SWEEPS_ROLE)
+
+        class _GrantsThenDies(_Session):
+            async def execute(self, statement, params=None):
+                sql = str(statement)
+                if "pg_backend_pid" in sql:
+                    raise RuntimeError("connection went away")
+                return await super().execute(statement, params)
+
+        assert await lock.acquire(_GrantsThenDies(granted=True)) is False
+
+
+# ---------------------------------------------------------------------------
+# 3. SweepLeader
+# ---------------------------------------------------------------------------
+
+
+class TestSweepLeaderWithoutADatabase:
+    @pytest.mark.asyncio
+    async def test_no_database_means_this_process_is_the_leader(self):
+        """Correct on a single-process dev stack, and unreachable in
+        staging/production where settings refuse to start without database_url."""
+        leader = SweepLeader()
+        with patch(
+            "persistence.database.is_persistence_enabled", return_value=False
+        ):
+            await leader.start()
+
+        assert leader.is_leader is True
+        assert leader.describe()["degraded_no_database"] is True
+        await leader.stop()
+
+    @pytest.mark.asyncio
+    async def test_no_database_starts_no_election_task(self):
+        leader = SweepLeader()
+        with patch(
+            "persistence.database.is_persistence_enabled", return_value=False
+        ):
+            await leader.start()
+        assert leader.describe()["election_active"] is False
+        await leader.stop()
+
+
+class TestSweepLeaderElection:
+    @staticmethod
+    def _patched_scope(session):
+        @contextlib.asynccontextmanager
+        async def _scope():
+            yield session
+
+        return _scope
+
+    @pytest.mark.asyncio
+    async def test_taking_the_lock_makes_this_process_leader(self):
+        leader = SweepLeader(verify_interval_seconds=0.01)
+        session = _Session(granted=True, pid=7)
+
+        with patch(
+            "persistence.database.is_persistence_enabled", return_value=True
+        ), patch(
+            "persistence.database.session_scope", self._patched_scope(session)
+        ):
+            await leader.start()
+            for _ in range(50):
+                if leader.is_leader:
+                    break
+                await asyncio.sleep(0.01)
+            assert leader.is_leader is True
+            await leader.stop()
+
+    @pytest.mark.asyncio
+    async def test_a_follower_never_claims_leadership(self):
+        leader = SweepLeader(verify_interval_seconds=0.01)
+        session = _Session(granted=False, pid=7)
+
+        with patch(
+            "persistence.database.is_persistence_enabled", return_value=True
+        ), patch(
+            "persistence.database.session_scope", self._patched_scope(session)
+        ):
+            await leader.start()
+            await asyncio.sleep(0.1)
+            assert leader.is_leader is False
+            await leader.stop()
+
+    @pytest.mark.asyncio
+    async def test_losing_the_lock_connection_stands_the_leader_down(self):
+        leader = SweepLeader(verify_interval_seconds=0.01)
+        session = _Session(granted=True, pid=7)
+
+        with patch(
+            "persistence.database.is_persistence_enabled", return_value=True
+        ), patch(
+            "persistence.database.session_scope", self._patched_scope(session)
+        ):
+            await leader.start()
+            for _ in range(50):
+                if leader.is_leader:
+                    break
+                await asyncio.sleep(0.01)
+            assert leader.is_leader is True
+
+            # The lock connection dies AND the lock is now held elsewhere, so the
+            # re-contend fails: this process must stand down rather than keep
+            # running sweeps alongside the new holder.
+            session.pid = 999
+            session._granted = False
+            for _ in range(60):
+                if not leader.is_leader:
+                    break
+                await asyncio.sleep(0.01)
+            assert leader.is_leader is False
+            await leader.stop()
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_leadership(self):
+        leader = SweepLeader(verify_interval_seconds=0.01)
+        session = _Session(granted=True, pid=7)
+
+        with patch(
+            "persistence.database.is_persistence_enabled", return_value=True
+        ), patch(
+            "persistence.database.session_scope", self._patched_scope(session)
+        ):
+            await leader.start()
+            for _ in range(50):
+                if leader.is_leader:
+                    break
+                await asyncio.sleep(0.01)
+            await leader.stop()
+
+        assert leader.is_leader is False
+        assert leader.describe()["election_active"] is False
+
+
+# ---------------------------------------------------------------------------
+# 4. run_periodic
+# ---------------------------------------------------------------------------
+
+
+class _FakeLeader:
+    def __init__(self, is_leader: bool):
+        self._is_leader = is_leader
+
+    @property
+    def is_leader(self) -> bool:
+        return self._is_leader
+
+
+class TestRunPeriodic:
+    @pytest.mark.asyncio
+    async def test_no_registered_leader_runs_the_cycle(self):
+        """A one-shot CLI invocation or a direct unit test must not become a
+        silent no-op just because no election is running."""
+        assert is_sweep_leader() is True
+
+        ran = asyncio.Event()
+
+        async def cycle():
+            ran.set()
+
+        task = asyncio.create_task(
+            run_periodic("t", 0.01, cycle, run_immediately=True)
+        )
+        await asyncio.wait_for(ran.wait(), timeout=1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_the_leader_runs_the_cycle(self):
+        set_sweep_leader(_FakeLeader(True))
+        ran = asyncio.Event()
+
+        async def cycle():
+            ran.set()
+
+        task = asyncio.create_task(
+            run_periodic("t", 0.01, cycle, run_immediately=True)
+        )
+        await asyncio.wait_for(ran.wait(), timeout=1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_a_follower_skips_the_cycle_but_keeps_the_loop_alive(self):
+        """Exiting would mean leadership could never move to this process."""
+        set_sweep_leader(_FakeLeader(False))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(
+            run_periodic("t", 0.005, cycle, run_immediately=True)
+        )
+        await asyncio.sleep(0.1)
+        assert calls == [], "a follower ran the cycle"
+        assert not task.done(), "the loop exited instead of standing by"
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_leadership_acquired_later_starts_running_cycles(self):
+        follower = _FakeLeader(False)
+        set_sweep_leader(follower)
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(run_periodic("t", 0.005, cycle))
+        await asyncio.sleep(0.05)
+        assert calls == []
+
+        follower._is_leader = True  # election moved leadership here
+        await asyncio.sleep(0.05)
+        assert calls, "cycles did not resume after becoming leader"
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_a_failing_cycle_does_not_kill_the_loop(self):
+        """A sweep that dies on one bad row must not stay dead until the next
+        deploy."""
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+            raise RuntimeError("bad row")
+
+        task = asyncio.create_task(
+            run_periodic("t", 0.005, cycle, run_immediately=True)
+        )
+        await asyncio.sleep(0.08)
+        assert len(calls) > 1, f"loop stopped after a failure: {calls}"
+        assert not task.done()
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_cancellation_propagates_so_shutdown_works(self):
+        set_sweep_leader(_FakeLeader(True))
+
+        async def cycle():
+            return None
+
+        task = asyncio.create_task(run_periodic("t", 5.0, cycle))
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_run_immediately_does_not_wait_for_the_first_interval(self):
+        set_sweep_leader(_FakeLeader(True))
+        ran = asyncio.Event()
+
+        async def cycle():
+            ran.set()
+
+        task = asyncio.create_task(
+            run_periodic("t", 30.0, cycle, run_immediately=True)
+        )
+        await asyncio.wait_for(ran.wait(), timeout=1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_a_long_interval_job_runs_soon_after_takeover(self):
+        """A follower used to sleep a whole interval after each skipped check.
+        For a daily job, a process that became leader after its first check
+        waited 24 h, so on an environment redeployed more often the job never
+        ran."""
+        follower = _FakeLeader(False)
+        set_sweep_leader(follower)
+        ran = asyncio.Event()
+
+        async def cycle():
+            ran.set()
+
+        with patch("persistence.leader_election.FOLLOWER_RECHECK_SECONDS", 0.01):
+            task = asyncio.create_task(
+                run_periodic("t", 86_400.0, cycle, run_immediately=True)
+            )
+            await asyncio.sleep(0.05)
+            assert not ran.is_set()
+            follower._is_leader = True
+            await asyncio.wait_for(ran.wait(), timeout=1.0)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_wait_for_leadership_uses_the_election_event(self):
+        leader = SweepLeader()
+        set_sweep_leader(leader)
+        waiter = asyncio.create_task(wait_for_leadership(86_400.0))
+        await asyncio.sleep(0.01)
+        assert not waiter.done()
+        leader._leader.set()
+        assert await asyncio.wait_for(waiter, timeout=1.0) is True
+
+    @pytest.mark.asyncio
+    async def test_wait_for_leadership_times_out_as_a_follower(self):
+        set_sweep_leader(_FakeLeader(False))
+        with patch("persistence.leader_election.FOLLOWER_RECHECK_SECONDS", 0.005):
+            assert await wait_for_leadership(0.02) is False
+
+    @pytest.mark.asyncio
+    async def test_default_sleeps_before_the_first_cycle(self):
+        """Boot must not be delayed by a retention sweep."""
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(run_periodic("t", 30.0, cycle))
+        await asyncio.sleep(0.05)
+        assert calls == []
+
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+# ---------------------------------------------------------------------------
+# Persisted schedule for long-interval jobs (CRON-1)
+# ---------------------------------------------------------------------------
+
+
+class TestPersistedSchedule:
+    """A daily ``run_periodic`` job schedules from the shared ledger, so a
+    deploy neither restarts its 24 h clock nor runs it twice in a day."""
+
+    @pytest.fixture(autouse=True)
+    def _ledger_and_clock(self):
+        from datetime import datetime, timezone
+
+        from persistence.periodic_runs import InMemoryRunLedger, set_run_ledger
+
+        self.ledger = InMemoryRunLedger()
+        set_run_ledger(self.ledger)
+        self.clock = [datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)]
+        with patch("persistence.leader_election.LEADERSHIP_RETRY_SECONDS", 0.01), \
+             patch("persistence.leader_election.FOLLOWER_RECHECK_SECONDS", 0.005), \
+             patch("persistence.leader_election._utcnow", lambda: self.clock[0]):
+            yield
+        set_run_ledger(None)
+
+    @staticmethod
+    async def _stop(task):
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    @pytest.mark.asyncio
+    async def test_a_deploy_does_not_restart_the_daily_clock(self):
+        """Last run 23 h ago on the old task: the new leader runs in 1 h, not 24 h."""
+        from datetime import timedelta
+
+        self.ledger.runs["daily"] = self.clock[0] - timedelta(hours=23)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(self.clock[0])
+
+        task = asyncio.create_task(run_periodic("daily", 86_400.0, cycle))
+        await asyncio.sleep(0.04)
+        assert calls == []
+        self.clock[0] += timedelta(hours=1)
+        await asyncio.sleep(0.04)
+        assert len(calls) == 1
+        assert self.ledger.runs["daily"] == self.clock[0]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_run_immediately_does_not_rerun_inside_the_interval(self):
+        from datetime import timedelta
+
+        self.ledger.runs["daily"] = self.clock[0] - timedelta(hours=2)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(
+            run_periodic("daily", 86_400.0, cycle, run_immediately=True)
+        )
+        await asyncio.sleep(0.04)
+        assert calls == [], "a new leader re-ran a daily job 2 h after the last run"
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_no_record_and_not_immediate_seeds_a_baseline(self):
+        """Keeps the old "never at boot" behaviour for the first-ever start."""
+        from datetime import timedelta
+
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(run_periodic("daily", 86_400.0, cycle))
+        await asyncio.sleep(0.04)
+        assert calls == []
+        assert self.ledger.runs["daily"] == self.clock[0]
+        self.clock[0] += timedelta(hours=24)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_follower_takes_over_and_runs_when_due(self):
+        follower = _FakeLeader(False)
+        set_sweep_leader(follower)
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = asyncio.create_task(
+            run_periodic("daily", 86_400.0, cycle, run_immediately=True)
+        )
+        await asyncio.sleep(0.03)
+        assert calls == []
+        follower._is_leader = True
+        await asyncio.sleep(0.03)
+        assert calls == [1]
+        await self._stop(task)
+
+
+class TestRecordOnSuccess:
+    """``record="success"`` (F1, analytics + AR-aging snapshots): the ledger
+    row ``<job>:success`` is written only after the cycle returns, so a run
+    killed by a deploy, or one that raised, is retried on the next boot."""
+
+    _ledger_and_clock = TestPersistedSchedule._ledger_and_clock
+    _stop = staticmethod(TestPersistedSchedule._stop)
+
+    def _start(self, cycle, name="snap"):
+        return asyncio.create_task(
+            run_periodic(name, 86_400.0, cycle, run_immediately=True, record="success")
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_record_runs_without_waiting_and_records_success(self):
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        assert self.ledger.runs["snap:success"] == self.clock[0]
+        assert "snap" not in self.ledger.runs, "a claim row was written"
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_success_1h_old_waits_about_23h(self):
+        from datetime import timedelta
+
+        self.ledger.runs["snap:success"] = self.clock[0] - timedelta(hours=1)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == []
+        self.clock[0] += timedelta(hours=22, minutes=59)
+        await asyncio.sleep(0.04)
+        assert calls == []
+        self.clock[0] += timedelta(minutes=1)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_success_25h_old_runs_at_once(self):
+        from datetime import timedelta
+
+        self.ledger.runs["snap:success"] = self.clock[0] - timedelta(hours=25)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_a_raising_cycle_records_nothing_and_a_restart_retries(self):
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def failing():
+            calls.append("fail")
+            raise RuntimeError("tenant scan failed")
+
+        task = self._start(failing)
+        await asyncio.sleep(0.04)
+        assert calls == ["fail"], "the same process retried inside the interval"
+        assert "snap:success" not in self.ledger.runs
+        await self._stop(task)
+
+        async def ok():
+            calls.append("ok")
+
+        restarted = self._start(ok)  # simulated deploy / new process
+        await asyncio.sleep(0.04)
+        assert calls == ["fail", "ok"]
+        assert self.ledger.runs["snap:success"] == self.clock[0]
+        await self._stop(restarted)
+
+    @pytest.mark.asyncio
+    async def test_a_cycle_killed_mid_run_is_retried_after_restart(self):
+        set_sweep_leader(_FakeLeader(True))
+        started = asyncio.Event()
+
+        async def hangs():
+            started.set()
+            await asyncio.sleep(3600)
+
+        task = self._start(hangs)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await self._stop(task)  # SIGTERM during deploy
+        assert "snap:success" not in self.ledger.runs
+
+        calls = []
+
+        async def ok():
+            calls.append(1)
+
+        restarted = self._start(ok)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(restarted)
+
+    @pytest.mark.asyncio
+    async def test_a_legacy_claim_or_seed_row_is_ignored(self):
+        from datetime import timedelta
+
+        # Seeded by an older build an hour ago; it never ran the job.
+        self.ledger.runs["snap"] = self.clock[0] - timedelta(hours=1)
+        set_sweep_leader(_FakeLeader(True))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.04)
+        assert calls == [1]
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_a_follower_never_runs_the_cycle(self):
+        set_sweep_leader(_FakeLeader(False))
+        calls = []
+
+        async def cycle():
+            calls.append(1)
+
+        task = self._start(cycle)
+        await asyncio.sleep(0.05)
+        assert calls == []
+        assert "snap:success" not in self.ledger.runs
+        assert not task.done()
+        await self._stop(task)
+
+    @pytest.mark.asyncio
+    async def test_unknown_record_mode_is_rejected(self):
+        async def cycle():
+            return None
+
+        with pytest.raises(ValueError):
+            await run_periodic("snap", 86_400.0, cycle, record="bogus")
+
+
+class TestDocumentStoreRunLedger:
+    @pytest.mark.asyncio
+    async def test_round_trip_through_the_document_store(self):
+        from datetime import datetime, timezone
+
+        from persistence.periodic_runs import PERIODIC_RUNS_INDEX, DocumentStoreRunLedger
+
+        docs = {}
+
+        class _Store:
+            async def get_document(self, index, doc_id):
+                return docs.get((index, doc_id))
+
+            async def index_document(self, index, doc_id, document):
+                docs[(index, doc_id)] = dict(document)
+
+        ledger = DocumentStoreRunLedger(_Store())
+        assert await ledger.last_run("agent:x") is None
+        at = datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc)
+        await ledger.record_run("agent:x", at)
+        assert await ledger.last_run("agent:x") == at
+        assert docs[(PERIODIC_RUNS_INDEX, "agent:x")]["job"] == "agent:x"
+
+    @pytest.mark.asyncio
+    async def test_unreadable_ledger_fails_open(self):
+        from persistence.periodic_runs import read_last_run, set_run_ledger, write_last_run
+
+        class _Broken:
+            async def last_run(self, job):
+                raise RuntimeError("db down")
+
+            async def record_run(self, job, at, *, seeded=False):
+                raise RuntimeError("db down")
+
+        set_run_ledger(_Broken())
+        try:
+            assert await read_last_run("x") is None
+            from datetime import datetime, timezone
+
+            await write_last_run("x", datetime.now(timezone.utc))  # no raise
+        finally:
+            set_run_ledger(None)

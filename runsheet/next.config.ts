@@ -1,5 +1,7 @@
 import bundleAnalyzer from "@next/bundle-analyzer";
 import type { NextConfig } from "next";
+import { nextRedirects } from "./src/config/redirects";
+import { buildSecurityHeaders } from "./src/config/securityHeaders";
 
 const withBundleAnalyzer = bundleAnalyzer({
   enabled: process.env.ANALYZE === "true",
@@ -7,22 +9,30 @@ const withBundleAnalyzer = bundleAnalyzer({
 
 const nextConfig: NextConfig = {
   reactStrictMode: false,
+  // `*.e2e.tsx` routes (the Dispatch Board Playwright harness) exist only
+  // when the e2e config starts the dev server with NEXT_PUBLIC_E2E_HARNESS=1;
+  // every other build ignores those files.
+  pageExtensions:
+    process.env.NEXT_PUBLIC_E2E_HARNESS === "1"
+      ? ["e2e.tsx", "tsx", "ts", "jsx", "js"]
+      : ["tsx", "ts", "jsx", "js"],
 
-  // Security headers for all routes
+  // Retired routes (UI revamp design.md §4) → their /dashboard homes, 308.
+  async redirects() {
+    return nextRedirects();
+  },
+  // Security headers for all routes, including HSTS and a report-only CSP
+  // (staging finding F6). See src/config/securityHeaders.ts.
   async headers() {
     return [
       {
         source: "/:path*",
-        headers: [
-          { key: "X-Content-Type-Options", value: "nosniff" },
-          { key: "X-Frame-Options", value: "DENY" },
-          { key: "X-XSS-Protection", value: "1; mode=block" },
-          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
-          {
-            key: "Permissions-Policy",
-            value: "camera=(), microphone=(), geolocation=(self)",
-          },
-        ],
+        headers: buildSecurityHeaders({
+          apiUrl: process.env.NEXT_PUBLIC_API_URL,
+          wsUrl: process.env.NEXT_PUBLIC_WS_URL,
+          stApiDomain: process.env.NEXT_PUBLIC_ST_API_DOMAIN,
+          isDev: process.env.NODE_ENV !== "production",
+        }),
       },
     ];
   },

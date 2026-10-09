@@ -15,17 +15,35 @@ Validates:
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
-from ._tenant_context import get_current_tenant
+from ._tenant_context import resolve_tool_tenant
 from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
+#: Average days-until-empty over stations that consume fuel. A station with
+#: no consumption carries the 99999 sentinel and must not be averaged (F5).
+_AVG_DAYS_CONSUMING_AGG = {
+    "filter": {"range": {"daily_consumption_rate": {"gt": 0}}},
+    "aggs": {"v": {"avg": {"field": "days_until_empty"}}},
+}
+
+
+def _avg_days(aggs: dict):
+    """The filtered average, or None when no station consumes fuel."""
+    return (aggs.get("avg_days_until_empty") or {}).get("v", {}).get("value")
+
+
+def _fmt_days(value) -> str:
+    return f"{value:.1f}" if value is not None else "not available"
+
 def _resolve_tenant_id(tenant_id: str | None) -> str:
-    return tenant_id or get_current_tenant()
+    # The bound tenant wins over a model-supplied tenant_id.
+    return resolve_tool_tenant(tenant_id)
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
@@ -53,6 +71,52 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
         )
 
 
+# The fuel station ``status`` values.
+FUEL_STATION_STATUSES = ("normal", "low", "critical", "empty")
+
+# Status words recognised in a free-text station query, mapped to the stored value.
+_STATION_STATUS_WORD_PATTERNS = (
+    (re.compile(r"\bcritical\b", re.IGNORECASE), "critical"),
+    (re.compile(r"\blow(\s+stock)?\b", re.IGNORECASE), "low"),
+    (re.compile(r"\bempty\b|\bout\s+of\s+stock\b", re.IGNORECASE), "empty"),
+    (re.compile(r"\bnormal\b", re.IGNORECASE), "normal"),
+)
+
+# Words that describe "fuel stations" rather than a field value. Left in the
+# free text they turn "critical fuel stations" into a phrase no station
+# contains (N-new-3, same failure as F5's fleet search).
+_GENERIC_STATION_WORDS = frozenset({
+    "fuel", "station", "stations", "stock", "level", "levels", "tank", "tanks",
+    "show", "me", "all", "list", "find", "the", "and", "or", "with", "which",
+    "are", "is", "what", "any", "in", "of",
+    # Prepositions before a place (OI-37): "low stock stations near Nairobi"
+    # must search for "Nairobi", not "near Nairobi".
+    "near", "at", "around", "by", "on", "for",
+})
+
+
+def _split_station_query(query: str, *, fuel_type: str | None = None) -> tuple[list[str], str]:
+    """Return ``(status values found in query, remaining free text)``.
+
+    The explicit ``fuel_type`` token is stripped from the free text too, since
+    it is already applied as a filter.
+    """
+    text = query or ""
+    statuses: list[str] = []
+    for pattern, value in _STATION_STATUS_WORD_PATTERNS:
+        if pattern.search(text):
+            statuses.append(value)
+            text = pattern.sub(" ", text)
+    fuel_token = (fuel_type or "").strip().lower()
+    words = [
+        w for w in re.split(r"\s+", text)
+        if w
+        and w.strip(".,;:!?").lower() not in _GENERIC_STATION_WORDS
+        and not (fuel_token and w.strip(".,;:!?").lower() == fuel_token)
+    ]
+    return statuses, " ".join(words).strip(" .,;:!?")
+
+
 @tool
 async def search_fuel_stations(query: str, fuel_type: str = None, status: str = None,
                                 tenant_id: str | None = None) -> str:
@@ -61,9 +125,12 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
 
     Args:
         query: Natural language search query (e.g., "Industrial Area", "diesel stations",
-               "low stock stations near Nairobi")
+               "low stock stations near Nairobi"). Status words in the query
+               ("critical", "low", "low stock", "empty", "out of stock", "normal")
+               filter on the station's status.
         fuel_type: Optional fuel type filter. One of: "AGO", "PMS", "ATK", "LPG"
-        status: Optional stock status filter. One of: "normal", "low", "critical", "empty"
+        status: Optional stock status filter. One of: "normal", "low", "critical",
+                "empty". Overrides status words in the query.
         tenant_id: Tenant identifier for data scoping
 
     Returns:
@@ -81,16 +148,33 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
             + (f" (status={status})" if status else "")
         )
 
-        # Build bool query with tenant scoping
-        must_clauses = [
-            {
-                "multi_match": {
-                    "query": query,
-                    "fields": ["name", "location_name", "station_id"],
-                    "type": "best_fields"
+        detected_statuses, free_text = _split_station_query(query, fuel_type=fuel_type)
+        if status:
+            status = status.strip().lower()
+            if status not in FUEL_STATION_STATUSES:
+                success = True
+                return (
+                    f"Unknown status '{status}'. "
+                    f"Valid statuses: {', '.join(FUEL_STATION_STATUSES)}."
+                )
+            statuses = [status]
+        else:
+            statuses = detected_statuses
+
+        # Free text left after removing status words, generic station nouns and
+        # the fuel_type token; nothing left means "every station matching the filters".
+        if free_text:
+            must_clauses = [
+                {
+                    "multi_match": {
+                        "query": free_text,
+                        "fields": ["name", "location_name", "station_id"],
+                        "type": "best_fields"
+                    }
                 }
-            }
-        ]
+            ]
+        else:
+            must_clauses = [{"match_all": {}}]
 
         filter_clauses = [
             {"term": {"tenant_id": tenant_id}}
@@ -98,8 +182,10 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
 
         if fuel_type:
             filter_clauses.append({"term": {"fuel_type": fuel_type}})
-        if status:
-            filter_clauses.append({"term": {"status": status}})
+        if len(statuses) == 1:
+            filter_clauses.append({"term": {"status": statuses[0]}})
+        elif statuses:
+            filter_clauses.append({"terms": {"status": statuses}})
 
         es_query = {
             "query": {
@@ -122,7 +208,9 @@ async def search_fuel_stations(query: str, fuel_type: str = None, status: str = 
                 filter_msg += f" with status='{status}'"
             return f"No fuel stations found for query: '{query}'{filter_msg}"
 
-        response_text = f"⛽ Found {len(results)} fuel station(s) matching '{query}':\n\n"
+        # "Showing", not "Found" — this is a capped page, and phrasing a page
+        # length as a total invites the model to state a count it never measured.
+        response_text = f"⛽ Showing {len(results)} fuel station(s) matching '{query}':\n\n"
         for station in results:
             capacity = station.get("capacity_liters", 0)
             stock = station.get("current_stock_liters", 0)
@@ -184,7 +272,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
                 "total_capacity": {"sum": {"field": "capacity_liters"}},
                 "total_stock": {"sum": {"field": "current_stock_liters"}},
                 "total_daily_consumption": {"sum": {"field": "daily_consumption_rate"}},
-                "avg_days_until_empty": {"avg": {"field": "days_until_empty"}},
+                "avg_days_until_empty": _AVG_DAYS_CONSUMING_AGG,
                 "by_status": {
                     "terms": {"field": "status"}
                 }
@@ -199,7 +287,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
         total_capacity = aggs.get("total_capacity", {}).get("value", 0)
         total_stock = aggs.get("total_stock", {}).get("value", 0)
         total_daily = aggs.get("total_daily_consumption", {}).get("value", 0)
-        avg_days = aggs.get("avg_days_until_empty", {}).get("value", 0)
+        avg_days = _avg_days(aggs)
 
         # Parse status buckets
         status_counts = {"normal": 0, "low": 0, "critical": 0, "empty": 0}
@@ -216,7 +304,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
         response_text += f"Total Capacity: {total_capacity:,.0f} L\n"
         response_text += f"Total Current Stock: {total_stock:,.0f} L ({overall_pct:.1f}%)\n"
         response_text += f"Total Daily Consumption: {total_daily:,.1f} L/day\n"
-        response_text += f"Average Days Until Empty: {avg_days:.1f}\n\n"
+        response_text += f"Average Days Until Empty: {_fmt_days(avg_days)}\n\n"
         response_text += "**Station Status Breakdown:**\n"
         response_text += f"  🟢 Normal: {status_counts['normal']}\n"
         response_text += f"  🟡 Low: {status_counts['low']}\n"
@@ -367,7 +455,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
                 "total_capacity": {"sum": {"field": "capacity_liters"}},
                 "total_stock": {"sum": {"field": "current_stock_liters"}},
                 "total_daily_consumption": {"sum": {"field": "daily_consumption_rate"}},
-                "avg_days_until_empty": {"avg": {"field": "days_until_empty"}},
+                "avg_days_until_empty": _AVG_DAYS_CONSUMING_AGG,
                 "by_status": {"terms": {"field": "status"}},
                 "by_fuel_type": {
                     "terms": {"field": "fuel_type"},
@@ -385,7 +473,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
         total_capacity = aggs.get("total_capacity", {}).get("value", 0)
         total_stock = aggs.get("total_stock", {}).get("value", 0)
         total_daily = aggs.get("total_daily_consumption", {}).get("value", 0)
-        avg_days = aggs.get("avg_days_until_empty", {}).get("value", 0)
+        avg_days = _avg_days(aggs)
 
         status_counts = {"normal": 0, "low": 0, "critical": 0, "empty": 0}
         for bucket in aggs.get("by_status", {}).get("buckets", []):
@@ -458,7 +546,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
         report += f"| Total Capacity | {total_capacity:,.0f} L |\n"
         report += f"| Current Stock | {total_stock:,.0f} L ({overall_pct:.1f}%) |\n"
         report += f"| Daily Consumption Rate | {total_daily:,.1f} L/day |\n"
-        report += f"| Avg Days Until Empty | {avg_days:.1f} |\n\n"
+        report += f"| Avg Days Until Empty | {_fmt_days(avg_days)} |\n\n"
 
         # Status breakdown
         report += "## Station Status\n\n"

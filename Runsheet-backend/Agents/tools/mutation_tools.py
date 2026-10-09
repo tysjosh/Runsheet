@@ -22,8 +22,9 @@ import logging
 import time
 from strands import tool
 from Agents.confirmation_protocol import MutationRequest
-from ._tenant_context import get_current_tenant
+from ._tenant_context import resolve_tool_tenant
 from .logging_wrapper import get_telemetry_service
+from .scheduling_tools import JOB_TYPE_VALUES
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,8 @@ def _get_protocol():
 
 
 def _resolve_tenant_id(tenant_id: str | None) -> str:
-    return tenant_id or get_current_tenant()
+    # The bound tenant wins over a model-supplied tenant_id.
+    return resolve_tool_tenant(tenant_id)
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
@@ -104,6 +106,9 @@ def _format_mutation_result(result) -> str:
         )
     elif result.executed:
         return f"✅ Action executed (risk: {result.risk_level}): {result.result}"
+    elif result.confirmation_method == "immediate":
+        # Ran immediately but did not execute (OI-15): never "queued".
+        return f"❌ Action not executed (risk: {result.risk_level}): {result.result}"
     else:
         return (
             f"⏳ Action queued for approval (risk: {result.risk_level}). "
@@ -258,7 +263,6 @@ async def cancel_job(job_id: str, reason: str,
         )
 
 
-@tool
 async def create_job(job_type: str, origin: str, destination: str,
                      scheduled_time: str, asset_id: str = None,
                      cargo_manifest: list = None,
@@ -270,8 +274,7 @@ async def create_job(job_type: str, origin: str, destination: str,
     business validation, and autonomy-level checks before executing.
 
     Args:
-        job_type: Type of job. One of: cargo_transport, passenger_transport,
-                  vessel_movement, airport_transfer, crane_booking.
+        job_type: Type of job. One of: {job_types}.
         origin: Origin location for the job.
         destination: Destination location for the job.
         scheduled_time: Scheduled start time in ISO 8601 format.
@@ -321,6 +324,11 @@ async def create_job(job_type: str, origin: str, destination: str,
              "cargo_manifest": cargo_manifest, "tenant_id": tenant_id},
             start_time, success, error_msg
         )
+
+
+# Job types come from scheduling.models.JobType (F5); fill before tool().
+create_job.__doc__ = create_job.__doc__.format(job_types=", ".join(JOB_TYPE_VALUES))
+create_job = tool(create_job)
 
 
 # ---------------------------------------------------------------------------

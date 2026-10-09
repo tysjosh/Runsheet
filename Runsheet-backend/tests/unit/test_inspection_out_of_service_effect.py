@@ -75,6 +75,24 @@ def _term_filters(node: Any, found: Optional[Dict[str, Any]] = None) -> Dict[str
     return found
 
 
+def _ids_value(node: Any) -> Optional[str]:
+    """The single doc id in an ``{"ids": {"values": [...]}}`` clause, if any."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "ids" and isinstance(value, dict):
+                values = value.get("values") or []
+                return values[0] if len(values) == 1 else None
+            found = _ids_value(value)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _ids_value(item)
+            if found is not None:
+                return found
+    return None
+
+
 class FakeES:
     """Records writes and answers searches by applying the query's term filters.
 
@@ -104,7 +122,9 @@ class FakeES:
         terms = _term_filters(query)
 
         if index == ASSET_INDEX:
-            key = (terms.get("tenant_id"), terms.get("_id"))
+            # The lookup is by doc id through ``ids`` (``term _id`` matches
+            # nothing on the Postgres store).
+            key = (terms.get("tenant_id"), _ids_value(query))
             hits = (
                 [{"_id": key[1], "_source": {"tenant_id": key[0]}}]
                 if key in self.assets
@@ -141,10 +161,13 @@ class RecordingWSManager:
 
     def __init__(self, *, fail: bool = False) -> None:
         self.broadcasts: List[tuple] = []
+        self.tenant_ids: List[str] = []
         self._fail = fail
 
-    async def broadcast(self, event_type: str, event_data: dict) -> None:
+    # Same signature as SchedulingWebSocketManager.broadcast (N-new-1).
+    async def broadcast(self, event_type: str, event_data: dict, tenant_id: str = "") -> None:
         self.broadcasts.append((event_type, dict(event_data)))
+        self.tenant_ids.append(tenant_id)
         if self._fail:
             raise RuntimeError("socket gone")
 
@@ -240,6 +263,7 @@ class TestOutOfServiceEffect:
         event_type, event_data = ws.broadcasts[0]
         assert event_type == ASSET_OUT_OF_SERVICE_EVENT
         assert event_data["tenant_id"] == TENANT
+        assert ws.tenant_ids == [TENANT]  # the manager refuses a tenantless call
         assert event_data["asset_id"] == ASSET
         assert event_data["driver_id"] == DRIVER
         assert event_data["inspection_id"] == report["inspection_id"]

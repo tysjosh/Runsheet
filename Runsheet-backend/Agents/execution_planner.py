@@ -29,6 +29,14 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+#: Shown for a failed step when the exception carries no vetted message.
+STEP_FAILED_MESSAGE = "This step could not be completed."
+
+
+def _safe_step_error(exc: BaseException) -> str:
+    """User-facing text for a failed step: never the raw exception (F3)."""
+    return getattr(exc, "safe_message", None) or STEP_FAILED_MESSAGE
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -75,6 +83,11 @@ class PlanStep:
     status: StepStatus = StepStatus.PENDING
     result: Optional[str] = None
     recovery_attempts: int = 0
+    #: True when the step only reads. Read-only steps must NOT go through the
+    #: ConfirmationProtocol: the risk registry classifies unknown tool names as
+    #: HIGH by design, so a read was parked in the dispatcher approval queue and
+    #: — if approved — hit "Unknown tool … no mutation executed".
+    read_only: bool = False
 
 
 @dataclass
@@ -219,13 +232,33 @@ class ExecutionPlanner:
         """
         self._activity_log = activity_log_service
         self._confirmation_protocol = confirmation_protocol
+        # Answers read-only steps. Injected by AgentOrchestrator, which owns the
+        # specialists; the planner has no specialist references of its own.
+        self._read_step_executor = None
+
+    def set_read_step_executor(self, executor) -> None:
+        """Inject the coroutine that answers read-only steps.
+
+        Signature: ``async (step, resolved_params, tenant_id) -> str``.
+
+        Passing ``None`` leaves read-only steps failing loudly, which is the
+        right outcome: it surfaces as a plan error the orchestrator recovers
+        from, rather than a queue of approval requests for reads.
+        """
+        self._read_step_executor = executor
 
     # ------------------------------------------------------------------
     # Plan creation
     # ------------------------------------------------------------------
 
     async def create_plan(
-        self, request: str, target_domains: list
+        self,
+        request: str,
+        target_domains: list,
+        *,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> ExecutionPlan:
         """Create an execution plan from a request string and target domains.
 
@@ -235,6 +268,11 @@ class ExecutionPlanner:
         Args:
             request: The user's natural language request.
             target_domains: List of specialist domain names to involve.
+            tenant_id: Tenant the request belongs to. Stamped on the
+                ``plan_created`` activity entry so it is only pushed to that
+                tenant (L2). ``None`` persists the entry and pushes it nowhere.
+            user_id: Requesting user, stamped on the activity entry.
+            session_id: Chat session, stamped on the activity entry.
 
         Returns:
             An ExecutionPlan with steps for each target domain.
@@ -249,6 +287,12 @@ class ExecutionPlanner:
                 agent=domain,
                 tool_name=f"{domain}_query",
                 parameters={"request": request},
+                # ``{domain}_query`` is a read: the specialist answers it with
+                # its search tools. Marked so ``_execute_step`` dispatches it to
+                # the specialist instead of the mutation path — these invented
+                # names are in no risk registry, so they classified HIGH and
+                # every step of every complex request went to the approval queue.
+                read_only=True,
             )
             steps.append(step)
 
@@ -268,9 +312,9 @@ class ExecutionPlanner:
             "risk_level": None,
             "outcome": "success",
             "duration_ms": 0,
-            "tenant_id": None,
-            "user_id": None,
-            "session_id": None,
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "session_id": session_id,
             "details": {
                 "event": "plan_created",
                 "plan_id": plan_id,
@@ -413,12 +457,23 @@ class ExecutionPlanner:
             except Exception as e:
                 step.recovery_attempts += 1
                 logger.warning(
-                    f"Step {step.step_id} failed (attempt "
-                    f"{step.recovery_attempts}/{self.MAX_RECOVERY_ATTEMPTS}): {e}"
+                    "Step %s failed (attempt %s/%s)",
+                    step.step_id,
+                    step.recovery_attempts,
+                    self.MAX_RECOVERY_ATTEMPTS,
+                    exc_info=e,
                 )
-                if step.recovery_attempts > self.MAX_RECOVERY_ATTEMPTS:
+                # ``recoverable is False`` (AgentServiceError) means the step
+                # already ran its own bounded LLM retry; re-running it would
+                # multiply model calls against an exhausted quota (F3).
+                if (
+                    getattr(e, "recoverable", True) is False
+                    or step.recovery_attempts > self.MAX_RECOVERY_ATTEMPTS
+                ):
                     step.status = StepStatus.FAILED
-                    step.result = f"Failed after {self.MAX_RECOVERY_ATTEMPTS} recovery attempts: {e}"
+                    # Never interpolate the exception: plan results are shown
+                    # to the user and provider errors carry raw JSON (F3).
+                    step.result = _safe_step_error(e)
                     return False
 
         # Should not reach here, but guard against it
@@ -447,6 +502,9 @@ class ExecutionPlanner:
         Returns:
             The execution result string.
         """
+        if step.read_only:
+            return await self._execute_read_step(step, resolved_params, tenant_id)
+
         if self._confirmation_protocol:
             from Agents.confirmation_protocol import MutationRequest
 
@@ -483,6 +541,34 @@ class ExecutionPlanner:
             f"Step {step.step_id} ({step.tool_name}) executed successfully "
             f"(simulated — no confirmation protocol wired)"
         )
+
+    async def _execute_read_step(
+        self,
+        step: PlanStep,
+        resolved_params: Dict[str, Any],
+        tenant_id: str,
+    ) -> str:
+        """Answer a read-only step via the injected read executor.
+
+        Deliberately never touches the ConfirmationProtocol. A read has nothing
+        to approve, and routing it there was actively harmful: the risk registry
+        defaults unknown tool names to HIGH, so each step returned "Queued for
+        approval" — which is not an exception, so the orchestrator's fallback to
+        simple execution never fired and the user got a list of approval ids
+        instead of an answer, while the dispatcher's queue filled with
+        approvals for reads that no handler could execute.
+        """
+        if self._read_step_executor is None:
+            logger.warning(
+                "ExecutionPlanner: no read-step executor wired — step %s (%s) "
+                "cannot be answered. Wire one via set_read_step_executor().",
+                step.step_id,
+                step.tool_name,
+            )
+            raise RuntimeError(
+                f"No read-step executor wired for {step.tool_name}"
+            )
+        return await self._read_step_executor(step, resolved_params, tenant_id)
 
     def _resolve_parameters(
         self,
@@ -565,9 +651,9 @@ class ExecutionPlanner:
                     step.result = f"Rolled back via {step.rollback_tool}"
                 except Exception as e:
                     logger.error(
-                        f"Rollback failed for step {step.step_id}: {e}"
+                        "Rollback failed for step %s", step.step_id, exc_info=e
                     )
-                    step.result = f"Rollback failed: {e}"
+                    step.result = f"Rollback failed: {_safe_step_error(e)}"
             else:
                 # No rollback tool defined — mark as rolled back anyway
                 step.status = StepStatus.ROLLED_BACK
@@ -586,7 +672,7 @@ class ExecutionPlanner:
             "risk_level": None,
             "outcome": "rolled_back",
             "duration_ms": rollback_duration_ms,
-            "tenant_id": None,
+            "tenant_id": tenant_id,
             "user_id": None,
             "session_id": None,
             "details": {

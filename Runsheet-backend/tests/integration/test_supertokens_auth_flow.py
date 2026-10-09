@@ -25,7 +25,10 @@ reachable from CI or a typical local checkout. So the file is split in two:
    SuperTokens core is configured via ``SUPERTOKENS_CONNECTION_URI`` and answers
    its ``/hello`` health probe, these drive the real end-to-end flow through a
    ``TestClient`` against the SDK-owned ``/auth`` routes and assert the same
-   four behaviors against the running core.
+   four behaviors against the running core. The public sign-up API is
+   disabled (staging finding F1), so these create their users with the
+   recipe-level ``sign_up`` the provisioner uses, and one example asserts
+   ``POST /auth/signup`` is no longer served.
 
 Validates: Requirements 1.2, 2.3, 2.5, 4.4
 """
@@ -259,11 +262,13 @@ def test_canonical_user_roles_are_declared(initialized_supertokens):
         # feature-flag endpoints had no way to distinguish a customer
         # administrator from support staff.
         "platform_admin",
+        # Exclusive customer-portal identity (OI-06).
+        "customer",
     }
     # No duplicates / no extras in the declared tuple. ``ops_manager`` was
     # removed: it was declared but gated nothing, so it advertised a permission
     # tier that did not exist.
-    assert len(CANONICAL_ROLES) == 4
+    assert len(CANONICAL_ROLES) == 5
     # The UserRoles recipe is registered so the roles can exist in the core.
     assert UserRolesRecipe.get_instance().get_recipe_id() == "userroles"
 
@@ -280,6 +285,20 @@ def _form_fields(email: str, password: str) -> dict:
             {"id": "password", "value": password},
         ]
     }
+
+
+def _create_user(email: str, password: str) -> None:
+    """Create a core user through the recipe function, as the provisioner does.
+
+    The public ``POST /auth/signup`` API is disabled (staging finding F1), so
+    test users are created with the recipe-level ``sign_up`` that
+    ``auth.provisioner`` uses.
+    """
+    from supertokens_python.recipe.emailpassword.interfaces import SignUpOkResult
+    from supertokens_python.recipe.emailpassword.syncio import sign_up
+
+    result = sign_up("public", email, password)
+    assert isinstance(result, SignUpOkResult), type(result).__name__
 
 
 def _session_cookie_value(client, name: str) -> Optional[str]:
@@ -324,9 +343,7 @@ def test_signin_establishes_session(live_core):
     password = "Testpass123!"
 
     with TestClient(app) as client:
-        signup = client.post("/auth/signup", json=_form_fields(email, password))
-        assert signup.status_code == 200, signup.text
-        assert signup.json().get("status") == "OK"
+        _create_user(email, password)
 
         signin = client.post("/auth/signin", json=_form_fields(email, password))
         assert signin.status_code == 200, signin.text
@@ -340,6 +357,21 @@ def test_signin_establishes_session(live_core):
 
 
 @pytest.mark.integration
+def test_public_signup_is_not_served(live_core):
+    """End-to-end: ``POST /auth/signup`` is not served (staging finding F1)."""
+    from starlette.testclient import TestClient
+
+    app = _build_auth_app()
+    email = f"itest+{uuid.uuid4().hex}@runsheet.test"
+
+    with TestClient(app) as client:
+        resp = client.post(
+            "/auth/signup", json=_form_fields(email, "Testpass123!")
+        )
+        assert resp.status_code == 404, resp.text
+
+
+@pytest.mark.integration
 def test_refresh_rotates_session_token(live_core):
     """End-to-end: refreshing a session rotates the access token (Req 2.3)."""
     from starlette.testclient import TestClient
@@ -349,7 +381,7 @@ def test_refresh_rotates_session_token(live_core):
     password = "Testpass123!"
 
     with TestClient(app) as client:
-        client.post("/auth/signup", json=_form_fields(email, password))
+        _create_user(email, password)
         signin = client.post("/auth/signin", json=_form_fields(email, password))
         assert signin.status_code == 200, signin.text
         original_access = _session_cookie_value(client, "sAccessToken")
@@ -375,7 +407,7 @@ def test_anti_csrf_enforced_on_state_changing_request(live_core):
     password = "Testpass123!"
 
     with TestClient(app) as client:
-        client.post("/auth/signup", json=_form_fields(email, password))
+        _create_user(email, password)
         signin = client.post("/auth/signin", json=_form_fields(email, password))
         assert signin.status_code == 200, signin.text
 

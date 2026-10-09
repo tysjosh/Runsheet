@@ -1,7 +1,15 @@
-import { Activity, BarChart3, Download, TrendingUp } from "lucide-react";
-import React, { useEffect, useMemo, useState } from "react";
-import { colors } from "@/styles/design-tokens";
-import { type AnalyticsMetrics, apiService } from "../services/api";
+import { Activity } from "lucide-react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { usePageChrome } from "@/components/ui";
+import { CHART, COLOR, SEMANTIC } from "@/styles/tokens";
+import { date, dateTime, number } from "../lib/format";
+import {
+  type AnalyticsMetricKey,
+  type AnalyticsMetrics,
+  type AnalyticsTimeSeriesPoint,
+  apiService,
+  type RoutePerformanceEntry,
+} from "../services/api";
 import LoadingSpinner from "./LoadingSpinner";
 
 // Google Charts component
@@ -19,25 +27,48 @@ interface GoogleChartProps {
   height?: string;
 }
 
-interface RoutePerformance {
-  name: string;
-  performance: number;
-}
+/** KPI cards in a fixed order. Absent keys are skipped. */
+const METRIC_KEYS: AnalyticsMetricKey[] = [
+  "delivery_performance",
+  "average_delay",
+  "fleet_utilization",
+];
+
+const NOT_AVAILABLE = "Not available";
+
+/** Trend series window, matching the backend default. */
+const TREND_RANGE = "30d" as const;
 
 function getMetricLabel(metric: string) {
-  const labels = {
+  const labels: Record<string, string> = {
     delivery_performance: "Performance (%)",
     average_delay: "Delay (minutes)",
     fleet_utilization: "Utilization (%)",
-    customer_satisfaction: "Rating (1-5)",
   };
-  return labels[metric as keyof typeof labels] || "Value";
+  return labels[metric] || "Value";
 }
 
-function parseMetricValue(value?: string): number {
-  if (!value) return 0;
+/** Null-safe numeric parse of a display value like "80.0%" (F2). */
+export function parseMetricValue(
+  value: string | null | undefined,
+): number | null {
+  if (value == null) return null;
   const numeric = Number.parseFloat(value.replace(/[^0-9.-]/g, ""));
-  return Number.isFinite(numeric) ? numeric : 0;
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+/**
+ * Bucket timestamp → "Tue 6 Oct", formatted in UTC because snapshots are per
+ * UTC date (the axis title says so).
+ */
+function utcDay(timestamp: string): string {
+  const d = new Date(timestamp);
+  return Number.isNaN(d.getTime()) ? timestamp : date(d, { timeZone: "UTC" });
+}
+
+function formatAsOf(asOf: string): string {
+  const d = new Date(asOf);
+  return Number.isNaN(d.getTime()) ? asOf : dateTime(d);
 }
 
 function GoogleChart({
@@ -108,53 +139,84 @@ function GoogleChart({
 }
 
 export default function Analytics() {
-  const [timeRange, setTimeRange] = useState("7d");
-  const [selectedMetric, setSelectedMetric] = useState("delivery_performance");
-  const [metrics, setMetrics] = useState<AnalyticsMetrics | null>(null);
-  const [routePerformance, setRoutePerformance] = useState<RoutePerformance[]>(
-    [],
+  const [selectedMetric, setSelectedMetric] = useState<AnalyticsMetricKey>(
+    "delivery_performance",
   );
+  const [metrics, setMetrics] = useState<AnalyticsMetrics | null>(null);
+  const [asOf, setAsOf] = useState<string | null>(null);
+  const [routePerformance, setRoutePerformance] = useState<
+    RoutePerformanceEntry[]
+  >([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [series, setSeries] = useState<AnalyticsTimeSeriesPoint[] | null>(null);
 
-  const loadAnalyticsData = async () => {
+  const loadAnalyticsData = useCallback(async () => {
     try {
       setLoading(true);
+      setLoadError(false);
       const [metricsResponse, routesResponse] = await Promise.all([
-        apiService.getAnalyticsMetrics(timeRange),
+        apiService.getAnalyticsMetrics(),
         apiService.getAnalyticsRoutePerformance(),
       ]);
 
-      setMetrics(metricsResponse.data);
-      setRoutePerformance(routesResponse.data);
+      setMetrics(metricsResponse.data ?? null);
+      setAsOf(metricsResponse.as_of ?? null);
+      setRoutePerformance(routesResponse.data ?? []);
     } catch (error) {
+      // F13: an outage must not look like "no data".
       console.error("Failed to load analytics data:", error);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
+  // Loads once on mount. There is no time-range selector: the KPIs are one
+  // daily snapshot (OI-50).
   useEffect(() => {
     loadAnalyticsData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeRange]);
+  }, [loadAnalyticsData]);
 
-  const chartData = useMemo(() => {
-    const metric = metrics?.[selectedMetric as keyof AnalyticsMetrics];
-    const currentValue = parseMetricValue(metric?.value);
-    const changeValue = parseMetricValue(metric?.change);
-    const previousValue =
-      metric?.trend === "down"
-        ? currentValue + changeValue
-        : currentValue - changeValue;
+  // Real trend for the selected KPI (F3), re-fetched when it changes.
+  useEffect(() => {
+    if (!metrics) return;
+    let cancelled = false;
+    setSeries(null);
+    apiService
+      .getAnalyticsTimeSeries(selectedMetric, TREND_RANGE)
+      .then((response) => {
+        if (!cancelled) setSeries(response.data ?? []);
+      })
+      .catch((error) => {
+        console.error("Failed to load analytics trend:", error);
+        if (!cancelled) setSeries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [metrics, selectedMetric]);
 
-    return {
+  const metricEntries = useMemo(
+    () =>
+      METRIC_KEYS.flatMap((key) => {
+        const metric = metrics?.[key];
+        return metric ? [[key, metric] as const] : [];
+      }),
+    [metrics],
+  );
+
+  const chartData = useMemo(
+    () => ({
       timeSeriesData: [
         [
-          { type: "string", label: "Period" },
+          { type: "string", label: "Date" },
           { type: "number", label: getMetricLabel(selectedMetric) },
         ],
-        ["Previous", Math.max(0, previousValue)],
-        ["Current", Math.max(0, currentValue)],
+        ...(series ?? []).map((point) => [
+          utcDay(point.timestamp),
+          point.value,
+        ]),
       ],
       pieChartData: [
         ["Route", "Performance"],
@@ -173,32 +235,62 @@ export default function Analytics() {
           Number(route.performance) || 0,
         ]),
       ],
-    };
-  }, [metrics, routePerformance, selectedMetric]);
+    }),
+    [routePerformance, selectedMetric, series],
+  );
+
+  const hasTrendPoint = (series ?? []).some((point) => point.value != null);
 
   const sortedRoutes = useMemo(
     () => [...routePerformance].sort((a, b) => b.performance - a.performance),
     [routePerformance],
   );
 
+  // Weighted by orders scored when the backend reports it (F8).
+  const averageRoutePerformance = useMemo(() => {
+    if (routePerformance.length === 0) return null;
+    const weightOf = (r: RoutePerformanceEntry) =>
+      r.orders_scored && r.orders_scored > 0 ? r.orders_scored : 1;
+    const totalWeight = routePerformance.reduce((s, r) => s + weightOf(r), 0);
+    const weighted = routePerformance.reduce(
+      (s, r) => s + (Number(r.performance) || 0) * weightOf(r),
+      0,
+    );
+    return weighted / totalWeight;
+  }, [routePerformance]);
+
+  const fleetUtilization = parseMetricValue(metrics?.fleet_utilization?.value);
+  const selectedTitle = metrics?.[selectedMetric]?.title ?? "Analytics";
+  // F13: the snapshot time goes into the Analytics hub's title-row counts.
+  const asOfNode = useMemo(
+    () =>
+      asOf && !loading && !loadError ? (
+        <span className="whitespace-nowrap">
+          As of <time dateTime={asOf}>{formatAsOf(asOf)}</time>
+        </span>
+      ) : null,
+    [asOf, loading, loadError],
+  );
+  const embedded = usePageChrome({ counts: asOfNode });
+
   const getChartOptions = (type: string) => {
     const baseOptions = {
       backgroundColor: "transparent",
       legend: {
         position: "bottom",
-        textStyle: { fontSize: 12, color: colors.gray[700] },
+        textStyle: { fontSize: 12, color: COLOR.slate[700] },
         alignment: "center",
       },
-      titleTextStyle: { fontSize: 14, bold: true, color: colors.gray[900] },
+      titleTextStyle: { fontSize: 14, bold: true, color: COLOR.slate[900] },
       hAxis: {
-        textStyle: { fontSize: 11, color: colors.gray[500] },
-        gridlines: { color: colors.gray[100], count: 5 },
-        baselineColor: colors.gray[200],
+        textStyle: { fontSize: 11, color: COLOR.slate[500] },
+        gridlines: { color: COLOR.slate[100], count: 5 },
+        baselineColor: COLOR.slate[200],
       },
       vAxis: {
-        textStyle: { fontSize: 11, color: colors.gray[500] },
-        gridlines: { color: colors.gray[100], count: 5 },
-        baselineColor: colors.gray[200],
+        textStyle: { fontSize: 11, color: COLOR.slate[500] },
+        gridlines: { color: COLOR.slate[100], count: 5 },
+        baselineColor: COLOR.slate[200],
       },
       chartArea: { left: 60, top: 20, width: "85%", height: "75%" },
     };
@@ -207,29 +299,24 @@ export default function Analytics() {
       case "line":
         return {
           ...baseOptions,
+          hAxis: { ...baseOptions.hAxis, title: "Date (UTC)" },
           curveType: "function",
-          colors: [colors.primary.DEFAULT],
+          colors: [SEMANTIC.primary],
           pointSize: 6,
           lineWidth: 3,
           pointShape: "circle",
           series: {
             0: {
               areaOpacity: 0.1,
-              color: colors.primary.DEFAULT,
+              color: SEMANTIC.primary,
             },
           },
         };
       case "pie":
         return {
           ...baseOptions,
-          colors: [
-            colors.primary.DEFAULT,
-            colors.gray[500],
-            colors.gray[400],
-            colors.gray[300],
-            colors.gray[200],
-            colors.gray[100],
-          ],
+          // Categorical chart order from the tokens (design.md §2.1).
+          colors: [...CHART],
           pieSliceText: "percentage",
           pieSliceTextStyle: { fontSize: 11, color: "white", bold: true },
           is3D: false,
@@ -239,11 +326,11 @@ export default function Analytics() {
       case "bar":
         return {
           ...baseOptions,
-          colors: [colors.primary.DEFAULT],
+          colors: [SEMANTIC.primary],
           bar: { groupWidth: "65%" },
           series: {
             0: {
-              color: colors.primary.DEFAULT,
+              color: SEMANTIC.primary,
             },
           },
         };
@@ -254,238 +341,190 @@ export default function Analytics() {
 
   return (
     <div className="h-full overflow-y-auto bg-white">
-      {/* Header */}
-      <div className="border-b border-gray-100 px-8 py-6">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-semibold text-primary">
-                Analytics Dashboard
-              </h1>
-              <p className="text-gray-500">
-                Performance insights and operational metrics
-              </p>
-            </div>
-          </div>
-          <div className="flex gap-3">
-            <select
-              value={timeRange}
-              onChange={(e) => setTimeRange(e.target.value)}
-              className="px-4 py-2 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white font-medium"
-            >
-              <option value="24h">Last 24 Hours</option>
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="90d">Last 90 Days</option>
-            </select>
-            <button className="bg-primary hover:bg-primary-hover text-white px-6 py-2 rounded-xl text-sm font-medium transition-colors flex items-center gap-2">
-              <Download className="w-4 h-4" />
-              Export Report
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <div className="p-8">
+      <div className="p-4">
+        {/* As of: in the hub's title row when hosted, else inline (F13). */}
+        {!embedded && asOfNode && (
+          <p className="mb-3 text-xs text-text-muted">{asOfNode}</p>
+        )}
         {/* Loading State */}
         {loading && (
           <LoadingSpinner message="Loading analytics..." fullHeight={false} />
         )}
 
+        {/* Error state (F13) */}
+        {!loading && loadError && (
+          <div
+            role="alert"
+            className="mb-8 rounded-2xl border border-error-light bg-error-light/30 p-6"
+          >
+            <p className="text-sm font-medium text-gray-800">
+              Analytics could not be loaded.
+            </p>
+            <button
+              type="button"
+              onClick={() => loadAnalyticsData()}
+              className="mt-3 rounded-xl border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-800 hover:border-gray-400"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Empty state: no daily snapshot yet (F3) */}
+        {!loading && !loadError && !metrics && (
+          <div className="mb-8 rounded-2xl border border-gray-200 bg-gray-50 p-6">
+            <p className="text-sm text-gray-700">
+              No analytics snapshot yet. Metrics appear after the daily snapshot
+              scores delivered or failed orders.
+            </p>
+          </div>
+        )}
+
         {/* Key Metrics */}
-        {!loading && metrics && (
-          <div className="grid grid-cols-4 gap-6 mb-8">
-            {Object.entries(metrics).map(([key, metric], _index) => {
-              return (
+        {!loading && !loadError && metricEntries.length > 0 && (
+          <div className="mb-4 grid grid-cols-2 gap-3 lg:grid-cols-3">
+            {metricEntries.map(([key, metric]) => (
+              <button
+                type="button"
+                key={key}
+                aria-pressed={selectedMetric === key}
+                className={`text-left p-4 rounded-xl cursor-pointer transition-all border ${
+                  selectedMetric === key
+                    ? "bg-gray-50 border-primary shadow-sm"
+                    : "bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
+                }`}
+                onClick={() => setSelectedMetric(key)}
+              >
+                <span className="mb-4 block text-sm font-medium text-text-muted">
+                  {metric.title}
+                </span>
                 <div
-                  key={key}
-                  className={`p-6 rounded-2xl cursor-pointer transition-all border ${
-                    selectedMetric === key
-                      ? "bg-gray-50 border-primary shadow-sm"
-                      : "bg-white border-gray-200 hover:border-gray-300 hover:shadow-sm"
-                  }`}
-                  onClick={() => setSelectedMetric(key)}
+                  className={
+                    metric.value == null
+                      ? "text-lg font-medium text-text-muted"
+                      : "text-2xl font-semibold tabular-nums text-text"
+                  }
                 >
-                  <div className="flex items-start justify-between mb-4">
-                    <h3 className="text-sm font-medium text-gray-600">
-                      {metric.title}
-                    </h3>
-                    <div
-                      className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium ${
-                        metric.trend === "up"
-                          ? "text-success-dark bg-success-light"
-                          : "text-error-dark bg-error-light"
-                      }`}
-                    >
-                      <TrendingUp
-                        className={`w-3 h-3 ${metric.trend === "down" ? "rotate-180" : ""}`}
-                      />
-                      <span>{metric.change}</span>
-                    </div>
-                  </div>
-                  <div className="text-3xl font-semibold text-primary mb-1">
-                    {metric.value}
-                  </div>
+                  {metric.value ?? NOT_AVAILABLE}
                 </div>
-              );
-            })}
+              </button>
+            ))}
           </div>
         )}
 
         {/* Interactive Charts */}
-        {!loading &&
-          metrics &&
-          Object.keys(metrics).length > 0 &&
-          chartData && (
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-              {/* Time Series Chart */}
-              <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-2 h-2 bg-primary rounded-full"></div>
-                  <h3 className="text-lg font-semibold text-primary">
-                    {metrics[selectedMetric as keyof typeof metrics]?.title ??
-                      "Analytics"}{" "}
-                    Trend
-                  </h3>
-                  <span className="text-sm text-gray-500 bg-gray-100 px-3 py-1 rounded-lg">
-                    {timeRange}
-                  </span>
-                </div>
+        {!loading && !loadError && metrics && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            {/* Time Series Chart: real daily snapshots (F3) */}
+            <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
+              <div className="flex items-center gap-3 mb-6">
+                <div
+                  aria-hidden="true"
+                  className="h-4 w-1 rounded-full bg-primary"
+                />
+                <h3 className="text-sm font-semibold text-text">
+                  {selectedTitle}, last 30 days
+                </h3>
+              </div>
+              {series === null ? (
+                <LoadingSpinner message="Loading trend..." fullHeight={false} />
+              ) : hasTrendPoint ? (
                 <GoogleChart
                   chartType="LineChart"
                   data={chartData.timeSeriesData}
                   options={getChartOptions("line")}
                   height="280px"
                 />
-              </div>
-
-              {/* Route Mix Pie Chart */}
-              <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-2 h-2 bg-primary rounded-full"></div>
-                  <h3 className="text-lg font-semibold text-primary">
-                    Route Performance Mix
-                  </h3>
-                </div>
-                <GoogleChart
-                  chartType="PieChart"
-                  data={chartData.pieChartData}
-                  options={getChartOptions("pie")}
-                  height="280px"
-                />
-              </div>
+              ) : (
+                <p className="text-sm text-gray-500">Not enough history yet</p>
+              )}
             </div>
-          )}
 
-        {/* Route Performance Bar Chart */}
-        {!loading && chartData && (
-          <div className="bg-white rounded-2xl p-6 mb-8 border border-gray-200 hover:border-gray-300 transition-colors">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="w-2 h-2 bg-primary rounded-full"></div>
-              <h3 className="text-lg font-semibold text-primary">
-                Route Performance Comparison
-              </h3>
-            </div>
-            <GoogleChart
-              chartType="ColumnChart"
-              data={chartData.barChartData}
-              options={getChartOptions("bar")}
-              height="320px"
-            />
-          </div>
-        )}
-
-        {/* Additional Analytics Charts */}
-        {!loading && chartData && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-            {/* Fleet Utilization Gauge */}
+            {/* Fleet Utilization Gauge (no placeholder value, F2/F3) */}
             <div className="bg-white border border-gray-200 rounded-2xl p-6 hover:border-gray-300 transition-colors">
               <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-primary rounded-full"></div>
-                <h3 className="text-lg font-semibold text-primary">
+                <div
+                  aria-hidden="true"
+                  className="h-4 w-1 rounded-full bg-primary"
+                />
+                <h3 className="text-sm font-semibold text-text">
                   Fleet Utilization
                 </h3>
               </div>
-              <GoogleChart
-                chartType="Gauge"
-                data={[
-                  ["Label", "Value"],
-                  [
-                    "Utilization",
-                    metrics?.fleet_utilization
-                      ? parseFloat(
-                          metrics.fleet_utilization.value.replace("%", ""),
-                        )
-                      : 92,
-                  ],
-                ]}
-                options={{
-                  width: "100%",
-                  height: 220,
-                  redFrom: 0,
-                  redTo: 25,
-                  yellowFrom: 25,
-                  yellowTo: 75,
-                  greenFrom: 75,
-                  greenTo: 100,
-                  minorTicks: 5,
-                  majorTicks: ["0", "25", "50", "75", "100"],
-                  animation: { duration: 1000, easing: "out" },
-                }}
-              />
+              {fleetUtilization != null ? (
+                <GoogleChart
+                  chartType="Gauge"
+                  data={[
+                    ["Label", "Value"],
+                    ["Utilization", fleetUtilization],
+                  ]}
+                  options={{
+                    width: "100%",
+                    height: 220,
+                    redFrom: 0,
+                    redTo: 25,
+                    yellowFrom: 25,
+                    yellowTo: 75,
+                    greenFrom: 75,
+                    greenTo: 100,
+                    minorTicks: 5,
+                    majorTicks: ["0", "25", "50", "75", "100"],
+                    animation: { duration: 1000, easing: "out" },
+                  }}
+                />
+              ) : (
+                <p className="text-sm text-gray-500">{NOT_AVAILABLE}</p>
+              )}
             </div>
+          </div>
+        )}
 
-            {/* Customer Satisfaction Gauge */}
-            <div className="bg-white border border-gray-200 rounded-2xl p-6 hover:border-gray-300 transition-colors">
+        {/* Route Performance */}
+        {!loading && !loadError && routePerformance.length > 0 && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
               <div className="flex items-center gap-3 mb-6">
-                <div className="w-2 h-2 bg-primary rounded-full"></div>
-                <h3 className="text-lg font-semibold text-primary">
-                  Customer Satisfaction
+                <div
+                  aria-hidden="true"
+                  className="h-4 w-1 rounded-full bg-primary"
+                />
+                <h3 className="text-sm font-semibold text-text">
+                  Route Performance Comparison
                 </h3>
               </div>
               <GoogleChart
-                chartType="Gauge"
-                data={[
-                  ["Label", "Value"],
-                  [
-                    "Rating",
-                    metrics?.customer_satisfaction
-                      ? parseFloat(
-                          metrics.customer_satisfaction.value.split("/")[0],
-                        )
-                      : 4.2,
-                  ],
-                ]}
-                options={{
-                  width: "100%",
-                  height: 220,
-                  max: 5,
-                  redFrom: 0,
-                  redTo: 2,
-                  yellowFrom: 2,
-                  yellowTo: 3.5,
-                  greenFrom: 3.5,
-                  greenTo: 5,
-                  minorTicks: 5,
-                  majorTicks: ["0", "1", "2", "3", "4", "5"],
-                  animation: { duration: 1000, easing: "out" },
-                }}
+                chartType="ColumnChart"
+                data={chartData.barChartData}
+                options={getChartOptions("bar")}
+                height="320px"
+              />
+            </div>
+            <div className="bg-white rounded-2xl p-6 border border-gray-200 hover:border-gray-300 transition-colors">
+              <div className="flex items-center gap-3 mb-6">
+                <div
+                  aria-hidden="true"
+                  className="h-4 w-1 rounded-full bg-primary"
+                />
+                <h3 className="text-sm font-semibold text-text">
+                  Route Performance Mix
+                </h3>
+              </div>
+              <GoogleChart
+                chartType="PieChart"
+                data={chartData.pieChartData}
+                options={getChartOptions("pie")}
+                height="320px"
               />
             </div>
           </div>
         )}
 
         {/* Key Insights */}
-        {!loading && routePerformance.length > 0 && (
+        {!loading && !loadError && routePerformance.length > 0 && (
           <div className="bg-gray-50 border border-gray-200 rounded-2xl p-6">
             <div className="flex items-center gap-3 mb-6">
               <Activity className="w-5 h-5 text-primary" />
-              <h3 className="text-lg font-semibold text-primary">
-                Key Insights
-              </h3>
+              <h3 className="text-sm font-semibold text-text">Key Insights</h3>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="space-y-4">
@@ -499,16 +538,18 @@ export default function Analytics() {
                     ({sortedRoutes[0]?.performance}%)
                   </span>
                 </div>
-                <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
-                  <div className="w-2 h-2 bg-error rounded-full"></div>
-                  <span className="text-sm font-medium text-gray-700">
-                    Needs attention:{" "}
-                    <span className="text-primary font-semibold">
-                      {sortedRoutes[sortedRoutes.length - 1]?.name}
-                    </span>{" "}
-                    ({sortedRoutes[sortedRoutes.length - 1]?.performance}%)
-                  </span>
-                </div>
+                {sortedRoutes.length >= 2 && (
+                  <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
+                    <div className="w-2 h-2 bg-error rounded-full"></div>
+                    <span className="text-sm font-medium text-gray-700">
+                      Needs attention:{" "}
+                      <span className="text-primary font-semibold">
+                        {sortedRoutes[sortedRoutes.length - 1]?.name}
+                      </span>{" "}
+                      ({sortedRoutes[sortedRoutes.length - 1]?.performance}%)
+                    </span>
+                  </div>
+                )}
               </div>
               <div className="space-y-4">
                 <div className="flex items-center gap-3 p-4 bg-white rounded-xl border border-gray-200">
@@ -516,14 +557,9 @@ export default function Analytics() {
                   <span className="text-sm font-medium text-gray-700">
                     Average route performance:{" "}
                     <span className="text-primary font-semibold">
-                      {(
-                        routePerformance.reduce(
-                          (sum, route) =>
-                            sum + (Number(route.performance) || 0),
-                          0,
-                        ) / routePerformance.length
-                      ).toFixed(1)}
-                      %
+                      {averageRoutePerformance != null
+                        ? `${number(averageRoutePerformance, { decimals: 1 })}%`
+                        : NOT_AVAILABLE}
                     </span>
                   </span>
                 </div>
@@ -532,7 +568,7 @@ export default function Analytics() {
                   <span className="text-sm font-medium text-gray-700">
                     Fleet utilization:{" "}
                     <span className="text-primary font-semibold">
-                      {metrics?.fleet_utilization?.value || "N/A"}
+                      {metrics?.fleet_utilization?.value ?? NOT_AVAILABLE}
                     </span>
                   </span>
                 </div>

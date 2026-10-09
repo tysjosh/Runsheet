@@ -17,6 +17,8 @@ Exposes tenant-scoped endpoints for driver CRUD and utilization:
   (admin only): provision the SuperTokens user for an email, assign the
   ``driver`` role, and link ``auth_users.driver_id``.
 * ``DELETE /api/ops/drivers/{driver_id}/app-access`` — revoke it again.
+* ``GET /api/ops/drivers/{driver_id}/activity`` — the driver's messages and
+  exceptions, newest first (admin / dispatcher; G1).
 
 Every handler depends on :func:`get_tenant_context` and tenant-scopes
 through :func:`inject_tenant_filter` (via the DriverRepository).
@@ -45,6 +47,7 @@ from typing import (
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
     app_access_already_linked,
@@ -94,6 +97,9 @@ _app_access_service: Any = None
 #: Wired by ``bootstrap/driver.py``, which runs after the duty-status service
 #: exists; may also be injected later via :func:`set_duty_status_service`.
 _duty_status_service: Any = None
+#: Read of driver messages and exceptions (G1), injected via
+#: :func:`set_driver_activity_service`.
+_driver_activity_service: Any = None
 
 
 def configure_driver_endpoints(
@@ -174,6 +180,25 @@ def set_driver_qualification_service(driver_qualification_service: Any) -> None:
     _driver_qualification_service = driver_qualification_service
 
 
+def set_driver_activity_service(service: Any) -> None:
+    """Inject the ``DriverActivityService`` behind ``/{driver_id}/activity`` (G1).
+
+    Wired by ``bootstrap/scheduling.py`` with the same service the job-level
+    read uses.
+    """
+    global _driver_activity_service
+    _driver_activity_service = service
+
+
+def _get_driver_activity_service():
+    """Return the configured DriverActivityService or raise."""
+    if _driver_activity_service is None:
+        raise RuntimeError(
+            "Driver activity not configured. Call set_driver_activity_service() during startup."
+        )
+    return _driver_activity_service
+
+
 def set_duty_status_service(duty_status_service: Any) -> None:
     """Inject (or clear) the ``DutyStatusService`` post-construction.
 
@@ -200,6 +225,42 @@ def _get_driver_repository():
 def _get_ref_resolver():
     """Return the resolver used to resolve the truck → asset link."""
     return _ref_resolver if _ref_resolver is not None else get_ref_resolver()
+
+
+async def _validate_assigned_truck(tenant_id: str, truck_id: Optional[str]) -> None:
+    """Refuse an ``assigned_truck_id`` that isn't a truck in this tenant (B15).
+
+    Resolves through the same tenant-scoped ``asset`` loader the profile read
+    uses (``make_asset_loader``: the ``trucks`` index, matching ``asset_id`` or
+    ``truck_id``). Like the customer-tank customer check, it is only enforced
+    when an ``asset`` loader is registered, so a partially-wired app stays
+    additive. Clearing the truck (``None``) is always allowed.
+
+    Raises:
+        AppException: 422 ``VALIDATION_ERROR`` with ``details.assigned_truck_id``
+            when the id is unknown or belongs to another tenant.
+    """
+    if not truck_id:
+        return
+    resolver = _get_ref_resolver()
+    try:
+        registered = "asset" in resolver.registered_types()
+    except Exception:  # noqa: BLE001 - fail closed: let resolve() decide (OI-30)
+        logger.warning(
+            "asset loader lookup failed; resolving assigned_truck_id anyway",
+            exc_info=True,
+        )
+        registered = True
+    if not registered:
+        return
+    ref = await resolver.resolve(tenant_id, "asset", truck_id)
+    if not ref.is_resolved:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Assigned truck was not found in this tenant",
+            status_code=422,
+            details={"assigned_truck_id": truck_id},
+        )
 
 
 def _get_app_access_service() -> "AppAccessService":
@@ -641,6 +702,57 @@ async def get_driver_profile(
 
 
 # ---------------------------------------------------------------------------
+# GET /api/ops/drivers/{driver_id}/activity (G1) — admin / dispatcher
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{driver_id}/activity")
+async def get_driver_activity(
+    driver_id: str,
+    request: Request,
+    tenant: TenantContext = Depends(get_tenant_context),
+    activity_type: Optional[Literal["message", "exception"]] = Query(
+        None, alias="type", description="Only messages or only exceptions"
+    ),
+    start_date: Optional[datetime] = Query(None, description="Earliest timestamp (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="Latest timestamp (ISO 8601)"),
+    page: int = Query(1, ge=1, description="Page number"),
+    size: int = Query(20, ge=1, le=100, description="Page size"),
+) -> dict:
+    """Messages and exceptions from one driver, newest first (G1).
+
+    Read-only and tenant-scoped over the existing ``job_messages`` and
+    ``driver_exceptions`` stores. Admins and dispatchers only: a driver gets
+    403 ``INSUFFICIENT_ROLE``. A missing or other-tenant driver is 404.
+    """
+    require_role(tenant, "admin", "dispatcher")
+    repo = _get_driver_repository()
+    if await repo.get(tenant.tenant_id, driver_id) is None:
+        raise resource_not_found(
+            message=f"Driver '{driver_id}' not found",
+            details={"driver_id": driver_id},
+        )
+    result = await _get_driver_activity_service().list_for_driver(
+        tenant.tenant_id,
+        driver_id,
+        types=[activity_type] if activity_type else None,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        size=size,
+    )
+    from schemas.common import paginated_response_dict
+
+    return paginated_response_dict(
+        items=result["items"],
+        total=result["total"],
+        page=page,
+        page_size=size,
+        request_id=getattr(request.state, "request_id", "unknown"),
+    )
+
+
+# ---------------------------------------------------------------------------
 # POST /api/ops/drivers (Req 3.1.3) — admin only
 # ---------------------------------------------------------------------------
 
@@ -657,6 +769,7 @@ async def create_driver(
     """
     _require_admin_role(tenant)
     repo = _get_driver_repository()
+    await _validate_assigned_truck(tenant.tenant_id, body.assigned_truck_id)
 
     now = utcnow()
     driver_data: Dict[str, Any] = {
@@ -775,6 +888,9 @@ async def update_driver(
             message=f"Driver '{driver_id}' not found",
             details={"driver_id": driver_id},
         )
+
+    if "assigned_truck_id" in updates:
+        await _validate_assigned_truck(tenant.tenant_id, updates["assigned_truck_id"])
 
     if updates:
         updated = await repo.update(tenant.tenant_id, driver_id, updates)
@@ -937,7 +1053,7 @@ class PostgresAppAccessUnitOfWork:
             await self._session.execute(
                 text(
                     "SELECT email, tenant_id, roles, has_pii_access, driver_id, "
-                    "st_user_id FROM auth_users WHERE email = :email"
+                    "st_user_id, customer_id FROM auth_users WHERE email = :email"
                 ),
                 {"email": email},
             )
@@ -951,6 +1067,7 @@ class PostgresAppAccessUnitOfWork:
             "has_pii_access": bool(row[3]),
             "driver_id": row[4],
             "st_user_id": row[5],
+            "customer_id": row[6],
         }
 
     async def upsert_app_access(
@@ -1299,6 +1416,29 @@ class AppAccessService:
                     r for r in (existing.get("roles") or []) if isinstance(r, str)
                 ]
 
+                # A customer-portal identity is exclusive (OI-06, design §1.6):
+                # appending ``driver`` would violate the auth_users CHECK and
+                # turn this into a 500. Same indistinguishable 409 as above;
+                # the reason stays in the log and the audit outcome.
+                if "customer" in existing_roles or existing.get("customer_id"):
+                    logger.warning(
+                        "App-access grant refused: target_email=%s is a "
+                        "customer-portal identity (user=%s tenant=%s "
+                        "driver_id=%s)",
+                        email,
+                        tenant.user_id,
+                        tenant.tenant_id,
+                        driver_id,
+                    )
+                    audit_outcome = "rejected:customer_identity"
+                    raise app_access_already_linked(
+                        message=(
+                            "That email cannot be granted app access in this "
+                            "tenant."
+                        ),
+                        details={"driver_id": driver_id},
+                    )
+
                 await uow.upsert_app_access(
                     email=email,
                     tenant_id=tenant.tenant_id,
@@ -1307,7 +1447,7 @@ class AppAccessService:
                     has_pii_access=body.has_pii_access,
                 )
 
-                from auth.provisioner import AuthUserRow
+                from auth.provisioner import AuthUserRow, ProvisioningConflictError
 
                 row = AuthUserRow(
                     email=email,
@@ -1318,9 +1458,37 @@ class AppAccessService:
                     st_user_id=existing.get("st_user_id"),
                 )
                 provisioned = True
-                result = await self._provisioner()(
-                    row, admin=self._admin(), store=uow
-                )
+                try:
+                    result = await self._provisioner()(
+                        row, admin=self._admin(), store=uow
+                    )
+                except ProvisioningConflictError as exc:
+                    # A SuperTokens user exists for this email that the
+                    # auth_users row is not bound to (F1). The provisioner
+                    # refused before any SuperTokens write, so there is
+                    # nothing to compensate — and compensating would edit the
+                    # roles of a user we do not own. Same indistinguishable
+                    # 409 as the cross-tenant guard above, so this cannot
+                    # become an enumeration oracle; the reason stays in the
+                    # log and the audit event.
+                    provisioned = False
+                    logger.warning(
+                        "App-access grant refused: SuperTokens user for "
+                        "target_email=%s is not bound to its auth_users row "
+                        "(user=%s tenant=%s driver_id=%s)",
+                        email,
+                        tenant.user_id,
+                        tenant.tenant_id,
+                        driver_id,
+                    )
+                    audit_outcome = "rejected:unbound_supertokens_user"
+                    raise app_access_already_linked(
+                        message=(
+                            "That email cannot be granted app access in this "
+                            "tenant."
+                        ),
+                        details={"driver_id": driver_id},
+                    ) from exc
         except AppException as exc:
             # 404 / 409 rejections happen before the SuperTokens write; a
             # translated failure after it still needs compensating.

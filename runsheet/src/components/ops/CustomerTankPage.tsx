@@ -34,16 +34,24 @@ import {
   Plus,
   RefreshCw,
   Search,
-  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   type Column,
   EntityLink,
+  Field,
+  FormDialog,
+  FormSection,
+  INPUT_CLASS,
+  NumberField,
+  ProductChip,
+  ProductSelect,
   Table,
   ToastContainer,
+  StatusBadge as TokenStatusBadge,
   useToasts,
 } from "@/components/ui";
+import { pct as formatPct, number } from "../../lib/format";
 import { type Customer, getCustomers } from "../../services/commerceApi";
 import type {
   CustomerTank,
@@ -64,6 +72,8 @@ import {
   updateCustomerTank,
 } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
+import type { StatusKey } from "../../styles/tokens";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -111,13 +121,13 @@ const USE_CASES: { value: CustomerTankUseCase; label: string }[] = [
   { value: "other", label: "Other" },
 ];
 
-const STATUS_BADGE_CONFIG: Record<
+export const STATUS_BADGE_CONFIG: Record<
   CustomerTankStatus,
-  { color: string; bg: string }
+  { status: StatusKey; label: string }
 > = {
-  active: { color: "text-success-dark", bg: "bg-success-light" },
-  inactive: { color: "text-gray-700", bg: "bg-gray-100" },
-  maintenance: { color: "text-warning-dark", bg: "bg-warning-light" },
+  active: { status: "ok", label: "Active" },
+  inactive: { status: "cancelled", label: "Inactive" },
+  maintenance: { status: "warning", label: "Maintenance" },
 };
 
 // Sentinel values used in filter <select> elements so "Any" can map to
@@ -128,8 +138,8 @@ const ANY_VALUE = "__any__";
 
 function formatGallons(gallons: number | null | undefined): string {
   if (gallons == null || Number.isNaN(gallons)) return "—";
-  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K`;
-  return gallons.toFixed(0);
+  if (gallons >= 1_000) return `${number(gallons / 1_000, { decimals: 1 })}K`;
+  return number(gallons);
 }
 
 function levelPct(tank: CustomerTank): number {
@@ -154,7 +164,7 @@ function formatKFactor(k: number | null | undefined): {
       title: "K-factor not yet computed (needs ≥ 3 delivery intervals).",
     };
   }
-  const label = k.toFixed(2);
+  const label = number(k, { decimals: 2 });
   if (k >= 0.6) {
     return {
       label,
@@ -220,7 +230,9 @@ export function formatRunoutForecast(forecast: CustomerTankForecast | null): {
 
   const days = hours / 24;
   const detail =
-    hours < 48 ? `~${Math.round(hours)}h` : `~${days.toFixed(1)} days`;
+    hours < 48
+      ? `~${Math.round(hours)}h`
+      : `~${number(days, { decimals: 1 })} days`;
   const riskPct = risk != null ? `${Math.round(risk * 100)}% / 24h` : "";
 
   // Urgency thresholds mirror the dispatch-priority buckets: a tank
@@ -257,13 +269,7 @@ export function formatRunoutForecast(forecast: CustomerTankForecast | null): {
 
 function StatusBadge({ status }: { status: CustomerTankStatus }) {
   const config = STATUS_BADGE_CONFIG[status] ?? STATUS_BADGE_CONFIG.inactive;
-  return (
-    <span
-      className={`inline-flex items-center text-[10px] px-2 py-0.5 rounded font-medium ${config.bg} ${config.color}`}
-    >
-      {status}
-    </span>
-  );
+  return <TokenStatusBadge status={config.status} label={config.label} />;
 }
 
 // ─── Filters Row ─────────────────────────────────────────────────────────────
@@ -547,67 +553,67 @@ interface CustomerTankFormModalProps {
   onSuccess: (tank: CustomerTank, mode: "create" | "edit") => void;
 }
 
+type TankDialogValues = Omit<
+  CustomerTankFormValues,
+  "capacity_gallons" | "current_level_gallons" | "location_lat" | "location_lon"
+> & {
+  capacity_gallons: number | null;
+  current_level_gallons: number | null;
+  location_lat: number | null;
+  location_lon: number | null;
+} & Record<string, unknown>;
+
+/** Whole gallons for display and editing (the backend may hold floats). */
+const wholeGallons = (v: number | null | undefined) =>
+  v === null || v === undefined ? null : Math.round(v);
+
+/**
+ * Create / edit a customer tank, as a sectioned `FormDialog` (design.md §5
+ * "Customer tank": md, NumberField). Gallons are whole numbers (rounded on
+ * load, so a stored 499.99 shows "500 gal", not a raw float); the product is
+ * a `ProductSelect` over the tenant's catalog; the customer is a validated
+ * picker (cross-module-entity-linkage Req 7.1) that falls back to free text
+ * when commerce is unreachable. In edit mode only changed fields are sent.
+ */
 function CustomerTankFormModal({
   mode,
   tank,
   onClose,
   onSuccess,
 }: CustomerTankFormModalProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [apiError, setApiError] = useState("");
-  const [fieldErrors, setFieldErrors] = useState<CustomerTankFormErrors>({});
-  // Fuel product catalog for the canonical-code combobox (Req 6.1.3).
-  // ``null`` means "still loading"; an empty array means "loaded with no
-  // catalog rows" (the backend returns 200 + empty list for tenants
-  // whose Region has no configured products — we fall back to the
-  // free-text input in that case too).
+  // Fuel product catalog (Req 6.1.3). ``null`` = loading; a failed or empty
+  // load falls back to a free-text code field (never blocks submission).
   const [fuelProducts, setFuelProducts] = useState<FuelProductItem[] | null>(
     null,
   );
-  // When the catalog fetch fails we silently fall back to the legacy
-  // free-text input. Logged via ``console.error`` per the spec.
   const [fuelProductsFailed, setFuelProductsFailed] = useState(false);
-
-  // Commerce customers for the validated customer picker (cross-module-entity-
-  // linkage Req 7.1/7.3): the customer_id field is no longer free-text — the
-  // dispatcher selects from the tenant's canonical commerce customers so the
-  // backend write-time reference validation always passes. ``null`` means the
-  // list is still loading; a failed fetch falls back to a free-text input so a
-  // commerce outage never blocks tank creation.
+  // Commerce customers for the validated picker (Req 7.1/7.3).
   const [customers, setCustomers] = useState<Customer[] | null>(null);
   const [customersFailed, setCustomersFailed] = useState(false);
 
-  const [form, setForm] = useState<CustomerTankFormValues>(() => ({
-    customer_tank_id: tank?.customer_tank_id ?? "",
-    customer_id: tank?.customer_id ?? "",
-    last_refill_order_id: tank?.last_refill_order_id ?? "",
-    customer_type: tank?.customer_type ?? "residential",
-    fuel_type: tank?.fuel_type ?? "propane",
-    fuel_product_code: tank?.fuel_product_code ?? DEFAULT_PRODUCT_CODE.propane,
-    capacity_gallons: tank?.capacity_gallons ?? 500,
-    current_level_gallons: tank?.current_level_gallons ?? 0,
-    location_lat: tank?.location_lat ?? 0,
-    location_lon: tank?.location_lon ?? 0,
-    zip_code: tank?.zip_code ?? "",
-    k_factor: tank?.k_factor ?? null,
-    use_case: (tank?.use_case as CustomerTankUseCase | undefined) ?? "",
-    status: tank?.status ?? "active",
-  }));
+  const initial = useMemo<TankDialogValues>(
+    () => ({
+      customer_tank_id: tank?.customer_tank_id ?? "",
+      customer_id: tank?.customer_id ?? "",
+      last_refill_order_id: tank?.last_refill_order_id ?? "",
+      customer_type: tank?.customer_type ?? "residential",
+      fuel_type: tank?.fuel_type ?? "propane",
+      fuel_product_code:
+        tank?.fuel_product_code ?? DEFAULT_PRODUCT_CODE.propane,
+      capacity_gallons: tank ? wholeGallons(tank.capacity_gallons) : 500,
+      current_level_gallons: tank
+        ? wholeGallons(tank.current_level_gallons)
+        : 0,
+      location_lat: tank?.location_lat ?? null,
+      location_lon: tank?.location_lon ?? null,
+      zip_code: tank?.zip_code ?? "",
+      k_factor: tank?.k_factor ?? null,
+      use_case: (tank?.use_case as CustomerTankUseCase | undefined) ?? "",
+      status: tank?.status ?? "active",
+    }),
+    [tank],
+  );
 
-  const title = mode === "create" ? "Add Customer Tank" : "Edit Customer Tank";
-  const submitLabel = mode === "create" ? "Create Tank" : "Save Changes";
-  const submittingLabel = mode === "create" ? "Creating..." : "Saving...";
-
-  // Fetch the tenant's fuel product catalog once per modal open so the
-  // fuel_product_code input can surface canonical codes as dropdown
-  // suggestions (Req 6.1.3). A failed fetch silently falls back to the
-  // legacy free-text input; submission is never blocked on this.
-  //
-  // Note: there is no dedicated Jest test file for CustomerTankPage as
-  // of Phase 2 Batch D. The Playwright smoke run covers the render
-  // path end-to-end. When a ``CustomerTankPage.test.tsx`` is added,
-  // assert that the datalist rendered by this effect contains the
-  // canonical product codes returned by :func:`listFuelProducts`.
   useEffect(() => {
     let cancelled = false;
     listFuelProducts()
@@ -619,15 +625,6 @@ function CustomerTankFormModal({
         console.error("Failed to load fuel product catalog", err);
         setFuelProductsFailed(true);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Load commerce customers once per modal open for the validated picker
-  // (Req 7.1). A failed fetch falls back to free-text entry.
-  useEffect(() => {
-    let cancelled = false;
     getCustomers({ limit: 200 })
       .then((res) => {
         if (!cancelled) setCustomers(res.data ?? []);
@@ -642,169 +639,118 @@ function CustomerTankFormModal({
     };
   }, []);
 
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-  const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
+  const catalog =
+    !fuelProductsFailed && fuelProducts && fuelProducts.length > 0
+      ? fuelProducts.map((p) => p.product_code)
+      : null;
 
-  function updateField<K extends keyof CustomerTankFormValues>(
-    key: K,
-    value: CustomerTankFormValues[K],
-  ) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-    if (key in fieldErrors) {
-      setFieldErrors((prev) => ({ ...prev, [key]: undefined }));
-    }
-  }
-
-  function onFuelTypeChange(next: CustomerTankFuelType) {
-    setForm((prev) => ({
-      ...prev,
-      fuel_type: next,
-      // Only auto-populate product_code when the user hasn't customized it.
-      fuel_product_code:
-        prev.fuel_product_code === DEFAULT_PRODUCT_CODE[prev.fuel_type] ||
-        !prev.fuel_product_code
-          ? DEFAULT_PRODUCT_CODE[next]
-          : prev.fuel_product_code,
-    }));
-  }
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    const errors = validateCustomerTankForm(form);
-    setFieldErrors(errors);
-    if (Object.keys(errors).length > 0) return;
-
-    setApiError("");
-    setSubmitting(true);
-
-    try {
-      let result: CustomerTank;
-      if (mode === "create") {
-        const payload: CustomerTankCreatePayload = {
-          customer_id: form.customer_id.trim(),
-          customer_type: form.customer_type,
-          fuel_type: form.fuel_type,
-          fuel_product_code: form.fuel_product_code.trim(),
-          capacity_gallons: form.capacity_gallons,
-          current_level_gallons: form.current_level_gallons,
-          location_lat: form.location_lat,
-          location_lon: form.location_lon,
-          zip_code: form.zip_code.trim(),
-          status: form.status,
-        };
-        if (form.customer_tank_id.trim()) {
-          payload.customer_tank_id = form.customer_tank_id.trim();
-        }
-        if (form.last_refill_order_id.trim()) {
-          payload.last_refill_order_id = form.last_refill_order_id.trim();
-        }
-        if (form.k_factor != null) payload.k_factor = form.k_factor;
-        if (form.use_case) payload.use_case = form.use_case;
-        result = await createCustomerTank(payload);
-      } else {
-        if (!tank) throw new Error("Missing tank reference for edit.");
-        const patch: CustomerTankUpdatePayload = {};
-        if (form.customer_id.trim() !== tank.customer_id)
-          patch.customer_id = form.customer_id.trim();
-        if (form.customer_type !== tank.customer_type)
-          patch.customer_type = form.customer_type;
-        if (form.fuel_type !== tank.fuel_type) patch.fuel_type = form.fuel_type;
-        if (form.fuel_product_code.trim() !== tank.fuel_product_code)
-          patch.fuel_product_code = form.fuel_product_code.trim();
-        if (form.capacity_gallons !== tank.capacity_gallons)
-          patch.capacity_gallons = form.capacity_gallons;
-        if (form.current_level_gallons !== tank.current_level_gallons)
-          patch.current_level_gallons = form.current_level_gallons;
-        if (form.location_lat !== tank.location_lat)
-          patch.location_lat = form.location_lat;
-        if (form.location_lon !== tank.location_lon)
-          patch.location_lon = form.location_lon;
-        if (form.zip_code.trim() !== tank.zip_code)
-          patch.zip_code = form.zip_code.trim();
-        if (
-          form.last_refill_order_id.trim() &&
-          form.last_refill_order_id.trim() !== (tank.last_refill_order_id ?? "")
-        )
-          patch.last_refill_order_id = form.last_refill_order_id.trim();
-        if ((form.k_factor ?? null) !== (tank.k_factor ?? null))
-          patch.k_factor = form.k_factor;
-        const currentUseCase = tank.use_case ?? "";
-        if (form.use_case !== currentUseCase) {
-          patch.use_case = form.use_case
-            ? (form.use_case as CustomerTankUseCase)
-            : undefined;
-        }
-        if (form.status !== tank.status) patch.status = form.status;
-
-        result = await updateCustomerTank(tank.customer_tank_id, patch);
+  const submit = async (v: TankDialogValues): Promise<CustomerTank> => {
+    const form = v as unknown as CustomerTankFormValues;
+    if (mode === "create") {
+      const payload: CustomerTankCreatePayload = {
+        customer_id: form.customer_id.trim(),
+        customer_type: form.customer_type,
+        fuel_type: form.fuel_type,
+        fuel_product_code: form.fuel_product_code.trim(),
+        capacity_gallons: form.capacity_gallons,
+        current_level_gallons: form.current_level_gallons,
+        location_lat: form.location_lat,
+        location_lon: form.location_lon,
+        zip_code: form.zip_code.trim(),
+        status: form.status,
+      };
+      if (form.customer_tank_id.trim()) {
+        payload.customer_tank_id = form.customer_tank_id.trim();
       }
-      onSuccess(result, mode);
-      onClose();
-    } catch (err) {
-      setApiError(
-        err instanceof Error ? err.message : "Failed to save customer tank.",
-      );
-    } finally {
-      setSubmitting(false);
+      if (form.last_refill_order_id.trim()) {
+        payload.last_refill_order_id = form.last_refill_order_id.trim();
+      }
+      if (form.k_factor != null) payload.k_factor = form.k_factor;
+      if (form.use_case) payload.use_case = form.use_case;
+      return createCustomerTank(payload);
     }
+    if (!tank) throw new Error("Missing tank reference for edit.");
+    const patch: CustomerTankUpdatePayload = {};
+    if (form.customer_id.trim() !== tank.customer_id)
+      patch.customer_id = form.customer_id.trim();
+    if (form.customer_type !== tank.customer_type)
+      patch.customer_type = form.customer_type;
+    if (form.fuel_type !== tank.fuel_type) patch.fuel_type = form.fuel_type;
+    if (form.fuel_product_code.trim() !== tank.fuel_product_code)
+      patch.fuel_product_code = form.fuel_product_code.trim();
+    // Compare with the rounded values shown, so opening and saving never
+    // rewrites a stored fractional volume.
+    if (form.capacity_gallons !== initial.capacity_gallons)
+      patch.capacity_gallons = form.capacity_gallons;
+    if (form.current_level_gallons !== initial.current_level_gallons)
+      patch.current_level_gallons = form.current_level_gallons;
+    if (form.location_lat !== tank.location_lat)
+      patch.location_lat = form.location_lat;
+    if (form.location_lon !== tank.location_lon)
+      patch.location_lon = form.location_lon;
+    if (form.zip_code.trim() !== tank.zip_code)
+      patch.zip_code = form.zip_code.trim();
+    if (
+      form.last_refill_order_id.trim() &&
+      form.last_refill_order_id.trim() !== (tank.last_refill_order_id ?? "")
+    )
+      patch.last_refill_order_id = form.last_refill_order_id.trim();
+    if ((form.k_factor ?? null) !== (tank.k_factor ?? null))
+      patch.k_factor = form.k_factor;
+    const currentUseCase = tank.use_case ?? "";
+    if (form.use_case !== currentUseCase) {
+      patch.use_case = form.use_case
+        ? (form.use_case as CustomerTankUseCase)
+        : undefined;
+    }
+    if (form.status !== tank.status) patch.status = form.status;
+    return updateCustomerTank(tank.customer_tank_id, patch);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">{title}</h2>
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close customer tank form"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {apiError && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {apiError}
-            </p>
-          )}
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ct-customer-id"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Customer ID
-              </label>
+    <FormDialog<TankDialogValues, CustomerTank>
+      open
+      size="md"
+      title={mode === "create" ? "Add customer tank" : "Edit customer tank"}
+      submitLabel={mode === "create" ? "Create tank" : "Save changes"}
+      successMessage={mode === "create" ? "Tank created" : "Tank saved"}
+      initialValues={initial}
+      sections={[
+        { id: "customer", title: "Customer" },
+        { id: "product", title: "Product and volume" },
+        { id: "location", title: "Location" },
+        { id: "forecast", title: "Forecasting" },
+      ]}
+      validate={(v) => ({
+        ...validateCustomerTankForm(v as unknown as CustomerTankFormValues),
+      })}
+      onSubmit={submit}
+      onSaved={(result) => onSuccess(result, mode)}
+      onClose={onClose}
+    >
+      {({ values, set, setValues, errors }) => (
+        <>
+          <FormSection id="customer" title="Customer">
+            <Field
+              label="Customer ID"
+              required
+              error={errors.customer_id}
+              span={1}
+            >
               {customers !== null && !customersFailed ? (
-                // Validated picker (cross-module-entity-linkage Req 7.1): the
-                // dispatcher selects a canonical commerce customer rather than
-                // typing a free-text id, so the backend write-time reference
-                // validation always resolves. In edit mode we surface the
-                // tank's current customer_id even when it falls outside the
-                // loaded page so the selection is never silently lost.
                 <select
                   id="ct-customer-id"
-                  className={
-                    fieldErrors.customer_id ? errorInputClass : inputClass
-                  }
-                  value={form.customer_id}
-                  onChange={(e) => updateField("customer_id", e.target.value)}
-                  required
+                  className={INPUT_CLASS}
+                  value={values.customer_id}
+                  onChange={(e) => set("customer_id", e.target.value)}
                 >
                   <option value="">Select a customer…</option>
-                  {form.customer_id &&
+                  {values.customer_id &&
                     !customers.some(
-                      (c) => c.customer_id === form.customer_id,
+                      (c) => c.customer_id === values.customer_id,
                     ) && (
-                      <option value={form.customer_id}>
-                        {form.customer_id} (current)
+                      <option value={values.customer_id}>
+                        {values.customer_id} (current)
                       </option>
                     )}
                   {customers.map((c) => (
@@ -814,91 +760,23 @@ function CustomerTankFormModal({
                   ))}
                 </select>
               ) : (
-                // Fallback: a commerce-customer fetch failed (or is still
-                // loading) — degrade to free-text so a commerce outage never
-                // blocks tank management. The backend still validates the ref.
                 <input
                   id="ct-customer-id"
                   type="text"
-                  className={
-                    fieldErrors.customer_id ? errorInputClass : inputClass
-                  }
-                  value={form.customer_id}
-                  onChange={(e) => updateField("customer_id", e.target.value)}
+                  className={INPUT_CLASS}
+                  value={values.customer_id}
+                  onChange={(e) => set("customer_id", e.target.value)}
                   placeholder="e.g. CUST-0042"
-                  required
                 />
               )}
-              {fieldErrors.customer_id && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.customer_id}
-                </p>
-              )}
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-tank-id"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Tank ID {mode === "create" && "(optional)"}
-              </label>
-              <input
-                id="ct-tank-id"
-                type="text"
-                className={inputClass}
-                value={form.customer_tank_id}
-                onChange={(e) =>
-                  updateField("customer_tank_id", e.target.value)
-                }
-                placeholder={
-                  mode === "create"
-                    ? "Auto-generated if blank"
-                    : "Immutable once set"
-                }
-                disabled={mode === "edit"}
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ct-refill-order"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Refilling Order ID (optional)
-              </label>
-              <input
-                id="ct-refill-order"
-                type="text"
-                className={inputClass}
-                value={form.last_refill_order_id}
-                onChange={(e) =>
-                  updateField("last_refill_order_id", e.target.value)
-                }
-                placeholder="e.g. ORD-0042"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                The delivery order that most recently refilled this tank.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ct-customer-type"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Customer Type
-              </label>
+            </Field>
+            <Field label="Customer type" span={1}>
               <select
                 id="ct-customer-type"
-                className={inputClass}
-                value={form.customer_type}
+                className={INPUT_CLASS}
+                value={values.customer_type}
                 onChange={(e) =>
-                  updateField(
+                  set(
                     "customer_type",
                     e.target.value as CustomerTankCustomerType,
                   )
@@ -910,22 +788,60 @@ function CustomerTankFormModal({
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-fuel-type"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Fuel Type
-              </label>
+            </Field>
+            <Field
+              label="Tank ID"
+              help={
+                mode === "create"
+                  ? "Optional. Generated if blank."
+                  : "Can't be changed."
+              }
+              span={1}
+            >
+              <input
+                id="ct-tank-id"
+                type="text"
+                className={INPUT_CLASS}
+                value={values.customer_tank_id}
+                onChange={(e) => set("customer_tank_id", e.target.value)}
+                disabled={mode === "edit"}
+              />
+            </Field>
+            <Field
+              label="Refilling order ID"
+              help="The order that most recently refilled this tank."
+              span={1}
+            >
+              <input
+                id="ct-refill-order"
+                type="text"
+                className={INPUT_CLASS}
+                value={values.last_refill_order_id}
+                onChange={(e) => set("last_refill_order_id", e.target.value)}
+                placeholder="e.g. ORD-0042"
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="product" title="Product and volume">
+            <Field label="Fuel type" span={1}>
               <select
                 id="ct-fuel-type"
-                className={inputClass}
-                value={form.fuel_type}
-                onChange={(e) =>
-                  onFuelTypeChange(e.target.value as CustomerTankFuelType)
-                }
+                className={INPUT_CLASS}
+                value={values.fuel_type}
+                onChange={(e) => {
+                  const next = e.target.value as CustomerTankFuelType;
+                  setValues((prev) => ({
+                    ...prev,
+                    fuel_type: next,
+                    // Only follow the fuel type when the code wasn't customised.
+                    fuel_product_code:
+                      prev.fuel_product_code ===
+                        DEFAULT_PRODUCT_CODE[prev.fuel_type] ||
+                      !prev.fuel_product_code
+                        ? DEFAULT_PRODUCT_CODE[next]
+                        : prev.fuel_product_code,
+                  }));
+                }}
               >
                 {FUEL_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>
@@ -933,327 +849,173 @@ function CustomerTankFormModal({
                   </option>
                 ))}
               </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ct-product-code"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Fuel Product Code
-              </label>
-              <input
-                id="ct-product-code"
-                type="text"
-                className={
-                  fieldErrors.fuel_product_code ? errorInputClass : inputClass
-                }
-                value={form.fuel_product_code}
-                onChange={(e) =>
-                  updateField("fuel_product_code", e.target.value.toUpperCase())
-                }
-                placeholder="e.g. PROPANE"
-                required
-                list={
-                  !fuelProductsFailed && fuelProducts && fuelProducts.length > 0
-                    ? "ct-product-code-options"
-                    : undefined
-                }
-                autoComplete="off"
-              />
-              {!fuelProductsFailed &&
-                fuelProducts &&
-                fuelProducts.length > 0 && (
-                  <datalist id="ct-product-code-options">
-                    {fuelProducts.map((p) => (
-                      <option
-                        key={p.product_code}
-                        value={p.product_code}
-                        label={p.display_name}
-                      >
-                        {p.display_name}
-                      </option>
-                    ))}
-                  </datalist>
-                )}
-              {fieldErrors.fuel_product_code && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.fuel_product_code}
-                </p>
+            </Field>
+            <Field
+              label="Product"
+              required
+              error={errors.fuel_product_code}
+              span={1}
+              id="ct-product-code"
+            >
+              {catalog ? (
+                <ProductSelect
+                  id="ct-product-code"
+                  value={values.fuel_product_code || null}
+                  options={
+                    values.fuel_product_code &&
+                    !catalog.includes(values.fuel_product_code)
+                      ? [values.fuel_product_code, ...catalog]
+                      : catalog
+                  }
+                  onChange={(code) => set("fuel_product_code", code)}
+                />
+              ) : (
+                <input
+                  id="ct-product-code"
+                  type="text"
+                  className={INPUT_CLASS}
+                  value={values.fuel_product_code}
+                  onChange={(e) =>
+                    set("fuel_product_code", e.target.value.toUpperCase())
+                  }
+                  placeholder="e.g. PROPANE"
+                  autoComplete="off"
+                />
               )}
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-use-case"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Use Case (optional)
-              </label>
+            </Field>
+            <Field
+              label="Capacity"
+              required
+              error={errors.capacity_gallons}
+              span={1}
+              id="ct-capacity"
+            >
+              <NumberField
+                id="ct-capacity"
+                unit="gal"
+                min={1}
+                value={values.capacity_gallons}
+                onChange={(n) => set("capacity_gallons", n)}
+              />
+            </Field>
+            <Field
+              label="Current level"
+              required
+              error={errors.current_level_gallons}
+              span={1}
+              id="ct-level"
+            >
+              <NumberField
+                id="ct-level"
+                unit="gal"
+                min={0}
+                max={values.capacity_gallons ?? undefined}
+                value={values.current_level_gallons}
+                onChange={(n) => set("current_level_gallons", n)}
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="location" title="Location">
+            <Field
+              label="Latitude"
+              required
+              error={errors.location_lat}
+              span={1}
+              id="ct-lat"
+            >
+              <NumberField
+                id="ct-lat"
+                decimals={4}
+                min={-90}
+                max={90}
+                value={values.location_lat}
+                onChange={(n) => set("location_lat", n)}
+                placeholder="40.7128"
+              />
+            </Field>
+            <Field
+              label="Longitude"
+              required
+              error={errors.location_lon}
+              span={1}
+              id="ct-lon"
+            >
+              <NumberField
+                id="ct-lon"
+                decimals={4}
+                min={-180}
+                max={180}
+                value={values.location_lon}
+                onChange={(n) => set("location_lon", n)}
+                placeholder="-74.0060"
+              />
+            </Field>
+            <Field label="ZIP code" required error={errors.zip_code} span={1}>
+              <input
+                id="ct-zip"
+                type="text"
+                inputMode="numeric"
+                className={INPUT_CLASS}
+                value={values.zip_code}
+                onChange={(e) => set("zip_code", e.target.value)}
+                placeholder="e.g. 10001"
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="forecast" title="Forecasting">
+            <Field
+              label="K-factor"
+              help="Gallons per heating degree day. Leave blank to learn it from deliveries."
+              error={errors.k_factor}
+              span={1}
+              id="ct-kfactor"
+            >
+              <NumberField
+                id="ct-kfactor"
+                decimals={2}
+                min={0}
+                value={values.k_factor}
+                onChange={(n) => set("k_factor", n)}
+                placeholder="Auto"
+              />
+            </Field>
+            <Field label="Use case" span={1}>
               <select
                 id="ct-use-case"
-                className={inputClass}
-                value={form.use_case}
+                className={INPUT_CLASS}
+                value={values.use_case}
                 onChange={(e) =>
-                  updateField(
-                    "use_case",
-                    e.target.value as CustomerTankUseCase | "",
-                  )
+                  set("use_case", e.target.value as CustomerTankUseCase | "")
                 }
               >
-                <option value="">—</option>
+                <option value="">None</option>
                 {USE_CASES.map((u) => (
                   <option key={u.value} value={u.value}>
                     {u.label}
                   </option>
                 ))}
               </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ct-capacity"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Capacity (gallons)
-              </label>
-              <input
-                id="ct-capacity"
-                type="number"
-                min="1"
-                step="any"
-                className={
-                  fieldErrors.capacity_gallons ? errorInputClass : inputClass
-                }
-                value={form.capacity_gallons || ""}
-                onChange={(e) =>
-                  updateField(
-                    "capacity_gallons",
-                    e.target.value === "" ? 0 : Number(e.target.value),
-                  )
-                }
-                placeholder="e.g. 500"
-                required
-              />
-              {fieldErrors.capacity_gallons && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.capacity_gallons}
-                </p>
-              )}
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-level"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Current Level (gallons)
-              </label>
-              <input
-                id="ct-level"
-                type="number"
-                min="0"
-                step="any"
-                className={
-                  fieldErrors.current_level_gallons
-                    ? errorInputClass
-                    : inputClass
-                }
-                value={
-                  form.current_level_gallons === 0
-                    ? form.current_level_gallons
-                    : form.current_level_gallons || ""
-                }
-                onChange={(e) =>
-                  updateField(
-                    "current_level_gallons",
-                    e.target.value === "" ? 0 : Number(e.target.value),
-                  )
-                }
-                placeholder="e.g. 180"
-                required
-              />
-              {fieldErrors.current_level_gallons && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.current_level_gallons}
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-3 gap-4">
-            <div>
-              <label
-                htmlFor="ct-lat"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Latitude
-              </label>
-              <input
-                id="ct-lat"
-                type="number"
-                step="any"
-                min="-90"
-                max="90"
-                className={
-                  fieldErrors.location_lat ? errorInputClass : inputClass
-                }
-                value={form.location_lat || ""}
-                onChange={(e) =>
-                  updateField(
-                    "location_lat",
-                    e.target.value === "" ? 0 : Number(e.target.value),
-                  )
-                }
-                placeholder="e.g. 40.7128"
-                required
-              />
-              {fieldErrors.location_lat && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.location_lat}
-                </p>
-              )}
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-lon"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Longitude
-              </label>
-              <input
-                id="ct-lon"
-                type="number"
-                step="any"
-                min="-180"
-                max="180"
-                className={
-                  fieldErrors.location_lon ? errorInputClass : inputClass
-                }
-                value={form.location_lon || ""}
-                onChange={(e) =>
-                  updateField(
-                    "location_lon",
-                    e.target.value === "" ? 0 : Number(e.target.value),
-                  )
-                }
-                placeholder="e.g. -74.0060"
-                required
-              />
-              {fieldErrors.location_lon && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.location_lon}
-                </p>
-              )}
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-zip"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                ZIP Code
-              </label>
-              <input
-                id="ct-zip"
-                type="text"
-                inputMode="numeric"
-                className={fieldErrors.zip_code ? errorInputClass : inputClass}
-                value={form.zip_code}
-                onChange={(e) => updateField("zip_code", e.target.value)}
-                placeholder="e.g. 10001"
-                required
-              />
-              {fieldErrors.zip_code && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.zip_code}
-                </p>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="ct-kfactor"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                K-Factor (optional)
-              </label>
-              <input
-                id="ct-kfactor"
-                type="number"
-                step="0.01"
-                min="0"
-                className={fieldErrors.k_factor ? errorInputClass : inputClass}
-                value={form.k_factor ?? ""}
-                onChange={(e) =>
-                  updateField(
-                    "k_factor",
-                    e.target.value === "" ? null : Number(e.target.value),
-                  )
-                }
-                placeholder="Auto-computed after 3+ deliveries"
-              />
-              {fieldErrors.k_factor && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.k_factor}
-                </p>
-              )}
-              <p className="text-xs text-gray-500 mt-1">
-                Gallons consumed per Heating Degree Day. Leave blank to let the
-                forecaster learn from delivery history.
-              </p>
-            </div>
-
-            <div>
-              <label
-                htmlFor="ct-status"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Status
-              </label>
+            </Field>
+            <Field label="Status" span={1}>
               <select
                 id="ct-status"
-                className={inputClass}
-                value={form.status}
+                className={INPUT_CLASS}
+                value={values.status}
                 onChange={(e) =>
-                  updateField("status", e.target.value as CustomerTankStatus)
+                  set("status", e.target.value as CustomerTankStatus)
                 }
               >
-                {STATUSES.map((s) => (
-                  <option key={s.value} value={s.value}>
-                    {s.label}
+                {STATUSES.map((st) => (
+                  <option key={st.value} value={st.value}>
+                    {st.label}
                   </option>
                 ))}
               </select>
-            </div>
-          </div>
-
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-            >
-              {submitting ? submittingLabel : submitLabel}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+            </Field>
+          </FormSection>
+        </>
+      )}
+    </FormDialog>
   );
 }
 
@@ -1447,10 +1209,7 @@ export default function CustomerTankPage({
       label: "Fuel",
       className: "text-sm text-gray-700",
       render: (tank) => (
-        <>
-          <div className="capitalize">{tank.fuel_type.replace(/_/g, " ")}</div>
-          <div className="text-xs text-gray-500">{tank.fuel_product_code}</div>
-        </>
+        <ProductChip code={tank.fuel_product_code} variant="chip" />
       ),
     },
     {
@@ -1475,7 +1234,7 @@ export default function CustomerTankPage({
                 />
               </div>
               <span className="text-xs text-gray-600 w-14 text-right">
-                {pct.toFixed(0)}%
+                {formatPct(pct)}
               </span>
             </div>
             <div className="text-xs text-gray-500 mt-0.5">
@@ -1569,9 +1328,9 @@ export default function CustomerTankPage({
         <div className="flex items-start justify-between">
           {!embedded && (
             <div>
-              <h1 className="text-xl font-semibold text-primary">
+              <PageTitle className="text-xl font-semibold text-primary">
                 Customer Tanks
-              </h1>
+              </PageTitle>
               <p className="text-sm text-gray-500 mt-1">
                 Per-customer fuel tanks used by the forecaster to drive runout
                 predictions, K-factor learning, and storm-mode prioritization.

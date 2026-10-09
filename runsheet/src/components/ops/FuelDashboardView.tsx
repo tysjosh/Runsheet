@@ -1,16 +1,10 @@
 "use client";
 
-import {
-  AlertTriangle,
-  BarChart3,
-  Fuel,
-  Plus,
-  RefreshCw,
-  Search,
-  X,
-} from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { AlertTriangle, Plus, RefreshCw } from "lucide-react";
+import { useSearchParams } from "next/navigation";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpsWebSocket } from "../../hooks/useOpsWebSocket";
+import { gallons, number, pct, relative } from "../../lib/format";
 import type {
   ConsumptionMetric,
   FuelNetworkSummary,
@@ -22,42 +16,36 @@ import type {
 } from "../../services/fuelApi";
 import {
   getConsumptionMetrics,
+  getNetworkCapacityGallons,
+  getNetworkCurrentStockGallons,
   getNetworkSummary,
   getStation,
   getStations,
 } from "../../services/fuelApi";
-import LoadingSpinner from "../LoadingSpinner";
 import FuelConsumptionChart from "../ops/FuelConsumptionChart";
 import FuelStationDetail from "../ops/FuelStationDetail";
-import FuelStationForm from "../ops/FuelStationForm";
-import FuelStationList from "../ops/FuelStationList";
-import FuelSummaryBar from "../ops/FuelSummaryBar";
-import { Button, PageHeader, type Tab, TabNavigation } from "../ui";
-
-const FUEL_TYPE_OPTIONS: { value: "" | FuelType; label: string }[] = [
-  { value: "", label: "All Fuel Types" },
-  { value: "DIESEL_2", label: "Diesel #2" },
-  { value: "GASOLINE_REG", label: "Regular Unleaded" },
-  { value: "GASOLINE_PREM", label: "Premium Unleaded" },
-  { value: "PROPANE", label: "Propane" },
-  { value: "KEROSENE", label: "Kerosene" },
-  { value: "DEF", label: "DEF" },
-];
-
-const STATUS_OPTIONS: { value: "" | StationStatus; label: string }[] = [
-  { value: "", label: "All Statuses" },
-  { value: "normal", label: "Normal" },
-  { value: "low", label: "Low" },
-  { value: "critical", label: "Critical" },
-  { value: "empty", label: "Empty" },
-];
+import FuelStationForm, { STATION_FUEL_TYPES } from "../ops/FuelStationForm";
+import FuelStationList, { STATION_STATUS } from "../ops/FuelStationList";
+import {
+  Button,
+  Drawer,
+  Field,
+  FilterChips,
+  FilterPopover,
+  IconButton,
+  PageTitle,
+  ProductSelect,
+  Skeleton,
+  Toolbar,
+  usePageChrome,
+} from "../ui";
 
 const EMPTY_SUMMARY: FuelNetworkSummary = {
   total_stations: 0,
   total_capacity_liters: 0,
   total_current_stock_liters: 0,
   total_daily_consumption: 0,
-  average_days_until_empty: 0,
+  average_days_until_empty: null,
   stations_normal: 0,
   stations_low: 0,
   stations_critical: 0,
@@ -65,69 +53,61 @@ const EMPTY_SUMMARY: FuelNetworkSummary = {
   active_alerts: 0,
 };
 
-const TABS: Tab[] = [
-  {
-    id: "stations",
-    label: "Fuel Stations",
-    icon: <Fuel className="w-4 h-4" />,
-  },
-  {
-    id: "efficiency",
-    label: "Consumption",
-    icon: <BarChart3 className="w-4 h-4" />,
-  },
-];
-
-type TabId = string;
+/**
+ * Network "Avg … days left" for the title-row counts. The backend averages
+ * only stations that consume fuel and sends null when none do (F5): "—".
+ */
+export function avgDaysLeftLabel(avg: number | null | undefined): string {
+  return avg != null && avg > 0 ? number(avg, { decimals: 1 }) : "—";
+}
 
 // Fallback poll so stock levels recover if the ops WebSocket drops or misses
-// a push — a monitoring screen can't silently go stale.
+// a push: a monitoring screen can't silently go stale.
 const REFRESH_INTERVAL_MS = 60_000;
 
-function formatRelative(date: Date | null): string {
-  if (!date) return "";
-  const secs = Math.round((Date.now() - date.getTime()) / 1000);
-  if (secs < 5) return "just now";
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  return `${Math.floor(mins / 60)}h ago`;
-}
+const STATUS_CHIPS: { id: "" | StationStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "critical", label: "Critical" },
+  { id: "low", label: "Low" },
+  { id: "empty", label: "Empty" },
+  { id: "normal", label: "Normal" },
+];
 
 interface FuelDashboardPageProps {
   /**
-   * When embedded in the Fuel Ops hub, the hub owns the page header + the
-   * top-level tab set, so this view suppresses its own header/tabs and renders
-   * the panel for the controlled `view`. Standalone (`/ops/fuel`) it keeps its
-   * own header and tabs.
+   * Inside the Fuel hub the hub owns the title row and tabs; this view only
+   * contributes its counts and Add station action (`usePageChrome`). The
+   * prop is kept for callers; the view is always rendered inside the hub.
    */
   embedded?: boolean;
-  /** Controlled view when embedded. */
+  /** Which panel to show. */
   view?: "stations" | "efficiency";
 }
 
 /**
- * Fuel Monitoring dashboard.
+ * Fuel → Stations and Consumption.
  *
- * Network summary bar, station list with filters, consumption trend, and a
- * station detail panel (side panel on `lg`, slide-over drawer below). Each
- * data source fails open independently, with a fallback poll + manual refresh
- * so the view always re-syncs; routine filter changes update the list in place
- * rather than blanking the whole screen.
+ * Network totals sit in the hub's title row (stock, alerts, days left) and
+ * station status counts are the filter chips (the old 4-card summary bar is
+ * gone, R4.4). One toolbar: location search, status chips, a Filters popover
+ * (product), refresh. The station detail opens in a side drawer; the list
+ * honours `?station=<id>` (Dashboard low-tank rows link here). Each data
+ * source fails open independently, with a fallback poll + manual refresh.
  *
  * Validates: Requirements 6.1-6.7, 8.1, 8.3
  */
 export default function FuelDashboardView({
-  embedded = false,
-  view,
+  view = "stations",
 }: FuelDashboardPageProps = {}) {
+  const searchParams = useSearchParams();
+  const deepLinkStation = searchParams?.get("station") ?? null;
   const [stations, setStations] = useState<FuelStation[]>([]);
   const [summary, setSummary] = useState<FuelNetworkSummary>(EMPTY_SUMMARY);
   const [consumptionData, setConsumptionData] = useState<ConsumptionMetric[]>(
     [],
   );
   const [selectedStationId, setSelectedStationId] = useState<string | null>(
-    null,
+    deepLinkStation,
   );
   const [stationDetail, setStationDetail] =
     useState<FuelStationDetailType | null>(null);
@@ -142,17 +122,10 @@ export default function FuelDashboardView({
   const [statusFilter, setStatusFilter] = useState<"" | StationStatus>("");
   const [locationFilter, setLocationFilter] = useState("");
 
-  // Station form modal state
-  const [showStationForm, setShowStationForm] = useState(false);
-  const [stationFormMode, setStationFormMode] = useState<"create" | "edit">(
-    "create",
-  );
-  const [editingStation, setEditingStation] = useState<FuelStation | null>(
-    null,
-  );
-
-  const [internalTab, setInternalTab] = useState<TabId>("stations");
-  const activeTab: TabId = embedded ? (view ?? "stations") : internalTab;
+  // Station form state
+  const [form, setForm] = useState<
+    { mode: "create" } | { mode: "edit"; station: FuelStation } | null
+  >(null);
 
   const loadData = useCallback(async () => {
     setRefreshing(true);
@@ -161,7 +134,7 @@ export default function FuelDashboardView({
     if (statusFilter) filters.status = statusFilter;
     if (locationFilter) filters.location = locationFilter;
 
-    // Each source fails open independently — one bad endpoint must not blank
+    // Each source fails open independently: one bad endpoint must not blank
     // the others. On failure we keep the last-known values and flag the error.
     const results = await Promise.allSettled([
       getStations(filters),
@@ -206,6 +179,14 @@ export default function FuelDashboardView({
     }
   }, []);
 
+  // `?station=` deep link: open that station's detail once.
+  const deepLinked = useRef(false);
+  useEffect(() => {
+    if (deepLinked.current || !deepLinkStation) return;
+    deepLinked.current = true;
+    loadStationDetail(deepLinkStation);
+  }, [deepLinkStation, loadStationDetail]);
+
   const handleSelectStation = useCallback(
     (stationId: string) => {
       if (selectedStationId === stationId) {
@@ -224,26 +205,9 @@ export default function FuelDashboardView({
     setStationDetail(null);
   }, []);
 
-  const handleAddStation = useCallback(() => {
-    setStationFormMode("create");
-    setEditingStation(null);
-    setShowStationForm(true);
-  }, []);
-
-  const handleEditStation = useCallback((station: FuelStation) => {
-    setStationFormMode("edit");
-    setEditingStation(station);
-    setShowStationForm(true);
-  }, []);
-
-  const handleCloseStationForm = useCallback(() => {
-    setShowStationForm(false);
-    setEditingStation(null);
-  }, []);
-
   const handleStationFormSuccess = useCallback(
     (savedStation: FuelStation) => {
-      if (stationFormMode === "create") {
+      if (form?.mode === "create") {
         setStations((prev) => [savedStation, ...prev]);
       } else {
         setStations((prev) =>
@@ -251,14 +215,14 @@ export default function FuelDashboardView({
             s.station_id === savedStation.station_id ? savedStation : s,
           ),
         );
-        if (selectedStationId === savedStation.station_id && stationDetail) {
+        if (selectedStationId === savedStation.station_id) {
           setStationDetail((prev) =>
             prev ? { ...prev, station: savedStation } : prev,
           );
         }
       }
     },
-    [stationFormMode, selectedStationId, stationDetail],
+    [form, selectedStationId],
   );
 
   const handleFuelAlert = useCallback(
@@ -290,13 +254,63 @@ export default function FuelDashboardView({
     onFuelAlert: handleFuelAlert,
   });
 
-  // First load only — routine reloads (filters/poll/refresh) keep the chrome.
-  if (loading) {
-    return <LoadingSpinner message="Loading fuel dashboard..." />;
-  }
+  // Title-row contributions: network totals and the create action.
+  const capacity = getNetworkCapacityGallons(summary);
+  const stock = getNetworkCurrentStockGallons(summary);
+  const counts = useMemo(
+    () =>
+      loading ? null : (
+        <span className="inline-flex items-center gap-3 whitespace-nowrap">
+          <span>
+            Stock{" "}
+            <b className="font-semibold text-text tabular-nums">
+              {capacity > 0 ? pct((stock / capacity) * 100) : "—"}
+            </b>{" "}
+            of {gallons(capacity)}
+          </span>
+          <span>
+            <b className="font-semibold text-text tabular-nums">
+              {summary.active_alerts}
+            </b>{" "}
+            {summary.active_alerts === 1 ? "alert" : "alerts"}
+          </span>
+          {/* null: no station consumes fuel, so there is no average (F5). */}
+          <span>
+            Avg{" "}
+            <b className="font-semibold text-text tabular-nums">
+              {avgDaysLeftLabel(summary.average_days_until_empty)}
+            </b>{" "}
+            days left
+          </span>
+        </span>
+      ),
+    [loading, capacity, stock, summary],
+  );
+  const actions = useMemo(
+    () => (
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => setForm({ mode: "create" })}
+        icon={<Plus className="h-3.5 w-3.5" aria-hidden="true" />}
+      >
+        Add station
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ counts, actions });
+
+  const statusCount: Record<string, number> = {
+    "": summary.total_stations,
+    normal: summary.stations_normal,
+    low: summary.stations_low,
+    critical: summary.stations_critical,
+    empty: summary.stations_empty,
+  };
 
   const detailPanel = detailLoading ? (
-    <LoadingSpinner message="Loading station detail..." />
+    <Skeleton rows={6} />
   ) : stationDetail ? (
     <FuelStationDetail
       detail={stationDetail}
@@ -307,208 +321,138 @@ export default function FuelDashboardView({
       }}
     />
   ) : (
-    <p className="text-sm text-gray-500 text-center py-8">
-      Failed to load station detail
+    <p className="py-8 text-center text-sm text-text-muted">
+      Couldn't load the station detail.
     </p>
   );
 
   const toolbar = (
-    <div className="flex flex-wrap items-center justify-between gap-3 px-8 py-3">
-      <div className="min-h-[1.25rem]">
-        {loadError && (
-          <span
-            role="alert"
-            className="inline-flex items-center gap-1.5 text-xs text-warning-dark"
+    <Toolbar
+      label="Stations"
+      search={
+        <input
+          type="search"
+          value={locationFilter}
+          onChange={(e) => setLocationFilter(e.target.value)}
+          placeholder="Search location"
+          aria-label="Filter by location"
+          className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+        />
+      }
+      filters={
+        <>
+          <FilterChips
+            label="Station status"
+            options={STATUS_CHIPS.map((c) => ({
+              id: c.id || "all",
+              label: c.label,
+              count: loading ? undefined : statusCount[c.id],
+              status: c.id ? STATION_STATUS[c.id].status : undefined,
+            }))}
+            value={statusFilter || "all"}
+            onChange={(v) =>
+              setStatusFilter(v === "all" ? "" : (v as StationStatus))
+            }
+            collapse
+          />
+          <FilterPopover
+            count={fuelTypeFilter ? 1 : 0}
+            label="Station filters"
+            onClear={() => setFuelTypeFilter("")}
           >
-            <AlertTriangle className="h-3.5 w-3.5" />
-            Some fuel data failed to load — showing last known values.
-          </span>
-        )}
-      </div>
-      <div className="flex items-center gap-3">
-        {lastUpdated && (
-          <span className="text-xs text-gray-500">
-            Updated {formatRelative(lastUpdated)}
-          </span>
-        )}
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          onClick={() => loadData()}
-          icon={
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${refreshing ? "animate-spin" : ""}`}
-            />
-          }
-        >
-          Refresh
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          onClick={handleAddStation}
-          icon={<Plus className="w-4 h-4" aria-hidden="true" />}
-        >
-          Add Station
-        </Button>
-      </div>
-    </div>
+            <Field label="Product" id="fuel-filter-product">
+              <ProductSelect
+                id="fuel-filter-product"
+                value={fuelTypeFilter || null}
+                options={STATION_FUEL_TYPES}
+                placeholder="All products"
+                onChange={(code) => setFuelTypeFilter(code as FuelType)}
+              />
+            </Field>
+          </FilterPopover>
+        </>
+      }
+      end={
+        <>
+          {loadError && (
+            <span
+              role="alert"
+              className="inline-flex items-center gap-1 whitespace-nowrap rounded-full border border-amber-300 bg-amber-100 px-2 text-xs font-semibold text-amber-800"
+            >
+              <AlertTriangle aria-hidden="true" className="h-3 w-3" />
+              Some data didn't load
+            </span>
+          )}
+          {lastUpdated && (
+            <span className="whitespace-nowrap text-xs text-text-muted">
+              Updated {relative(lastUpdated)}
+            </span>
+          )}
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => loadData()}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        </>
+      }
+    />
   );
 
   return (
-    <div className="h-full flex flex-col bg-white">
+    <div className="flex h-full flex-col bg-surface">
       {!embedded && (
-        <PageHeader
-          title="Fuel Monitoring"
-          subtitle="Track fuel stock levels, alerts, and consumption trends"
-          icon={<Fuel className="w-5 h-5" />}
-        />
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Fuel stations
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
+        </div>
       )}
-
-      {toolbar}
-
-      {/* Summary Bar — Validates: Requirement 6.2 */}
-      <div className="border-b border-gray-100 px-8 py-4">
-        <FuelSummaryBar summary={summary} />
-      </div>
-
-      {/* Main content area */}
-      <div className="flex-1 overflow-hidden flex flex-col">
-        {!embedded && (
-          <TabNavigation
-            tabs={TABS}
-            activeTab={internalTab}
-            onChange={setInternalTab}
-            className="!px-8 pt-4"
-          />
-        )}
-
-        <div className="flex-1 overflow-hidden flex border-t border-gray-200">
-          {activeTab === "efficiency" && (
-            <div className="flex-1 overflow-y-auto">
-              <div className="px-8 py-6">
-                <h2 className="text-sm font-medium text-gray-700 mb-3">
-                  Daily Consumption Trend
-                </h2>
-                <FuelConsumptionChart data={consumptionData} />
-              </div>
-            </div>
-          )}
-
-          {activeTab === "stations" && (
-            <div className="flex-1 overflow-hidden flex">
-              {/* Left: Station list */}
-              <div
-                className={`flex-1 overflow-y-auto ${selectedStationId ? "lg:w-3/5" : "w-full"}`}
-              >
-                <div className="px-8 py-6">
-                  {/* Filters — Validates: Requirement 6.4 */}
-                  <div className="flex flex-wrap items-center gap-3 mb-4">
-                    <select
-                      value={fuelTypeFilter}
-                      onChange={(e) =>
-                        setFuelTypeFilter(e.target.value as "" | FuelType)
-                      }
-                      className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-                      aria-label="Filter by fuel type"
-                    >
-                      {FUEL_TYPE_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={statusFilter}
-                      onChange={(e) =>
-                        setStatusFilter(e.target.value as "" | StationStatus)
-                      }
-                      className="px-3 py-1.5 text-sm border border-gray-200 rounded-lg bg-white focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-                      aria-label="Filter by status"
-                    >
-                      {STATUS_OPTIONS.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
-                          {opt.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    <div className="relative">
-                      <Search
-                        className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-500"
-                        aria-hidden="true"
-                      />
-                      <input
-                        type="text"
-                        value={locationFilter}
-                        onChange={(e) => setLocationFilter(e.target.value)}
-                        placeholder="Filter by location..."
-                        className="pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-                        aria-label="Filter by location"
-                      />
-                    </div>
-
-                    {refreshing && (
-                      <RefreshCw className="w-4 h-4 text-gray-400 animate-spin" />
-                    )}
-                  </div>
-
-                  <FuelStationList
-                    stations={stations}
-                    onSelectStation={handleSelectStation}
-                    selectedStationId={selectedStationId}
-                    onEditStation={handleEditStation}
-                  />
-                </div>
-              </div>
-
-              {/* Right: Station Detail — side panel on lg+ */}
-              {selectedStationId && (
-                <div className="hidden lg:block w-2/5 border-l border-gray-100 overflow-y-auto p-4">
-                  {detailPanel}
-                </div>
-              )}
-            </div>
+      {view === "efficiency" ? (
+        <div className="flex-1 overflow-y-auto px-4 py-4">
+          <h2 className="mb-3 text-sm font-semibold text-text">
+            Daily consumption trend
+          </h2>
+          {loading ? (
+            <Skeleton rows={6} />
+          ) : (
+            <FuelConsumptionChart data={consumptionData} />
           )}
         </div>
-      </div>
-
-      {/* Station Detail — slide-over drawer below lg so the click works on
-          tablet/phone (the side panel is desktop-only). */}
-      {selectedStationId && (
-        <div
-          className="fixed inset-0 z-50 flex lg:hidden"
-          role="dialog"
-          aria-modal="true"
-        >
-          <button
-            type="button"
-            aria-label="Close station detail"
-            className="absolute inset-0 bg-black/40"
-            onClick={handleCloseDetail}
-          />
-          <div className="relative ml-auto h-full w-full max-w-md overflow-y-auto bg-white p-4 shadow-xl">
-            <button
-              type="button"
-              onClick={handleCloseDetail}
-              aria-label="Close"
-              className="absolute right-3 top-3 rounded-md p-1.5 text-gray-500 hover:bg-gray-100"
-            >
-              <X className="h-5 w-5" />
-            </button>
-            {detailPanel}
+      ) : (
+        <>
+          {toolbar}
+          <div className="min-h-0 flex-1 overflow-auto">
+            <FuelStationList
+              stations={loading ? [] : stations}
+              loading={loading}
+              onSelectStation={handleSelectStation}
+              selectedStationId={selectedStationId}
+              onEditStation={(station) => setForm({ mode: "edit", station })}
+            />
           </div>
-        </div>
+        </>
       )}
 
-      {/* Station Form Modal — Validates: Requirements 8.1, 8.3 */}
-      {showStationForm && (
+      <Drawer
+        open={selectedStationId !== null && view !== "efficiency"}
+        onClose={handleCloseDetail}
+        title="Station detail"
+        width={480}
+      >
+        {detailPanel}
+      </Drawer>
+
+      {form && (
         <FuelStationForm
-          mode={stationFormMode}
-          station={editingStation}
-          onClose={handleCloseStationForm}
+          mode={form.mode}
+          station={form.mode === "edit" ? form.station : null}
+          onClose={() => setForm(null)}
           onSuccess={handleStationFormSuccess}
         />
       )}

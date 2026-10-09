@@ -47,15 +47,16 @@ describe("PaymentsListPage", () => {
     mockGetAccounts.mockResolvedValue(accountsResponse() as any);
   });
 
-  it("loads the account roster for the picker on mount", async () => {
+  it("loads the account roster when the Filters popover opens", async () => {
     render(<PaymentsListPage />);
-    await waitFor(() => expect(mockGetAccounts).toHaveBeenCalled());
     await waitFor(() => expect(mockGetPayments).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Filters" }));
+    await waitFor(() => expect(mockGetAccounts).toHaveBeenCalled());
   });
 
   it("filters payments by the selected account", async () => {
     render(<PaymentsListPage />);
-
+    fireEvent.click(await screen.findByRole("button", { name: "Filters" }));
     await waitFor(() => expect(mockGetAccounts).toHaveBeenCalled());
 
     fireEvent.click(await screen.findByLabelText("Account"));

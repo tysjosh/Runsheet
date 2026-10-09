@@ -28,6 +28,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from integrations.api.stripe_endpoints import (
     configure_stripe_endpoints,
     router,
@@ -192,6 +194,7 @@ def _build_app(
     configure_stripe_endpoints(connector_factory=_factory)
 
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(router)
     app.include_router(webhook_router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory()
@@ -238,10 +241,10 @@ class TestPublicConfigEndpoint:
             resp = client.get("/api/integrations/stripe/public-config")
         assert resp.status_code == 404
         assert calls == [_TENANT]
-        assert (
-            resp.json()["detail"]["error_code"]
-            == "stripe_integration_not_configured"
-        )
+        body = resp.json()
+        assert body["error_code"] == "stripe_integration_not_configured"
+        assert body["request_id"]
+        assert "detail" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +303,7 @@ class TestWebhookEndpoint:
                 headers={"Stripe-Signature": "bad-sig"},
             )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "invalid_signature"
+        assert resp.json()["error_code"] == "invalid_signature"
 
     def test_missing_signature_header_returns_400(self):
         connector = _build_connector(stripe_module=_FakeStripeSDK())
@@ -311,7 +314,7 @@ class TestWebhookEndpoint:
                 content=b'{"id":"evt_3"}',
             )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "missing_stripe_signature"
+        assert resp.json()["error_code"] == "missing_stripe_signature"
 
     def test_webhook_returns_404_when_no_integration(self):
         app, calls = _build_app(connector=None)
@@ -503,10 +506,10 @@ class TestListPaymentsEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/integrations/stripe/payments")
         assert resp.status_code == 404
-        assert (
-            resp.json()["detail"]["error_code"]
-            == "stripe_integration_not_configured"
-        )
+        body = resp.json()
+        assert body["error_code"] == "stripe_integration_not_configured"
+        assert body["request_id"]
+        assert "detail" not in body
 
     def test_limit_above_100_is_capped_to_100(self):
         pi_api = _FakeListingPaymentIntentAPI(raw_items=[])
@@ -558,7 +561,7 @@ class TestListPaymentsEndpoint:
                 "/api/integrations/stripe/payments?created.gte=not-a-date"
             )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "invalid_timestamp"
+        assert resp.json()["error_code"] == "invalid_timestamp"
 
     def test_connector_error_returns_503(self):
         pi_api = _FakeListingPaymentIntentAPI(
@@ -571,7 +574,7 @@ class TestListPaymentsEndpoint:
             resp = client.get("/api/integrations/stripe/payments")
         assert resp.status_code == 503
         assert (
-            resp.json()["detail"]["error_code"]
+            resp.json()["error_code"]
             == "stripe_list_payments_failed"
         )
 

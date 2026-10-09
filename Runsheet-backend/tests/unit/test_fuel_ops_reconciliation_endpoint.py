@@ -149,13 +149,13 @@ class _FakeRedis:
 # ---------------------------------------------------------------------------
 
 
-def _tenant_ctx_factory(tenant_id: str = "tenant-A"):
+def _tenant_ctx_factory(tenant_id: str = "tenant-A", roles=("dispatcher",)):
     def _factory() -> TenantContext:
         return TenantContext(
             tenant_id=tenant_id,
             user_id="user-1",
             has_pii_access=False,
-            roles=["dispatcher"],
+            roles=list(roles),
             region="US",
             measurement_units={"volume": "gal", "distance": "mi"},
         )
@@ -874,3 +874,32 @@ class TestQBOInvoiceUpdateSeamEndToEndWithEndpoint:
         assert row["invoiced_gallons"] == 600.0
         assert row["variance_invoiced_vs_delivered_pct"] == pytest.approx(20.0)
         assert VARIANCE_ALERT_FLAG in row["alert_flags"]
+
+
+# ===========================================================================
+# Role gate (OI-19): admin + dispatcher only
+# ===========================================================================
+
+
+class TestListReconciliationRoleGate:
+    def _client(self, roles) -> TestClient:
+        from errors.handlers import register_exception_handlers
+
+        app, es = _build_app()
+        register_exception_handlers(app)
+        app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
+            roles=roles
+        )
+        _seed_record(es, reconciliation_id="rec-1", tenant_id="tenant-A")
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_driver_gets_403_insufficient_role(self):
+        resp = self._client(["driver"]).get("/api/fuel/mvp/reconciliation")
+        assert resp.status_code == 403, resp.text
+        assert resp.json()["error_code"] == "INSUFFICIENT_ROLE"
+
+    @pytest.mark.parametrize("role", ["admin", "dispatcher"])
+    def test_admin_and_dispatcher_get_200(self, role):
+        resp = self._client([role]).get("/api/fuel/mvp/reconciliation")
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["data"]) == 1

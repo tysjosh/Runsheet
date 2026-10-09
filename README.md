@@ -4,7 +4,7 @@
 
 [![Powered by Strands SDK](https://img.shields.io/badge/Powered%20by-Strands%20SDK-blue?style=for-the-badge)](https://strandsagents.com)
 [![Google Gemini 2.5](https://img.shields.io/badge/Google-Gemini%202.5%20Flash-4285F4?style=for-the-badge&logo=google)](https://cloud.google.com/vertex-ai)
-[![Elasticsearch](https://img.shields.io/badge/Elasticsearch-005571?style=for-the-badge&logo=elasticsearch)](https://www.elastic.co/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Next.js 15](https://img.shields.io/badge/Next.js-15-000000?style=for-the-badge&logo=next.js)](https://nextjs.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi)](https://fastapi.tiangolo.com/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?style=for-the-badge&logo=typescript)](https://www.typescriptlang.org/)
@@ -13,6 +13,7 @@
 **AI-powered logistics monitoring system with real-time fleet tracking, inventory management, and intelligent analytics.**
 
 </div>
+
 
 ## Architecture
 
@@ -36,7 +37,7 @@ graph TB
     subgraph "Bootstrap Lifecycle"
         BOOT[bootstrap/core.py]
         BOOT -->|initialize_all| BOOT_MW[Register Middleware]
-        BOOT -->|initialize_all| BOOT_ES[Connect Elasticsearch]
+        BOOT -->|initialize_all| BOOT_ES[Connect PostgreSQL]
         BOOT -->|initialize_all| BOOT_RED[Connect Redis]
         BOOT -->|initialize_all| BOOT_AGT[Start Agent Scheduler]
         BOOT -->|initialize_all| BOOT_DOM[Mount Domain Routers]
@@ -69,7 +70,7 @@ graph TB
     end
 
     subgraph "Data Layer"
-        OPS --> ES[(Elasticsearch)]
+        OPS --> ES[("PostgreSQL<br/>relational + es_documents")]
         FUEL --> ES
         SCHED --> ES
         DATA --> ES
@@ -223,8 +224,7 @@ Runsheet-backend/
 │   └── support/                   # Agent support utilities
 ├── scripts/                       # Utility scripts
 │   ├── check_coverage.py          # Coverage verification
-│   ├── generate_endpoint_registry.py
-│   └── backfill_asset_type.py
+│   └── generate_endpoint_registry.py
 ├── tests/                         # Test suite
 ├── demo-data/                     # Sample CSV files
 └── compliance/                    # Fuel compliance backbone (see Compliance Backbone section)
@@ -742,8 +742,10 @@ Set up your environment configuration:
 cp .env.example .env.development
 
 # Open .env.development and fill in your actual credentials:
-# - ELASTIC_ENDPOINT: Your Elasticsearch Cloud endpoint URL
-# - ELASTIC_API_KEY: Your Elasticsearch API key (from Elastic Cloud console)
+# - DATABASE_URL: PostgreSQL connection string. Required — it is the only
+#   datastore now, holding both the relational tables and the document plane.
+#   Start it with: docker compose up -d postgres
+#   Then create the schema: ./venv/bin/alembic upgrade head
 # - GOOGLE_CLOUD_PROJECT: Your GCP project ID
 # - JWT_SECRET: A strong random secret for JWT signing (min 32 chars)
 # - DINEE_WEBHOOK_SECRET: HMAC secret for webhook verification
@@ -826,6 +828,19 @@ graph LR
     E --> P[find_truck_by_id]
     E --> Q[get_all_locations]
 ```
+
+### Dispatch Board
+
+The Dispatch Board is a drag-and-drop planner for one service day. It is the "Board" tab of the Dispatch page (`/dashboard/dispatch?tab=board`), before Scheduling and Fuel Distribution, and is shown to `admin` and `dispatcher` users when the tenant's `dispatch_board` flag is not `disabled`.
+
+- Each row is a truck lane. Drag orders from the Orders tray onto a lane, and drag a driver from the Drivers tray onto the lane header to pair them. Stops can be reordered on a lane or moved to another lane; drop targets show whether a drop is allowed before you let go.
+- Every lane is checked live: compartment capacity and product compatibility, driver qualification and hours of service, truck certification, and delivery windows. Blocking problems must be fixed (or overridden with a reason, where allowed) before the lane can be published.
+- Publish sends ready lanes to their drivers through the driver app. Changing a published lane marks it Modified; re-publishing tells each affected driver what changed, and revokes stops a driver lost. Started stops stay pinned.
+- Undo and redo cover board edits. Agent suggestions appear when the compartment-loading or route-planning agent runs in an active mode, and can be accepted, partly accepted or rejected.
+- Everything has a non-drag path: card menus ("Assign to truck…", "Move to…"), Place mode with Enter, and shortcuts listed in the "?" dialog (`/` search, `A` assign, `M` move, `P` pair driver, `U` unassign, `[`/`]` previous/next day, `T` timeline/sequence, `Cmd/Ctrl+Z` undo, `Shift+Cmd/Ctrl+Z` redo, `Esc` cancel). Single-key shortcuts can be turned off in that dialog.
+- Plans published from the board are managed on the board only. They are hidden from the Fuel Distribution plan list, and approve, reject and replan there refuse them.
+
+Flag states (`dispatch_board`, per tenant, default `disabled`): `disabled` hides the tab and every board endpoint returns 404; `shadow` shows a read-only board ("Preview mode, changes are not saved"); `active_gated` and `active_auto` both enable editing and make the board the default Dispatch tab. The board never publishes without a dispatcher action. Turning the flag off leaves drafts and published plans as they are.
 
 ## Data Models
 
@@ -924,7 +939,7 @@ GET  /api/analytics/delay-causes    # Delay cause breakdown
 GET  /api/analytics/regional        # Regional performance analytics
 GET  /api/analytics/time-series     # Time-series metric data
 GET  /api/search                    # Semantic search across indices
-POST /api/data/cleanup              # Deduplicate data
+POST /api/data/cleanup              # Wipe + reseed demo data (platform_admin + ALLOW_DATA_CLEANUP, local dev only)
 POST /api/data/upload/sheets        # Upload data from Google Sheets
 POST /api/data/upload/csv           # Upload CSV data
 ```
@@ -945,12 +960,12 @@ GET  /api/ops/metrics/sla                       # SLA compliance metrics
 GET  /api/ops/metrics/riders                    # Rider performance metrics
 GET  /api/ops/metrics/failures                  # Failure rate metrics
 GET  /api/ops/metrics/prometheus                # Prometheus-format metrics export
-GET  /api/ops/monitoring/ingestion              # Ingestion pipeline metrics
-GET  /api/ops/monitoring/indexing               # Indexing throughput metrics
-GET  /api/ops/monitoring/poison-queue           # Poison queue metrics
+GET  /api/ops/monitoring/poison-queue           # Poison queue metrics (platform_admin)
 POST /api/ops/admin/feature-flags/{tenant_id}/enable    # Enable ops for tenant
 POST /api/ops/admin/feature-flags/{tenant_id}/disable   # Disable ops for tenant
 POST /api/ops/admin/feature-flags/{tenant_id}/rollback  # Rollback feature flag
+GET  /api/ops/admin/feature-flags/{tenant_id}/dispatch-board              # dispatch_board flag state (unset reads as disabled)
+POST /api/ops/admin/feature-flags/{tenant_id}/dispatch-board/{new_state}  # Set it: disabled | shadow | active_gated | active_auto (admin)
 POST /api/ops/replay/trigger                    # Trigger event replay
 GET  /api/ops/replay/status/{job_id}            # Replay job status
 POST /api/ops/drift/run                         # Run configuration drift detection
@@ -981,6 +996,22 @@ GET  /api/fuel/mvp/plan/{plan_id}               # Get a distribution plan
 POST /api/fuel/mvp/plan/{plan_id}/replan        # Replan with exception handling
 GET  /api/fuel/mvp/forecasts                    # Get tank level forecasts
 GET  /api/fuel/mvp/priorities                   # Get delivery priorities
+```
+
+#### Dispatch Board (`/api/fuel/board/*` — `fuel/api/dispatch_board_endpoints.py`)
+
+Gated by the per-tenant `dispatch_board` flag: 404 `DISPATCH_BOARD_DISABLED` when `disabled`; commands and publish return 409 `DISPATCH_BOARD_READ_ONLY` in `shadow`. `admin` and `dispatcher` only.
+
+```
+GET  /api/fuel/board/status                                        # Flag mode for the caller's tenant (UI polls this)
+GET  /api/fuel/board/{service_date}                                # Board snapshot: lanes, trays, checks
+POST /api/fuel/board/{service_date}/validate                       # Validation preview (batch or position)
+POST /api/fuel/board/{service_date}/commands                       # Apply a board command (assign, move, pair, revert/reapply, ...)
+GET  /api/fuel/board/{service_date}/history                        # Command and publish history
+POST /api/fuel/board/{service_date}/publish                        # Publish ready lanes (202 + publish id); dry_run gives the review preview
+GET  /api/fuel/board/{service_date}/publish/{publish_id}           # Publish progress per lane
+POST /api/fuel/board/{service_date}/suggestions/{plan_id}/reject   # Reject an agent suggestion
+WS   /ws/dispatch-board                                            # Live board updates and presence
 ```
 
 #### Compliance & Commerce Backbone (`/api/compliance/*`, `/api/commerce/*`)
@@ -1172,9 +1203,10 @@ See each `.env.example` file for the full list of variables with descriptions, e
 
 Key variables:
 ```bash
-# Elasticsearch (required)
-ELASTIC_API_KEY=your-api-key-here
-ELASTIC_ENDPOINT=https://your-elasticsearch-endpoint.elastic-cloud.com
+# PostgreSQL (required) — the only datastore. There is no Elasticsearch: the
+# document plane is the es_documents table. See
+# docs/elasticsearch-to-postgres-migration.md.
+DATABASE_URL=postgresql+psycopg://runsheet:runsheet@localhost:5432/runsheet
 
 # Google Cloud (required)
 GOOGLE_CLOUD_PROJECT=your-gcp-project-id

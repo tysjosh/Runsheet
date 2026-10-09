@@ -131,9 +131,12 @@ class FakeSchedulingWS:
     def __init__(self, *, raises=None):
         self._raises = raises
         self.broadcasts = []
+        self.tenant_ids = []
 
-    async def broadcast(self, event_type, event_data):
+    # Same signature as SchedulingWebSocketManager.broadcast (N-new-1).
+    async def broadcast(self, event_type, event_data, tenant_id=""):
         self.broadcasts.append((event_type, event_data))
+        self.tenant_ids.append(tenant_id)
         if self._raises is not None:
             raise self._raises
 
@@ -734,6 +737,7 @@ class TestHOSBlockBroadcast:
         assert event_data["driver_id"] == DRIVER
         assert event_data["reason_code"] == "HOS_DRIVING_LIMIT"
         assert event_data["tenant_id"] == TENANT
+        assert ws.tenant_ids == [TENANT]  # the manager refuses a tenantless call
 
     @pytest.mark.asyncio
     async def test_the_payload_names_no_other_driver(self):

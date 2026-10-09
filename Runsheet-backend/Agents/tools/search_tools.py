@@ -8,6 +8,7 @@ Validates:
 """
 
 import logging
+import re
 import time
 from strands import tool
 from services.elasticsearch_service import elasticsearch_service
@@ -45,8 +46,42 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
 
 
 
+# The vehicle template's ``status`` enum (services/schema_templates.py).
+FLEET_ASSET_STATUSES = ("on_time", "delayed", "idle", "maintenance")
+
+# Status words recognised in a free-text fleet query, mapped to the stored value.
+_STATUS_WORD_PATTERNS = (
+    (re.compile(r"\bon[\s_-]time\b", re.IGNORECASE), "on_time"),
+    (re.compile(r"\bdelayed\b", re.IGNORECASE), "delayed"),
+    (re.compile(r"\bidle\b", re.IGNORECASE), "idle"),
+    (re.compile(r"\bmaintenance\b", re.IGNORECASE), "maintenance"),
+)
+
+# Words that describe "the fleet" rather than a field value. Left in the
+# free text they turn "delayed trucks" into a phrase no asset contains (F5).
+_GENERIC_FLEET_WORDS = frozenset({
+    "truck", "trucks", "vehicle", "vehicles", "asset", "assets", "fleet",
+    "show", "me", "all", "list", "find", "the", "and", "or",
+})
+
+
+def _split_fleet_query(query: str) -> tuple[list[str], str]:
+    """Return ``(status values found in query, remaining free text)``."""
+    text = query or ""
+    statuses: list[str] = []
+    for pattern, value in _STATUS_WORD_PATTERNS:
+        if pattern.search(text):
+            statuses.append(value)
+            text = pattern.sub(" ", text)
+    words = [
+        w for w in re.split(r"\s+", text)
+        if w and w.strip(".,;:!?").lower() not in _GENERIC_FLEET_WORDS
+    ]
+    return statuses, " ".join(words).strip(" .,;:!?")
+
+
 @tool
-async def search_fleet_data(query: str, asset_type: str = None) -> str:
+async def search_fleet_data(query: str, asset_type: str = None, status: str = None) -> str:
     """
     Search fleet and asset data using natural language. Supports all asset types
     including vehicles, vessels, equipment, and containers.
@@ -57,10 +92,14 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
     Args:
         query: Natural language search query (e.g., "trucks carrying perishables",
                "delayed vehicles", "search for all vessels", "find idle equipment",
-               "containers in transit", "show me all boats")
+               "containers in transit", "show me all boats"). Status words in the
+               query ("delayed", "idle", "maintenance", "on time") filter on the
+               asset's status.
         asset_type: Optional asset type filter. One of: "vehicle", "vessel",
                     "equipment", "container". When provided, results are limited
                     to the specified asset type.
+        status: Optional asset status filter. One of: "on_time", "delayed",
+                "idle", "maintenance". Overrides status words in the query.
 
     Returns:
         Search results from fleet database
@@ -73,24 +112,47 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
     try:
         logger.info(f"🔍 Searching fleet data for: {query}" + (f" (asset_type={asset_type})" if asset_type else ""))
 
-        # Build the base multi_match query
-        must_clause = {
-            "multi_match": {
-                "query": query,
-                "fields": ["cargo.description", "driver_name", "status", "asset_name", "vessel_name", "equipment_model", "container_number"],
-                "type": "best_fields"
-            }
-        }
+        detected_statuses, free_text = _split_fleet_query(query)
+        if status:
+            status = status.strip().lower().replace("-", "_").replace(" ", "_")
+            if status not in FLEET_ASSET_STATUSES:
+                success = True
+                return (
+                    f"Unknown status '{status}'. "
+                    f"Valid statuses: {', '.join(FLEET_ASSET_STATUSES)}."
+                )
+            statuses = [status]
+        else:
+            statuses = detected_statuses
 
-        # When asset_type is provided, wrap in a bool query with a term filter
+        # Free text left after removing status words and generic fleet nouns;
+        # nothing left means "every asset with that status / type".
+        if free_text:
+            must_clause = {
+                "multi_match": {
+                    "query": free_text,
+                    "fields": ["cargo.description", "driver_name", "status", "asset_name", "vessel_name", "equipment_model", "container_number"],
+                    "type": "best_fields"
+                }
+            }
+        else:
+            must_clause = {"match_all": {}}
+
+        filters = []
         if asset_type:
+            filters.append({"term": {"asset_type": asset_type}})
+        if len(statuses) == 1:
+            filters.append({"term": {"status": statuses[0]}})
+        elif statuses:
+            filters.append({"terms": {"status": statuses}})
+
+        # With filters, wrap in a bool query; otherwise the bare clause
+        if filters:
             inner_es_query = {
                 "query": {
                     "bool": {
                         "must": [must_clause],
-                        "filter": [
-                            {"term": {"asset_type": asset_type}}
-                        ]
+                        "filter": filters,
                     }
                 }
             }
@@ -110,7 +172,10 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
             return f"No fleet data found for query: '{query}'{filter_msg}"
 
         type_label = asset_type if asset_type else "assets"
-        response_text = f"🚛 Found {len(results)} {type_label} matching '{query}':\n\n"
+        # "Showing", not "Found": this is a capped page, and phrasing a page
+        # length as a total is what let the agent report a count it had never
+        # measured. A true total would need semantic_search to return one.
+        response_text = f"🚛 Showing {len(results)} {type_label} matching '{query}':\n\n"
         for asset in results:
             # Use asset_name or plate_number as the display name
             display_name = asset.get('asset_name') or asset.get('plate_number') or asset.get('vessel_name') or asset.get('equipment_model') or asset.get('container_number') or 'Unknown'
@@ -130,51 +195,24 @@ async def search_fleet_data(query: str, asset_type: str = None) -> str:
         logger.exception("Error searching fleet data")
         return f"Error searching fleet data: {str(e)}"
     finally:
-        _log_tool_invocation("search_fleet_data", {"query": query, "asset_type": asset_type}, start_time, success, error_msg)
+        _log_tool_invocation("search_fleet_data", {"query": query, "asset_type": asset_type, "status": status}, start_time, success, error_msg)
 
 
 @tool
-async def search_orders(query: str) -> str:
-    """
-    Search order data using natural language.
+# ``search_orders`` used to live here and has been removed rather than repaired.
+#
+# It searched an index named ``orders``, which does not exist — live orders are in
+# ``fuel_orders_current``. It also capped at 5 hits and returned ``len(page)``
+# phrased as a count, so it could not report a true total even against a healthy
+# index, and it rendered ``customer`` / ``value`` / ``items`` / ``priority``
+# against a document whose fields are ``customer_name`` / ``gallons_requested`` /
+# ``product_code`` / ``status``.
+#
+# ``Agents.tools.order_tools.search_orders`` already queries the live index with
+# real filters and a true total, and is what ``mainagent``'s system prompt
+# documents. Keeping a second tool of the same name reaching different data is
+# what let one reply report two different counts for the same question.
 
-    The search is scoped to the current tenant so cross-tenant orders never leak.
-
-    Args:
-        query: Natural language search query (e.g., "network equipment orders", "high priority deliveries")
-    
-    Returns:
-        Search results from orders database
-    """
-    start_time = time.time()
-    success = False
-    error_msg = None
-    tenant_id = get_current_tenant()
-
-    try:
-        logger.info(f"🔍 Searching orders for: {query}")
-        results = await elasticsearch_service.semantic_search(tenant_id, "orders", query, ["items", "customer"], 5)
-        
-        if not results:
-            success = True
-            return f"No orders found for query: '{query}'"
-        
-        response = f"📦 Found {len(results)} orders matching '{query}':\n\n"
-        for order in results:
-            response += f"• **{order.get('order_id')}** - {order.get('customer')}\n"
-            response += f"  Status: {order.get('status')}\n"
-            response += f"  Value: ${order.get('value', 0):,.2f}\n"
-            response += f"  Items: {order.get('items', 'N/A')}\n"
-            response += f"  Priority: {order.get('priority', 'N/A')}\n\n"
-        
-        success = True
-        return response
-    except Exception as e:
-        error_msg = str(e)
-        logger.exception("Error searching orders")
-        return f"Error searching orders: {str(e)}"
-    finally:
-        _log_tool_invocation("search_orders", {"query": query}, start_time, success, error_msg)
 
 @tool
 async def search_support_tickets(query: str) -> str:
@@ -225,7 +263,7 @@ async def search_support_tickets(query: str) -> str:
             success = True
             return f"No support tickets found for query: '{query}'"
         
-        response = f"🎫 Found {len(results)} support tickets matching '{query}':\n\n"
+        response = f"🎫 Showing {len(results)} support tickets matching '{query}':\n\n"
         for ticket in results:
             response += f"• **{ticket.get('ticket_id')}** - {ticket.get('customer')}\n"
             response += f"  Issue: {ticket.get('issue')}\n"
@@ -284,7 +322,7 @@ async def search_inventory(query: str) -> str:
             success = True
             return f"No inventory items found for: '{query}'"
         
-        response = f"📦 Found {len(results)} inventory items:\n\n"
+        response = f"📦 Showing {len(results)} inventory items:\n\n"
         for item in results:
             status_emoji = "🟢" if item.get('status') == 'in_stock' else "🟡" if item.get('status') == 'low_stock' else "🔴"
             response += f"{status_emoji} **{item.get('name')}**\n"

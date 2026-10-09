@@ -17,12 +17,14 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_staff
 from commerce.services.payment_service import PaymentService
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
 
@@ -94,12 +96,9 @@ async def require_payments_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     if not settings.commerce_invoicing_enabled:
@@ -108,12 +107,9 @@ async def require_payments_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "INVOICING_DISABLED",
-                "message": "Commerce invoicing module is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.INVOICING_DISABLED,
+            "Commerce invoicing module is not enabled for this tenant",
         )
 
     # Payments are a Tier 4 / staff surface: the ERP bills and collects. Applied
@@ -201,15 +197,13 @@ async def create_manual_payment(
     # Validate method is one of the allowed manual methods
     allowed_methods = {"check", "ach", "wire", "other"}
     if body.method not in allowed_methods:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.INVALID_PAYMENT_METHOD,
+            (
+                f"Invalid payment method: '{body.method}'. "
+                f"Allowed: {sorted(allowed_methods)}"
+            ),
             status_code=422,
-            detail={
-                "error_code": "INVALID_PAYMENT_METHOD",
-                "message": (
-                    f"Invalid payment method: '{body.method}'. "
-                    f"Allowed: {sorted(allowed_methods)}"
-                ),
-            },
         )
 
     # Look up the invoice to get the account_id

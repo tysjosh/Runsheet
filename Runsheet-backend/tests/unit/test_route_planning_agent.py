@@ -777,3 +777,31 @@ class TestTrafficAwareRoutingFlag:
             return_value="disabled"
         )
         assert await agent._traffic_aware_routing_enabled("tenant-1") is False
+
+
+# ---------------------------------------------------------------------------
+# T-U16b (loading-plan-executor R8.5): applied orders stay routable
+# ---------------------------------------------------------------------------
+
+
+class TestAppliedOrdersStayRoutable:
+    @pytest.mark.asyncio
+    async def test_scheduled_linked_order_is_routable(self):
+        """An order committed to an applied loading plan (scheduled, linked to
+        a run) is still returned for routing; only the loader excludes it."""
+        from tests.unit._loading_plan_fakes import ORDERS, InMemoryDocStore, fuel_order_doc
+
+        store = InMemoryDocStore()
+        applied = fuel_order_doc(
+            "ord-applied", status="scheduled",
+            assigned_run_id="run-1", assigned_asset_id="truck-1",
+            assigned_claim_id="attempt-1",
+        )
+        unlinked = fuel_order_doc("ord-open", status="confirmed")
+        store.seed(ORDERS, "ord-applied", applied)
+        store.seed(ORDERS, "ord-open", unlinked)
+        agent, _deps = _make_agent(es_service=store)
+
+        orders = await agent._fetch_routable_orders("tenant-1")
+
+        assert sorted(o["order_id"] for o in orders) == ["ord-applied", "ord-open"]

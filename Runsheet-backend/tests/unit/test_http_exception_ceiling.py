@@ -5,8 +5,10 @@ added to the codebase.
 Handlers should raise through ``errors/exceptions.py`` (``forbidden``,
 ``internal_error``, ``resource_not_found``, ``validation_error``, ...)
 so every response goes through the structured ``ErrorResponse`` envelope
-the frontend parses. The existing 185 raw-``HTTPException`` call sites
-are tolerated as tech debt but cannot grow.
+the frontend parses. OI-35 migrated the last 73 raw-``HTTPException``
+call sites, so the frozen count is zero and must stay there. (A raw one
+that does slip through still renders the envelope via
+``errors.handlers.handle_http_exception``.)
 
 This test freezes a per-file counter. A migration that removes call
 sites will cause the freeze to drift below the counter and the test
@@ -37,30 +39,8 @@ from pathlib import Path
 #
 # Paths are relative to the backend repo root.
 EXPECTED_HTTPEXCEPTION_COUNTS: dict[str, int] = {
-    "ops/api/endpoints.py": 11,
-    "integrations/api/integrations_endpoints.py": 7,
-    "fuel/api/fuel_ops_endpoints.py": 115,
-    "integrations/api/stripe_endpoints.py": 8,
-    "import_endpoints.py": 12,
-    # Commerce endpoints (commerce-backbone spec) — raw HTTPException tech
-    # debt frozen at introduction; migrate to errors.exceptions over time.
-    "commerce/api/account_endpoints.py": 2,
-    "commerce/api/ar_aging_endpoints.py": 1,
-    "commerce/api/customer_endpoints.py": 2,
-    "commerce/api/invoice_endpoints.py": 4,
-    "commerce/api/payment_endpoints.py": 3,
-    "commerce/api/price_book_endpoints.py": 4,
-    "commerce/api/price_protection_endpoints.py": 6,
-    "commerce/api/pricing_endpoints.py": 3,
-    # Compliance endpoints (fuel-compliance-backbone spec) — same tech-debt
-    # freeze; structured-envelope migration tracked separately.
-    "compliance/api/asset_certification_endpoints.py": 7,
-    "compliance/api/driver_endpoints.py": 7,
-    "compliance/api/ifta_endpoints.py": 7,
-    "compliance/api/kfactor_endpoints.py": 8,
-    "compliance/api/meter_endpoints.py": 5,
-    "compliance/api/tax_endpoints.py": 3,
-    "compliance/api/terminal_bol_endpoints.py": 11,
+    # Empty: compliance/api/*, integrations/api/*, ops/api/endpoints.py and
+    # import_endpoints.py were migrated to AppException (OI-35).
 }
 
 #: Total ceiling — sum of per-file counts. A handy second gate that

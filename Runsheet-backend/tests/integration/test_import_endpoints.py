@@ -76,6 +76,8 @@ def _mock_es_service() -> MagicMock:
     )
     mock.index_document = AsyncMock(return_value={"result": "created"})
     mock.get_document = AsyncMock(return_value=None)
+    # Non-canonical commits write create-if-absent per row (C1).
+    mock.create_document = AsyncMock(return_value=True)
     return mock
 
 
@@ -93,6 +95,8 @@ def mock_es():
 def test_app(mock_es):
     """Create a minimal FastAPI app with the import router and mocked ES."""
     app = FastAPI()
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(app)
 
     # Set up rate limiter on the test app
     app.state.limiter = limiter
@@ -172,7 +176,7 @@ class TestUploadCSV:
             data={"data_type": "fleet"},
         )
         assert resp.status_code == 400
-        assert "10MB" in resp.json()["detail"] or "size limit" in resp.json()["detail"].lower()
+        assert "10MB" in resp.json()["message"] or "size limit" in resp.json()["message"].lower()
 
     async def test_upload_non_csv_file(self, client):
         """Reject a non-CSV file. Validates: Requirement 3.4"""
@@ -182,7 +186,7 @@ class TestUploadCSV:
             data={"data_type": "fleet"},
         )
         assert resp.status_code == 400
-        assert "csv" in resp.json()["detail"].lower()
+        assert "csv" in resp.json()["message"].lower()
 
     async def test_upload_invalid_data_type(self, client):
         """Reject an unsupported data type."""
@@ -193,7 +197,7 @@ class TestUploadCSV:
             data={"data_type": "nonexistent"},
         )
         assert resp.status_code == 422
-        assert "unsupported" in resp.json()["detail"].lower() or "Unsupported" in resp.json()["detail"]
+        assert "unsupported" in resp.json()["message"].lower() or "Unsupported" in resp.json()["message"]
 
     async def test_upload_csv_empty_file(self, client):
         """Reject an empty CSV (no header row)."""
@@ -222,7 +226,7 @@ class TestUploadSheets:
             json={"url": "https://example.com/not-a-sheet", "data_type": "fleet"},
         )
         assert resp.status_code == 422
-        assert "google" in resp.json()["detail"].lower() or "sheet" in resp.json()["detail"].lower()
+        assert "google" in resp.json()["message"].lower() or "sheet" in resp.json()["message"].lower()
 
     async def test_upload_sheets_invalid_data_type(self, client):
         """Reject an unsupported data type for sheets."""
@@ -300,7 +304,7 @@ class TestValidate:
             },
         )
         assert resp.status_code == 404
-        assert "not found" in resp.json()["detail"].lower()
+        assert "not found" in resp.json()["message"].lower()
 
     async def test_validate_with_full_mapping(self, client):
         """Validate with all fields mapped produces valid rows."""
@@ -363,9 +367,8 @@ class TestCommit:
 
     async def test_commit_valid_session(self, client, mock_es):
         """Commit a validated session successfully."""
-        mock_es.bulk_index_documents = AsyncMock(
-            return_value={"successful": 3, "failed": 0, "errors": []}
-        )
+        mock_es.get_document = AsyncMock(return_value=None)
+        mock_es.create_document = AsyncMock(return_value=True)
         session_id = await self._create_and_validate_session(client, "fleet")
         resp = await client.post(
             "/api/import/commit",
@@ -382,9 +385,8 @@ class TestCommit:
 
     async def test_commit_with_skip_errors(self, client, mock_es):
         """Commit with skip_errors=True."""
-        mock_es.bulk_index_documents = AsyncMock(
-            return_value={"successful": 2, "failed": 0, "errors": []}
-        )
+        mock_es.get_document = AsyncMock(return_value=None)
+        mock_es.create_document = AsyncMock(return_value=True)
         session_id = await self._create_and_validate_session(client, "inventory")
         resp = await client.post(
             "/api/import/commit",
@@ -417,7 +419,7 @@ class TestCommit:
             json={"session_id": session_id, "skip_errors": False},
         )
         assert resp.status_code == 409
-        assert "not been validated" in resp.json()["detail"].lower()
+        assert "not been validated" in resp.json()["message"].lower()
 
 
 # ===========================================================================
@@ -543,7 +545,7 @@ class TestHistorySession:
         )
         resp = await client.get(f"/api/import/history/{uuid.uuid4()}")
         assert resp.status_code == 404
-        assert "not found" in resp.json()["detail"].lower()
+        assert "not found" in resp.json()["message"].lower()
 
 
 # ===========================================================================
@@ -642,9 +644,8 @@ class TestImportWorkflow:
 
     async def test_full_csv_import_workflow(self, client, mock_es):
         """Run the complete import workflow for fleet data."""
-        mock_es.bulk_index_documents = AsyncMock(
-            return_value={"successful": 3, "failed": 0, "errors": []}
-        )
+        mock_es.get_document = AsyncMock(return_value=None)
+        mock_es.create_document = AsyncMock(return_value=True)
 
         # Step 1: Upload CSV
         csv_data = _csv_bytes_for("fleet")

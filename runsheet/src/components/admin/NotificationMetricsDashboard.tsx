@@ -9,6 +9,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { dateTime, number, pct } from "../../lib/format";
 import {
   type CommunicationMetrics,
   getCommunicationMetrics,
@@ -20,12 +21,12 @@ import { Badge, Button, PageHeader } from "../ui";
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
 function formatLatency(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
+  if (ms < 1000) return `${number(ms)}ms`;
+  return `${number(ms / 1000, { decimals: 2 })}s`;
 }
 
 function formatPercentage(rate: number): string {
-  return `${(rate * 100).toFixed(2)}%`;
+  return pct(rate, { fraction: true, decimals: 2 });
 }
 
 function getLatestValue(dataPoints: MetricDataPoint[]): number | null {
@@ -174,11 +175,15 @@ export default function NotificationMetricsDashboard() {
       <div className="bg-white rounded-xl border border-gray-200 p-4 mb-6">
         <div className="flex flex-wrap gap-4 items-end">
           <div className="flex-1 min-w-[200px]">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label
+              htmlFor="metrics-start"
+              className="block text-sm font-medium text-gray-700 mb-2"
+            >
               Start Date
             </label>
             <input
               type="date"
+              id="metrics-start"
               value={dateRange.start}
               onChange={(e) =>
                 setDateRange((prev) => ({ ...prev, start: e.target.value }))
@@ -188,11 +193,15 @@ export default function NotificationMetricsDashboard() {
           </div>
 
           <div className="flex-1 min-w-[200px]">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label
+              htmlFor="metrics-end"
+              className="block text-sm font-medium text-gray-700 mb-2"
+            >
               End Date
             </label>
             <input
               type="date"
+              id="metrics-end"
               value={dateRange.end}
               onChange={(e) =>
                 setDateRange((prev) => ({ ...prev, end: e.target.value }))
@@ -202,10 +211,14 @@ export default function NotificationMetricsDashboard() {
           </div>
 
           <div className="flex-1 min-w-[200px]">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
+            <label
+              htmlFor="metrics-interval"
+              className="block text-sm font-medium text-gray-700 mb-2"
+            >
               Interval
             </label>
             <select
+              id="metrics-interval"
               value={interval}
               onChange={(e) => setInterval(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
@@ -432,12 +445,7 @@ function MetricChart({ title, data, formatValue, color }: MetricChartProps) {
           {data.map((point, index) => (
             <div key={index} className="flex items-center gap-3">
               <div className="text-xs text-gray-500 w-32 flex-shrink-0">
-                {new Date(point.timestamp).toLocaleString(undefined, {
-                  month: "short",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
+                {dateTime(point.timestamp)}
               </div>
               <div className="flex-1 bg-gray-100 rounded-full h-6 relative overflow-hidden">
                 <div

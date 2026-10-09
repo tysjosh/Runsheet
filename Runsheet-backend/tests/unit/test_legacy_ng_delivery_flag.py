@@ -6,6 +6,8 @@ Covers:
 - The legacy NG last-mile ops read surface 404s when the flag is off.
 - Ops platform monitoring and the per-tenant flag admin routes are NOT gated,
   so a disabled surface can still be observed and re-enabled.
+- The poison-queue monitor is ``platform_admin`` only, and the dead
+  ingestion/indexing monitors are gone (UI revamp task 0.2).
 - The legacy support-ticket surface 404s when the flag is off.
 - The Dinee **voice** integration (Surface A ``POST /voice-intake`` and the
   ``/voice/*`` prefix) is untouched by the flag. The audit's "Dinee webhook"
@@ -18,7 +20,7 @@ Audit reference: product-owner-audit-2026-05-08 recommendation #1.
 """
 
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -65,8 +67,6 @@ GATED_OPS_PATHS = [
 # monitoring plus the per-tenant flag admin API.
 UNGATED_OPS_PATHS = [
     "/api/ops/metrics/prometheus",
-    "/api/ops/monitoring/ingestion",
-    "/api/ops/monitoring/indexing",
     "/api/ops/monitoring/poison-queue",
     "/api/ops/admin/feature-flags/{tenant_id}/enable",
     "/api/ops/admin/feature-flags/{tenant_id}/disable",
@@ -89,6 +89,16 @@ def ops_client():
     mock_ops_es = MagicMock(spec=OpsElasticsearchService)
     mock_ops_es.client = mock_es_client
 
+    # The ops endpoints call ``es.search_documents(...)`` now instead of
+    # ``es.client.search(...)`` — a raw client call bypasses the
+    # Postgres/Elasticsearch backend switch. Delegate the facade to the same
+    # canned client so tests that reconfigure ``mock_es_client.search``
+    # mid-test keep working: the lambda reads it at call time.
+    mock_ops_es.search_documents = AsyncMock(
+        side_effect=lambda index, query, **kw: mock_es_client.search(
+            index=index, body=query
+        )
+    )
     configure_ops_api(ops_es_service=mock_ops_es, feature_flag_service=None)
 
     async def _override_tenant():
@@ -179,6 +189,50 @@ class TestOpsSurfaceGated:
             assert require_ops_enabled not in dependency_calls, (
                 f"{path} unexpectedly depends on the legacy_ng_delivery gate"
             )
+
+
+# ---------------------------------------------------------------------------
+# Ops platform monitoring: scope (UI revamp task 0.2)
+# ---------------------------------------------------------------------------
+
+
+def _as_roles(client: TestClient, roles: list[str]) -> None:
+    async def _override_tenant():
+        return TenantContext(
+            tenant_id="tenant-1", user_id="user-1", has_pii_access=False, roles=roles
+        )
+
+    client.app.dependency_overrides[get_tenant_context] = _override_tenant
+
+
+class TestOpsMonitoringScope:
+    """The poison queue is platform-wide, so only Runsheet staff may read it."""
+
+    @pytest.mark.parametrize(
+        "roles", [["dispatcher"], ["driver"], ["admin"], []],
+        ids=["dispatcher", "driver", "tenant-admin", "no-role"],
+    )
+    def test_poison_queue_forbids_tenant_roles(self, ops_client, roles):
+        _as_roles(ops_client, roles)
+        resp = ops_client.get("/api/ops/monitoring/poison-queue")
+        assert resp.status_code == 403
+        body = resp.json()
+        assert body["details"] == {"required_roles": ["platform_admin"]}
+        assert "queue_depth" not in resp.text
+
+    def test_poison_queue_allows_platform_admin(self, ops_client):
+        _as_roles(ops_client, ["platform_admin", "admin"])
+        resp = ops_client.get("/api/ops/monitoring/poison-queue")
+        assert resp.status_code == 200
+        assert resp.json()["data"]["queue_depth"] == 0
+
+    @pytest.mark.parametrize(
+        "path", ["/api/ops/monitoring/ingestion", "/api/ops/monitoring/indexing"]
+    )
+    def test_dead_monitors_are_gone(self, ops_client, path):
+        _as_roles(ops_client, ["platform_admin", "admin"])
+        assert ops_client.get(path).status_code == 404
+        assert not [r for r in router.routes if r.path == path]
 
 
 # ---------------------------------------------------------------------------

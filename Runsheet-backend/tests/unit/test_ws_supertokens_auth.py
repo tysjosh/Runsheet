@@ -235,6 +235,116 @@ class TestAuthenticateDriverSupertokens:
 
 
 # ---------------------------------------------------------------------------
+# Handshake Origin check — Cross-Site WebSocket Hijacking (staging finding F2)
+# ---------------------------------------------------------------------------
+
+_APP_ORIGIN = "https://app.example.test"
+_EVIL_ORIGIN = "https://evil.example.com"
+
+
+class TestHandshakeOrigin:
+    """A valid credential from a disallowed Origin is rejected before verify."""
+
+    @pytest.fixture(autouse=True)
+    def _cors(self, monkeypatch):
+        monkeypatch.setenv("CORS_ORIGINS", f'["{_APP_ORIGIN}"]')
+
+    @pytest.fixture
+    def calls(self):
+        seen = []
+
+        async def fake_verify(access_token, anti_csrf):
+            seen.append(access_token)
+            return {"tenant_id": "t-1", "driver_id": "d-1"}
+
+        ws.configure_ws_session_verifier(fake_verify)
+        return seen
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "credential",
+        [{"cookie": "sAccessToken=tok"}, {"authorization": "Bearer tok"}],
+        ids=["cookie", "bearer"],
+    )
+    async def test_disallowed_origin_rejected_without_verifying(
+        self, calls, credential
+    ):
+        websocket = _make_ws(headers={**credential, "origin": _EVIL_ORIGIN})
+
+        assert await ws._authenticate_tenant(websocket) is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_null_origin_rejected(self, calls):
+        websocket = _make_ws(
+            headers={"cookie": "sAccessToken=tok", "origin": "null"}
+        )
+
+        assert await ws._authenticate_tenant(websocket) is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_driver_channel_disallowed_origin_rejected(self, calls):
+        websocket = _make_ws(
+            headers={"authorization": "Bearer tok", "origin": _EVIL_ORIGIN}
+        )
+
+        assert await ws._authenticate_driver(websocket) is None
+        assert calls == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("origin", [_APP_ORIGIN, _APP_ORIGIN + "/"])
+    async def test_allowed_origin_with_cookie_accepted(self, calls, origin):
+        websocket = _make_ws(
+            headers={"cookie": "sAccessToken=tok", "origin": origin}
+        )
+
+        assert await ws._authenticate_tenant(websocket) == "t-1"
+        assert calls == ["tok"]
+
+    @pytest.mark.asyncio
+    async def test_no_origin_with_bearer_accepted(self, calls):
+        """Native clients that send no Origin still need a credential."""
+        websocket = _make_ws(headers={"authorization": "Bearer tok"})
+
+        assert await ws._authenticate_tenant(websocket) == "t-1"
+
+    @pytest.mark.asyncio
+    async def test_same_origin_with_host_accepted(self, calls):
+        """React Native sends the target URL as Origin (driver app)."""
+        websocket = _make_ws(
+            headers={
+                "authorization": "Bearer tok",
+                "origin": "https://api.example.test",
+                "host": "api.example.test",
+            }
+        )
+
+        assert await ws._authenticate_driver(websocket) == ("t-1", "d-1")
+
+    @pytest.mark.asyncio
+    async def test_suffix_lookalike_origin_rejected(self, calls):
+        websocket = _make_ws(
+            headers={
+                "cookie": "sAccessToken=tok",
+                "origin": _APP_ORIGIN + ".evil.com",
+                "host": "api.example.test",
+            }
+        )
+
+        assert await ws._authenticate_tenant(websocket) is None
+
+    @pytest.mark.asyncio
+    async def test_wildcard_entry_is_not_honoured(self, calls, monkeypatch):
+        monkeypatch.setenv("CORS_ORIGINS", '["*"]')
+        websocket = _make_ws(
+            headers={"cookie": "sAccessToken=tok", "origin": _EVIL_ORIGIN}
+        )
+
+        assert await ws._authenticate_tenant(websocket) is None
+
+
+# ---------------------------------------------------------------------------
 # Token redaction — the credential value is never logged (Req 7.4, 7.5)
 # ---------------------------------------------------------------------------
 

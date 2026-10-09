@@ -110,25 +110,31 @@ class FuelPlanningWSManager(BaseWSManager):
     # ------------------------------------------------------------------
 
     async def broadcast_event(self, event_type: str, data: Dict[str, Any]) -> int:
-        """Broadcast a generic event envelope to every connected client.
+        """Broadcast a generic event envelope to the payload's tenant only.
 
         Matches the envelope shape used by ``AgentActivityWSManager`` and
         ``PlanExecutionWSManager`` (``{type, data, timestamp}``) so UI
-        clients can reuse the same dispatcher/parser.
+        clients can reuse the same dispatcher/parser. Events are
+        tenant-scoped (OI-01): data without a ``tenant_id`` is dropped with
+        a WARNING (fail closed).
 
         Args:
             event_type: The event name (e.g. ``customer_tank_forecast_ready``).
-            data: The event payload.
+            data: The event payload. Must carry ``tenant_id``.
 
         Returns:
             The number of clients that successfully received the message.
         """
+        tenant_id = (data or {}).get("tenant_id") if isinstance(data, dict) else None
+        if not tenant_id:
+            logger.warning("%s without tenant_id dropped", event_type)
+            return 0
         message = {
             "type": event_type,
             "data": data,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        return await self.broadcast(message)
+        return await self.broadcast_to_tenant(tenant_id, message)
 
     async def broadcast_customer_tank_forecast_ready(
         self,

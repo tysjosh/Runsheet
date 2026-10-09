@@ -34,6 +34,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     TERMINAL_WAIT_CACHE_KEY_TEMPLATE,
     TERMINAL_WAIT_CACHE_TTL_SECONDS,
@@ -81,6 +83,15 @@ class _FakeESService:
         self.index_calls.append(
             {"index": index, "doc_id": doc_id, "doc": dict(document)}
         )
+
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
 
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int
@@ -253,6 +264,8 @@ def _build_app(
     )
 
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(
         tenant_id=tenant_id
@@ -324,7 +337,7 @@ class TestSubmitTerminalWaitReport:
         )
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_cross_tenant_terminal_returns_404(self):
         """A terminal owned by another tenant must surface as 404 — the
@@ -340,7 +353,7 @@ class TestSubmitTerminalWaitReport:
         )
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_negative_wait_minutes_rejected(self):
         app, es, _ = _build_app(redis_client=_FakeRedis())
@@ -541,7 +554,7 @@ class TestGetTerminalWaitSummary:
         resp = client.get("/api/fuel/terminals/term_missing/wait-summary")
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_summary_cached_to_redis_after_compute(self):
         redis = _FakeRedis()

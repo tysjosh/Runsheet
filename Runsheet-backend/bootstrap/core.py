@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,14 @@ _invoice_draft_finalize_task = None
 # Module-level reference for the AR aging snapshot background task
 # so shutdown can cancel it.
 _ar_aging_snapshot_task = None
+
+# Module-level reference for the analytics snapshot background task
+# so shutdown can cancel it.
+_analytics_snapshot_task = None
+
+# Margin feed background tasks (gap sweep, weekly report).
+_margin_gap_sweep_task = None
+_margin_weekly_report_task = None
 
 # ── Commerce / Intake flag dependency keys ──────────────────────────
 COMMERCE_BACKBONE_FLAG_KEY = "commerce_backbone"
@@ -209,35 +218,30 @@ async def assert_driver_surface_wired(container: ServiceContainer) -> None:
             "and the order.delivered subscribers stay dormant"
         )
 
-    # Declared-index presence. Bounded work: one exists() call per declared
-    # index. A failure of the check itself is never treated as a violation —
-    # an unreachable cluster is a different fault with its own signal.
-    es_service = container.es_service if container.has("es_service") else None
-    if es_service is None or getattr(es_service, "client", None) is None:
-        logger.debug(
-            "Skipping driver index presence assertion: "
-            "Elasticsearch client not connected"
-        )
-    else:
-        try:
-            from driver.services.driver_es_mappings import DRIVER_INDEX_MAPPINGS
-
-            missing = [
-                index_name
-                for index_name in DRIVER_INDEX_MAPPINGS
-                if not es_service.client.indices.exists(index=index_name)
-            ]
-            if missing:
-                problems.append(
-                    "declared driver index absent from Elasticsearch: "
-                    f"{', '.join(sorted(missing))} — the dynamic: strict "
-                    "declaration is not in force for these, so the first write "
-                    "auto-creates them with dynamic: true"
-                )
-        except Exception as exc:
-            logger.warning(
-                "Driver index presence assertion could not complete: %s", exc
-            )
+    # The declared-index presence check is gone with the cluster.
+    #
+    # It called ``indices.exists`` for each declared driver index and complained
+    # about any that were absent, because on Elasticsearch the first write to a
+    # missing index auto-created it with ``dynamic: true`` — silently discarding
+    # the ``dynamic: strict`` declaration. The document store is one Postgres table
+    # created by migration ``0009_es_documents``, so there is no index to be absent
+    # and that failure mode cannot occur.
+    #
+    # Phase 5 scoped the check with ``settings.document_store_is_postgres``. Phase 6
+    # deleted that property and left the read here, which raised AttributeError into
+    # the caller's ``except`` in ``bootstrap/__init__.py`` — so the WHOLE assertion,
+    # including the ``order_service`` check above, silently stopped running in every
+    # environment. Found by booting with ENVIRONMENT=staging; the unit tests missed
+    # it because they set ``document_store_is_postgres`` on a ``MagicMock``
+    # container, supplying an attribute production settings no longer had.
+    #
+    # What IS lost with strict mappings is worth stating rather than glossing:
+    # ``dynamic: strict`` rejected an undeclared field at write time, so a typo'd
+    # key was a 400. jsonb accepts anything, so the same typo now stores silently.
+    # The compensating controls are the Pydantic models on the way in
+    # (``extra="forbid"`` on every driver-surface model) and
+    # ``persistence/document_field_policy.py``, which still reads the declared
+    # mappings — that is why the mapping modules survive.
 
     if not problems:
         return
@@ -257,6 +261,58 @@ async def assert_driver_surface_wired(container: ServiceContainer) -> None:
     raise DriverBootstrapMisconfigurationError(msg)
 
 
+def wire_margin_feed(container: ServiceContainer, elasticsearch_service) -> object:
+    """Construct the margin feed services and attach the hooks (margin-feed FR3).
+
+    Builds MarginRepository, MarginCostEntryService and MarginService, sets
+    the invoice margin hook and, when the OrderService already exists,
+    registers MarginOrderSubscriber (otherwise bootstrap/fuel late-binds it,
+    the same reason as the invoice subscriber). Every hook and job checks
+    ``commerce_margin_feed_enabled`` per event / cycle, so a flag flip needs
+    no restart. The signal bus is resolved lazily: bootstrap/agents creates
+    it after core.
+    """
+    from commerce.services.margin_cost_entry_service import MarginCostEntryService
+    from commerce.services.margin_repository import MarginRepository
+    from commerce.services.margin_service import MarginService
+    from fuel.terminal_models import TerminalRepository
+
+    terminals = TerminalRepository(elasticsearch_service)
+    margin_repository = MarginRepository()
+    invoice_service = (
+        container.commerce_invoice_service
+        if container.has("commerce_invoice_service")
+        else None
+    )
+    margin_service = MarginService(
+        margin_repository,
+        es_service=elasticsearch_service,
+        terminals=terminals,
+        invoice_service=invoice_service,
+        signal_bus_provider=lambda: (
+            container.signal_bus if container.has("signal_bus") else None
+        ),
+    )
+    container.margin_repository = margin_repository
+    container.margin_cost_entry_service = MarginCostEntryService(
+        margin_repository,
+        terminals=terminals,
+        es_service=elasticsearch_service,
+    )
+    container.margin_service = margin_service
+    if invoice_service is not None:
+        invoice_service.set_margin_hook(margin_service.hook)
+    if container.has("order_service"):
+        from commerce.hooks.margin_order_subscriber import (
+            register_margin_order_subscribers,
+        )
+
+        container.margin_order_subscribers = register_margin_order_subscribers(
+            container.order_service, margin_service.hook
+        )
+    return margin_service
+
+
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register core infrastructure services."""
     from config.settings import get_settings
@@ -272,12 +328,57 @@ async def initialize(app, container: ServiceContainer) -> None:
     settings = get_settings()
     container.settings = settings
 
+    # ── Sweep leader election ─────────────────────────────────────────
+    # Started first, before anything schedules a periodic job, because every
+    # background job in this process consults it. Without it the API had to run
+    # as exactly one task — two processes meant two AR-aging snapshots for the
+    # same day and two overdue sweeps racing the same invoices — which made
+    # every deploy a downtime window. See persistence/leader_election.py.
+    try:
+        from persistence.leader_election import SweepLeader, set_sweep_leader
+
+        sweep_leader = SweepLeader()
+        set_sweep_leader(sweep_leader)
+        container.sweep_leader = sweep_leader
+        await sweep_leader.start()
+    except Exception as exc:
+        # Fail closed on the *scheduling* side rather than the request side: if
+        # election cannot start, leave no leader registered so periodic jobs run
+        # (single-process assumption) and say so loudly, rather than silently
+        # running no background work at all.
+        logger.error(
+            "Sweep leader election failed to start (%s) — periodic jobs will run "
+            "in every process. Do NOT run more than one replica until this is "
+            "resolved.",
+            exc,
+            exc_info=True,
+        )
+
     # Telemetry
     telemetry_service = initialize_telemetry(settings)
     container.telemetry_service = telemetry_service
 
     # Elasticsearch (module-level singleton)
     container.es_service = elasticsearch_service
+
+    # FileStorageService (S3). Built here, before any domain boots, so
+    # compliance (terminal BOL raw documents) and agents share one instance.
+    # It used to be built in the agents bootstrap, which runs after
+    # compliance, so terminal BOLs never had storage (finding C9).
+    try:
+        from services.file_storage_service import build_file_storage_service_from_env
+
+        file_storage_service = build_file_storage_service_from_env()
+        if file_storage_service is not None:
+            container.file_storage_service = file_storage_service
+            logger.info("FileStorageService registered")
+        else:
+            logger.info(
+                "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
+                "FUEL_OPS_S3_REGION not configured"
+            )
+    except Exception as exc:
+        logger.warning("FileStorageService wiring failed: %s", exc)
 
     # Seed baseline data (development / demo only).
     #
@@ -333,13 +434,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # pattern in bootstrap/agents.py but gates on the flag so tenants
     # without commerce enabled never pay the index-creation cost.
     if getattr(settings, "commerce_backbone_enabled", False):
-        try:
-            from commerce.services.commerce_es_mappings import setup_commerce_indices
-
-            setup_commerce_indices(elasticsearch_service)
-            logger.info("Commerce backbone ES indices provisioned")
-        except Exception as exc:
-            logger.warning("Commerce backbone ES index setup failed: %s", exc)
 
         # ── Commerce Customer API wiring (Task 3.3) ────────────────────
         # Wire the CustomerService into the customer_endpoints module so
@@ -354,6 +448,51 @@ async def initialize(app, container: ServiceContainer) -> None:
             logger.info("Commerce customer API configured")
         except Exception as exc:
             logger.warning("Commerce customer API wiring failed: %s", exc)
+
+        # ── Customer portal principal check (OI-06, design §2.3) ──────
+        # Only when CustomerService exists; without it the portal guard
+        # fails closed (503 PORTAL_UNAVAILABLE).
+        if container.has("commerce_customer_service"):
+            try:
+                from portal.api.me_endpoints import configure_portal_me
+                from portal.services.principal import (
+                    PortalPrincipalChecker,
+                    configure_portal_principal,
+                )
+
+                configure_portal_principal(
+                    PortalPrincipalChecker(
+                        customer_service=container.commerce_customer_service,
+                        cache_seconds=settings.portal_principal_cache_seconds,
+                    )
+                )
+                configure_portal_me(
+                    customer_service=container.commerce_customer_service
+                )
+                logger.info("Customer portal principal checker configured")
+
+                # Portal-user provisioning (design §1.7). The unit of work,
+                # the SuperTokens seams and the link minter default to their
+                # production implementations; only the audit sink comes from
+                # the container.
+                from portal.services.portal_access_service import (
+                    PortalAccessService,
+                    configure_portal_access,
+                )
+
+                configure_portal_access(
+                    PortalAccessService(
+                        customer_service=container.commerce_customer_service,
+                        telemetry_service=(
+                            container.telemetry_service
+                            if container.has("telemetry_service")
+                            else None
+                        ),
+                    )
+                )
+                logger.info("Customer portal access service configured")
+            except Exception as exc:
+                logger.warning("Customer portal principal wiring failed: %s", exc)
 
         # ── Commerce Account API wiring (Task 4.3) ─────────────────────
         # Wire the AccountService and CreditService into the
@@ -559,6 +698,27 @@ async def initialize(app, container: ServiceContainer) -> None:
 
             configure_invoice_api(invoice_service=_inv_svc_for_api)
             logger.info("Commerce invoice API configured")
+
+            from portal.api.me_endpoints import configure_portal_me
+
+            configure_portal_me(invoice_service=_inv_svc_for_api)
+
+            # Customer portal invoices (OI-06, design §5).
+            from portal.services.portal_invoice_service import wire_portal_invoices
+
+            wire_portal_invoices(
+                invoice_service=_inv_svc_for_api,
+                account_service=(
+                    container.commerce_account_service
+                    if container.has("commerce_account_service")
+                    else None
+                ),
+                customer_service=(
+                    container.commerce_customer_service
+                    if container.has("commerce_customer_service")
+                    else None
+                ),
+            )
         except Exception as exc:
             logger.warning("Commerce invoice API wiring failed: %s", exc)
 
@@ -680,6 +840,20 @@ async def initialize(app, container: ServiceContainer) -> None:
         except Exception as exc:
             logger.warning("Commerce external sync wiring failed: %s", exc)
 
+        # ── Margin feed (margin-feed FR3) ──────────────────────────────
+        # MarginService, the invoice margin hook and the order-event
+        # subscriber, and the admin margin API (margin_endpoints).
+        try:
+            from commerce.api.margin_endpoints import configure_margin_api
+            _margin_svc_for_api = wire_margin_feed(container, elasticsearch_service)
+            configure_margin_api(
+                margin_service=_margin_svc_for_api,
+                cost_entry_service=container.margin_cost_entry_service,
+            )
+            logger.info("Margin feed services and API wired")
+        except Exception as exc:
+            logger.warning("Margin feed wiring failed: %s", exc)
+
         # ── Commerce Sync Pull Subscribers (Task 9.3) ─────────────────
         # Register on_qbo_payment_observed and on_stripe_charge_observed
         # as subscribers on the respective connector sync_pull output
@@ -762,30 +936,24 @@ async def initialize(app, container: ServiceContainer) -> None:
                 else _CreditServiceCls(es_service=elasticsearch_service)
             )
 
-            async def _periodic_credit_override_expiry() -> None:
-                """Background task that expires stale credit overrides."""
-                try:
-                    while True:
-                        await asyncio.sleep(CREDIT_OVERRIDE_EXPIRY_INTERVAL_SECONDS)
-                        try:
-                            expired = await run_credit_override_expiry_cycle(
-                                es_service=elasticsearch_service,
-                                credit_service=_expiry_credit_service,
-                            )
-                            if expired:
-                                logger.info(
-                                    "Credit override expiry job: %d override(s) expired",
-                                    expired,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "Credit override expiry job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("Credit override expiry task cancelled")
+            async def _credit_override_expiry_cycle() -> None:
+                """One pass expiring stale credit overrides."""
+                expired = await run_credit_override_expiry_cycle(
+                    es_service=elasticsearch_service,
+                    credit_service=_expiry_credit_service,
+                )
+                if expired:
+                    logger.info(
+                        "Credit override expiry job: %d override(s) expired",
+                        expired,
+                    )
 
             _credit_override_expiry_task = asyncio.create_task(
-                _periodic_credit_override_expiry()
+                run_periodic(
+                    "commerce.credit-override-expiry",
+                    CREDIT_OVERRIDE_EXPIRY_INTERVAL_SECONDS,
+                    _credit_override_expiry_cycle,
+                )
             )
             logger.info(
                 "Credit override expiry job started (interval: %ds)",
@@ -793,6 +961,62 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
         except Exception as exc:
             logger.warning("Credit override expiry job wiring failed: %s", exc)
+
+        # ── Margin gap sweep + weekly report jobs (margin-feed) ────────
+        # Leader-elected via run_periodic. Each cycle returns before any
+        # query when commerce_margin_feed_enabled or persistence is off.
+        try:
+            global _margin_gap_sweep_task, _margin_weekly_report_task
+            from commerce.services.margin_jobs import (
+                MARGIN_GAP_SWEEP_INTERVAL_SECONDS,
+                MARGIN_WEEKLY_REPORT_INTERVAL_SECONDS,
+                run_margin_gap_sweep_cycle,
+                run_margin_weekly_report_cycle,
+            )
+
+            if container.has("margin_service"):
+                _margin_service = container.margin_service
+
+                async def _margin_gap_sweep_cycle() -> None:
+                    """One margin gap-sweep pass."""
+                    counts = await run_margin_gap_sweep_cycle(
+                        _margin_service, es_service=elasticsearch_service
+                    )
+                    if counts.get("written"):
+                        logger.info(
+                            "Margin gap sweep: %d record(s) written",
+                            counts["written"],
+                        )
+
+                async def _margin_weekly_report_cycle() -> None:
+                    """One margin weekly-report pass."""
+                    written = await run_margin_weekly_report_cycle(_margin_service)
+                    if written:
+                        logger.info(
+                            "Margin weekly report job: %d report(s) written", written
+                        )
+
+                _margin_gap_sweep_task = asyncio.create_task(
+                    run_periodic(
+                        "commerce.margin-gap-sweep",
+                        MARGIN_GAP_SWEEP_INTERVAL_SECONDS,
+                        _margin_gap_sweep_cycle,
+                    )
+                )
+                _margin_weekly_report_task = asyncio.create_task(
+                    run_periodic(
+                        "commerce.margin-weekly-report",
+                        MARGIN_WEEKLY_REPORT_INTERVAL_SECONDS,
+                        _margin_weekly_report_cycle,
+                    )
+                )
+                logger.info(
+                    "Margin jobs started (gap sweep %ds, weekly report %ds)",
+                    MARGIN_GAP_SWEEP_INTERVAL_SECONDS,
+                    MARGIN_WEEKLY_REPORT_INTERVAL_SECONDS,
+                )
+        except Exception as exc:
+            logger.warning("Margin job wiring failed: %s", exc)
 
         # ── Invoice overdue scheduled job ────────────────────────────────
         # Scans invoices_current for open/partial invoices past their
@@ -814,30 +1038,24 @@ async def initialize(app, container: ServiceContainer) -> None:
                 else _InvoiceServiceCls(es_service=elasticsearch_service)
             )
 
-            async def _periodic_invoice_overdue() -> None:
-                """Background task that transitions past-due invoices to overdue."""
-                try:
-                    while True:
-                        await asyncio.sleep(INVOICE_OVERDUE_INTERVAL_SECONDS)
-                        try:
-                            transitioned = await run_invoice_overdue_cycle(
-                                es_service=elasticsearch_service,
-                                invoice_service=_overdue_invoice_service,
-                            )
-                            if transitioned:
-                                logger.info(
-                                    "Invoice overdue job: %d invoice(s) transitioned",
-                                    transitioned,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "Invoice overdue job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("Invoice overdue task cancelled")
+            async def _invoice_overdue_cycle() -> None:
+                """One pass transitioning past-due invoices to overdue."""
+                transitioned = await run_invoice_overdue_cycle(
+                    es_service=elasticsearch_service,
+                    invoice_service=_overdue_invoice_service,
+                )
+                if transitioned:
+                    logger.info(
+                        "Invoice overdue job: %d invoice(s) transitioned",
+                        transitioned,
+                    )
 
             _invoice_overdue_task = asyncio.create_task(
-                _periodic_invoice_overdue()
+                run_periodic(
+                    "commerce.invoice-overdue",
+                    INVOICE_OVERDUE_INTERVAL_SECONDS,
+                    _invoice_overdue_cycle,
+                )
             )
             logger.info(
                 "Invoice overdue job started (interval: %ds)",
@@ -862,34 +1080,26 @@ async def initialize(app, container: ServiceContainer) -> None:
                 else None
             )
 
-            async def _periodic_invoice_draft_finalize() -> None:
-                """Background task that finalizes drafts past their grace."""
-                try:
-                    while True:
-                        await asyncio.sleep(
-                            INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS
-                        )
-                        try:
-                            finalized = await run_invoice_draft_finalize_cycle(
-                                es_service=elasticsearch_service,
-                                invoice_service=_overdue_invoice_service,
-                                redis_client=_draft_redis,
-                            )
-                            if finalized:
-                                logger.info(
-                                    "Invoice draft-finalize job: %d "
-                                    "invoice(s) finalized",
-                                    finalized,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "Invoice draft-finalize job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("Invoice draft-finalize task cancelled")
+            async def _invoice_draft_finalize_cycle() -> None:
+                """One pass finalizing drafts past their grace."""
+                finalized = await run_invoice_draft_finalize_cycle(
+                    es_service=elasticsearch_service,
+                    invoice_service=_overdue_invoice_service,
+                    redis_client=_draft_redis,
+                )
+                if finalized:
+                    logger.info(
+                        "Invoice draft-finalize job: %d "
+                        "invoice(s) finalized",
+                        finalized,
+                    )
 
             _invoice_draft_finalize_task = asyncio.create_task(
-                _periodic_invoice_draft_finalize()
+                run_periodic(
+                    "commerce.invoice-draft-finalize",
+                    INVOICE_DRAFT_FINALIZE_INTERVAL_SECONDS,
+                    _invoice_draft_finalize_cycle,
+                )
             )
             logger.info(
                 "Invoice draft-finalize job started (interval: %ds)",
@@ -919,30 +1129,29 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.commerce_ar_aging_service = _snapshot_ar_aging_service
 
-            async def _periodic_ar_aging_snapshot() -> None:
-                """Background task that writes daily AR aging snapshots."""
-                try:
-                    while True:
-                        await asyncio.sleep(AR_AGING_SNAPSHOT_INTERVAL_SECONDS)
-                        try:
-                            written = await run_ar_aging_snapshot_cycle(
-                                es_service=elasticsearch_service,
-                                ar_aging_service=_snapshot_ar_aging_service,
-                            )
-                            if written:
-                                logger.info(
-                                    "AR aging snapshot job: %d snapshot(s) written",
-                                    written,
-                                )
-                        except Exception as exc:
-                            logger.error(
-                                "AR aging snapshot job failed: %s", exc
-                            )
-                except asyncio.CancelledError:
-                    logger.info("AR aging snapshot task cancelled")
+            async def _ar_aging_snapshot_cycle() -> None:
+                """One pass writing daily AR aging snapshots."""
+                written = await run_ar_aging_snapshot_cycle(
+                    es_service=elasticsearch_service,
+                    ar_aging_service=_snapshot_ar_aging_service,
+                )
+                if written:
+                    logger.info(
+                        "AR aging snapshot job: %d snapshot(s) written",
+                        written,
+                    )
 
             _ar_aging_snapshot_task = asyncio.create_task(
-                _periodic_ar_aging_snapshot()
+                run_periodic(
+                    "commerce.ar-aging-snapshot",
+                    AR_AGING_SNAPSHOT_INTERVAL_SECONDS,
+                    _ar_aging_snapshot_cycle,
+                    # Snapshot ids are per UTC date, so a catch-up run is
+                    # idempotent. Record only successful runs so a deploy
+                    # that kills a cycle (or a failed cycle) retries on boot.
+                    run_immediately=True,
+                    record="success",
+                )
             )
             logger.info(
                 "AR aging snapshot job started (interval: %ds)",
@@ -977,6 +1186,49 @@ async def initialize(app, container: ServiceContainer) -> None:
             "commerce_backbone_enabled is off"
         )
 
+    # ── Analytics snapshot job ─────────────────────────────────────────
+    # Daily background task that computes real daily_performance /
+    # route_performance / delay_cause_analysis / regional_performance
+    # documents in analytics_events from actual delivered/failed orders,
+    # replacing the seed-only demo data. Not gated behind
+    # commerce_backbone_enabled — this scores fuel_orders_current
+    # directly and has no commerce/invoicing dependency.
+    try:
+        global _analytics_snapshot_task
+        from commerce.services.analytics_snapshot_job import (
+            run_analytics_snapshot_cycle,
+            ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
+        )
+
+        async def _analytics_snapshot_cycle() -> None:
+            """One pass computing daily analytics snapshots."""
+            snapshotted = await run_analytics_snapshot_cycle(
+                es_service=elasticsearch_service,
+            )
+            if snapshotted:
+                logger.info(
+                    "Analytics snapshot job: %d tenant(s) snapshotted",
+                    snapshotted,
+                )
+
+        _analytics_snapshot_task = asyncio.create_task(
+            run_periodic(
+                "core.analytics-snapshot",
+                ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
+                _analytics_snapshot_cycle,
+                # Doc ids are per UTC date (idempotent catch-up). Run on boot
+                # when the last *successful* run is >= 24 h old.
+                run_immediately=True,
+                record="success",
+            )
+        )
+        logger.info(
+            "Analytics snapshot job started (interval: %ds)",
+            ANALYTICS_SNAPSHOT_INTERVAL_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("Analytics snapshot job wiring failed: %s", exc)
+
     logger.info("Core infrastructure initialized")
 
 
@@ -985,6 +1237,21 @@ async def shutdown(app, container: ServiceContainer) -> None:
     global _credit_override_expiry_task
     global _invoice_overdue_task
     global _ar_aging_snapshot_task
+    global _analytics_snapshot_task
+    global _margin_gap_sweep_task
+    global _margin_weekly_report_task
+
+    # Stand down as sweep leader first, so the replacement task can pick up
+    # leadership as soon as this one's lock connection closes rather than
+    # waiting for the OS to reap it.
+    try:
+        from persistence.leader_election import set_sweep_leader
+
+        if container.has("sweep_leader"):
+            await container.sweep_leader.stop()
+        set_sweep_leader(None)
+    except Exception as exc:
+        logger.warning("Sweep leader shutdown failed: %s", exc)
 
     # Cancel the credit override expiry background task if running.
     if _credit_override_expiry_task is not None and not _credit_override_expiry_task.done():
@@ -1012,6 +1279,32 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("AR aging snapshot task stopped")
+
+    # Cancel the analytics snapshot background task if running.
+    if _analytics_snapshot_task is not None and not _analytics_snapshot_task.done():
+        _analytics_snapshot_task.cancel()
+        try:
+            await _analytics_snapshot_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Analytics snapshot task stopped")
+
+    # Margin feed: let in-flight margin tasks finish (bounded), then stop
+    # the margin jobs.
+    if container.has("margin_service"):
+        try:
+            await container.margin_service.drain(timeout=10)
+        except Exception as exc:
+            logger.warning("Margin service drain failed: %s", exc)
+    for _task in (_margin_gap_sweep_task, _margin_weekly_report_task):
+        if _task is not None and not _task.done():
+            _task.cancel()
+            try:
+                await _task
+            except asyncio.CancelledError:
+                pass
+    _margin_gap_sweep_task = None
+    _margin_weekly_report_task = None
 
     # Redis client cleanup is handled by modules that own the connection.
     logger.info("Core infrastructure shut down")

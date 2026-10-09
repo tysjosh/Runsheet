@@ -204,3 +204,31 @@ class TestHelpers:
         assert is_known_product("UNKNOWN") is False
         assert is_known_product("") is False
         assert is_known_product(None) is False  # type: ignore[arg-type]
+
+
+class TestResolveProductFilter:
+    """F12/S6: a list filter accepts a code, an alias or a category name."""
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("DIESEL_2", ["DIESEL_2"]),
+            (" diesel_2 ", ["DIESEL_2"]),
+            ("AGO", ["DIESEL_2"]),
+            ("lpg", ["PROPANE"]),
+            ("diesel", ["DIESEL_2"]),
+            ("Gasoline", ["GASOLINE_REG", "GASOLINE_PREM"]),
+            ("off_road", ["OFF_ROAD_DIESEL"]),
+        ],
+    )
+    def test_resolves(self, value, expected):
+        from fuel.services.fuel_product_catalog import resolve_product_filter
+
+        assert resolve_product_filter(value) == expected
+
+    @pytest.mark.parametrize("value", ["bogus", "", "   ", "diesels"])
+    def test_unknown_raises_value_error(self, value):
+        from fuel.services.fuel_product_catalog import resolve_product_filter
+
+        with pytest.raises(ValueError):
+            resolve_product_filter(value)

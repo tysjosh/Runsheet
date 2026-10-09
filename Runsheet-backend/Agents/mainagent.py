@@ -13,20 +13,37 @@ Validates:
 - Requirement 8.6: Gracefully degrade when Session_Store is unavailable
 """
 
+import asyncio
 import os
 import logging
 import time
-from typing import AsyncGenerator, Optional, Any
+from typing import AsyncGenerator, Dict, List, Optional, Any
 from datetime import datetime
 from strands import Agent
-from strands.models.litellm import LiteLLMModel
+# The model itself is built by Agents.model_provider.build_agent_model, which
+# owns provider selection and credential resolution for every agent entry point.
 from dotenv import load_dotenv
 from .tools import ALL_TOOLS
 from .tools._tenant_context import set_current_tenant
+from .tools.scheduling_tools import JOB_STATUS_VALUES, JOB_TYPE_VALUES
+from .tools.search_tools import FLEET_ASSET_STATUSES
 from config.settings import get_settings
 from resilience.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitOpenException
-from errors.codes import ErrorCode
 from errors.exceptions import ai_service_unavailable, circuit_open
+from .llm_errors import (
+    AI_SERVICE_UNAVAILABLE,
+    MAX_ATTEMPTS,
+    AgentServiceError,
+    ChatEvent,
+    call_with_llm_retry,
+    classify_llm_exception,
+    error_event,
+    error_event_for,
+    retry_delay,
+    safe_message_for,
+    status_event,
+    to_agent_service_error,
+)
 
 # Load environment variables
 load_dotenv()
@@ -155,28 +172,20 @@ class LogisticsAgent:
         
         # Setup Google credentials
         self.setup_gemini_credentials()
-        
-        # Initialize Gemini model through LiteLLM (using API key)
-        import os
-        # Set the env var litellm reads for Gemini API key auth
-        gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        if gemini_key:
-            os.environ["GEMINI_API_KEY"] = gemini_key
-        gemini_model = LiteLLMModel(
-            model_id="gemini/gemini-2.5-flash",
-            client_args={
-                "api_key": gemini_key,
-            },
-            params={
-                "max_tokens": 8000,
-                "temperature": 0.7,
-            }
-        )
+
+        # Model + credential resolution lives in one place (see
+        # Agents/model_provider.py). This used to read GEMINI_API_KEY with an
+        # empty-string default and hardcode a ``gemini/`` model id, so an unset
+        # key produced a model that authenticated with nothing and failed on
+        # every request rather than at startup.
+        from Agents.model_provider import build_agent_model
+
+        gemini_model = build_agent_model(self.settings)
         
         # Initialize Strands Agent with the Gemini model
         self.agent = Agent(
             model=gemini_model,
-            system_prompt="""You are a Fuel Distribution Operations AI Assistant. You help dispatchers and operations managers run a fuel delivery business — managing orders, tracking drivers, optimizing routes, and monitoring tank levels.
+            system_prompt=f"""You are a Fuel Distribution Operations AI Assistant. You help dispatchers and operations managers run a fuel delivery business — managing orders, tracking drivers, optimizing routes, and monitoring tank levels.
 
             **YOU HAVE ACCESS TO LIVE DATA!** You can search and analyze real fleet, order, driver, and fuel data using your tools.
 
@@ -209,7 +218,7 @@ class LogisticsAgent:
             - **container**: cargo_container, ISO_tank
 
             **Available Tools:**
-            - `search_fleet_data(query, asset_type=None)` - Search assets using semantic search. Accepts an optional `asset_type` parameter to filter by type (e.g. "vehicle", "vessel", "equipment", "container").
+            - `search_fleet_data(query, asset_type=None, status=None)` - Search assets using semantic search. Accepts an optional `asset_type` parameter to filter by type (e.g. "vehicle", "vessel", "equipment", "container") and an optional `status` ({', '.join(FLEET_ASSET_STATUSES)}).
             - `search_orders(status, customer_id, driver_id, call_type, product_code, start_date, end_date, intake_channel)` - Search fuel orders by status, customer, driver, call type, product, date range, or intake channel
             - `search_drivers(status, availability, hazmat_endorsement)` - Search drivers by status, availability, and qualifications
             - `get_order_events(order_id)` - Get the full event timeline for a specific fuel order
@@ -227,10 +236,10 @@ class LogisticsAgent:
             - `generate_incident_analysis(issue)` - Analyze incidents across multiple data sources
 
             **Legacy Ops Tools:**
-            - `get_ops_metrics(metric_type, bucket, start_date, end_date, tenant_id)` - Get aggregated operational metrics
-            - `generate_sla_report(start_date, end_date, tenant_id)` - Generate SLA violations report
-            - `generate_failure_report(start_date, end_date, tenant_id, intake_channel=None)` - Generate failure root-cause analysis report. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to compare failure rates across channels.
-            - `generate_driver_productivity_report(start_date, end_date, tenant_id)` - Generate driver productivity report
+            - `get_ops_metrics(metric_type, bucket, start_date, end_date)` - Get aggregated operational metrics
+            - `generate_sla_report(start_date, end_date)` - Generate SLA violations report
+            - `generate_failure_report(start_date, end_date, intake_channel=None)` - Generate failure root-cause analysis report. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to compare failure rates across channels.
+            - `generate_driver_productivity_report(start_date, end_date)` - Generate driver productivity report
 
             **IMPORTANT - Read-Only Guardrail:**
             All ops intelligence tools are strictly read-only. You must NEVER modify order, driver, or event data.
@@ -250,11 +259,11 @@ class LogisticsAgent:
             present the suggestion to the user as a recommendation but do NOT execute it.
 
             **Scheduling & Dispatch Tools (read-only):**
-            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None, tenant_id=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: cargo_transport, passenger_transport, vessel_movement, airport_transfer, crane_booking. Statuses: scheduled, assigned, in_progress, completed, cancelled, failed.
-            - `get_job_details(job_id, tenant_id=None)` - Get full details of a job including event history and cargo manifest using the authenticated tenant context.
-            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None, tenant_id=None)` - Find assets not assigned to active jobs within a time window using the authenticated tenant context. Filter by asset_type: vehicle, vessel, equipment, container.
-            - `get_scheduling_summary(tenant_id=None)` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs using the authenticated tenant context.
-            - `generate_dispatch_report(days=7, tenant_id=None, intake_channel=None)` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations using the authenticated tenant context. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to see channel-specific dispatch metrics.
+            - `search_jobs(job_type=None, status=None, asset=None, origin=None, destination=None, start_date=None, end_date=None)` - Search logistics jobs by type, status, asset, location, or time range using the authenticated tenant context. Job types: {', '.join(JOB_TYPE_VALUES)}. Statuses: {', '.join(JOB_STATUS_VALUES)}.
+            - `get_job_details(job_id)` - Get full details of a job including event history and cargo manifest using the authenticated tenant context.
+            - `find_available_assets(asset_type=None, start_time_range=None, end_time_range=None)` - Find assets not assigned to active jobs within a time window using the authenticated tenant context. Filter by asset_type: vehicle, vessel, equipment, container.
+            - `get_scheduling_summary()` - Get summary of active jobs, delayed jobs, available assets, and upcoming scheduled jobs using the authenticated tenant context.
+            - `generate_dispatch_report(days=7, intake_channel=None)` - Generate a markdown dispatch report with completion rates, delay analysis, asset utilization, and recommendations using the authenticated tenant context. Filter by intake_channel (voice, web_portal, dispatcher, csv, edi, api_partner, legacy) to see channel-specific dispatch metrics.
 
             **IMPORTANT - Scheduling Tools Read-Only Guardrail:**
             All scheduling tools are strictly read-only. You must NEVER modify job data, assignments, or status.
@@ -312,7 +321,10 @@ class LogisticsAgent:
             You: "Here's the dispatch report: [completion rates, delays, asset utilization, recommendations]"
 
             Always announce your tool usage and explain the results clearly.""",
-            tools=ALL_TOOLS
+            tools=ALL_TOOLS,
+            # The default PrintingCallbackHandler echoes every answer and
+            # tool call to stdout (CloudWatch on staging, F13).
+            callback_handler=None,
         )
         logger.info("✅ Logistics Agent initialized with Strands + Gemini 2.5 Flash")
     
@@ -348,7 +360,33 @@ class LogisticsAgent:
             self._session_store = None
             return False
     
-    async def _load_conversation_history(self, session_id: str) -> Optional[list]:
+    @staticmethod
+    def _session_key(
+        tenant_id: Optional[str],
+        user_id: Optional[str],
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        """Session-store key for one conversation, scoped to its tenant and user.
+
+        The store used to be keyed on the client-supplied ``session_id``
+        alone, so tenant B sending tenant A's session id loaded A's history
+        (staging finding F1). ``tenant_id`` comes from the verified
+        ``TenantContext`` and leads the key, so a client-chosen session id
+        cannot reach another tenant's entry. ``user_id`` (also verified)
+        follows it, so two users of one tenant who send the same session id
+        don't share history (OI-38). Returns ``None`` when any part is
+        missing; callers then skip the store entirely (fail closed).
+        """
+        if not tenant_id or not user_id or not session_id:
+            return None
+        return f"{tenant_id}:{user_id}:{session_id}"
+
+    async def _load_conversation_history(
+        self,
+        session_id: str,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> Optional[list]:
         """
         Load conversation history from the session store.
         
@@ -360,16 +398,22 @@ class LogisticsAgent:
         
         Args:
             session_id: Unique identifier for the conversation session.
+            tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
             
         Returns:
             List of conversation messages if found, None otherwise.
         """
+        key = self._session_key(tenant_id, user_id, session_id)
+        if key is None:
+            return None
+
         if not await self._ensure_session_store_connected():
             logger.debug(f"Session store unavailable, starting fresh conversation for session {session_id}")
             return None
         
         try:
-            session_data = await self._session_store.get(session_id)
+            session_data = await self._session_store.get(key)
             if session_data and "messages" in session_data:
                 logger.info(f"📥 Loaded {len(session_data['messages'])} messages for session {session_id}")
                 return session_data["messages"]
@@ -380,7 +424,13 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to load conversation history for session {session_id}: {e}")
             return None
     
-    async def _save_conversation_history(self, session_id: str, messages: list) -> bool:
+    async def _save_conversation_history(
+        self,
+        session_id: str,
+        messages: list,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
         """
         Save conversation history to the session store.
         
@@ -393,10 +443,16 @@ class LogisticsAgent:
         Args:
             session_id: Unique identifier for the conversation session.
             messages: List of conversation messages to persist.
+            tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
             
         Returns:
             True if saved successfully, False otherwise.
         """
+        key = self._session_key(tenant_id, user_id, session_id)
+        if key is None:
+            return False
+
         if not await self._ensure_session_store_connected():
             logger.debug(f"Session store unavailable, conversation not persisted for session {session_id}")
             return False
@@ -404,11 +460,13 @@ class LogisticsAgent:
         try:
             session_data = {
                 "session_id": session_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
                 "messages": messages,
                 "updated_at": datetime.utcnow().isoformat() + "Z",
                 "message_count": len(messages)
             }
-            await self._session_store.set(session_id, session_data)
+            await self._session_store.set(key, session_data)
             logger.info(f"📤 Saved {len(messages)} messages for session {session_id}")
             return True
         except Exception as e:
@@ -416,30 +474,121 @@ class LogisticsAgent:
             logger.warning(f"⚠️ Failed to save conversation history for session {session_id}: {e}")
             return False
     
-    async def _clear_session(self, session_id: str) -> bool:
+    # ------------------------------------------------------------------
+    # Orchestrator transcript (OI-17)
+    #
+    # Freeze decision (plan §E2): a text-only transcript of at most
+    # ``_ORCH_MAX_MESSAGES`` messages, each at most ``_ORCH_MAX_CHARS``
+    # characters, under ``orch:{tenant}:{user}:{session}`` with the store's
+    # default TTL. No tool input or output is stored. The simple path uses it;
+    # the planner path doesn't. A store failure means no history, never a
+    # failed request (Requirement 8.6).
+    # ------------------------------------------------------------------
+
+    _ORCH_MAX_MESSAGES = 20
+    _ORCH_MAX_CHARS = 4000
+
+    @classmethod
+    def _orchestrator_key(
+        cls,
+        tenant_id: Optional[str],
+        user_id: Optional[str],
+        session_id: Optional[str],
+    ) -> Optional[str]:
+        """Store key for the orchestrator transcript, or ``None`` (fail closed)."""
+        key = cls._session_key(tenant_id, user_id, session_id)
+        return f"orch:{key}" if key else None
+
+    async def _load_orchestrator_transcript(self, key: str) -> List[Dict[str, str]]:
+        """The stored transcript for ``key``; ``[]`` when absent or on any error."""
+        if not await self._ensure_session_store_connected():
+            return []
+        try:
+            data = await self._session_store.get(key)
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to load orchestrator transcript: {e}")
+            return []
+        messages = (data or {}).get("messages") if isinstance(data, dict) else None
+        return [
+            {"role": m["role"], "content": m["content"]}
+            for m in messages or []
+            if isinstance(m, dict)
+            and m.get("role") in ("user", "assistant")
+            and isinstance(m.get("content"), str)
+        ]
+
+    async def _save_orchestrator_transcript(
+        self,
+        key: str,
+        history: List[Dict[str, str]],
+        message: str,
+        answer: str,
+    ) -> None:
+        """Append one turn, trim to the cap, and store it. Errors are logged only."""
+        cap = self._ORCH_MAX_CHARS
+        messages = list(history) + [
+            {"role": "user", "content": message[:cap]},
+            {"role": "assistant", "content": answer[:cap]},
+        ]
+        messages = messages[-self._ORCH_MAX_MESSAGES:]
+        # A transcript the model sees must open with a user turn.
+        while messages and messages[0]["role"] != "user":
+            messages.pop(0)
+        if not await self._ensure_session_store_connected():
+            return
+        try:
+            await self._session_store.set(key, {
+                "messages": messages,
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+            })
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to save orchestrator transcript: {e}")
+
+    async def _clear_session(
+        self,
+        session_id: str,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
         """
         Clear conversation history from the session store.
         
         Args:
             session_id: Unique identifier for the conversation session.
+            tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
             
         Returns:
             True if cleared successfully, False otherwise.
         """
+        key = self._session_key(tenant_id, user_id, session_id)
+        if key is None:
+            return False
+
         if not await self._ensure_session_store_connected():
             return False
         
         try:
-            await self._session_store.delete(session_id)
+            await self._session_store.delete(key)
+            # The orchestrator transcript for the same conversation (OI-17).
+            await self._session_store.delete(f"orch:{key}")
             logger.info(f"🗑️ Cleared session {session_id}")
             return True
         except Exception as e:
             logger.warning(f"⚠️ Failed to clear session {session_id}: {e}")
             return False
     
-    def _handle_circuit_breaker_exception(self, exc: CircuitOpenException) -> dict:
+    @staticmethod
+    def _circuit_retry_after(exc: CircuitOpenException) -> Optional[int]:
+        if exc.time_until_retry:
+            return max(1, int(exc.time_until_retry.total_seconds()))
+        return None
+
+    def _handle_circuit_breaker_exception(
+        self, exc: CircuitOpenException, request_id: Optional[str] = None
+    ) -> ChatEvent:
         """
-        Handle a circuit breaker exception by returning an appropriate error response.
+        Error event for an open circuit breaker.
         
         Validates:
         - Requirement 2.5: Return specific error code indicating AI service unavailability
@@ -447,52 +596,43 @@ class LogisticsAgent:
         
         Args:
             exc: The CircuitOpenException that was raised
+            request_id: Correlates the event with server logs.
             
         Returns:
-            dict: Error response with type "error" and appropriate message
+            ChatEvent: ``error`` event with ``AI_SERVICE_UNAVAILABLE`` and
+            ``retry_after_seconds`` when known.
         """
-        time_until_retry = None
-        if exc.time_until_retry:
-            time_until_retry = int(exc.time_until_retry.total_seconds())
-        
-        error_message = f"❌ AI service temporarily unavailable. Circuit breaker '{exc.circuit_name}' is open."
-        if time_until_retry:
-            error_message += f" Please retry in {time_until_retry} seconds."
-        
-        return {
-            "type": "error",
-            "content": error_message,
-            "error_code": ErrorCode.CIRCUIT_OPEN.value,
-            "details": {
-                "circuit_name": exc.circuit_name,
-                "time_until_retry_seconds": time_until_retry,
-                "service": "gemini_api"
-            }
-        }
+        logger.warning(
+            "AI circuit '%s' open (request_id=%s)", exc.circuit_name, request_id
+        )
+        retry_after = self._circuit_retry_after(exc)
+        return error_event(
+            AI_SERVICE_UNAVAILABLE,
+            safe_message_for(AI_SERVICE_UNAVAILABLE, retry_after),
+            request_id,
+            retry_after,
+        )
     
-    def _handle_gemini_api_error(self, error: Exception) -> dict:
+    def _handle_gemini_api_error(
+        self, error: Exception, request_id: Optional[str] = None
+    ) -> ChatEvent:
         """
-        Handle a Gemini API error by returning an appropriate error response.
+        Error event for a failed LLM call. Full detail is logged server-side;
+        the event carries only the code and a safe message (F3), never
+        ``str(error)``.
         
         Validates:
         - Requirement 2.5: Return specific error code indicating AI service unavailability
         
         Args:
             error: The exception that was raised
+            request_id: Correlates the event with server logs.
             
         Returns:
-            dict: Error response with type "error" and appropriate message
+            ChatEvent: ``error`` event
         """
-        logger.error("Gemini API error: %s", error)
-        return {
-            "type": "error",
-            "content": f"❌ AI service error: {str(error)}",
-            "error_code": ErrorCode.AI_SERVICE_UNAVAILABLE.value,
-            "details": {
-                "error": str(error),
-                "service": "gemini_api"
-            }
-        }
+        logger.error("AI service error (request_id=%s)", request_id, exc_info=error)
+        return error_event_for(to_agent_service_error(error), request_id)
 
     def setup_gemini_credentials(self):
         """Setup Gemini credentials. Skips Vertex AI setup when GEMINI_API_KEY is set."""
@@ -521,15 +661,29 @@ class LogisticsAgent:
             logger.exception("Failed to setup Gemini credentials")
             os.environ['GOOGLE_CLOUD_PROJECT'] = self.settings.google_cloud_project
 
-    def clear_memory(self, session_id: Optional[str] = None):
+    async def clear_memory(
+        self,
+        session_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> bool:
         """
         Clear the agent's conversation memory.
         
         If a session_id is provided and session store is available,
-        also clears the persisted session data.
+        also clears the persisted session data for
+        (tenant_id, user_id, session_id).
+        The store delete is awaited: it used to be fire-and-forget via
+        ``create_task``, so ``/api/chat/clear`` returned before anything was
+        cleared and the next turn could still load the old history (F1).
         
         Args:
             session_id: Optional session identifier to clear from store.
+            tenant_id: Verified tenant of the caller; scopes the store key.
+            user_id: Verified user of the caller; scopes the store key.
+
+        Returns:
+            True if cleared (or nothing persisted to clear), False otherwise.
         """
         try:
             # Clear Strands agent's message history
@@ -538,17 +692,11 @@ class LogisticsAgent:
             
             # If session_id provided, also clear from session store
             if session_id:
-                import asyncio
-                try:
-                    # Try to get the running event loop
-                    loop = asyncio.get_running_loop()
-                    # Schedule the coroutine to run
-                    asyncio.create_task(self._clear_session(session_id))
-                except RuntimeError:
-                    # No running event loop, create one
-                    asyncio.run(self._clear_session(session_id))
+                return await self._clear_session(session_id, tenant_id, user_id)
+            return True
         except Exception:
             logger.exception("Failed to clear agent memory")
+            return False
 
     async def chat_streaming(
         self,
@@ -556,6 +704,8 @@ class LogisticsAgent:
         mode: str = "chat",
         session_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> AsyncGenerator[dict, None]:
         """
         Asynchronous streaming chat method with circuit breaker protection,
@@ -563,16 +713,20 @@ class LogisticsAgent:
         routing.
 
         When an ``AgentOrchestrator`` has been configured via
-        ``configure_orchestrator``, requests are routed through the
-        multi-agent orchestrator which delegates to specialist agents.
-        The orchestrator returns a complete string response that is
-        yielded as a single streaming event for backward compatibility.
+        ``configure_orchestrator``, requests are routed through
+        ``route_stream`` and its normalized ``ChatEvent``s are yielded as
+        they arrive (status, tool, text, error, done).
 
         When no orchestrator is available the method falls back to the
         legacy direct Strands agent invocation with full circuit breaker
-        and retry support. In that fallback, the tenant ContextVar is
-        bound for the duration of the streaming generator so every
-        ES-reading tool runs tenant-scoped.
+        and retry support. That path yields raw Strands event dicts plus
+        ``ChatEvent`` status/error events. The tenant ContextVar is bound for
+        the duration of the streaming generator so every ES-reading tool runs
+        tenant-scoped.
+
+        Provider failures never reach the client as text: they are retried
+        per ``Agents.llm_errors`` and reported as one ``error`` event with a
+        safe message and ``request_id`` (F3).
         
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
@@ -594,16 +748,20 @@ class LogisticsAgent:
                 it is bound to the tool ContextVar so every ES-reading tool in
                 the legacy fallback runs tenant-scoped. The orchestrator path
                 passes tenant_id through its own API.
+            request_id: The HTTP request id, echoed in error events so a user
+                can quote it and operators can find the server-side log.
+            user_id: Verified user of the caller. Scopes the session-store
+                key (OI-38) and is recorded on orchestrator activity (OI-60).
         """
-        max_retries = 3
-        retry_count = 0
         start_time = time.time()
         
         # Load conversation history from session store if session_id provided
         # Requirement 8.2: Load conversation history using session identifier
         if session_id:
             try:
-                stored_messages = await self._load_conversation_history(session_id)
+                stored_messages = await self._load_conversation_history(
+                    session_id, tenant_id, user_id
+                )
                 if stored_messages:
                     # Restore conversation history to agent
                     self.agent.messages = stored_messages
@@ -614,52 +772,76 @@ class LogisticsAgent:
         
         # ------------------------------------------------------------------
         # Orchestrator routing (Requirements 7.6, 7.7)
-        # When the orchestrator is configured, route through it for
-        # multi-agent specialist delegation. The orchestrator returns a
-        # complete string which we yield as a streaming text event to
-        # maintain backward compatibility with the SSE interface.
+        # ``route_stream`` yields normalized ChatEvents incrementally. Fall
+        # back to the legacy agent only when it fails unexpectedly before
+        # yielding anything; an AgentServiceError is already a user-safe
+        # outcome and falling back would just spend more model calls.
         # ------------------------------------------------------------------
         if _orchestrator is not None:
+            yielded_any = False
+            saw_error = False
+            # Per-(tenant, user, session) transcript (OI-17). No key, no store.
+            orch_key = self._orchestrator_key(tenant_id, user_id, session_id)
+            history = (
+                await self._load_orchestrator_transcript(orch_key) if orch_key else []
+            )
+            answer_parts: List[str] = []
             try:
                 logger.info("🔀 Routing request through AgentOrchestrator")
                 # Tenant id comes from the caller (injected by the /api/chat
                 # handler from the authenticated ``TenantContext``).
                 effective_tenant_id = _require_tenant_id(tenant_id)
-                orchestrator_response = await _orchestrator.route(
+                async for event in _orchestrator.route_stream(
                     user_message=message,
                     tenant_id=effective_tenant_id,
                     session_id=session_id,
-                )
-
-                # Record AI response time metrics (Requirement 5.4)
-                telemetry = _get_telemetry_service()
-                if telemetry:
-                    total_duration_ms = (time.time() - start_time) * 1000
-                    telemetry.record_metric(
-                        name="ai_response_time_ms",
-                        value=total_duration_ms,
-                        tags={"mode": mode, "success": "true", "method": "orchestrator"},
-                    )
-
-                # Yield the orchestrator response as a streaming text event
-                yield {"data": orchestrator_response}
-                yield {"result": orchestrator_response}
-                return
-
+                    request_id=request_id,
+                    user_id=user_id,
+                    history=history or None,
+                ):
+                    yielded_any = True
+                    # A partial error (one specialist failed, the rest of
+                    # the answer stands) is not a failed response (N4).
+                    if event.get("type") == "error" and not event.get("partial"):
+                        saw_error = True
+                    elif event.get("type") == "text":
+                        # Only answer text is remembered, never tool events.
+                        answer_parts.append(event.get("content") or "")
+                    yield event
             except Exception as e:
-                logger.warning(
-                    f"⚠️ Orchestrator routing failed, falling back to direct agent: {e}"
-                )
-                # Record failure metrics before falling through
-                telemetry = _get_telemetry_service()
-                if telemetry:
-                    total_duration_ms = (time.time() - start_time) * 1000
-                    telemetry.record_metric(
-                        name="ai_response_time_ms",
-                        value=total_duration_ms,
-                        tags={"mode": mode, "success": "false", "method": "orchestrator"},
+                if yielded_any or isinstance(e, AgentServiceError):
+                    logger.error(
+                        "Orchestrator stream failed (request_id=%s)",
+                        request_id,
+                        exc_info=e,
                     )
+                    self._record_response_metric(
+                        start_time, mode, success=False, method="orchestrator"
+                    )
+                    if not saw_error:
+                        yield error_event_for(to_agent_service_error(e), request_id)
+                    return
+                logger.warning(
+                    "⚠️ Orchestrator routing failed, falling back to direct agent "
+                    "(request_id=%s)",
+                    request_id,
+                    exc_info=e,
+                )
+                self._record_response_metric(
+                    start_time, mode, success=False, method="orchestrator"
+                )
                 # Fall through to direct agent invocation below
+            else:
+                # Record AI response time metrics (Requirement 5.4)
+                self._record_response_metric(
+                    start_time, mode, success=not saw_error, method="orchestrator"
+                )
+                answer = "".join(answer_parts).strip()
+                if orch_key and not saw_error and answer:
+                    await self._save_orchestrator_transcript(
+                        orch_key, history, message, answer
+                    )
+                return
         
         # ------------------------------------------------------------------
         # Direct agent invocation (legacy fallback)
@@ -673,23 +855,24 @@ class LogisticsAgent:
         if self._circuit_breaker.state.value == "open":
             if not self._circuit_breaker._should_attempt_reset():
                 # Circuit is open and not ready to retry
-                error_response = self._handle_circuit_breaker_exception(
+                yield self._handle_circuit_breaker_exception(
                     CircuitOpenException(
                         self._circuit_breaker.name,
                         self._circuit_breaker._get_time_until_retry()
-                    )
+                    ),
+                    request_id,
                 )
-                yield error_response
                 return
         
-        while retry_count < max_retries:
+        attempt = 0
+        while True:
+            attempt += 1
+            # Track if we got any response
+            got_response = False
+            first_token_time = None
             try:
                 # Send message to agent (mode prefix removed — single unified mode)
                 message_to_send = message
-                
-                # Track if we got any response
-                got_response = False
-                first_token_time = None
                 
                 # Wrap the streaming call with circuit breaker tracking and
                 # with the tenant ContextVar bound so tools see the caller's
@@ -713,27 +896,23 @@ class LogisticsAgent:
                     self._circuit_breaker._on_success()
                     
                     # Record AI response time metrics (Requirement 5.4)
+                    self._record_response_metric(start_time, mode, success=True)
                     telemetry = _get_telemetry_service()
-                    if telemetry:
-                        total_duration_ms = (time.time() - start_time) * 1000
+                    if telemetry and first_token_time:
+                        time_to_first_token_ms = (first_token_time - start_time) * 1000
                         telemetry.record_metric(
-                            name="ai_response_time_ms",
-                            value=total_duration_ms,
-                            tags={"mode": mode, "success": "true"}
+                            name="ai_time_to_first_token_ms",
+                            value=time_to_first_token_ms,
+                            tags={"mode": mode}
                         )
-                        if first_token_time:
-                            time_to_first_token_ms = (first_token_time - start_time) * 1000
-                            telemetry.record_metric(
-                                name="ai_time_to_first_token_ms",
-                                value=time_to_first_token_ms,
-                                tags={"mode": mode}
-                            )
                     
                     # Persist updated conversation history to session store
                     # Requirement 8.3: Persist updated conversation history
                     if session_id:
                         try:
-                            await self._save_conversation_history(session_id, self.agent.messages)
+                            await self._save_conversation_history(
+                                session_id, self.agent.messages, tenant_id, user_id
+                            )
                         except Exception as e:
                             # Graceful degradation: log but don't fail the response
                             logger.warning(f"⚠️ Could not persist session {session_id}: {e}")
@@ -742,81 +921,65 @@ class LogisticsAgent:
                 
             except CircuitOpenException as e:
                 # Circuit breaker is open
-                error_response = self._handle_circuit_breaker_exception(e)
-                yield error_response
+                yield self._handle_circuit_breaker_exception(e, request_id)
                 return
                 
             except Exception as e:
-                retry_count += 1
-                error_msg = str(e)
-                
-                # Check if it's a connection error (retryable)
-                is_connection_error = any(keyword in error_msg.lower() for keyword in [
-                    'connection closed', 'connection error', 'timeout', 'unavailable',
-                    'service unavailable', 'rate limit', 'quota'
-                ])
-                
-                if is_connection_error:
-                    # Record failure in circuit breaker
-                    self._circuit_breaker._on_failure()
-                    
-                    # Check if circuit is now open
-                    if self._circuit_breaker.state.value == "open":
-                        error_response = self._handle_circuit_breaker_exception(
-                            CircuitOpenException(
-                                self._circuit_breaker.name,
-                                self._circuit_breaker._get_time_until_retry()
-                            )
-                        )
-                        yield error_response
-                        return
-                    
-                    if retry_count < max_retries:
-                        logger.warning(f"Connection error (attempt {retry_count}/{max_retries}): {error_msg}")
-                        yield {
-                            "type": "status",
-                            "content": f"🔄 Connection interrupted, retrying... (attempt {retry_count}/{max_retries})"
-                        }
-                        
-                        # Wait a bit before retrying (exponential backoff)
-                        import asyncio
-                        await asyncio.sleep(1 * retry_count)
-                        continue
-                    else:
-                        # Max retries reached - record failure metrics
-                        telemetry = _get_telemetry_service()
-                        if telemetry:
-                            total_duration_ms = (time.time() - start_time) * 1000
-                            telemetry.record_metric(
-                                name="ai_response_time_ms",
-                                value=total_duration_ms,
-                                tags={"mode": mode, "success": "false", "error_type": "connection"}
-                            )
-                        
-                        logger.exception("Error in streaming chat (final)")
-                        yield {
-                            "type": "error", 
-                            "content": f"❌ Connection failed after {max_retries} attempts. The AI service is having connectivity issues. Please try again in a moment.",
-                            "error_code": ErrorCode.AI_SERVICE_UNAVAILABLE.value
-                        }
-                        return
-                else:
-                    # Non-connection error - don't retry, but record failure
-                    self._circuit_breaker._on_failure()
-                    
-                    # Record failure metrics
-                    telemetry = _get_telemetry_service()
-                    if telemetry:
-                        total_duration_ms = (time.time() - start_time) * 1000
-                        telemetry.record_metric(
-                            name="ai_response_time_ms",
-                            value=total_duration_ms,
-                            tags={"mode": mode, "success": "false", "error_type": "other"}
-                        )
-                    
-                    logger.exception("Error in streaming chat")
-                    yield self._handle_gemini_api_error(e)
+                failure = classify_llm_exception(e)
+                self._circuit_breaker._on_failure()
+                logger.warning(
+                    "Legacy chat failed (attempt %d/%d, code=%s, request_id=%s)",
+                    attempt, MAX_ATTEMPTS, failure.code, request_id,
+                    exc_info=e,
+                )
+
+                # Check if circuit is now open
+                if self._circuit_breaker.state.value == "open":
+                    yield self._handle_circuit_breaker_exception(
+                        CircuitOpenException(
+                            self._circuit_breaker.name,
+                            self._circuit_breaker._get_time_until_retry()
+                        ),
+                        request_id,
+                    )
                     return
+
+                # Retrying after streamed output would repeat it.
+                delay = None if got_response else retry_delay(failure, attempt)
+                if delay is not None:
+                    yield status_event("retrying", attempt=attempt + 1)
+                    await asyncio.sleep(delay)
+                    continue
+
+                self._record_response_metric(
+                    start_time, mode, success=False, error_type=failure.code
+                )
+                yield self._handle_gemini_api_error(e, request_id)
+                return
+
+    def _record_response_metric(
+        self,
+        start_time: float,
+        mode: str,
+        *,
+        success: bool,
+        method: Optional[str] = None,
+        error_type: Optional[str] = None,
+    ) -> None:
+        """Record ``ai_response_time_ms`` (Requirement 5.4)."""
+        telemetry = _get_telemetry_service()
+        if not telemetry:
+            return
+        tags = {"mode": mode, "success": "true" if success else "false"}
+        if method:
+            tags["method"] = method
+        if error_type:
+            tags["error_type"] = error_type
+        telemetry.record_metric(
+            name="ai_response_time_ms",
+            value=(time.time() - start_time) * 1000,
+            tags=tags,
+        )
 
     async def chat_fallback(
         self,
@@ -824,10 +987,16 @@ class LogisticsAgent:
         mode: str = "chat",
         session_id: Optional[str] = None,
         tenant_id: Optional[str] = None,
+        user_id: Optional[str] = None,
     ) -> str:
         """
         Non-streaming fallback method with circuit breaker protection, session
         persistence, and tenant scoping.
+
+        The LLM call gets the bounded retry from ``Agents.llm_errors``. A
+        final failure, or an open circuit, raises ``AgentServiceError`` (safe
+        message only) so the endpoint can answer 429/503 instead of a 200
+        whose text is an error (F3).
 
         Validates:
         - Requirement 3.5: Implement circuit breakers for Gemini API
@@ -844,6 +1013,12 @@ class LogisticsAgent:
             session_id: Optional session identifier for conversation persistence.
             tenant_id: Optional tenant identifier for data scoping. Bound to the
                 tool ContextVar for the duration of the run.
+            user_id: Verified user of the caller; scopes the session-store
+                key (OI-38).
+
+        Raises:
+            AgentServiceError: the AI service failed after retries, or its
+                circuit breaker is open.
         """
         start_time = time.time()
         
@@ -851,7 +1026,9 @@ class LogisticsAgent:
         # Requirement 8.2: Load conversation history using session identifier
         if session_id:
             try:
-                stored_messages = await self._load_conversation_history(session_id)
+                stored_messages = await self._load_conversation_history(
+                    session_id, tenant_id, user_id
+                )
                 if stored_messages:
                     # Restore conversation history to agent
                     self.agent.messages = stored_messages
@@ -865,11 +1042,10 @@ class LogisticsAgent:
             if self._circuit_breaker.state.value == "open":
                 if not self._circuit_breaker._should_attempt_reset():
                     # Circuit is open and not ready to retry
-                    time_until_retry = self._circuit_breaker._get_time_until_retry()
-                    retry_msg = ""
-                    if time_until_retry:
-                        retry_msg = f" Please retry in {int(time_until_retry.total_seconds())} seconds."
-                    return f"❌ AI service temporarily unavailable. Circuit breaker is open.{retry_msg}"
+                    raise CircuitOpenException(
+                        self._circuit_breaker.name,
+                        self._circuit_breaker._get_time_until_retry(),
+                    )
             
             logger.info("🔄 Using non-streaming fallback mode")
             
@@ -879,28 +1055,29 @@ class LogisticsAgent:
             # ``run_async``) for a single non-streaming turn; it returns an
             # ``AgentResult`` whose ``__str__`` yields the concatenated text.
             effective_tenant_id = _require_tenant_id(tenant_id)
-            with set_current_tenant(effective_tenant_id):
-                agent_result = await self.agent.invoke_async(message)
+
+            async def _invoke():
+                with set_current_tenant(effective_tenant_id):
+                    return await self.agent.invoke_async(message)
+
+            agent_result = await call_with_llm_retry(
+                _invoke, describe="Fallback chat"
+            )
             response = str(agent_result)
             
             # Record success in circuit breaker
             self._circuit_breaker._on_success()
             
             # Record AI response time metrics (Requirement 5.4)
-            telemetry = _get_telemetry_service()
-            if telemetry:
-                total_duration_ms = (time.time() - start_time) * 1000
-                telemetry.record_metric(
-                    name="ai_response_time_ms",
-                    value=total_duration_ms,
-                    tags={"mode": mode, "success": "true", "method": "fallback"}
-                )
+            self._record_response_metric(start_time, mode, success=True, method="fallback")
             
             # Persist updated conversation history to session store
             # Requirement 8.3: Persist updated conversation history
             if session_id:
                 try:
-                    await self._save_conversation_history(session_id, self.agent.messages)
+                    await self._save_conversation_history(
+                        session_id, self.agent.messages, tenant_id, user_id
+                    )
                 except Exception as e:
                     # Graceful degradation: log but don't fail the response
                     logger.warning(f"⚠️ Could not persist session {session_id}: {e}")
@@ -908,24 +1085,15 @@ class LogisticsAgent:
             return response
             
         except CircuitOpenException as e:
-            time_until_retry = ""
-            if e.time_until_retry:
-                time_until_retry = f" Please retry in {int(e.time_until_retry.total_seconds())} seconds."
-            return f"❌ AI service temporarily unavailable. Circuit breaker '{e.circuit_name}' is open.{time_until_retry}"
+            logger.warning("AI circuit '%s' open on fallback chat", e.circuit_name)
+            retry_after = self._circuit_retry_after(e)
+            raise AgentServiceError(
+                AI_SERVICE_UNAVAILABLE, retry_after_seconds=retry_after
+            ) from e
             
-        except Exception as e:
-            # Record failure in circuit breaker
+        except AgentServiceError:
+            # Already logged with full detail by call_with_llm_retry. One
+            # failed request counts once toward the circuit, as before.
             self._circuit_breaker._on_failure()
-            
-            # Record failure metrics
-            telemetry = _get_telemetry_service()
-            if telemetry:
-                total_duration_ms = (time.time() - start_time) * 1000
-                telemetry.record_metric(
-                    name="ai_response_time_ms",
-                    value=total_duration_ms,
-                    tags={"mode": mode, "success": "false", "method": "fallback"}
-                )
-            
-            logger.exception("Error in fallback chat")
-            return f"❌ I'm having trouble connecting to the AI service right now. However, all the data tools are working fine. Please try again in a moment."
+            self._record_response_metric(start_time, mode, success=False, method="fallback")
+            raise

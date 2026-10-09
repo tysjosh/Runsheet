@@ -32,6 +32,7 @@ jest.mock("../../services/schedulingApi", () => ({
   getJob: jest.fn(),
   getCargo: jest.fn(),
   getJobEta: jest.fn(),
+  getJobDriverActivity: jest.fn(),
   reassignAsset: jest.fn(),
   transitionStatus: jest.fn(),
 }));
@@ -44,6 +45,7 @@ import { apiService } from "../../services/api";
 import {
   getCargo,
   getJob,
+  getJobDriverActivity,
   getJobEta,
   reassignAsset,
 } from "../../services/schedulingApi";
@@ -51,12 +53,15 @@ import {
 const mockGetJob = getJob as jest.MockedFunction<typeof getJob>;
 const mockGetCargo = getCargo as jest.MockedFunction<typeof getCargo>;
 const mockGetJobEta = getJobEta as jest.MockedFunction<typeof getJobEta>;
+const mockGetDriverActivity = getJobDriverActivity as jest.MockedFunction<
+  typeof getJobDriverActivity
+>;
 const mockReassign = reassignAsset as jest.MockedFunction<typeof reassignAsset>;
 const mockGetAssets = apiService.getAssets as jest.MockedFunction<
   typeof apiService.getAssets
 >;
 
-import JobDetailPage from "./JobDetailPage";
+import JobDetailPage, { formatLiveEta } from "./JobDetailPage";
 
 function jobFixture(overrides: Partial<Job> = {}): Job {
   return {
@@ -91,9 +96,37 @@ beforeEach(() => {
   mockGetJobEta.mockReset();
   mockReassign.mockReset();
   mockGetAssets.mockReset();
+  mockGetDriverActivity.mockReset();
+  mockGetDriverActivity.mockResolvedValue({
+    data: [],
+    pagination: { page: 1, size: 20, total: 0, total_pages: 0 },
+    request_id: "a",
+  });
   mockGetCargo.mockResolvedValue({ data: [], request_id: "c" });
   mockGetJobEta.mockRejectedValue(new Error("no eta"));
   mockGetAssets.mockResolvedValue({ data: [], success: true } as never);
+});
+
+describe("JobDetailPage — driver activity (G1)", () => {
+  it("renders the Driver activity section for the job", async () => {
+    mockGetJob.mockResolvedValue({
+      data: { ...jobFixture(), links: {} },
+      request_id: "j",
+    } as never);
+
+    renderPage();
+
+    expect(
+      await screen.findByRole("region", { name: "Driver activity" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(mockGetDriverActivity).toHaveBeenCalledWith(
+        "JOB-1",
+        { page: 1, size: 20 },
+        expect.any(AbortSignal),
+      ),
+    );
+  });
 });
 
 describe("JobDetailPage — linked records", () => {
@@ -119,11 +152,11 @@ describe("JobDetailPage — linked records", () => {
 
     // Order link → /orders/ORD-9
     const orderLink = await screen.findByRole("link", { name: /ORD-9/ });
-    expect(orderLink).toHaveAttribute("href", "/orders/ORD-9");
+    expect(orderLink).toHaveAttribute("href", "/dashboard/orders/ORD-9");
 
     // Customer link shows resolved display name → /commerce/customers/CUST-7
     const customerLink = screen.getByRole("link", { name: /Acme Fuels/ });
-    expect(customerLink).toHaveAttribute("href", "/commerce/customers/CUST-7");
+    expect(customerLink).toHaveAttribute("href", "/dashboard/customers/CUST-7");
   });
 
   it("requests the resolver expand for order/customer/asset/driver", async () => {
@@ -226,5 +259,65 @@ describe("JobDetailPage — asset reassign picker", () => {
     await waitFor(() =>
       expect(mockReassign).toHaveBeenCalledWith("JOB-1", "TRK-005"),
     );
+  });
+});
+
+describe("formatLiveEta (R-2)", () => {
+  it("returns null when eta_minutes is missing", () => {
+    expect(
+      formatLiveEta({ estimated_arrival: "2026-10-04T19:00:00Z" }),
+    ).toBeNull();
+    expect(formatLiveEta({ eta_minutes: null })).toBeNull();
+    expect(formatLiveEta(null)).toBeNull();
+  });
+
+  it("formats minutes with the arrival time when both are present", () => {
+    const arrival = "2026-10-04T19:00:00Z";
+    // Time through lib/format (24 h, tenant zone; task 3.10).
+    expect(
+      formatLiveEta({ eta_minutes: 12, estimated_arrival: arrival }),
+    ).toMatch(/^12 min \(\d{2}:\d{2}\)$/);
+  });
+
+  it("omits an unparseable arrival time", () => {
+    expect(formatLiveEta({ eta_minutes: 0, estimated_arrival: "nope" })).toBe(
+      "0 min",
+    );
+  });
+});
+
+describe("JobDetailPage — live ETA row (R-2)", () => {
+  it("hides the Live ETA row when the ETA payload has no minutes", async () => {
+    mockGetJob.mockResolvedValue({
+      data: { ...jobFixture({ status: "scheduled" }), links: {} },
+      request_id: "j",
+    } as never);
+    mockGetJobEta.mockResolvedValue({
+      data: { estimated_arrival: "2026-10-04T19:00:00Z" },
+      request_id: "e",
+    } as never);
+
+    renderPage();
+    await waitFor(() => expect(mockGetJobEta).toHaveBeenCalled());
+    expect(await screen.findByText("Estimated Arrival")).toBeInTheDocument();
+
+    expect(screen.queryByText("Live ETA")).toBeNull();
+    expect(screen.queryByText(/undefined min/)).toBeNull();
+  });
+
+  it("shows the Live ETA row when minutes are present", async () => {
+    mockGetJob.mockResolvedValue({
+      data: { ...jobFixture(), links: {} },
+      request_id: "j",
+    } as never);
+    mockGetJobEta.mockResolvedValue({
+      data: { eta_minutes: 7, estimated_arrival: "2026-10-04T19:00:00Z" },
+      request_id: "e",
+    } as never);
+
+    renderPage();
+
+    expect(await screen.findByText("Live ETA")).toBeInTheDocument();
+    expect(screen.getByText(/^7 min \(/)).toBeInTheDocument();
   });
 });

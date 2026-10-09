@@ -52,8 +52,22 @@ _SETTINGS_PATCH = nullcontext()
 # ---------------------------------------------------------------------------
 
 
-def _auth_headers(tenant_id: str = TENANT_ID) -> dict:
-    return auth_headers(tenant_id, sub="driver-1")
+DRIVER_ID = "DRV-1"
+
+
+def _auth_headers(
+    tenant_id: str = TENANT_ID,
+    *,
+    sub: str = "driver-1",
+    roles=("driver",),
+    driver_id=DRIVER_ID,
+) -> dict:
+    """A driver session: the exact ``driver`` role and a canonical driver_id.
+
+    The scheduling ack/accept/reject endpoints gate on
+    ``require_driver_identity`` (B5), so the default context is a driver.
+    """
+    return auth_headers(tenant_id, sub=sub, roles=list(roles), driver_id=driver_id)
 
 
 def _job_doc(
@@ -79,6 +93,9 @@ def _make_job_service() -> MagicMock:
     """Create a mock JobService with the methods used by driver endpoints."""
     es = MagicMock()
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    # update_job_fields reads the merged doc back (OI-31); None falls back
+    # to the caller's snapshot plus the fields.
+    es.get_document = AsyncMock(return_value=None)
 
     svc = MagicMock()
     svc._es = es
@@ -302,7 +319,9 @@ class TestAcceptJob:
     def test_accept_assigned_confirms_without_transition(self):
         """Accept on assigned job confirms without changing status. Validates: Req 5.2"""
         svc = _make_job_service()
-        svc._get_job_doc.return_value = _job_doc(status="assigned")
+        doc = _job_doc(status="assigned")
+        doc["assigned_driver_id"] = DRIVER_ID  # already linked: a pure read
+        svc._get_job_doc.return_value = doc
 
         app = _make_app(svc)
         with _SETTINGS_PATCH:
@@ -390,8 +409,12 @@ class TestAcceptJobRecordsAssignedDriverId:
     Validates: Requirements 1.13, 1.14
     """
 
-    def test_scheduled_accept_writes_both_identifiers(self):
-        """asset_assigned keeps the user_id; assigned_driver_id gets driver_id."""
+    def test_scheduled_accept_stamps_driver_id_without_asset_assigned(self):
+        """Claiming a job stamps assigned_driver_id and never writes asset_assigned.
+
+        ``asset_assigned`` holds the dispatcher's truck, so accept leaves it
+        alone (B5, D3).
+        """
         svc = _make_job_service()
         svc._get_job_doc.return_value = _job_doc(status="scheduled", asset_assigned=None)
 
@@ -405,7 +428,7 @@ class TestAcceptJobRecordsAssignedDriverId:
 
         assert resp.status_code == 200
         update_fields = svc._es.update_document.call_args.args[2]
-        assert update_fields["asset_assigned"] == "driver-1"
+        assert "asset_assigned" not in update_fields
         assert update_fields["assigned_driver_id"] == "DRV-77"
         assert update_fields["status"] == "assigned"
 
@@ -447,8 +470,8 @@ class TestAcceptJobRecordsAssignedDriverId:
         assert resp.status_code == 200
         svc._es.update_document.assert_not_called()
 
-    def test_session_without_driver_id_writes_no_assigned_driver_id(self):
-        """No driver claim means no assigned_driver_id — a pre-migration write."""
+    def test_session_without_driver_id_is_refused(self):
+        """No driver claim means 403 DRIVER_IDENTITY_MISSING and no write (B5)."""
         svc = _make_job_service()
         svc._get_job_doc.return_value = _job_doc(status="scheduled", asset_assigned=None)
 
@@ -460,10 +483,152 @@ class TestAcceptJobRecordsAssignedDriverId:
                 headers=_auth_headers(),
             )
 
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "DRIVER_IDENTITY_MISSING"
+        svc._es.update_document.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test: B5 driver-role gate and assigned-driver check (D3)
+# ---------------------------------------------------------------------------
+
+#: (action, request body) for each driver action endpoint.
+_ACTIONS = [
+    ("ack", {"device_id": "mobile-123"}),
+    ("accept", None),
+    ("reject", {"reason": "Not available"}),
+]
+
+
+def _post_action(app, action, body, headers):
+    client = TestClient(app)
+    url = f"/api/scheduling/jobs/JOB_1/{action}"
+    if body is None:
+        return client.post(url, headers=headers)
+    return client.post(url, json=body, headers=headers)
+
+
+class TestDriverAuthorization:
+    """ack/accept/reject require a driver identity and the job's own driver.
+
+    Validates: B5 (D3), Requirement 11.2, R15.14
+    """
+
+    @pytest.mark.parametrize("action,body", _ACTIONS)
+    @pytest.mark.parametrize("field", ["assigned_driver_id", "driver_id"])
+    def test_other_named_driver_is_403(self, action, body, field):
+        """A job naming another driver refuses the caller, whatever asset_assigned says."""
+        svc = _make_job_service()
+        doc = _job_doc(status="assigned", asset_assigned="driver-1")
+        doc[field] = "DRV-OTHER"
+        svc._get_job_doc.return_value = doc
+
+        resp = _post_action(_make_app(svc), action, body, _auth_headers())
+
+        assert resp.status_code == 403
+        payload = resp.json()
+        assert payload["message"] == "Assignment revoked"
+        # Details name the job only, never either driver (R15.14).
+        assert payload["details"] == {"job_id": "JOB_1"}
+        svc._es.update_document.assert_not_called()
+        svc._append_event.assert_not_called()
+
+    @pytest.mark.parametrize("action,body", _ACTIONS)
+    def test_admin_without_driver_role_is_403_insufficient_role(self, action, body):
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="assigned")
+
+        resp = _post_action(
+            _make_app(svc), action, body,
+            _auth_headers(roles=("admin",), driver_id=None),
+        )
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "INSUFFICIENT_ROLE"
+        svc._get_job_doc.assert_not_called()
+        svc._append_event.assert_not_called()
+
+    @pytest.mark.parametrize("action,body", _ACTIONS)
+    def test_driver_without_driver_id_is_403_identity_missing(self, action, body):
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="assigned")
+
+        resp = _post_action(_make_app(svc), action, body, _auth_headers(driver_id=None))
+
+        assert resp.status_code == 403
+        assert resp.json()["error_code"] == "DRIVER_IDENTITY_MISSING"
+        svc._append_event.assert_not_called()
+
+    def test_accept_keeps_the_dispatchers_truck(self):
+        """Accepting a truck-assigned job named for the caller keeps TRUCK-1."""
+        svc = _make_job_service()
+        doc = _job_doc(status="scheduled", asset_assigned="TRUCK-1")
+        doc["driver_id"] = DRIVER_ID
+        svc._get_job_doc.return_value = doc
+
+        resp = _post_action(_make_app(svc), "accept", None, _auth_headers())
+
         assert resp.status_code == 200
         update_fields = svc._es.update_document.call_args.args[2]
-        assert "assigned_driver_id" not in update_fields
-        assert update_fields["asset_assigned"] == "driver-1"
+        assert "asset_assigned" not in update_fields
+        assert update_fields["assigned_driver_id"] == DRIVER_ID
+        assert update_fields["status"] == "assigned"
+        assert doc["asset_assigned"] == "TRUCK-1"
+
+    @pytest.mark.parametrize("action,body", _ACTIONS)
+    def test_truck_assigned_job_without_named_driver_is_403(self, action, body):
+        """asset_assigned holding a truck id is not the caller's claim."""
+        svc = _make_job_service()
+        status = "scheduled" if action == "accept" else "assigned"
+        svc._get_job_doc.return_value = _job_doc(status=status, asset_assigned="TRUCK-9")
+
+        resp = _post_action(_make_app(svc), action, body, _auth_headers())
+
+        assert resp.status_code == 403
+        assert resp.json()["details"] == {"job_id": "JOB_1"}
+        svc._es.update_document.assert_not_called()
+
+    @pytest.mark.parametrize("action,body", _ACTIONS)
+    def test_pre_migration_doc_keyed_on_user_id_is_allowed(self, action, body):
+        """A job that stored the caller's user id in asset_assigned still authorizes."""
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="assigned", asset_assigned="driver-1")
+
+        resp = _post_action(_make_app(svc), action, body, _auth_headers())
+
+        assert resp.status_code == 200
+
+    @pytest.mark.parametrize("action,body", _ACTIONS)
+    def test_named_caller_is_allowed_on_truck_assigned_job(self, action, body):
+        svc = _make_job_service()
+        doc = _job_doc(status="assigned", asset_assigned="TRUCK-1")
+        doc["assigned_driver_id"] = DRIVER_ID
+        svc._get_job_doc.return_value = doc
+
+        resp = _post_action(_make_app(svc), action, body, _auth_headers())
+
+        assert resp.status_code == 200
+        if svc._es.update_document.called:
+            assert "asset_assigned" not in svc._es.update_document.call_args.args[2]
+
+    def test_unclaimed_scheduled_job_can_be_accepted(self):
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="scheduled", asset_assigned="")
+
+        resp = _post_action(_make_app(svc), "accept", None, _auth_headers())
+
+        assert resp.status_code == 200
+        assert svc._es.update_document.call_args.args[2]["assigned_driver_id"] == DRIVER_ID
+
+    def test_events_and_broadcasts_keep_the_user_id_as_actor(self):
+        svc = _make_job_service()
+        svc._get_job_doc.return_value = _job_doc(status="assigned")
+
+        resp = _post_action(_make_app(svc), "ack", {"device_id": "d"}, _auth_headers())
+
+        assert resp.status_code == 200
+        assert svc._append_event.call_args.kwargs["actor_id"] == "driver-1"
+        assert resp.json()["data"]["actor_id"] == "driver-1"
 
 
 # ---------------------------------------------------------------------------

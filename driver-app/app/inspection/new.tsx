@@ -29,8 +29,9 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useRef, useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { ScrollView, View } from 'react-native';
 
+import { ChoiceOption } from '@/components/ChoiceOption';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -54,6 +55,7 @@ import {
   type InspectionTypeValue,
 } from '@/lib/inspection-api';
 import { uploadPodArtifact } from '@/lib/pod-api';
+import { markPretripQueued } from '@/lib/pretrip-marker';
 import { DISTANCE_UNIT_LABEL } from '@/lib/units';
 
 export default function NewInspectionScreen() {
@@ -177,16 +179,21 @@ export default function NewInspectionScreen() {
     setMessage(null);
     try {
       const now = new Date();
+      const localDay = localCalendarDay(now);
       const result = await queueInspectionReport({
         report: {
           inspectionType,
           assetId: trimmedAsset,
           odometerMiles: miles,
           inspectionTimestamp: now.toISOString(),
-          inspectionLocalDate: localCalendarDay(now),
+          inspectionLocalDate: localDay,
           defects,
         },
       });
+      if (inspectionType === 'pre_trip') {
+        // Only steers the Work screen's DVIR prompt (lib/pretrip-marker.ts).
+        markPretripQueued(localDay);
+      }
       setMessage(
         result.inserted
           ? 'Inspection queued. It sends as soon as there is service.'
@@ -232,12 +239,10 @@ export default function NewInspectionScreen() {
         contentContainerClassName="gap-5 p-5 pb-12"
         keyboardShouldPersistTaps="handled"
       >
-        <View className="gap-1">
-          <Text className="text-2xl font-bold">Vehicle inspection</Text>
-          <Text className="text-muted-foreground">
-            Your walk-around, recorded against your driver id from this session.
-          </Text>
-        </View>
+        {/* The stack header carries the title (UI revamp task 4.2). */}
+        <Text className="text-muted-foreground">
+          Your walk-around, recorded against your driver id from this session.
+        </Text>
 
         <Card>
           <CardHeader>
@@ -246,35 +251,28 @@ export default function NewInspectionScreen() {
               Both carry the same details. Only the type differs.
             </CardDescription>
           </CardHeader>
-          <CardContent className="gap-2">
-            {INSPECTION_TYPE_OPTIONS.map((option) => {
-              const active = option.value === inspectionType;
-              return (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="radio"
-                  accessibilityState={{ selected: active }}
-                  disabled={busy}
-                  onPress={() => setInspectionType(option.value)}
-                  className={
-                    active
-                      ? 'rounded-xl border-2 border-primary p-3'
-                      : 'rounded-xl border border-input p-3'
-                  }
-                >
-                  <Text className="font-semibold">{option.label}</Text>
-                  <Text className="text-sm text-muted-foreground">
-                    {option.description}
-                  </Text>
-                </Pressable>
-              );
-            })}
+          <CardContent
+            accessibilityRole="radiogroup"
+            accessibilityLabel="Report type"
+            className="gap-2"
+          >
+            {INSPECTION_TYPE_OPTIONS.map((option) => (
+              <ChoiceOption
+                key={option.value}
+                label={option.label}
+                description={option.description}
+                checked={option.value === inspectionType}
+                disabled={busy}
+                onPress={() => setInspectionType(option.value)}
+              />
+            ))}
           </CardContent>
         </Card>
 
         <View className="gap-2">
           <Text className="font-medium">Vehicle</Text>
           <Input
+            aria-label="Vehicle unit number"
             value={assetId}
             onChangeText={setAssetId}
             placeholder="Unit number"
@@ -286,6 +284,7 @@ export default function NewInspectionScreen() {
         <View className="gap-2">
           <Text className="font-medium">Odometer ({DISTANCE_UNIT_LABEL})</Text>
           <Input
+            aria-label={`Odometer (${DISTANCE_UNIT_LABEL})`}
             value={odometer}
             onChangeText={setOdometer}
             placeholder="0"
@@ -355,61 +354,43 @@ export default function NewInspectionScreen() {
             ) : (
               <View className="gap-3">
                 <Text className="font-medium">Component</Text>
-                <View className="flex-row flex-wrap gap-2">
-                  {INSPECTION_COMPONENTS.map((component) => {
-                    const active = component === draftComponent;
-                    return (
-                      <Pressable
-                        key={component}
-                        accessibilityRole="radio"
-                        accessibilityState={{ selected: active }}
-                        disabled={busy}
-                        onPress={() => setDraftComponent(component)}
-                        className={
-                          active
-                            ? 'rounded-full bg-primary px-3 py-2'
-                            : 'rounded-full border border-input px-3 py-2'
-                        }
-                      >
-                        <Text
-                          className={
-                            active
-                              ? 'text-sm font-semibold text-primary-foreground'
-                              : 'text-sm'
-                          }
-                        >
-                          {componentLabel(component)}
-                        </Text>
-                      </Pressable>
-                    );
-                  })}
+                <View
+                  accessibilityRole="radiogroup"
+                  accessibilityLabel="Component"
+                  className="flex-row flex-wrap gap-2"
+                >
+                  {INSPECTION_COMPONENTS.map((component) => (
+                    <ChoiceOption
+                      key={component}
+                      variant="chip"
+                      label={componentLabel(component)}
+                      checked={component === draftComponent}
+                      disabled={busy}
+                      onPress={() => setDraftComponent(component)}
+                    />
+                  ))}
                 </View>
 
                 <Text className="font-medium">Severity</Text>
-                {DEFECT_SEVERITY_OPTIONS.map((option) => {
-                  const active = option.value === draftSeverity;
-                  return (
-                    <Pressable
+                <View
+                  accessibilityRole="radiogroup"
+                  accessibilityLabel="Severity"
+                  className="gap-2"
+                >
+                  {DEFECT_SEVERITY_OPTIONS.map((option) => (
+                    <ChoiceOption
                       key={option.value}
-                      accessibilityRole="radio"
-                      accessibilityState={{ selected: active }}
+                      label={option.label}
+                      description={option.effect}
+                      checked={option.value === draftSeverity}
                       disabled={busy}
                       onPress={() => setDraftSeverity(option.value)}
-                      className={
-                        active
-                          ? 'rounded-xl border-2 border-primary p-3'
-                          : 'rounded-xl border border-input p-3'
-                      }
-                    >
-                      <Text className="font-semibold">{option.label}</Text>
-                      <Text className="text-sm text-muted-foreground">
-                        {option.effect}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
+                    />
+                  ))}
+                </View>
 
                 <Input
+                  aria-label="What you found"
                   value={draftNote}
                   onChangeText={setDraftNote}
                   placeholder="What you found"

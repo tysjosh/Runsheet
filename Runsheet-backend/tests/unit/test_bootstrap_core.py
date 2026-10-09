@@ -114,95 +114,52 @@ class TestCoreBootstrap:
         assert container.has("settings")
         assert container.has("es_service")
 
-
-class TestCommerceESIndexProvisioning:
-    """Tests for commerce ES index provisioning behind commerce_backbone_enabled flag."""
-
+    @pytest.mark.parametrize("bucket", ["qa-bucket", None])
     @pytest.mark.asyncio
-    async def test_commerce_indices_provisioned_when_flag_on(
-        self, mock_app, container, _mock_external_services
+    async def test_file_storage_service_is_built_before_domains(
+        self, mock_app, container, _mock_external_services, monkeypatch, bucket
     ):
-        """When commerce_backbone_enabled is True, setup_commerce_indices is called."""
-        mock_settings = MagicMock()
-        mock_settings.commerce_backbone_enabled = True
-        mock_settings.seed_demo_data = False
+        """Finding C9: core (first in the boot order) registers file storage so
+        compliance's terminal-BOL service gets it; absent config, none is built."""
+        if bucket:
+            monkeypatch.setenv("FUEL_OPS_S3_BUCKET", bucket)
+        else:
+            monkeypatch.delenv("FUEL_OPS_S3_BUCKET", raising=False)
+        monkeypatch.setenv("FUEL_OPS_S3_REGION", "us-east-2")
 
-        mock_setup = MagicMock()
-
-        with patch("config.settings.get_settings", return_value=mock_settings), \
+        with patch("config.settings.get_settings", return_value=MagicMock()), \
              patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
              patch("health.service.HealthCheckService", return_value=MagicMock()), \
              patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
              patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
              patch("websocket.connection_manager.bind_container"), \
-             patch("errors.handlers.register_exception_handlers"), \
-             patch(
-                 "commerce.services.commerce_es_mappings.setup_commerce_indices",
-                 mock_setup,
-             ):
+             patch("errors.handlers.register_exception_handlers"):
 
             sys.modules.pop("bootstrap.core", None)
             from bootstrap.core import initialize
             await initialize(mock_app, container)
 
-        mock_setup.assert_called_once_with(
-            _mock_external_services["es_service"]
-        )
+        from services.file_storage_service import FileStorageService
 
-    @pytest.mark.asyncio
-    async def test_commerce_indices_not_provisioned_when_flag_off(
-        self, mock_app, container, _mock_external_services
-    ):
-        """When commerce_backbone_enabled is False, setup_commerce_indices is NOT called."""
-        mock_settings = MagicMock()
-        mock_settings.commerce_backbone_enabled = False
-        mock_settings.seed_demo_data = False
+        if bucket:
+            assert isinstance(container.get("file_storage_service"), FileStorageService)
+        else:
+            assert not container.has("file_storage_service")
 
-        mock_setup = MagicMock()
 
-        with patch("config.settings.get_settings", return_value=mock_settings), \
-             patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
-             patch("health.service.HealthCheckService", return_value=MagicMock()), \
-             patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
-             patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
-             patch("websocket.connection_manager.bind_container"), \
-             patch("errors.handlers.register_exception_handlers"), \
-             patch(
-                 "commerce.services.commerce_es_mappings.setup_commerce_indices",
-                 mock_setup,
-             ):
+class _CommerceESIndexProvisioningRemoved:
+    """``TestCommerceESIndexProvisioning`` was here — three tests.
 
-            sys.modules.pop("bootstrap.core", None)
-            from bootstrap.core import initialize
-            await initialize(mock_app, container)
+    They asserted that ``bootstrap/core.py`` called ``setup_commerce_indices`` when
+    ``commerce_backbone_enabled`` was on, did not call it when off, and that a failure
+    in it did not crash the boot chain.
 
-        mock_setup.assert_not_called()
+    Phase 6 deleted ``setup_commerce_indices``, and with it the only thing that flag
+    gated at boot: there are no commerce indices to provision, because the document
+    store is one Postgres table created by a migration. The commerce TABLES are
+    created by ``alembic upgrade head`` and the ``migration-check`` CI job asserts
+    those migrations run.
 
-    @pytest.mark.asyncio
-    async def test_commerce_index_setup_failure_does_not_crash(
-        self, mock_app, container, _mock_external_services
-    ):
-        """If setup_commerce_indices raises, initialization continues."""
-        mock_settings = MagicMock()
-        mock_settings.commerce_backbone_enabled = True
-        mock_settings.seed_demo_data = False
-
-        with patch("config.settings.get_settings", return_value=mock_settings), \
-             patch("telemetry.service.initialize_telemetry", return_value=MagicMock()), \
-             patch("health.service.HealthCheckService", return_value=MagicMock()), \
-             patch("ingestion.service.DataIngestionService", return_value=MagicMock()), \
-             patch("websocket.connection_manager.ConnectionManager", return_value=MagicMock()), \
-             patch("websocket.connection_manager.bind_container"), \
-             patch("errors.handlers.register_exception_handlers"), \
-             patch(
-                 "commerce.services.commerce_es_mappings.setup_commerce_indices",
-                 side_effect=RuntimeError("ES connection failed"),
-             ):
-
-            sys.modules.pop("bootstrap.core", None)
-            from bootstrap.core import initialize
-            await initialize(mock_app, container)
-
-        # Should not raise — initialization completes despite the failure
-        assert container.has("settings")
-        assert container.has("es_service")
+    The flag itself still gates commerce behaviour elsewhere and is tested where that
+    behaviour lives; what is gone is the index-creation observable these three used.
+    """

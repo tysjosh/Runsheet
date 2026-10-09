@@ -1,14 +1,21 @@
-"""Parity check: diff the Postgres read path against Elasticsearch.
+"""Parity check: diff the relational read path against the document store.
 
-Phase-4 confidence tool. For each commerce aggregate it fetches every record
-from BOTH stores and reports any divergence, so the read-cutover decision rests
-on evidence rather than inspection. Read-only against both stores — it never
-writes.
+It fetches every record for each commerce aggregate from BOTH planes and reports
+any divergence. Read-only against both — it never writes.
 
-It compares the *projected* document shapes (what callers actually receive):
-ES returns the stored ``_source``; Postgres returns ``persistence.projections``
-output. Volatile/derived fields that are intentionally recomputed on read (e.g.
-``updated_at`` drift, account live-balance fields) can be ignored per aggregate.
+Originally the Phase-4 confidence tool for the read cutover, when the two planes
+were Postgres and an Elasticsearch cluster. Both are Postgres now — the typed
+tables and ``es_documents`` — which does not make the comparison redundant: the
+document plane is a *projection*, fed asynchronously by the outbox relay, so it can
+still fall behind or drift. What changed is that a mismatch is now a projection bug
+rather than a cross-store consistency risk, and the tool is drift detection rather
+than a cutover gate.
+
+It compares the *projected* document shapes (what callers actually receive): the
+document store returns the stored document; the relational side returns
+``persistence.projections`` output. Volatile/derived fields that are intentionally
+recomputed on read (e.g. ``updated_at`` drift, account live-balance fields) can be
+ignored per aggregate.
 
 Usage::
 
@@ -46,7 +53,12 @@ _INDEX_BY_AGG = {
     "supplier_contract": ("supplier_contracts", "contract_id"),
     "fuel_order": ("fuel_orders_current", "order_id"),
     "job": ("jobs_current", "job_id"),
-    "shipment": ("shipments_current", "shipment_id"),
+    # ``shipment`` was retired with the ``shipments_current`` table (rev 0007).
+    # It stayed listed here after the drop, and because ``_fetch_pg_all`` has no
+    # entry for it the tool raised ``KeyError: 'shipment'`` and abandoned the run
+    # — taking the seven aggregates after it, including all three fuel assets,
+    # down with it. Only reachable when ``shipments_current`` is absent from
+    # ``retired_es_indices``, which is why it went unnoticed.
     "tenant_job_policy": ("tenant_job_policies", "tenant_id"),
     "driver": ("drivers", "driver_id"),
     "depot": ("depots", "depot_id"),
@@ -55,6 +67,23 @@ _INDEX_BY_AGG = {
     "intake_channel": ("intake_channels", "channel_id"),
     "truck": ("trucks", "truck_id"),
     "location": ("locations", "location_id"),
+    "customer_tank": ("customer_tanks", "customer_tank_id"),
+    "truck_compartment": ("truck_compartments", "compartment_key"),
+    "fuel_station": ("fuel_stations", "station_key"),
+}
+
+#: Aggregates whose Elasticsearch ``_id`` is not the Postgres primary key, with
+#: the function that maps an ES ``_id`` + ``_source`` onto the PG key.
+#:
+#: Without this, parity reports every row twice — once "only in ES" and once
+#: "only in Postgres" — for a migration that is actually correct.
+#: ``customer_tanks`` is the case that matters: the ES documents are keyed by
+#: ``customer_id`` because the seeder's id resolver preferred the foreign key,
+#: and the Postgres table is deliberately keyed by ``customer_tank_id`` so the
+#: collision cannot recur. The remap makes parity compare the same tank on both
+#: sides instead of flagging the fix as a divergence.
+_ES_ID_REMAP = {
+    "customer_tank": lambda es_id, src: src.get("customer_tank_id") or es_id,
 }
 
 # Fields excluded from the diff per aggregate. These are either recomputed on
@@ -93,7 +122,6 @@ _IGNORED_FIELDS = {
     # Orders/jobs current-state: verbatim document — compare all.
     "fuel_order": set(),
     "job": set(),
-    "shipment": set(),
     "tenant_job_policy": set(),
     # Master data: verbatim document — compare all.
     "driver": set(),
@@ -103,6 +131,10 @@ _IGNORED_FIELDS = {
     "intake_channel": set(),
     "truck": set(),
     "location": set(),
+    # Fuel assets: verbatim document — compare all.
+    "customer_tank": set(),
+    "truck_compartment": set(),
+    "fuel_station": set(),
 }
 
 
@@ -170,57 +202,35 @@ def _diff_doc(agg: str, es_doc: Dict[str, Any], pg_doc: Dict[str, Any]) -> List[
     return diffs
 
 
-async def _fetch_es_all(es_client, index: str, tenant_id: Optional[str]) -> Dict[str, Dict[str, Any]]:
-    """Return ``{id: _source}`` for every doc in an index (optionally one tenant).
+async def _fetch_documents_all(index: str, tenant_id: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """Return ``{doc_id: document}`` for one index (optionally one tenant).
 
-    Legacy generic-ES indices (``trucks`` / ``locations``) were created with
-    dynamic mapping, so their ``tenant_id`` is ``text`` (with a ``.keyword``
-    subfield) rather than ``keyword``. A plain ``term: {tenant_id}`` query
-    matches nothing on a ``text`` field, which previously made parity silently
-    report ES=0 for those indices. When a tenant-scoped term yields nothing but
-    the index is non-empty, retry on ``tenant_id.keyword`` then fall back to a
-    client-side filter — so parity sees the same rows the application reads
-    (which post-filter in Python) actually serve.
+    Reads ``es_documents`` directly rather than through ``search_documents``,
+    because parity wants *every* row and a query API built for paged application
+    reads is the wrong shape for that.
+
+    This used to scroll the Elasticsearch cluster, and most of it was working
+    around one mapping defect: the legacy generic indices (``trucks`` /
+    ``locations``) were created with dynamic mapping, so their ``tenant_id`` was
+    ``text`` rather than ``keyword`` and a plain ``term`` query matched nothing —
+    which made parity silently report ES=0 for them. The fix was a three-stage
+    fallback: ``term`` on ``tenant_id``, then on ``tenant_id.keyword``, then a
+    client-side filter. None of it applies to a ``varchar`` column, so all three
+    stages collapse into one ``WHERE``. The scroll-context cleanup goes too.
     """
-    if not es_client.indices.exists(index=index):
-        return {}
+    from sqlalchemy import select
 
-    def _scroll(query: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
-        out: Dict[str, Dict[str, Any]] = {}
-        resp = es_client.search(index=index, query=query, size=500, scroll="2m")
-        scroll_id = resp.get("_scroll_id")
-        hits = resp["hits"]["hits"]
-        while hits:
-            for hit in hits:
-                out[hit["_id"]] = hit["_source"]
-            resp = es_client.scroll(scroll_id=scroll_id, scroll="2m")
-            scroll_id = resp.get("_scroll_id")
-            hits = resp["hits"]["hits"]
-        # Release the scroll context promptly — the serverless cluster caps the
-        # number of open scroll contexts, and parity opens several per run.
-        if scroll_id:
-            try:
-                es_client.clear_scroll(scroll_id=scroll_id)
-            except Exception:  # noqa: BLE001 — best-effort cleanup
-                pass
-        return out
+    from persistence.database import session_scope
+    from persistence.models import EsDocumentORM
 
-    if tenant_id is None:
-        return _scroll({"match_all": {}})
-
-    out = _scroll({"term": {"tenant_id": tenant_id}})
-    if out:
-        return out
-
-    out = _scroll({"term": {"tenant_id.keyword": tenant_id}})
-    if out:
-        return out
-
-    return {
-        doc_id: src
-        for doc_id, src in _scroll({"match_all": {}}).items()
-        if src.get("tenant_id") == tenant_id
-    }
+    out: Dict[str, Dict[str, Any]] = {}
+    async with session_scope() as session:
+        stmt = select(EsDocumentORM).where(EsDocumentORM.index_name == index)
+        if tenant_id:
+            stmt = stmt.where(EsDocumentORM.tenant_id == tenant_id)
+        for row in (await session.execute(stmt)).scalars().all():
+            out[row.doc_id] = dict(row.document or {})
+    return out
 
 
 async def _fetch_pg_all(agg: str, tenant_id: Optional[str]) -> Dict[str, Dict[str, Any]]:
@@ -249,6 +259,9 @@ async def _fetch_pg_all(agg: str, tenant_id: Optional[str]) -> Dict[str, Dict[st
         "intake_channel": ("IntakeChannelORM", "channel_id"),
         "truck": ("TruckORM", "truck_id"),
         "location": ("LocationORM", "location_id"),
+        "customer_tank": ("CustomerTankORM", "customer_tank_id"),
+        "truck_compartment": ("TruckCompartmentORM", "compartment_key"),
+        "fuel_station": ("FuelStationORM", "station_key"),
     }
     if agg in _CONFIG:
         import persistence.models as _m
@@ -303,23 +316,21 @@ async def _fetch_pg_all(agg: str, tenant_id: Optional[str]) -> Dict[str, Dict[st
 
 
 async def parity_check(tenant_id: Optional[str] = None) -> Tuple[int, int]:
-    """Compare every commerce record across ES and Postgres.
+    """Compare every commerce record across the document store and the tables.
 
     Returns ``(records_checked, mismatches)``.
     """
     from persistence.database import is_persistence_enabled
-    from services.elasticsearch_service import elasticsearch_service
 
     if not is_persistence_enabled():
         raise RuntimeError("Parity check requires DATABASE_URL (persistence dormant).")
 
-    es_client = elasticsearch_service.client
     total_checked = 0
     total_mismatches = 0
 
-    # Indices retired in Phase 6 no longer exist in ES — Postgres is now their
-    # sole store, so a parity diff against an absent index is meaningless. Skip
-    # them (they were verified before the drop and PG is authoritative).
+    # A retired index has no document rows by design — the relational table is its
+    # sole store — so a diff against it would report every record as missing from
+    # the document side. Skip them.
     try:
         from config.settings import get_settings
         retired = set(get_settings().retired_es_indices or [])
@@ -328,26 +339,35 @@ async def parity_check(tenant_id: Optional[str] = None) -> Tuple[int, int]:
 
     for agg, (index, id_field) in _INDEX_BY_AGG.items():
         if index in retired:
-            logger.info("[%s] index %s retired (Postgres-only) — skipping parity", agg, index)
+            logger.info("[%s] index %s retired (table-only) — skipping parity", agg, index)
             continue
-        es_docs = await _fetch_es_all(es_client, index, tenant_id)
+        doc_docs = await _fetch_documents_all(index, tenant_id)
+        remap = _ES_ID_REMAP.get(agg)
+        if remap is not None:
+            doc_docs = {remap(doc_id, src): src for doc_id, src in doc_docs.items()}
         pg_docs = await _fetch_pg_all(agg, tenant_id)
 
-        only_es = set(es_docs) - set(pg_docs)
-        only_pg = set(pg_docs) - set(es_docs)
-        both = set(es_docs) & set(pg_docs)
+        only_doc = set(doc_docs) - set(pg_docs)
+        only_pg = set(pg_docs) - set(doc_docs)
+        both = set(doc_docs) & set(pg_docs)
 
         agg_mismatches = 0
-        for missing in sorted(only_es):
-            logger.error("[%s] %s present in ES but MISSING in Postgres", agg, missing)
+        for missing in sorted(only_doc):
+            logger.error(
+                "[%s] %s present in the document store but MISSING in the table",
+                agg, missing,
+            )
             agg_mismatches += 1
         for extra in sorted(only_pg):
-            logger.error("[%s] %s present in Postgres but MISSING in ES", agg, extra)
+            logger.error(
+                "[%s] %s present in the table but MISSING in the document store",
+                agg, extra,
+            )
             agg_mismatches += 1
 
         for rid in sorted(both):
             total_checked += 1
-            diffs = _diff_doc(agg, es_docs[rid], pg_docs[rid])
+            diffs = _diff_doc(agg, doc_docs[rid], pg_docs[rid])
             if diffs:
                 agg_mismatches += 1
                 logger.error("[%s] %s diverges:\n%s", agg, rid, "\n".join(diffs))
@@ -355,12 +375,15 @@ async def parity_check(tenant_id: Optional[str] = None) -> Tuple[int, int]:
         total_mismatches += agg_mismatches
         status = "OK" if agg_mismatches == 0 else f"{agg_mismatches} MISMATCH(es)"
         logger.info(
-            "[%s] ES=%d PG=%d common=%d → %s",
-            agg, len(es_docs), len(pg_docs), len(both), status,
+            "[%s] docs=%d table=%d common=%d → %s",
+            agg, len(doc_docs), len(pg_docs), len(both), status,
         )
 
     if total_mismatches == 0:
-        logger.info("PARITY OK — %d records identical across ES and Postgres", total_checked)
+        logger.info(
+            "PARITY OK — %d records identical between the document store and the "
+            "tables", total_checked,
+        )
     else:
         logger.error(
             "PARITY FAILED — %d mismatch(es) across %d records checked",
@@ -370,7 +393,9 @@ async def parity_check(tenant_id: Optional[str] = None) -> Tuple[int, int]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Diff the Postgres read path vs Elasticsearch.")
+    parser = argparse.ArgumentParser(
+        description="Diff the relational read path vs the document store."
+    )
     parser.add_argument("--tenant", default=None, help="Restrict to one tenant_id.")
     args = parser.parse_args()
 

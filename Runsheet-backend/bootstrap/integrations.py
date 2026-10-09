@@ -7,6 +7,7 @@ and registers Prometheus metrics for the intake channel admin surface.
 Requirements: 2.1
 """
 import logging
+import os
 
 from bootstrap.container import ServiceContainer
 
@@ -125,6 +126,72 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.warning("Canonical import wiring failed: %s", exc)
 
+    # Customer portal orders and tanks (OI-06, design §2.4, §4). Wired here
+    # because the customer-tank repository is created just above; it needs the
+    # pipeline and order repository (fuel) and CustomerService (core, only
+    # with the commerce backbone). Without them the routes answer 503.
+    try:
+        needed = (
+            "order_intake_pipeline", "order_repository",
+            "customer_tank_repository", "commerce_customer_service",
+        )
+        if all(container.has(name) for name in needed):
+            from portal.services.portal_order_service import wire_portal_orders
+
+            wire_portal_orders(
+                es_service=es_service,
+                order_repository=container.order_repository,
+                tank_repository=container.customer_tank_repository,
+                pipeline=container.order_intake_pipeline,
+                customer_service=container.commerce_customer_service,
+            )
+            logger.info("Customer portal orders and tanks configured")
+            # Request notifications (portal-fixes B2/C2): dispatchers through
+            # the activity log (staff bell), the requester by email.
+            from portal.services.order_notifications import (
+                PortalOrderNotifier,
+                configure_portal_order_notifier,
+            )
+            configure_portal_order_notifier(
+                PortalOrderNotifier(
+                    activity_log=container.get("activity_log_service")
+                    if container.has("activity_log_service") else None,
+                    order_repository=container.order_repository,
+                    tank_repository=container.customer_tank_repository,
+                )
+            )
+    except Exception as exc:
+        logger.warning("Customer portal order wiring failed: %s", exc)
+    # Portal email templates: tenant-edited wording from the notifications
+    # template store when it exists (portal-fixes C2).
+    try:
+        if container.has("notification_service"):
+            from portal.services.portal_email import configure_portal_email_templates
+            configure_portal_email_templates(
+                container.notification_service._template_renderer
+            )
+    except Exception as exc:
+        logger.warning("Portal email template wiring failed: %s", exc)
+    # Supplier display name seed (portal-fixes A1): SEED_TENANT_DISPLAY_NAME
+    # restores the name for SEED_TENANT_ID after a Redis rebuild, without
+    # overwriting a name an operator set with scripts/set_tenant_display_name.
+    try:
+        seed_tenant = (
+            getattr(container.settings, "seed_tenant_id", "") or ""
+        ).strip() or os.environ.get("SEED_TENANT_ID", "").strip()
+        seed_name = os.environ.get("SEED_TENANT_DISPLAY_NAME", "").strip()
+        if seed_tenant and seed_name and container.has("tenant_settings_service"):
+            wrote = await container.tenant_settings_service.seed_display_name(
+                seed_tenant, seed_name
+            )
+            logger.info(
+                "Tenant display name seed for tenant=%s: %s",
+                seed_tenant,
+                "set" if wrote else "already set",
+            )
+    except Exception as exc:
+        logger.warning("Tenant display name seed failed: %s", exc)
+
     # ------------------------------------------------------------------
     # Dinee voice integration (Surface A submission bridge + Surface B
     # read/driver endpoints). Wired here — the last bootstrap module — so the
@@ -187,14 +254,8 @@ async def _initialize_voice_integration(
             VoiceApiKeyRepository,
             configure_voice_auth,
         )
-        from fuel.voice.voice_es_mappings import setup_voice_indices
 
         # Create the voice_api_keys index (idempotent).
-        try:
-            setup_voice_indices(es_service)
-            logger.info("Voice ES indices ready")
-        except Exception as exc:
-            logger.warning("Failed to set up voice ES indices: %s", exc)
 
         salt = getattr(settings, "voice_api_key_salt", "") if settings else ""
         if salt:

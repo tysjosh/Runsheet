@@ -11,6 +11,7 @@
  */
 
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import { buildQueryString, fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -170,6 +171,12 @@ export interface OrderListFilters {
   start_date?: string;
   end_date?: string;
   intake_channel?: IntakeChannelType;
+  /**
+   * Exact hold reason. With `status: "on_hold"` and
+   * `PORTAL_REVIEW_HOLD_REASON` (`./orderHoldReasons`) this is the "Awaiting confirmation"
+   * queue of customer-portal requests (PD24).
+   */
+  hold_reason?: string;
   /** Free-text search over order id, customer name/id, and ship-to address. */
   q?: string;
   page?: number;
@@ -280,11 +287,7 @@ async function ordersRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();

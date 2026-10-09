@@ -151,6 +151,40 @@ class TestAssetCertExpiryCronMonitorCycle:
             assert actions == []
 
     @pytest.mark.asyncio
+    async def test_legacy_summary_counts_as_one_detection(self, agent, mock_es_service):
+        """OI-33: N legacy expired certs reach the cron as one detection."""
+        from compliance.services.asset_certification_service import (
+            LegacyExpiredCertSummaryAlert,
+        )
+        from datetime import date
+
+        mock_es_service.search_documents.return_value = {
+            "aggregations": {
+                "tenants": {"buckets": [{"key": "tenant-1"}]}
+            }
+        }
+        summary = LegacyExpiredCertSummaryAlert(
+            tenant_id="tenant-1",
+            cert_ids=["c1", "c2", "c3"],
+            asset_ids=["truck-1"],
+            count=3,
+            oldest_expiry_date=date(2025, 1, 1),
+        )
+
+        with patch(
+            "Agents.autonomous.asset_cert_expiry_cron_agent.AssetCertificationService"
+        ) as MockACS:
+            mock_svc = AsyncMock()
+            mock_svc.check_expiry_alerts.return_value = [summary]
+            MockACS.return_value = mock_svc
+            agent._note_tenant_activity = MagicMock()
+
+            detections, _ = await agent.monitor_cycle()
+
+        assert detections == [summary]
+        agent._note_tenant_activity.assert_called_once_with("tenant-1", detections=1)
+
+    @pytest.mark.asyncio
     async def test_single_tenant_failure_does_not_abort_others(
         self, agent, mock_es_service
     ):

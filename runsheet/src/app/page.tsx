@@ -22,6 +22,7 @@ import {
   Gauge,
   Landmark,
   Plug,
+  Receipt,
   ScrollText,
   ShieldCheck,
   SlidersHorizontal,
@@ -1001,20 +1002,39 @@ const HERO_STATS = [
   { value: "9", label: "US fuel products" },
 ];
 
+// Ordered to lead with the three propositions a fuel distributor actually buys
+// on: fewer runouts, more gallons per truck-day, and audit/billing exposure
+// closed at the point of transaction. "AI Agents" was demoted out of the
+// headline sequence — no distributor buys a multi-agent architecture, they buy
+// the three outcomes above. The agent stack now sits under "Autonomy", framed
+// as the adoption path (how you get comfortable turning it on) rather than as a
+// product pillar in its own right.
 const NAV_LINKS = [
   ["Forecasting", "#forecasting"],
-  ["Replanning", "#replanning"],
   ["Loading", "#loading"],
-  ["AI Agents", "#agents"],
   ["Compliance", "#compliance"],
+  ["Replanning", "#replanning"],
+  ["Autonomy", "#autonomy"],
   ["How", "#how"],
 ] as const;
 
+// Each card names a capability with an enforcing service behind it.
+//
+// Two deliberate wordings:
+// - Dyed diesel says "order, load and invoice" because the enforcer really is
+//   called at all three points (intake pipeline hook, compartment loading
+//   agent, invoice finalization) — that breadth is the claim worth making.
+// - IFTA says "mileage record", NOT "files your return". IFTA_Reporter
+//   aggregates per-state miles and gallons honestly, but
+//   ``generate_quarterly_report`` is a self-described placeholder, fuel-card
+//   gallons are an unbuilt index, and ``tax_due`` falls back to 0.0 with no
+//   rate table configured. Promising a filable return would be the one
+//   overclaim in an otherwise defensible section.
 const COMPLIANCE = [
   {
     icon: Landmark,
     title: "Tax Engine",
-    body: "Federal · State · County · City (FIPS)",
+    body: "Federal · State · County · City, resolved down the FIPS hierarchy",
   },
   {
     icon: Gauge,
@@ -1023,18 +1043,23 @@ const COMPLIANCE = [
   },
   {
     icon: BadgeCheck,
-    title: "Driver Compliance",
-    body: "CDL · HAZMAT · Medical card expiry",
+    title: "Driver Qualification",
+    body: "CDL · HAZMAT · Medical card · Auto-suspend on expiry",
   },
   {
     icon: Droplet,
-    title: "Enforcement",
-    body: "Dyed diesel · IRS 637M · Exemption certs",
+    title: "Dyed-Diesel Enforcement",
+    body: "IRS 637M checked at order, at load, and at invoice",
+  },
+  {
+    icon: Receipt,
+    title: "Meter-to-Invoice",
+    body: "Ticket → calibration check → immutable audit link",
   },
   {
     icon: FileText,
-    title: "Reporting",
-    body: "IFTA quarterly · Jurisdiction tax detail · Audit trail",
+    title: "IFTA Mileage Record",
+    body: "Per-state miles and gallons · Quarterly workpaper",
   },
 ];
 
@@ -1062,16 +1087,24 @@ const STANDARDS = [
 ];
 
 // Architecture-true trust claims (not marketing fluff, not fake certifications).
+//
+// "Human-in-the-loop" was removed from this band because the new #autonomy
+// section states it in full; repeating it here made the page argue the same
+// point twice before the reader had seen a single capability. Its slot went to
+// the integrations claim, which nothing else on the page was making despite
+// being backed by real connectors: a Geotab JSON-RPC client with session
+// renewal, a Veeder-Root connector that speaks TLS-350 over raw TCP to an
+// on-site console, and a QuickBooks Online sync.
 const TRUST_PILLARS = [
+  {
+    icon: Plug,
+    title: "Runs alongside your stack",
+    body: "Geotab telematics, Veeder-Root tank gauges, QuickBooks Online. No rip-and-replace.",
+  },
   {
     icon: Eye,
     title: "Shadow-mode rollout",
     body: "Agents observe and earn autonomy. Nothing goes live until it's validated against your data.",
-  },
-  {
-    icon: SlidersHorizontal,
-    title: "Human-in-the-loop",
-    body: "Configurable autonomy per operation — suggest-only, auto-low, or full-auto, with approval gates.",
   },
   {
     icon: ShieldCheck,
@@ -1249,10 +1282,16 @@ export default function LandingPage() {
           <div className="mt-10 grid gap-10 lg:grid-cols-[1fr_1.15fr] lg:items-end">
             <div>
               <Reveal delay={360}>
+                {/* "replan disruptions in seconds" was removed: no replan
+                    latency is specified or instrumented anywhere, unlike the
+                    loading (Req 3.4) and routing (Req 4.5) bounds in the
+                    stat strip below. The three clauses here now map 1:1 to the
+                    three pillars a distributor is buying. */}
                 <p className="max-w-xl text-lg leading-relaxed text-[#f5f4ef]/70">
-                  Autonomous AI operations for fuel distributors. Predict
-                  runouts, optimize truck loads, and replan disruptions in
-                  seconds — no rip-and-replace.
+                  Deliver on the last profitable day, not on a calendar.
+                  Runsheet forecasts every tank from its own consumption
+                  history, plans loads your compartments can legally carry, and
+                  blocks compliance exposure before it reaches an invoice.
                 </p>
               </Reveal>
               <Reveal delay={440}>
@@ -1306,11 +1345,11 @@ export default function LandingPage() {
           items={[
             "Runout Prevention",
             "P50/P90 Forecasts",
-            "Exception Replanning",
             "Multi-Compartment Loading",
-            "Shadow-Mode Agents",
+            "Dyed-Diesel Enforcement",
+            "Meter-to-Invoice Audit",
             "API 2540 VCF",
-            "IFTA Reporting",
+            "IFTA Mileage Record",
             "DOT / FMCSA Compliance",
           ]}
         />
@@ -1407,7 +1446,7 @@ export default function LandingPage() {
       <Pillar
         id="forecasting"
         index="01"
-        kicker="Predictive Forecasting"
+        kicker="Runout Prevention"
         title={
           <>
             Predict
@@ -1415,19 +1454,185 @@ export default function LandingPage() {
             before dry.
           </>
         }
-        body="Runsheet generates 24–72 hour runout forecasts with P50/P90 confidence for every station — pulling from tank telemetry, delivery history, and demand patterns. Anomaly detection flags sensor drift before it corrupts your plan."
-        tags={["P50/P90 Forecasts", "Anomaly Detection", "SLA Prioritization"]}
+        // Rewritten to name the actual mechanism rather than the generic
+        // "telemetry, history, and demand patterns" — which described every
+        // tank-monitoring vendor on the market. The differentiator is that
+        // consumption is weather-normalized per fuel type and the K-factor is
+        // learned from each tank's own delivery intervals
+        // (fuel/services/consumption_models.py), then reconciled against actual
+        // deliveries with operator approval
+        // (compliance/services/kfactor_calibration_service.py).
+        body="Every runout is an emergency delivery at negative margin. Every truck sent to a tank that turns out three-quarters full is a wasted stop. Runsheet forecasts each tank on a model matched to its fuel — degree-day regression for heating oil, a learned K-factor for propane, rolling seasonality for diesel — and returns a P50/P90 runout window with deliveries you have already scheduled subtracted out."
+        tags={["Degree-Day Normalized", "Learned K-Factors", "P50/P90 Windows"]}
         graphic={
           <Console file="forecast.engine" theme={DARK_GFX}>
             <ForecastGfx theme={DARK_GFX} />
           </Console>
         }
-      />
+      >
+        {/* Framed as queue ranking, not auto-dispatch. The forecast fires
+            alerts and ranks the board; order_creation_service.py exists but no
+            agent calls it yet, so "it books its own deliveries" would be a
+            claim the code does not support. */}
+        <ul className="space-y-2.5">
+          {[
+            "The right tank arrives at the top of your dispatcher's queue — you still decide.",
+            "Predicted vs. actual variance per tank, with a K-factor retune you approve.",
+            "Confidence degrades explicitly on thin history instead of guessing quietly.",
+          ].map((line) => (
+            <li key={line} className="flex items-start gap-2.5">
+              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-[#16b88c]" />
+              <span className="text-sm text-[#f5f4ef]/70">{line}</span>
+            </li>
+          ))}
+        </ul>
+      </Pillar>
 
-      {/* 02 REPLANNING */}
+      {/* 02 LOADING & ROUTING */}
+      <Pillar
+        id="loading"
+        index="02"
+        kicker="Load & Route Planning"
+        invert
+        flip
+        title={
+          <>
+            Loaded
+            <br />
+            right.
+          </>
+        }
+        // Products named from the shipped catalog
+        // (`fuel/services/fuel_product_catalog.py`). This previously read
+        // "AGO · PMS · ATK · LPG" — the pre-pivot Nigerian grades — which told a
+        // US heating-oil or commercial-diesel buyer the product was not built
+        // for them. Road diesel and dyed off-road fuel carry different tax
+        // classes, and DEF is isolated outright, so segregation is a tax and
+        // contamination control rather than a convenience.
+        // Routing was folded into this pillar because loading and routing are
+        // one decision for a tanker: which grades go in which compartments
+        // determines which stops the truck can serve. Splitting them implied a
+        // generic stop-optimizer, which is precisely the comparison this
+        // product wins.
+        //
+        // Deliberately absent: any customer-facing ETA promise. Route distances
+        // are real (Haversine, or a live traffic matrix when a provider is
+        // configured), but the per-stop arrival times on a persisted RoutePlan
+        // are still a flat 30-minutes-per-stop approximation in
+        // _build_route_plan. Selling "we tell your customer when we'll arrive"
+        // would be writing a cheque the solver cannot cash yet.
+        body="A generic route optimizer treats a delivery as a pin on a map. Yours is a multi-compartment tanker where the wrong product in the wrong compartment is a contamination claim or a tax problem. Runsheet plans the load and the route as one decision — segregating Diesel #2, Heating Oil, Off-Road Diesel, Gasoline, Propane, Kerosene and DEF, checking what each compartment last carried, and respecting axle weight before a stop sequence is ever built."
+        tags={[
+          "Product Segregation",
+          "Residue-Aware",
+          "Weight-Limited",
+          "Multi-Drop Routing",
+        ]}
+        graphic={
+          <Console file="load.solver" theme={CREAM_GFX}>
+            <LoadGfx theme={CREAM_GFX} />
+          </Console>
+        }
+      >
+        <ul className="space-y-2.5">
+          {[
+            "Constraint solve under 500ms; stop sequencing under 2s at 15 stops.",
+            "No truck is assigned on an expired CDL, medical card, or cargo-tank cert.",
+            "Hours-of-Service eligibility is checked from telematics before dispatch.",
+          ].map((line) => (
+            <li key={line} className="flex items-start gap-2.5">
+              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-[#0a0a0b]/45" />
+              <span className="text-sm text-[#0a0a0b]/75">{line}</span>
+            </li>
+          ))}
+        </ul>
+      </Pillar>
+
+      {/* 03 COMPLIANCE */}
+      <section
+        id="compliance"
+        className="relative border-t border-[#f5f4ef]/10"
+      >
+        <div className="mx-auto max-w-7xl px-6 py-20 lg:px-10 lg:py-28">
+          <Reveal>
+            <div className="mb-8 flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-[#f5f4ef]/62">
+              <span className="text-[#16b88c]">03</span>
+              <span className="h-px w-[90px] bg-[#16b88c] opacity-50" />
+              Compliance Backbone
+            </div>
+          </Reveal>
+          <Reveal delay={60}>
+            <h2 className="max-w-4xl text-[clamp(2.5rem,7vw,5.5rem)] font-black uppercase leading-[0.9] tracking-[-0.03em]">
+              Blocked at
+              <br />
+              <span className="text-[#f5f4ef]/40">the transaction.</span>
+            </h2>
+          </Reveal>
+          <Reveal delay={140}>
+            {/* Reframed from "handles the entire regulatory stack" — a
+                completeness claim — to enforcement timing, which is the part
+                that is actually true and actually differentiating. "IFTA
+                reporting" softened to the mileage record it really produces. */}
+            <p className="mt-7 max-w-2xl text-base leading-relaxed text-[#f5f4ef]/70 lg:text-lg">
+              Dyed fuel to a customer without a valid 637M. A driver dispatched
+              on an expired medical card. Gallons delivered that never reached
+              an invoice. Runsheet stops each of those at the moment it happens
+              rather than surfacing it in a month-end report.
+            </p>
+          </Reveal>
+
+          <div className="mt-14 grid gap-px overflow-hidden rounded-2xl border border-[#f5f4ef]/10 bg-[#f5f4ef]/10 sm:grid-cols-2 lg:grid-cols-3">
+            {COMPLIANCE.map((c, i) => {
+              const Icon = c.icon;
+              return (
+                <Reveal key={c.title} delay={i * 70}>
+                  <div className="h-full bg-[#0a0a0b] p-6">
+                    <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#16b88c]/12">
+                      <Icon className="h-5 w-5 text-[#16b88c]" />
+                    </div>
+                    <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-[#16b88c]">
+                      0{i + 1}
+                    </div>
+                    <h3 className="text-sm font-bold uppercase tracking-[0.08em]">
+                      {c.title}
+                    </h3>
+                    <p className="mt-3 text-xs leading-relaxed text-[#f5f4ef]/70">
+                      {c.body}
+                    </p>
+                  </div>
+                </Reveal>
+              );
+            })}
+          </div>
+        </div>
+      </section>
+
+      {/* MARQUEE 2 */}
+      <div className="border-y border-[#f5f4ef]/10 bg-[#0a0a0b] py-3 text-[#f5f4ef]">
+        <Marquee
+          direction="right"
+          // Dropped: the two fabricated figures repeated from the pillars, and
+          // "Form 720 Ready" — the only Form 720 reference in the backend is a
+          // comment in an ES mapping noting that TaxEngine output is shaped so
+          // reporting *could* be built. IFTA is genuinely implemented, so it
+          // takes the slot instead.
+          items={[
+            "Autonomous Fuel Ops",
+            "Net Gallons at 60°F",
+            "Learned K-Factors",
+            "Human-in-Loop",
+            "Degree-Day Normalized",
+            "Residue-Aware Loading",
+            "Explainable AI",
+            "Regional Distributors",
+          ]}
+        />
+      </div>
+
+      {/* 04 REPLANNING */}
       <Pillar
         id="replanning"
-        index="02"
+        index="04"
         kicker="Exception Replanning"
         flip
         title={
@@ -1456,149 +1661,66 @@ export default function LandingPage() {
         }
       />
 
-      {/* 03 LOADING */}
-      <Pillar
-        id="loading"
-        index="03"
-        kicker="Load Optimization"
-        invert
-        title={
-          <>
-            Loaded
-            <br />
-            right.
-          </>
-        }
-        // Products named from the shipped catalog
-        // (`fuel/services/fuel_product_catalog.py`). This previously read
-        // "AGO · PMS · ATK · LPG" — the pre-pivot Nigerian grades — which told a
-        // US heating-oil or commercial-diesel buyer the product was not built
-        // for them. Road diesel and dyed off-road fuel carry different tax
-        // classes, and DEF is isolated outright, so segregation is a tax and
-        // contamination control rather than a convenience.
-        body="Auto-generate optimal loading plans for multi-compartment tankers — enforcing absolute product segregation across Diesel #2, Heating Oil, Off-Road Diesel, Gasoline, Propane, Kerosene and DEF, maximizing compartment utilization, and enabling multi-drop routes in a single trip. Constraint solving completes in under 500ms."
-        tags={["Product Segregation", "Multi-Drop Routing", "Tax-Class Aware"]}
-        graphic={
-          <Console file="load.solver" theme={CREAM_GFX}>
-            <LoadGfx theme={CREAM_GFX} />
-          </Console>
-        }
-      />
-
-      {/* 04 AGENTS */}
-      <Pillar
-        id="agents"
-        index="04"
-        kicker="Multi-Agent AI"
-        flip
-        title={
-          <>
-            <span className="block">Human</span>
-            <span className="block text-[#16b88c]">first.</span>
-          </>
-        }
-        body="Three agent layers run continuously: domain watchdogs monitor operations, overlay agents optimize across the fleet, and a meta-learning agent improves decisions over time. Every agent starts in shadow mode and earns autonomy through validated performance."
-        tags={[
-          "Shadow Mode",
-          "Configurable Autonomy",
-          "Continuous Learning",
-          "Audit Trail",
-        ]}
-        accent={PILLAR_ACCENT.agents}
-        graphic={
-          <Console file="agent.stack" theme={DARK_GFX}>
-            <AgentGfx theme={DARK_GFX} reduce={reduce} />
-          </Console>
-        }
-      >
-        <ul className="space-y-2.5">
-          {[
-            "Shadow mode first — agents go active only after validation.",
-            "Configurable autonomy: suggest-only → auto-low → full-auto.",
-            "Full audit trail on every agent decision, across every layer.",
-          ].map((line) => (
-            <li key={line} className="flex items-start gap-2.5">
-              <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-[#16b88c]" />
-              <span className="text-sm text-[#f5f4ef]/70">{line}</span>
-            </li>
-          ))}
-        </ul>
-      </Pillar>
-
-      {/* MARQUEE 2 */}
-      <div className="border-y border-[#f5f4ef]/10 bg-[#0a0a0b] py-3 text-[#f5f4ef]">
-        <Marquee
-          direction="right"
-          // Dropped: the two fabricated figures repeated from the pillars, and
-          // "Form 720 Ready" — the only Form 720 reference in the backend is a
-          // comment in an ES mapping noting that TaxEngine output is shaped so
-          // reporting *could* be built. IFTA is genuinely implemented, so it
-          // takes the slot instead.
-          items={[
-            "Autonomous Fuel Ops",
-            "Net Gallons at 60°F",
-            "IFTA Quarterly",
-            "Human-in-Loop",
-            "Dyed-Diesel Enforcement",
-            "Multi-Compartment Loading",
-            "Explainable AI",
-            "Regional Distributors",
-          ]}
-        />
-      </div>
-
-      {/* 05 COMPLIANCE */}
+      {/* AUTONOMY — deliberately unnumbered.
+          This was pillar "04 · Multi-Agent AI". A three-layer agent
+          architecture is an implementation fact, not a reason a distributor
+          signs. Demoting it out of the numbered sequence and reframing it as
+          the adoption path puts it where it earns its keep: answering "I am not
+          letting software dispatch my trucks." Same graphic, same claims — all
+          three are architecture-true — just no longer competing with runouts,
+          loading, and compliance for top billing. */}
       <section
-        id="compliance"
-        className="relative border-t border-[#f5f4ef]/10"
+        id="autonomy"
+        className="relative border-t border-[#f5f4ef]/10 bg-[#0d0d0f]"
       >
-        <div className="mx-auto max-w-7xl px-6 py-20 lg:px-10 lg:py-28">
-          <Reveal>
-            <div className="mb-8 flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-[#f5f4ef]/62">
-              <span className="text-[#16b88c]">05</span>
-              <span className="h-px w-[90px] bg-[#16b88c] opacity-50" />
-              Compliance Backbone
-            </div>
-          </Reveal>
-          <Reveal delay={60}>
-            <h2 className="max-w-4xl text-[clamp(2.5rem,7vw,5.5rem)] font-black uppercase leading-[0.9] tracking-[-0.03em]">
-              Built in.
-              <br />
-              <span className="text-[#f5f4ef]/40">Not bolted on.</span>
-            </h2>
-          </Reveal>
-          <Reveal delay={140}>
-            <p className="mt-7 max-w-2xl text-base leading-relaxed text-[#f5f4ef]/70 lg:text-lg">
-              Runsheet handles the entire regulatory stack for U.S. fuel
-              distribution — multi-jurisdiction excise tax, API 2540 volume
-              correction, DOT/FMCSA driver qualification, dyed-diesel
-              enforcement, and IFTA reporting.
-            </p>
-          </Reveal>
-
-          <div className="mt-14 grid gap-px overflow-hidden rounded-2xl border border-[#f5f4ef]/10 bg-[#f5f4ef]/10 sm:grid-cols-2 lg:grid-cols-5">
-            {COMPLIANCE.map((c, i) => {
-              const Icon = c.icon;
-              return (
-                <Reveal key={c.title} delay={i * 70}>
-                  <div className="h-full bg-[#0a0a0b] p-6">
-                    <div className="mb-5 flex h-10 w-10 items-center justify-center rounded-lg bg-[#16b88c]/12">
-                      <Icon className="h-5 w-5 text-[#16b88c]" />
-                    </div>
-                    <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-[#16b88c]">
-                      0{i + 1}
-                    </div>
-                    <h3 className="text-sm font-bold uppercase tracking-[0.08em]">
-                      {c.title}
-                    </h3>
-                    <p className="mt-3 text-xs leading-relaxed text-[#f5f4ef]/70">
-                      {c.body}
-                    </p>
-                  </div>
-                </Reveal>
-              );
-            })}
+        <div className="mx-auto grid max-w-7xl items-center gap-12 px-6 py-20 lg:grid-cols-2 lg:gap-16 lg:px-10 lg:py-28">
+          <div>
+            <Reveal>
+              <div className="mb-8 flex items-center gap-4 font-mono text-xs uppercase tracking-[0.3em] text-[#f5f4ef]/62">
+                <span style={{ color: PILLAR_ACCENT.agents }}>→</span>
+                <span
+                  className="h-px w-[90px]"
+                  style={{ background: PILLAR_ACCENT.agents, opacity: 0.5 }}
+                />
+                Autonomy on your terms
+              </div>
+            </Reveal>
+            <Reveal delay={60}>
+              <h2 className="text-[clamp(2.5rem,7vw,5.5rem)] font-black uppercase leading-[0.9] tracking-[-0.03em]">
+                <span className="block">Nothing acts</span>
+                <span className="block text-[#16b88c]">unwatched.</span>
+              </h2>
+            </Reveal>
+            <Reveal delay={140}>
+              <p className="mt-7 max-w-lg text-base leading-relaxed text-[#f5f4ef]/82 lg:text-lg">
+                You do not have to trust any of the above on day one. Every
+                agent starts in shadow mode — it observes your operation and
+                shows you the call it would have made, while your dispatchers
+                keep working exactly as they do today. You promote capabilities
+                one at a time, and you can switch any of them off per operation.
+              </p>
+            </Reveal>
+            <Reveal delay={200}>
+              <ul className="mt-6 space-y-2.5">
+                {[
+                  "Shadow mode first — agents go active only after you have seen them be right.",
+                  "Configurable autonomy per operation: suggest-only → auto-low → full-auto.",
+                  "Every decision logged and explainable, with approval gates where you want them.",
+                ].map((line) => (
+                  <li key={line} className="flex items-start gap-2.5">
+                    <ArrowUpRight className="mt-0.5 h-4 w-4 shrink-0 text-[#16b88c]" />
+                    <span className="text-sm text-[#f5f4ef]/70">{line}</span>
+                  </li>
+                ))}
+              </ul>
+            </Reveal>
           </div>
+
+          <Reveal delay={120}>
+            <Console file="agent.stack" theme={DARK_GFX}>
+              <AgentGfx theme={DARK_GFX} reduce={reduce} />
+            </Console>
+          </Reveal>
         </div>
       </section>
 
@@ -1659,7 +1781,7 @@ export default function LandingPage() {
               </Link>
               <p className="mt-4 max-w-xs text-sm leading-relaxed text-[#f5f4ef]/55">
                 Autonomous AI operations for regional fuel distributors —
-                forecast, load, replan, and stay compliant.
+                forecast the runout, load the tanker right, stay compliant.
               </p>
             </div>
 
@@ -1724,7 +1846,15 @@ export default function LandingPage() {
           </div>
 
           <div className="mt-12 flex flex-col gap-2 border-t border-[#f5f4ef]/10 pt-6 font-mono text-[10px] uppercase tracking-[0.22em] text-[#f5f4ef]/50 sm:flex-row sm:items-center sm:justify-between">
-            <span>© {new Date().getFullYear()} Runsheet · Beta</span>
+            <span className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <span>© {new Date().getFullYear()} Runsheet · Beta</span>
+              <Link
+                href="/privacy"
+                className="transition-colors hover:text-[#f5f4ef]"
+              >
+                Privacy
+              </Link>
+            </span>
             <span>
               Fuel Distribution · Runout Prevention · Dispatch Support
             </span>

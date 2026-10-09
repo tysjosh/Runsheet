@@ -11,7 +11,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -22,29 +21,17 @@ if str(_BACKEND_DIR) not in sys.path:
 
 
 @pytest.fixture(scope="module")
-def mock_es_client():
-    """Create a mock Elasticsearch client that passes ping()."""
-    mock = MagicMock()
-    mock.ping.return_value = True
-    mock.indices.exists.return_value = False
-    mock.indices.create.return_value = {"acknowledged": True}
-    mock.indices.get_mapping.return_value = {}
-    mock.indices.put_mapping.return_value = {"acknowledged": True}
-    mock.ilm.get_lifecycle.side_effect = Exception("not found")
-    mock.ilm.put_lifecycle.return_value = {"acknowledged": True}
-    mock.indices.put_settings.return_value = {"acknowledged": True}
-    mock.search.return_value = {"hits": {"hits": [], "total": {"value": 0}}}
-    return mock
+def app_and_registry():
+    """Import the app and generate the registry once for all tests.
 
-
-@pytest.fixture(scope="module")
-def app_and_registry(mock_es_client):
-    """Import the app and generate the registry once for all tests."""
+    No Elasticsearch mocking: the ``elasticsearch`` package was removed from
+    requirements.txt when the document plane moved to PostgreSQL, and nothing
+    imports it any more — patching ``elasticsearch.Elasticsearch`` raised
+    ``ModuleNotFoundError`` in any environment where the (now-unused) package
+    isn't separately installed, which is every environment that installs
+    strictly from requirements.txt (e.g. CI).
+    """
     env_defaults = {
-        "ELASTICSEARCH_URL": "http://localhost:9200",
-        "ELASTIC_ENDPOINT": "http://localhost:9200",
-        "ELASTIC_API_KEY": "mock-key-for-test",
-        "ELASTICSEARCH_API_KEY": "mock-key-for-test",
         "REDIS_URL": "redis://localhost:6379",
         "JWT_SECRET": "mock-jwt-secret-for-test",
         "JWT_ALGORITHM": "HS256",
@@ -53,11 +40,10 @@ def app_and_registry(mock_es_client):
     for key, value in env_defaults.items():
         os.environ.setdefault(key, value)
 
-    with patch("elasticsearch.Elasticsearch", return_value=mock_es_client):
-        from main import app
-        from scripts.generate_endpoint_registry import generate_registry
+    from main import app
+    from scripts.generate_endpoint_registry import generate_registry
 
-        registry_text = generate_registry()
+    registry_text = generate_registry()
 
     return app, registry_text
 

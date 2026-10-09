@@ -372,8 +372,8 @@ class TestInitializeDefaultTemplates:
         # 4 base event types × 3 channels + 4 _storm variants × 3 channels
         # + 6 fuel templates (low_tank_autofill_alert×2, past_due_invoice×1,
         #   delivery_completed×2, e_bol_delivery×1) + pod_otp×2
-        #   + driver push×4
-        assert es.index_document.call_count == 36
+        #   + driver push×4 + customer portal email×4 (portal-fixes C2)
+        assert es.index_document.call_count == 40
 
         indexed_keys = set()
         for call in es.index_document.call_args_list:
@@ -417,6 +417,10 @@ class TestInitializeDefaultTemplates:
         expected_keys.add(("driver_assignment_revoked", "push"))
         expected_keys.add(("driver_exception_escalation", "push"))
         expected_keys.add(("driver_thread_message", "push"))
+        # Customer portal emails (portal-fixes C2) — email only.
+        for et in ("portal_invite", "portal_request_received",
+                   "portal_request_confirmed", "portal_request_declined"):
+            expected_keys.add((et, "email"))
         assert indexed_keys == expected_keys
 
     async def test_skips_existing_templates(self):
@@ -431,8 +435,8 @@ class TestInitializeDefaultTemplates:
 
         await renderer.initialize_default_templates("tenant-1")
 
-        # 36 total - 3 existing = 33 new
-        assert es.index_document.call_count == 33
+        # 40 total - 3 existing = 37 new
+        assert es.index_document.call_count == 37
         created_keys = {
             (call[0][2]["event_type"], call[0][2]["channel"])
             for call in es.index_document.call_args_list
@@ -477,6 +481,11 @@ class TestInitializeDefaultTemplates:
                 event_type="driver_exception_escalation", channel="push"
             ),
             _template_doc(event_type="driver_thread_message", channel="push"),
+            # Customer portal emails (portal-fixes C2)
+            _template_doc(event_type="portal_invite", channel="email"),
+            _template_doc(event_type="portal_request_received", channel="email"),
+            _template_doc(event_type="portal_request_confirmed", channel="email"),
+            _template_doc(event_type="portal_request_declined", channel="email"),
         ]
         existing.extend(fuel_templates)
         es = _make_es_mock()

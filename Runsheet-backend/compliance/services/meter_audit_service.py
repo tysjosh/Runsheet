@@ -34,10 +34,15 @@ from compliance.services.compliance_es_mappings import (
     METER_REGISTRY_INDEX,
     METER_AUDIT_TRAIL_INDEX,
 )
-from errors.exceptions import resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import AppException, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
+from services.keyset_pagination import (
+    next_cursor_from_hits,
+    search_after_for_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,8 +126,24 @@ class MeterAuditService:
         Validates the input via the MeterRegistration Pydantic model,
         assigns a server-generated ``meter_id``, and persists to ES.
 
+        A ``meter_number`` already registered for the tenant raises 409
+        ``DUPLICATE_METER_NUMBER``. A calibration that has already expired is
+        stored ``expired_calibration`` whatever status the caller sent
+        (finding C7).
+
+        Freeze decision: the duplicate check is check-then-write. The registry
+        has no unique constraint, so two simultaneous creates of the same
+        number can both succeed. Accepted for an admin-only form.
+
+        The model is validated before the duplicate check, so an invalid
+        payload (for example reversed calibration dates) is a 422 even when
+        the number is already registered (OI-34).
+
         Validates: Requirement 8.1, 8.3
         """
+        if calibration_expiry_date < utcnow().date():
+            status = "expired_calibration"
+
         meter = MeterRegistration(
             tenant_id=tenant_id,
             meter_number=meter_number,
@@ -133,6 +154,13 @@ class MeterAuditService:
             weights_measures_authority=weights_measures_authority,
             status=status,
         )
+
+        if await self.get_meter_by_number(tenant_id, meter_number.strip()) is not None:
+            raise AppException(
+                ErrorCode.DUPLICATE_METER_NUMBER,
+                f"Meter number '{meter_number}' is already registered",
+                details={"meter_number": meter_number},
+            )
 
         doc = self._serialize_meter(meter)
 
@@ -185,6 +213,47 @@ class MeterAuditService:
         return hits[0]["_source"]
 
     # ------------------------------------------------------------------
+    # Get meter by number
+    # ------------------------------------------------------------------
+
+    async def get_meter_by_number(
+        self, tenant_id: str, meter_number: str
+    ) -> Optional[Dict[str, Any]]:
+        """Look up a MeterRegistration by its physical ``meter_number``.
+
+        Unlike :meth:`get_meter`, which requires the server-generated
+        ``meter_id``, this resolves the human/OCR-readable serial printed
+        on the meter itself — the only identifier available from a
+        photographed meter ticket (fuel-compliance-backbone Req 8.1).
+        Returns ``None`` rather than raising when no match is found, so
+        callers on the invoicing path (which must never block on a
+        missing/unregistered meter) can degrade gracefully.
+
+        Validates: Requirement 8.5
+        """
+        base_query: Dict[str, Any] = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"meter_number": meter_number}},
+                    ]
+                }
+            },
+            "size": 1,
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+
+        response = await self._es.search_documents(
+            METER_REGISTRY_INDEX, query, size=1
+        )
+
+        hits = response["hits"]["hits"]
+        if not hits:
+            return None
+
+        return hits[0]["_source"]
+
+    # ------------------------------------------------------------------
     # List meters
     # ------------------------------------------------------------------
 
@@ -230,7 +299,9 @@ class MeterAuditService:
         }
 
         if cursor:
-            base_query["search_after"] = [cursor, cursor]
+            base_query["search_after"] = await search_after_for_cursor(
+                self._es, METER_REGISTRY_INDEX, cursor, base_query["sort"]
+            )
 
         query = inject_tenant_filter(base_query, tenant_id)
 
@@ -241,11 +312,9 @@ class MeterAuditService:
         hits = response["hits"]["hits"]
         items = [hit["_source"] for hit in hits]
 
-        next_cursor: Optional[str] = None
-        if hits and len(hits) == limit:
-            last_sort = hits[-1].get("sort")
-            if last_sort and len(last_sort) >= 2:
-                next_cursor = hits[-1]["_source"]["meter_id"]
+        next_cursor = next_cursor_from_hits(
+            hits, limit, id_field="meter_id"
+        )
 
         return {
             "items": items,
@@ -403,7 +472,9 @@ class MeterAuditService:
         }
 
         if cursor:
-            base_query["search_after"] = [cursor, cursor]
+            base_query["search_after"] = await search_after_for_cursor(
+                self._es, METER_AUDIT_TRAIL_INDEX, cursor, base_query["sort"]
+            )
 
         query = inject_tenant_filter(base_query, tenant_id)
 
@@ -414,11 +485,9 @@ class MeterAuditService:
         hits = response["hits"]["hits"]
         items = [hit["_source"] for hit in hits]
 
-        next_cursor: Optional[str] = None
-        if hits and len(hits) == limit:
-            last_sort = hits[-1].get("sort")
-            if last_sort and len(last_sort) >= 2:
-                next_cursor = hits[-1]["_source"]["audit_id"]
+        next_cursor = next_cursor_from_hits(
+            hits, limit, id_field="audit_id"
+        )
 
         return {
             "items": items,

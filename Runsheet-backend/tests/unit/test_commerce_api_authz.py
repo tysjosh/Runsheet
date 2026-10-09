@@ -135,6 +135,10 @@ GATE_SYMBOLS = (
     "require_commerce_staff",
     "require_commerce_ops",
     "commerce_staff_dependency",
+    # margin_endpoints: tenant admin only (margin-feed D1), a router-level
+    # dependency chained after require_margin_enabled, so the flag 404 comes
+    # first (tests/integration/commerce/test_margin_authz.py).
+    "require_margin_admin",
 )
 
 
@@ -190,8 +194,14 @@ class TestNoRouterIsUngated:
                 default=-1,
             )
             assert gate_at != -1, f"{name}: no gate call site found"
-            # The 404 the feature-flag guard raises.
-            flag_at = source.index("status_code=404")
+            # The 404 the feature-flag guard raises (an AppException with an
+            # ``ErrorCode.*_DISABLED`` code). The role gate must follow every one.
+            flag_at = max(
+                source.rindex(f"ErrorCode.{code}")
+                for code in ("COMMERCE_DISABLED", "CUSTOMERS_DISABLED",
+                             "PRICING_DISABLED", "INVOICING_DISABLED")
+                if f"ErrorCode.{code}" in source
+            )
             assert gate_at > flag_at, (
                 f"{name}: the role gate runs before the feature-flag 404, so a "
                 "tenant without the module would get 403 and learn it exists."

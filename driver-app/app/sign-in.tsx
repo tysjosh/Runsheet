@@ -5,11 +5,24 @@ import { KeyboardAvoidingView, Platform, View } from 'react-native';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Text } from '@/components/ui/text';
+import { ApiError } from '@/lib/api-client';
 import { demoPreviewEnabled } from '@/lib/demo-preview';
 import { notificationManager } from '@/lib/notification-manager';
 import { signIn } from '@/lib/session';
 import { forgotPasswordUrl } from '@/lib/web-app';
 import { driverWebSocket } from '@/lib/websocket';
+
+/** The wait message for a throttled sign-in (429, staging finding F5), else null. */
+function throttledMessage(error: unknown): string | null {
+  if (!(error instanceof ApiError) || error.status !== 429) {
+    return null;
+  }
+  const seconds = (error.details as { retry_after_seconds?: unknown } | undefined)
+    ?.retry_after_seconds;
+  return typeof seconds === 'number' && seconds > 0
+    ? `Too many attempts, try again in ${Math.ceil(seconds)} seconds`
+    : error.message;
+}
 
 export default function SignInScreen() {
   const [email, setEmail] = useState(
@@ -85,9 +98,10 @@ export default function SignInScreen() {
       }
     } catch (error) {
       setMessage(
-        error instanceof Error
-          ? error.message
-          : 'The driver session could not be started.',
+        throttledMessage(error) ??
+          (error instanceof Error
+            ? error.message
+            : 'The driver session could not be started.'),
       );
     } finally {
       setSubmitting(false);
@@ -101,7 +115,9 @@ export default function SignInScreen() {
     >
       <View className="flex-1 justify-center gap-8 px-6">
         <View className="gap-2">
-          <Text className="text-4xl font-bold">Runsheet Driver</Text>
+          <Text role="heading" aria-level={1} className="text-4xl font-bold">
+            <Text className="text-4xl font-bold text-primary">Runsheet</Text> Driver
+          </Text>
           <Text className="text-lg text-muted-foreground">
             {demoPreviewEnabled
               ? 'Open a local demo route with realistic fuel deliveries.'
@@ -113,6 +129,7 @@ export default function SignInScreen() {
           <View className="gap-2">
             <Text className="font-semibold">Email</Text>
             <Input
+              aria-label="Email"
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
@@ -126,6 +143,7 @@ export default function SignInScreen() {
           <View className="gap-2">
             <Text className="font-semibold">Password</Text>
             <Input
+              aria-label="Password"
               value={password}
               onChangeText={setPassword}
               secureTextEntry

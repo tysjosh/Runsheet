@@ -27,6 +27,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from fuel.api.fuel_ops_endpoints import (
     configure_fuel_ops_endpoints,
     router,
@@ -179,6 +181,8 @@ def _build_app(
     ws_manager: Optional[Any] = None,
 ):
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(router)
     app.include_router(mvp_router)
     configure_fuel_ops_endpoints(
@@ -312,6 +316,8 @@ class TestEmergencyStopHappyPath:
         )
 
         app = FastAPI()
+        # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+        register_exception_handlers(app)
         app.include_router(router)
         app.include_router(mvp_router)
         configure_fuel_ops_endpoints(
@@ -492,8 +498,8 @@ class TestEmergencyStopInfeasibility:
         )
 
         assert resp.status_code == 409
-        detail = resp.json()["detail"]
-        assert detail["reason"] == "capacity_insufficient"
+        detail = resp.json()
+        assert detail["details"]["reason"] == "capacity_insufficient"
         assert detail["error_code"] == "capacity_insufficient"
 
         # ConfirmationProtocol is NOT called on infeasibility.
@@ -524,7 +530,7 @@ class TestEmergencyStopTenantScoping:
         )
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "route_not_found"
+        assert resp.json()["error_code"] == "route_not_found"
 
     def test_destination_required_validation(self):
         route = _route_doc()
@@ -547,7 +553,7 @@ class TestEmergencyStopTenantScoping:
             },
         )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "destination_required"
+        assert resp.json()["error_code"] == "destination_required"
 
 
 # ---------------------------------------------------------------------------
@@ -617,4 +623,4 @@ class TestEmergencyStopCanonicalization:
         )
 
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "unknown_product_code"
+        assert resp.json()["error_code"] == "unknown_product_code"

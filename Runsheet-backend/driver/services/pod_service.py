@@ -105,6 +105,7 @@ from driver.services.work_ref import WorkRef
 from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
+    error_code_value,
     delivered_gallons_required,
     forbidden,
     invalid_request,
@@ -979,6 +980,13 @@ class PODSubmissionService:
         extracted = getattr(result, "extracted_gallons", None)
         requires_review = getattr(result, "requires_manual_review", True)
         service_error = getattr(result, "error_details", None)
+        # Meter/ticket identification extracted alongside the gallon count
+        # (fuel-compliance-backbone Req 8.1, Task 10.3). Threaded through
+        # regardless of whether the gallon count itself was usable, so the
+        # meter registry lookup at invoicing time still has a meter_number
+        # to key off even when the driver had to confirm gallons manually.
+        meter_number = getattr(result, "meter_number", None)
+        ticket_number = getattr(result, "ticket_number", None)
 
         if service_error:
             return self._gallons_result(
@@ -988,6 +996,8 @@ class PODSubmissionService:
                 ocr_confidence=confidence,
                 ocr_requires_manual_review=True,
                 ocr_error=service_error,
+                meter_number=meter_number,
+                ticket_number=ticket_number,
             )
         if extracted is None or requires_review:
             return self._gallons_result(
@@ -997,6 +1007,8 @@ class PODSubmissionService:
                 ocr_confidence=confidence,
                 ocr_requires_manual_review=True,
                 ocr_error="requires_manual_review",
+                meter_number=meter_number,
+                ticket_number=ticket_number,
             )
 
         return self._gallons_result(
@@ -1005,6 +1017,8 @@ class PODSubmissionService:
             ocr_result_id=ocr_result_id,
             ocr_confidence=confidence,
             ocr_requires_manual_review=False,
+            meter_number=meter_number,
+            ticket_number=ticket_number,
         )
 
     @classmethod
@@ -1081,8 +1095,15 @@ class PODSubmissionService:
         ocr_confidence: Optional[float] = None,
         ocr_requires_manual_review: Optional[bool] = None,
         ocr_error: Optional[str] = None,
+        meter_number: Optional[str] = None,
+        ticket_number: Optional[str] = None,
     ) -> dict:
-        """Build the gallons-resolution record persisted on the POD."""
+        """Build the gallons-resolution record persisted on the POD.
+
+        ``meter_number``/``ticket_number`` are only ever populated on the
+        OCR path (fuel-compliance-backbone Req 8.1) — a manual gallon entry
+        has no meter ticket to read them from.
+        """
         return {
             "delivered_gallons": delivered_gallons,
             "source": source,
@@ -1090,6 +1111,8 @@ class PODSubmissionService:
             "ocr_confidence": ocr_confidence,
             "ocr_requires_manual_review": ocr_requires_manual_review,
             "ocr_error": ocr_error,
+            "meter_number": meter_number,
+            "ticket_number": ticket_number,
         }
 
     # -- the POD document ----------------------------------------------
@@ -1191,6 +1214,8 @@ class PODSubmissionService:
                 "ocr_requires_manual_review"
             ],
             "ocr_error": ocr_resolution["ocr_error"],
+            "meter_number": ocr_resolution.get("meter_number"),
+            "ticket_number": ocr_resolution.get("ticket_number"),
             "delivered_at": body.timestamp,
             "geotag": {"lat": body.geotag.lat, "lon": body.geotag.lng},
             "timestamp": body.timestamp,
@@ -1425,8 +1450,14 @@ class PODSubmissionService:
                         driver_id,
                         {"type": event_type, "data": event_data},
                     )
-                elif hasattr(self._driver_ws_manager, "broadcast"):
-                    await self._driver_ws_manager.broadcast(event_type, event_data)
+                else:
+                    # No driver to target. A fan-out to every driver socket
+                    # would cross tenants, so driver delivery is skipped (D3).
+                    logger.debug(
+                        "No driver id; driver socket delivery skipped for %s on work %s",
+                        event_type,
+                        event_data.get("job_id") or event_data.get("order_id"),
+                    )
             except Exception as exc:
                 logger.warning(
                     "Driver WS broadcast failed for %s on work %s: %s",
@@ -1580,14 +1611,14 @@ class PODSubmissionService:
             await self._record_transition_failure(
                 tenant_id=ref.tenant_id,
                 pod_doc=pod_doc,
-                error_code=error_code.value,
+                error_code=error_code_value(error_code),
             )
             details = {
                 "reason": "pod_order_transition_failed",
                 "pod_id": pod_id,
                 "order_id": order_id,
                 "target_status": target_status,
-                "transition_error_code": error_code.value,
+                "transition_error_code": error_code_value(error_code),
                 "pod_status_transition": POD_TRANSITION_PENDING,
             }
             if isinstance(exc, AppException) and exc.details:
@@ -1748,6 +1779,8 @@ class PODSubmissionService:
             signature_ref=pod_doc.get("signature_ref"),
             photo_refs=pod_doc.get("photo_refs") or [],
             meter_ticket_ref=pod_doc.get("meter_ticket_ref"),
+            meter_number=pod_doc.get("meter_number"),
+            ticket_number=pod_doc.get("ticket_number"),
             bol_id=_bol_value("bol_id"),
             bol_ref=_bol_value("file_ref"),
             pod_hash=pod_doc.get("pod_hash"),

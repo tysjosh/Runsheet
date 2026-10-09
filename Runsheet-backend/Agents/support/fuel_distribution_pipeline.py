@@ -249,6 +249,49 @@ def reset_agent_degradation(agent: Any) -> None:
         )
 
 
+def read_agent_unplaced_orders(agent: Any) -> List[Dict[str, Any]]:
+    """Read the per-order "not loaded" report a stage left (OI-39).
+
+    ``CompartmentLoadingAgent.last_unplaced_orders`` lists every order the
+    last ``evaluate()`` could not load, with its reason. Fail-safe like
+    :func:`read_agent_degradation`: only a real ``list`` of mappings counts, so
+    a ``MagicMock`` stage (whose attributes are truthy mocks) reads as ``[]``,
+    and nothing raises out of here.
+    """
+    try:
+        raw = getattr(agent, "last_unplaced_orders", None)
+        if not isinstance(raw, list):
+            return []
+        return [dict(entry) for entry in raw if isinstance(entry, Mapping)]
+    except Exception as e:
+        logger.warning(
+            "FuelDistributionPipeline: could not read unplaced orders from "
+            "%s: %s",
+            getattr(agent, "agent_id", type(agent).__name__),
+            e,
+        )
+        return []
+
+
+def reset_agent_unplaced_orders(agent: Any) -> None:
+    """Clear a stale per-order report before a stage runs.
+
+    ``monitor_cycle`` can return before ``evaluate()`` (which resets the list),
+    so without this a previous run's unplaced orders would be reported again.
+    Only a real ``list`` attribute is touched.
+    """
+    try:
+        if isinstance(getattr(agent, "last_unplaced_orders", None), list):
+            agent.last_unplaced_orders = []
+    except Exception as e:
+        logger.warning(
+            "FuelDistributionPipeline: could not reset unplaced orders on "
+            "%s: %s",
+            getattr(agent, "agent_id", type(agent).__name__),
+            e,
+        )
+
+
 # Agent stage ordering (Req 6.1)
 PIPELINE_STAGES = [
     ("tank_forecasting", PipelineState.FORECASTING),
@@ -283,6 +326,9 @@ class PipelineRun:
         #: ``{"agent_id": str, "reasons": list}``. Empty on a clean run, which
         #: is what :attr:`degraded` keys off.
         self.degradations: List[Dict[str, Any]] = []
+        #: Orders a stage could not load, one entry per order and reason
+        #: (OI-39). Does not by itself make the run degraded.
+        self.unplaced_orders: List[Dict[str, Any]] = []
 
     @property
     def degraded(self) -> bool:
@@ -334,6 +380,7 @@ class PipelineRun:
             "error_message": self.error_message,
             "degraded": self.degraded,
             "degradations": [dict(d) for d in self.degradations],
+            "unplaced_orders": [dict(u) for u in self.unplaced_orders],
             "stage_results": dict(self.stage_results),
         }
 
@@ -458,6 +505,7 @@ class FuelDistributionPipeline:
                 # this same long-lived agent instance, so what is read back
                 # below belongs to this run and no other.
                 reset_agent_degradation(agent)
+                reset_agent_unplaced_orders(agent)
 
                 # Capture published messages during monitor_cycle (Req 1.1, 2.1)
                 captured_messages: List[Any] = []
@@ -506,6 +554,15 @@ class FuelDistributionPipeline:
                         "FuelDistributionPipeline: agent %s completed for run %s",
                         agent_id,
                         run_id,
+                    )
+
+                # Per-order "not loaded" report (OI-39). Surfaced on the run
+                # and the stage result; it does not change the run state.
+                unplaced = read_agent_unplaced_orders(agent)
+                if unplaced:
+                    pipeline_run.unplaced_orders.extend(unplaced)
+                    pipeline_run.stage_results[agent_id]["unplaced_orders"] = list(
+                        unplaced
                     )
 
                 # Clear pipeline mode override after stage completes

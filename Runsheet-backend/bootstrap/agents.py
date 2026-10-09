@@ -16,6 +16,7 @@ from typing import Optional
 
 from bootstrap.container import ServiceContainer
 from bootstrap.routing import mount_router
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,50 @@ _approval_expiry_task = None
 # Interval for the approval-expiry sweep. Approvals carry a 1-hour expiry, so a
 # 5-minute cadence keeps the pending queue accurate without polling pressure.
 APPROVAL_EXPIRY_INTERVAL_SECONDS = 300
+
+# Module-level reference for the outcome-tracker measurement sweep so
+# shutdown can cancel it. OutcomeTracker.check_pending_outcomes() must run
+# periodically or every recorded proposal execution sits in
+# OutcomeTracker._pending forever with no after-KPI ever measured.
+_outcome_tracking_task = None
+
+# Interval for the outcome-measurement sweep. The default observation
+# window (DEFAULT_OBSERVATION_WINDOW_SECONDS, 1 hour) is long relative to
+# the poll cost, so a 5-minute cadence catches every due outcome promptly
+# without meaningful overhead.
+OUTCOME_TRACKING_INTERVAL_SECONDS = 300
+
+
+def adopt_compliance_cron_agents(
+    app, activity_log_service, ws_manager, confirmation_protocol
+) -> list:
+    """Hand the compliance crons the services that did not exist when they were built.
+
+    ``compliance`` boots before ``agents`` (``_BOOT_ORDER``), so its four
+    cron agents were constructed with ``activity_log_service=None`` and every
+    cycle with detections died on ``None.log_monitoring_cycle`` (F9). This
+    late-binds the activity log, fills ``_ws`` / ``_confirmation_protocol``
+    only where they are still ``None``, and registers each cron in
+    ``app.state.autonomous_agents`` so ``/api/agent/health`` lists it. The
+    crons are already running; they are not restarted.
+    """
+    from bootstrap.compliance import compliance_cron_agents
+
+    adopted = compliance_cron_agents()
+    for cron in adopted:
+        cron.set_activity_log_service(activity_log_service)
+        if cron._ws is None:
+            cron._ws = ws_manager
+        if cron._confirmation_protocol is None:
+            cron._confirmation_protocol = confirmation_protocol
+        app.state.autonomous_agents[cron.agent_id] = cron
+    if adopted:
+        logger.info(
+            "Adopted %d compliance cron agent(s): %s",
+            len(adopted),
+            ", ".join(c.agent_id for c in adopted),
+        )
+    return adopted
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +112,30 @@ _FUEL_OPS_FEATURE_FLAG_DEFAULTS = (
     "overlay.integration.stripe",
 )
 
+#: Agent-level overlay gates — ``overlay.{agent_id}`` for every overlay agent.
+#:
+#: These are NOT the capability flags above and the two sets do not overlap.
+#: ``OverlayAgentBase._get_mode`` reads ``overlay.{agent_id}``, and
+#: ``monitor_cycle`` skips a tenant outright when that resolves to
+#: ``disabled``. Seeding only the capability names left every agent-level gate
+#: unset, undocumented and invisible to the feature-flag admin API, so all
+#: twelve overlay agents skipped every tenant with nothing to point at.
+#:
+#: Derived from the live agent instances at boot rather than restated here, so a
+#: new overlay agent cannot ship without its gate being seeded
+#: (tests/unit/test_overlay_flag_gating.py pins the derivation).
+def _overlay_agent_flag_keys(agents) -> list:
+    """Return ``overlay.{agent_id}`` for every agent that exposes the gate."""
+    keys = []
+    for agent in agents:
+        getter = getattr(agent, "overlay_flag_key", None)
+        if callable(getter):
+            try:
+                keys.append(getter())
+            except Exception:  # pragma: no cover - defensive
+                continue
+    return keys
+
 
 def _resolve_fuel_ops_settings(settings) -> dict:
     """Resolve the fuel-ops hardening platform settings.
@@ -93,18 +162,30 @@ def _resolve_fuel_ops_settings(settings) -> dict:
 async def _seed_fuel_ops_feature_flag_defaults(
     container,
     redis_client,
+    flag_keys=None,
+    *,
+    label: str = "fuel-ops overlay",
 ) -> None:
-    """Seed every fuel-ops overlay feature flag to ``disabled`` by default.
+    """Seed overlay feature flags to ``disabled`` by default.
 
     Uses the shared :class:`ops.services.feature_flags.FeatureFlagService`
     Redis key layout (``overlay_ff:{flag_key}:{tenant_id}``). We only
     set the key when it is absent so existing tenant overrides are
     preserved across redeploys. Missing Redis simply logs a warning.
 
+    ``flag_keys`` defaults to the fuel-ops *capability* flags. Bootstrap calls
+    this a second time with the agent-level gates
+    (``overlay.{agent_id}``), which are a disjoint set and were previously
+    seeded nowhere — see ``_overlay_agent_flag_keys``.
+
     Validates: Requirement 10.2.2.
     """
 
     if redis_client is None:
+        return
+    if flag_keys is None:
+        flag_keys = _FUEL_OPS_FEATURE_FLAG_DEFAULTS
+    if not flag_keys:
         return
 
     # Feature flag defaults are keyed per tenant. Without a tenant
@@ -116,7 +197,7 @@ async def _seed_fuel_ops_feature_flag_defaults(
     from ops.services.feature_flags import OVERLAY_PREFIX
 
     seeded = []
-    for flag_key in _FUEL_OPS_FEATURE_FLAG_DEFAULTS:
+    for flag_key in flag_keys:
         redis_key = f"{OVERLAY_PREFIX}{flag_key}:{placeholder_tenant}"
         try:
             # SET NX so we never clobber an existing default.
@@ -126,26 +207,223 @@ async def _seed_fuel_ops_feature_flag_defaults(
                 seeded.append(flag_key)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(
-                "Failed to seed fuel-ops feature flag %s: %s",
+                "Failed to seed %s feature flag %s: %s",
+                label,
                 flag_key,
                 exc,
             )
 
     if seeded:
         logger.info(
-            "Seeded fuel-ops overlay feature flags (defaults=OFF): %s",
+            "Seeded %s feature flags (defaults=OFF): %s",
+            label,
             ", ".join(seeded),
         )
     else:
         logger.debug(
-            "Fuel-ops overlay feature flags already seeded; no changes made"
+            "%s feature flags already seeded; no changes made", label
         )
+
+
+def _make_stripe_connector_factory(
+    *, repository, vault, build_connector, enabled_only: bool
+):
+    """Build an ``async (tenant_id) -> StripeConnector | None`` factory.
+
+    ``enabled_only=False`` is the webhook / admin factory: it prefers an
+    enabled instance and falls back to the first record, so a disabled
+    integration still verifies webhooks. ``enabled_only=True`` is the
+    customer-portal factory (design §3.1): only an enabled instance counts,
+    so "may the portal take payments" is answered by ``None``.
+
+    Both return ``None`` when the repository or vault is missing, there is
+    no matching instance, or the repository lookup raises (logged WARN).
+    ``build_connector(tenant_id, instance)`` constructs the connector.
+    """
+
+    async def _factory(tenant_id: str):
+        if repository is None or vault is None:
+            return None
+        try:
+            instances = await repository.list_for_tenant(
+                tenant_id=tenant_id,
+                provider_name="stripe",
+                enabled=None,
+            )
+        except Exception as exc:
+            logger.warning(
+                "%s: repository lookup failed tenant=%s: %s",
+                "Portal Stripe connector factory"
+                if enabled_only
+                else "Stripe connector factory",
+                tenant_id,
+                exc,
+            )
+            return None
+
+        if not instances:
+            return None
+        if enabled_only:
+            instance = next((i for i in instances if i.enabled), None)
+            if instance is None:
+                return None
+        else:
+            # Prefer an enabled instance; fall back to the first record
+            # so a disabled integration still serves webhooks (Stripe
+            # will keep delivering events until the operator removes
+            # the endpoint from their dashboard).
+            instance = next(
+                (i for i in instances if i.enabled), instances[0]
+            )
+        return build_connector(tenant_id, instance)
+
+    return _factory
+def _wire_dispatch_board(app, container: ServiceContainer, es_service, redis_client, plan_execution_service=None) -> None:
+    """Build the Dispatch Board services and configure ``/api/fuel/board`` (K11).
+
+    The router is also included by ``main.py`` at import time (so the endpoint
+    registry lists it); mounting through the idempotent helper keeps one copy.
+    The board flag defaults to ``disabled`` (K13), so wiring changes nothing
+    until a tenant is switched on.
+    """
+    from fuel.api.dispatch_board_endpoints import (
+        configure_dispatch_board_endpoints,
+        router as dispatch_board_router,
+    )
+    from fuel.services.contract_lift_service import ContractLiftService
+    from fuel.services.dispatch_board_service import DispatchBoardService
+    from fuel.services.dispatch_board_telemetry import BoardTelemetry
+    from fuel.services.dispatch_validation import DispatchValidationService, Lazy
+    from fuel.services.terminal_wait_resolver import build_wait_time_resolver
+    from fuel.terminal_models import TerminalWaitReportRepository
+
+    def _from_container(name: str):
+        return Lazy(lambda: container.get(name) if container.has(name) else None)
+
+    validation = DispatchValidationService(
+        es_service=es_service,
+        order_repository=_from_container("order_repository"),
+        driver_repository=_from_container("driver_repository"),
+        qualification_service=_from_container("driver_qualification_service"),
+        hos_advisory_service=_from_container("hos_advisory_service"),
+        asset_certification_service=_from_container("asset_certification_service"),
+        dyed_diesel_enforcer=_from_container("dyed_diesel_enforcer"),
+        terminal_wait_resolver=build_wait_time_resolver(
+            redis_client=redis_client,
+            wait_report_repository=TerminalWaitReportRepository(es_service=es_service),
+        ),
+        contract_lift_service=ContractLiftService(redis_client=redis_client),
+        tenant_config=redis_client,
+    )
+    from fuel.services.dispatch_board_order_listener import BoardOrderListener
+    from fuel.services.dispatch_board_suggestions import BoardSuggestionService
+    from fuel.services.dispatch_board_ws_manager import get_dispatch_board_ws_manager
+
+    feature_flags = container.ops_feature_flags if container.has("ops_feature_flags") else None
+    board_ws_manager = get_dispatch_board_ws_manager()
+    board_service = DispatchBoardService(
+        es_service=es_service,
+        validation=validation,
+        driver_repository=container.get("driver_repository") if container.has("driver_repository") else None,
+        ws_manager=board_ws_manager,
+        telemetry=BoardTelemetry(
+            telemetry=container.get("telemetry_service") if container.has("telemetry_service") else None,
+            activity_log=container.get("activity_log_service") if container.has("activity_log_service") else None,
+        ),
+    )
+    # K9: agent suggestions (gated on the agents' overlay modes).
+    suggestion_service = BoardSuggestionService(
+        es_service=es_service,
+        feature_flags=feature_flags,
+        board_service=board_service,
+        approval_queue=container.get("approval_queue_service") if container.has("approval_queue_service") else None,
+    )
+    board_service.set_suggestion_reader(suggestion_service)
+    container.dispatch_validation_service = validation
+    container.dispatch_board_service = board_service
+    container.dispatch_board_ws_manager = board_ws_manager
+    container.dispatch_board_suggestion_service = suggestion_service
+    publish_service = _build_board_publish(container, es_service, board_service, plan_execution_service, _from_container)
+    if publish_service is not None:
+        container.dispatch_board_publish_service = publish_service
+    # K10.4: mark lanes stale when an order on them changes status.
+    if container.has("order_service"):
+        listener = BoardOrderListener(
+            es_service=es_service,
+            broadcast=board_service._broadcast,  # noqa: SLF001 - shared board fan-out
+            timezone_for=board_service.timezone_for,
+            clock=board_service.now,
+        )
+        listener.subscribe(container.get("order_service"))
+        container.dispatch_board_order_listener = listener
+    else:
+        logger.warning("Dispatch Board order listener not subscribed: order_service missing")
+    configure_dispatch_board_endpoints(
+        board_service=board_service,
+        feature_flag_service=feature_flags,
+        publish_service=publish_service,
+        suggestion_service=suggestion_service,
+    )
+    mount_router(app, dispatch_board_router)
+    logger.info("Dispatch Board endpoints configured and router registered")
+
+
+async def _invalidate_driver_work(tenant_id: str, order_id: str) -> None:
+    """Drop every cached driver work bundle of an order (dispatch-board K8.4 phase 5).
+
+    Resolves the work service at call time: ``bootstrap/driver.py`` configures
+    it after this module, and a missing service is a no-op.
+    """
+    from driver.api.work_endpoints import get_work_service
+
+    service = get_work_service()
+    if service is None:
+        logger.debug("Driver work service not configured; cache invalidation skipped")
+        return
+    await service.invalidate(tenant_id, order_id)
+
+
+def _build_board_publish(container: ServiceContainer, es_service, board_service, plan_execution_service, from_container):
+    """Publish and redispatch services (dispatch-board K7, K8; plan tasks 15-16).
+
+    Needs the executor, the dispatch service and the order repository; without
+    them the publish route keeps answering 503 ``service_not_configured``.
+    """
+    needed = ("loading_plan_executor", "plan_dispatch_service", "order_repository")
+    if not all(container.has(name) for name in needed):
+        logger.warning(
+            "Dispatch Board publish not wired; missing: %s",
+            ", ".join(name for name in needed if not container.has(name)),
+        )
+        return None
+    from fuel.services.dispatch_board_publish import BoardPublishService, BoardRedispatchService
+
+    redispatch = BoardRedispatchService(
+        es_service=es_service,
+        order_repository=container.get("order_repository"),
+        executor=container.get("loading_plan_executor"),
+        dispatch_service=container.get("plan_dispatch_service"),
+        execution_service=plan_execution_service,
+        driver_ws_manager=from_container("driver_ws_manager"),
+        orders_ws_manager=from_container("orders_ws_manager"),
+        work_cache_invalidator=_invalidate_driver_work,
+        telemetry=board_service.telemetry,
+        clock=board_service.now,
+    )
+    return BoardPublishService(
+        es_service=es_service,
+        board_service=board_service,
+        executor=container.get("loading_plan_executor"),
+        dispatch_service=container.get("plan_dispatch_service"),
+        redispatch_service=redispatch,
+    )
 
 
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register all agentic AI services."""
     global _autonomous_agents, _agent_scheduler, _agent_redis_client
     global _approval_expiry_task
+    global _outcome_tracking_task
     global _storm_mode_evaluator, _integration_scheduler
     global _erp_invoice_export_task
 
@@ -160,7 +438,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     from Agents.memory_service import MemoryService
     from Agents.feedback_service import FeedbackService
     from Agents.tools.mutation_tools import configure_mutation_tools
-    from Agents.agent_es_mappings import setup_agent_indices
     from Agents.specialists import (
         FleetAgent,
         SchedulingAgent,
@@ -185,15 +462,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     settings = container.settings
     es_service = container.es_service
 
-    # ---- Startup Mapping Validation (Req 5.1, 5.5) ----
-    try:
-        from services.mapping_validator import MappingValidator
-
-        mapping_validator = MappingValidator(es_service=es_service)
-        drift_items = await mapping_validator.validate_all()
-        await mapping_validator.remediate(drift_items)
-    except Exception as exc:
-        logger.error("Mapping validation failed (non-blocking): %s", exc)
+    # Startup mapping validation is gone with Elasticsearch (Req 5.1, 5.5). It
+    # compared live index mappings against the code-defined ones and added missing
+    # fields; there are no live mappings to drift from now. The declarations survive
+    # in the ``*_es_mappings`` modules because
+    # ``persistence/document_field_policy.py`` reads them to decide which fields
+    # must stay unqueryable — that is the one job they still do.
 
     # Agent WebSocket manager
     agent_ws_manager = AgentActivityWSManager()
@@ -245,14 +519,22 @@ async def initialize(app, container: ServiceContainer) -> None:
     #    AES-GCM envelope encryption under a process-local master key. This
     #    keeps credential-dependent flows (intake-channel registration,
     #    integration credential storage) working end-to-end off-AWS without
-    #    silently calling the real KMS API. Never used in production.
+    #    silently calling the real KMS API.
+    #
+    #    The fallback is restricted to development and test. It used to apply to
+    #    any environment that was not production, which included STAGING — so a
+    #    staging deployment without FUEL_OPS_KMS_KEY_ID encrypted real tenant
+    #    QuickBooks / Stripe / Geotab tokens under ``LocalKMSClient``'s master
+    #    key, which is derived from a literal default committed to this repo.
+    #    Staging holds real credentials, so it gets the same requirement as
+    #    production: a real CMK, or no vault.
     try:
         from services.credentials_vault import TenantCredentialsVault
 
         kms_key_id = fuel_ops_settings.get("kms_key_id")
         kms_client = None
         _env = getattr(settings.environment, "value", settings.environment)
-        if not kms_key_id and _env != "production":
+        if not kms_key_id and _env in ("development", "test"):
             from services.local_kms import LOCAL_KMS_DEFAULT_KEY_ID, LocalKMSClient
 
             kms_key_id = LOCAL_KMS_DEFAULT_KEY_ID
@@ -260,6 +542,19 @@ async def initialize(app, container: ServiceContainer) -> None:
             logger.info(
                 "No FUEL_OPS_KMS_KEY_ID configured in %s; using LocalKMSClient "
                 "for the credentials vault (dev/CI envelope encryption)",
+                _env,
+            )
+        elif not kms_key_id:
+            # Registering a vault that cannot encrypt is not itself wrong — it
+            # still serves reads of previously stored credentials — but the
+            # failure surfaced only when someone tried to store one, as a 500
+            # from a ValueError deep in ``put``. Say it at boot instead.
+            logger.warning(
+                "No FUEL_OPS_KMS_KEY_ID configured in %s: the credentials vault "
+                "cannot encrypt, so storing any tenant integration credential "
+                "will fail. Set a real KMS CMK. The dev-only LocalKMSClient "
+                "fallback is deliberately NOT used here because its master key "
+                "is a literal committed to this repository.",
                 _env,
             )
 
@@ -274,33 +569,18 @@ async def initialize(app, container: ServiceContainer) -> None:
         credentials_vault = None
         logger.warning("TenantCredentialsVault wiring failed: %s", exc)
 
-    # 4. FileStorageService — S3-backed object store with tenant
-    #    prefixes and presigned URLs. Only constructed when a bucket is
-    #    configured; local-dev / CI skip the S3 path entirely.
-    file_storage_service = None
-    try:
-        from services.file_storage_service import FileStorageService
-
-        _bucket = fuel_ops_settings.get("s3_bucket")
-        _region = fuel_ops_settings.get("s3_region")
-        if _bucket and _region:
-            file_storage_service = FileStorageService(
-                bucket=_bucket,
-                region=_region,
-            )
-            container.file_storage_service = file_storage_service
-            logger.info(
-                "FileStorageService registered (bucket=%s region=%s)",
-                _bucket,
-                _region,
-            )
-        else:
-            logger.info(
-                "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
-                "FUEL_OPS_S3_REGION not configured"
-            )
-    except Exception as exc:
-        logger.warning("FileStorageService wiring failed: %s", exc)
+    # 4. FileStorageService — built once by the core bootstrap (it must exist
+    #    before compliance boots); reuse that instance here.
+    file_storage_service = (
+        container.get("file_storage_service")
+        if container.has("file_storage_service")
+        else None
+    )
+    if file_storage_service is None:
+        logger.info(
+            "FileStorageService not registered — FUEL_OPS_S3_BUCKET / "
+            "FUEL_OPS_S3_REGION not configured"
+        )
 
     # 5. MeterTicketOCRService — AWS Textract wrapper. Requires a
     #    FileStorageService to fetch the meter-ticket bytes. When S3 is
@@ -371,6 +651,66 @@ async def initialize(app, container: ServiceContainer) -> None:
     except Exception as exc:
         logger.warning("PodHashChainWriter wiring failed: %s", exc)
 
+    # 8b. Weather_Provider — HDD input to the propane / heating-oil
+    #    consumption models (Req 1.2.1–1.2.6).
+    #
+    #    Both adapters were fully implemented and neither was ever
+    #    constructed: nothing called ``build_weather_provider`` outside its own
+    #    module, and ``TankForecastingAgent.set_weather_provider`` was never
+    #    called, so ``_weather_provider`` stayed ``None`` and EVERY propane and
+    #    heating-oil forecast ran weather-blind with ``weather_fallback: true``.
+    #    Degree-days are the dominant term in those models, so the annotation
+    #    was the only sign that the forecast was running without its main input.
+    #
+    #    Built only when a credential is present. Both adapters return ``[]``
+    #    with a warning when their token is missing, so wiring one
+    #    unconditionally would swap a visible "not registered" for a provider
+    #    that fails on every call — the same silence, one layer deeper.
+    weather_provider = None
+    try:
+        from fuel.services.weather_provider import (
+            NOAA_TOKEN_ENV,
+            OPENWEATHER_KEY_ENV,
+            build_weather_provider,
+        )
+
+        _weather_name = (os.environ.get("FUEL_OPS_WEATHER_PROVIDER") or "").strip().lower()
+        if not _weather_name:
+            # Auto-select from whichever credential exists. OpenWeather first:
+            # its One Call history endpoint covers the [-14, +7] window the
+            # forecaster asks for, whereas NOAA CDO is observations-only.
+            if os.environ.get(OPENWEATHER_KEY_ENV):
+                _weather_name = "openweather"
+            elif os.environ.get(NOAA_TOKEN_ENV):
+                _weather_name = "noaa"
+
+        if _weather_name:
+            weather_provider = build_weather_provider(
+                _weather_name,
+                # ES persists daily observations to weather_observations, which
+                # also gives the compliance K-factor service real HDD to read
+                # instead of its empty-index fallback. Redis gives the 1h cache.
+                es_service=es_service,
+                redis_client=_agent_redis_client,
+            )
+            container.weather_provider = weather_provider
+            logger.info(
+                "Weather_Provider registered (%s) — HDD available to the "
+                "propane / heating-oil consumption models",
+                _weather_name,
+            )
+        else:
+            logger.info(
+                "Weather_Provider not registered — set FUEL_OPS_WEATHER_PROVIDER "
+                "with %s or %s. Propane / heating-oil forecasts will run without "
+                "degree-days and annotate weather_fallback: true",
+                OPENWEATHER_KEY_ENV,
+                NOAA_TOKEN_ENV,
+            )
+    except Exception as exc:  # noqa: BLE001 — forecasting degrades, not fails
+        weather_provider = None
+        logger.warning("Weather_Provider wiring failed: %s", exc)
+
     # 9. DeliveryDestinationService — unified reader over fuel_stations
     #    and customer_tanks.
     try:
@@ -390,13 +730,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # ---- Fuel-Ops Hardening ES indices (Task 12.2 prerequisite) --------
     # Create the 21 new indices introduced by this spec. The helper is
     # idempotent — existing indices are left untouched.
-    try:
-        from fuel.services.fuel_ops_es_mappings import setup_fuel_ops_indices
-
-        setup_fuel_ops_indices(es_service)
-        logger.info("Fuel-ops ES indices ready")
-    except Exception as exc:
-        logger.warning("Fuel-ops ES index setup failed: %s", exc)
 
     # ---- Fuel-Ops feature-flag defaults (Task 12.1, 12.7) -------------
     # Seed every overlay feature flag introduced by this spec to
@@ -432,11 +765,17 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_tenant_guard(tenant_settings_service)
     logger.info("Tenant settings service wired into tenant guard")
 
+    # Feedback is built before the approval queue so a rejection is
+    # recorded as a feedback signal (F7, Req 12.1).
+    feedback_service = FeedbackService(es_service=es_service)
+    container.feedback_service = feedback_service
+
     # Approval queue
     approval_queue_service = ApprovalQueueService(
         es_service=es_service,
         ws_manager=agent_ws_manager,
         activity_log_service=activity_log_service,
+        feedback_service=feedback_service,
     )
     container.approval_queue_service = approval_queue_service
 
@@ -449,6 +788,8 @@ async def initialize(app, container: ServiceContainer) -> None:
         business_validator=business_validator,
         es_service=es_service,
         notification_service=container.notification_service if container.has("notification_service") else None,
+        # Job tools go through JobService (OI-15); scheduling boots first.
+        job_service=container.job_service if container.has("job_service") else None,
     )
     container.confirmation_protocol = confirmation_protocol
 
@@ -461,39 +802,68 @@ async def initialize(app, container: ServiceContainer) -> None:
     # scheduled it, so expired-but-still-pending approvals piled up in the
     # queue (and inflated the operator alert badge). Mirrors the
     # asyncio.create_task periodic-job pattern used in bootstrap/core.py.
-    async def _periodic_approval_expiry() -> None:
-        """Background task that expires stale pending approvals."""
-        try:
-            while True:
-                await asyncio.sleep(APPROVAL_EXPIRY_INTERVAL_SECONDS)
-                try:
-                    expired = await approval_queue_service.expire_stale()
-                    if expired:
-                        logger.info(
-                            "Approval expiry sweep: %d approval(s) expired",
-                            expired,
-                        )
-                except Exception as exc:
-                    logger.error("Approval expiry sweep failed: %s", exc)
-        except asyncio.CancelledError:
-            logger.info("Approval expiry task cancelled")
+    async def _approval_expiry_cycle() -> None:
+        """One pass expiring stale pending approvals."""
+        expired = await approval_queue_service.expire_stale()
+        if expired:
+            logger.info(
+                "Approval expiry sweep: %d approval(s) expired",
+                expired,
+            )
 
-    _approval_expiry_task = asyncio.create_task(_periodic_approval_expiry())
+    _approval_expiry_task = asyncio.create_task(
+        run_periodic(
+            "agents.approval-expiry",
+            APPROVAL_EXPIRY_INTERVAL_SECONDS,
+            _approval_expiry_cycle,
+        )
+    )
     logger.info(
         "Approval expiry sweep started (interval: %ds)",
         APPROVAL_EXPIRY_INTERVAL_SECONDS,
     )
 
-    # Memory and Feedback
+    # Memory (feedback is built above, before the approval queue)
     memory_service = MemoryService(es_service=es_service)
     container.memory_service = memory_service
-
-    feedback_service = FeedbackService(es_service=es_service)
-    container.feedback_service = feedback_service
 
     # Wire mutation tools
     configure_mutation_tools(confirmation_protocol, es_service)
     logger.info("Mutation tools configured")
+
+    # Wire the commerce read tool to the SAME services the order intake path
+    # uses. Building fresh instances here would let the agent's credit verdict
+    # drift from the one that actually gates an order; reusing the container's
+    # instances makes that impossible. Read-only by design — no commerce
+    # mutation tool is exposed to any specialist.
+    from Agents.tools.commerce_read_tools import configure_commerce_read_tools
+
+    _credit_svc = (
+        container.commerce_credit_service
+        if container.has("commerce_credit_service")
+        else None
+    )
+    _aging_svc = (
+        container.commerce_ar_aging_service
+        if container.has("commerce_ar_aging_service")
+        else None
+    )
+    configure_commerce_read_tools(
+        credit_service=_credit_svc,
+        ar_aging_service=_aging_svc,
+        es_service=es_service,
+    )
+    if _credit_svc is None:
+        # Commerce is flag-gated, so this is a legitimate state. Logged at
+        # WARNING because the tool will decline rather than answer, and a silent
+        # decline reads to a user like the feature is broken.
+        logger.warning(
+            "Commerce read tool has no CreditService (commerce backbone "
+            "disabled or wiring failed) — delivery-eligibility questions will "
+            "report the tool as unconfigured"
+        )
+    else:
+        logger.info("Commerce read tools configured (credit eligibility)")
 
     # Wire agent REST endpoints
     configure_agent_endpoints(
@@ -505,23 +875,18 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     logger.info("Agent endpoints configured")
 
-    # Specialist agents
-    from strands.models.litellm import LiteLLMModel
+    # Specialist agents.
+    #
+    # The model + credential come from Agents/model_provider.py rather than a
+    # literal model id and an ``os.environ.get(..., "")`` default. An unset key
+    # used to build a model with an EMPTY api_key: boot succeeded and every
+    # agent request failed on authentication. Settings now refuses to start
+    # staging/production without a credential, so reaching here means one is
+    # configured; a development stack without one raises and is logged loudly
+    # instead of pretending the agents work.
+    from Agents.model_provider import build_agent_model
 
-    # Set the env var litellm reads for Gemini API key auth
-    gemini_key = os.environ.get("GEMINI_API_KEY", "")
-    if gemini_key:
-        os.environ["GEMINI_API_KEY"] = gemini_key
-    specialist_model = LiteLLMModel(
-        model_id="gemini/gemini-2.5-flash",
-        client_args={
-            "api_key": gemini_key,
-        },
-        params={
-            "max_tokens": 8000,
-            "temperature": 0.7,
-        },
-    )
+    specialist_model = build_agent_model(settings)
 
     specialists = {
         "fleet": FleetAgent(model=specialist_model),
@@ -606,14 +971,12 @@ async def initialize(app, container: ServiceContainer) -> None:
     configure_orchestrator(agent_orchestrator)
 
     # Set up agent ES indices
-    setup_agent_indices(es_service)
     logger.info("Agent ES indices ready")
 
     # ---- Overlay Infrastructure (Phase 2) ----
     # Imports inside function to avoid circular imports
     from Agents.overlay.signal_bus import SignalBus
     from Agents.overlay.outcome_tracker import OutcomeTracker
-    from Agents.overlay.overlay_es_mappings import setup_overlay_indices
     from Agents.overlay.dispatch_optimizer import DispatchOptimizer
     from Agents.overlay.exception_commander import ExceptionCommander
     from Agents.overlay.revenue_guard import RevenueGuard
@@ -633,12 +996,50 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     container.outcome_tracker = outcome_tracker
 
+    # ── Outcome-tracking measurement sweep ─────────────────────────────
+    # Periodically measure after-KPIs for every proposal execution that
+    # was recorded via record_proposal_execution() and is now past its
+    # observation window. Without this, OutcomeTracker.check_pending_
+    # outcomes() existed but nothing ever called it, so pending outcomes
+    # accumulated forever and LearningPolicyAgent never received an
+    # OutcomeRecord to learn from.
+    async def _outcome_tracking_cycle() -> None:
+        """One pass measuring after-KPIs for due proposal outcomes."""
+        outcomes = await outcome_tracker.check_pending_outcomes()
+        if outcomes:
+            adverse = sum(1 for o in outcomes if o.status == "adverse")
+            logger.info(
+                "Outcome tracking sweep: %d outcome(s) measured (%d adverse)",
+                len(outcomes),
+                adverse,
+            )
+
+    _outcome_tracking_task = asyncio.create_task(
+        run_periodic(
+            "agents.outcome-tracking",
+            OUTCOME_TRACKING_INTERVAL_SECONDS,
+            _outcome_tracking_cycle,
+        )
+    )
+    logger.info(
+        "Outcome tracking sweep started (interval: %ds)",
+        OUTCOME_TRACKING_INTERVAL_SECONDS,
+    )
+
     # Wire Layer 0 agents to publish RiskSignals (Req 2.2)
     for agent_name, agent in app.state.autonomous_agents.items():
         agent._signal_bus = signal_bus
 
+    # Adopt the compliance crons (F9). Done after the RiskSignal loop above so
+    # the crons keep the signal bus they were built with.
+    try:
+        adopt_compliance_cron_agents(
+            app, activity_log_service, agent_ws_manager, confirmation_protocol
+        )
+    except Exception:
+        logger.exception("Compliance cron adoption failed")
+
     # Set up overlay ES indices
-    setup_overlay_indices(es_service)
     logger.info("Overlay ES indices ready")
 
     # Shared dependencies for overlay agents (Req 10.1, 10.4)
@@ -659,6 +1060,13 @@ async def initialize(app, container: ServiceContainer) -> None:
     )
     exception_commander = ExceptionCommander(**overlay_common_args)
     revenue_guard = RevenueGuard(**overlay_common_args)
+    # Margin feed (FR5): RevenueGuard drains the margin DB queue, and the
+    # margin service publishes its ids-only hints on this bus. Both are set
+    # by bootstrap/core.wire_margin_feed when the commerce backbone is on.
+    if container.has("margin_repository"):
+        revenue_guard.set_margin_repository(container.margin_repository)
+    if container.has("margin_service"):
+        container.margin_service.set_signal_bus(signal_bus)
     customer_promise = CustomerPromise(**overlay_common_args)
     learning_policy_agent = LearningPolicyAgent(
         **overlay_common_args,
@@ -690,26 +1098,56 @@ async def initialize(app, container: ServiceContainer) -> None:
         "learning_policy_agent": learning_policy_agent,
     }
 
+    # Wire OutcomeTracker into every overlay agent (Req 11.1, 11.2) so an
+    # executed InterventionProposal has its before-KPIs captured. Without
+    # this, OutcomeTracker was constructed and stored on the container but
+    # never fed — LearningPolicyAgent subscribes to OutcomeRecord and had
+    # nothing to learn from.
+    for _agent in app.state.overlay_agents.values():
+        set_tracker = getattr(_agent, "set_outcome_tracker", None)
+        if set_tracker is not None:
+            set_tracker(outcome_tracker)
+
     # ---- Fuel Distribution MVP Agents (Phase 3) ----
     from Agents.overlay.tank_forecasting_agent import TankForecastingAgent
     from Agents.overlay.delivery_prioritization_agent import DeliveryPrioritizationAgent
     from Agents.overlay.compartment_loading_agent import CompartmentLoadingAgent
     from Agents.overlay.route_planning_agent import RoutePlanningAgent
     from Agents.overlay.exception_replanning_agent import ExceptionReplanningAgent
-    from Agents.support.mvp_es_mappings import setup_mvp_indices
     from Agents.support.fuel_distribution_pipeline import FuelDistributionPipeline
 
     # Set up MVP ES indices (Req 7.9)
-    setup_mvp_indices(es_service)
     logger.info("MVP ES indices ready")
 
     # Instantiate MVP agents with shared dependencies (Req 11.1–11.6)
-    tank_forecasting_agent = TankForecastingAgent(**overlay_common_args)
+    # ``weather_provider`` may be None (no credential configured), which is the
+    # pre-existing behaviour: the agent annotates ``weather_fallback: true``.
+    tank_forecasting_agent = TankForecastingAgent(
+        **overlay_common_args,
+        weather_provider=weather_provider,
+    )
     delivery_prioritization_agent = DeliveryPrioritizationAgent(
         **overlay_common_args,
         redis_client=_agent_redis_client,
     )
     compartment_loading_agent = CompartmentLoadingAgent(**overlay_common_args)
+    # Task 9.8 / Req 6.3, 6.4 (OI-02): compliance boots before agents, so its
+    # own wiring attempt finds no agent. Register the agent and inject the
+    # DyedDieselEnforcer here, where both exist.
+    container.compartment_loading_agent = compartment_loading_agent
+    if container.has("dyed_diesel_enforcer"):
+        compartment_loading_agent.set_dyed_diesel_enforcer(
+            container.dyed_diesel_enforcer
+        )
+        logger.info(
+            "DyedDieselEnforcer wired into CompartmentLoadingAgent (task 9.8)"
+        )
+    else:
+        logger.warning(
+            "DyedDieselEnforcer not in container; CompartmentLoadingAgent "
+            "will block every loading plan that carries dyed diesel "
+            "(fail closed, task 9.8 / OI-02)"
+        )
     route_planning_agent = RoutePlanningAgent(**overlay_common_args)
     exception_replanning_agent = ExceptionReplanningAgent(**overlay_common_args)
 
@@ -732,6 +1170,53 @@ async def initialize(app, container: ServiceContainer) -> None:
         "route_planning": route_planning_agent,
         "exception_replanning": exception_replanning_agent,
     }
+
+    # Wire OutcomeTracker into MVP agents too (Req 11.1, 11.2) — same
+    # rationale as the overlay agents above.
+    for _agent in app.state.mvp_agents.values():
+        set_tracker = getattr(_agent, "set_outcome_tracker", None)
+        if set_tracker is not None:
+            set_tracker(outcome_tracker)
+
+    # Seed the agent-level overlay gates — ``overlay.{agent_id}`` — now that
+    # every overlay and MVP agent exists to derive its own key.
+    #
+    # Without this the flags that decide whether an agent runs at all were set
+    # nowhere and were invisible to the feature-flag admin API, so an operator
+    # had no surface to enable an overlay and no way to see why nothing was
+    # happening. The capability flags seeded earlier are a different, disjoint
+    # set. Both are seeded to ``disabled`` for the ``__default__`` placeholder
+    # tenant; a real tenant with no value falls back to
+    # ``settings.overlay_default_mode``.
+    _overlay_gate_agents = list(app.state.overlay_agents.values()) + list(
+        app.state.mvp_agents.values()
+    )
+    await _seed_fuel_ops_feature_flag_defaults(
+        container,
+        _agent_redis_client,
+        _overlay_agent_flag_keys(_overlay_gate_agents),
+        label="overlay agent gate",
+    )
+    try:
+        _default_mode = settings.overlay_default_mode
+    except AttributeError:  # pragma: no cover - MagicMock settings in tests
+        _default_mode = "disabled"
+    if _default_mode == "disabled":
+        logger.warning(
+            "Overlay agents default to mode 'disabled' — %d agent(s) will skip "
+            "every tenant that has no overlay_ff:overlay.{agent_id} value. Set "
+            "OVERLAY_DEFAULT_MODE=shadow to run their decision logic in "
+            "observe-only mode, or enable per tenant via the feature-flag admin "
+            "API.",
+            len(_overlay_gate_agents),
+        )
+    else:
+        logger.info(
+            "Overlay agents default to mode '%s' for tenants with no explicit "
+            "flag (%d agent(s))",
+            _default_mode,
+            len(_overlay_gate_agents),
+        )
 
     # Create FuelDistributionPipeline instance (Req 6.1–6.6)
     mvp_pipeline = FuelDistributionPipeline(
@@ -790,6 +1275,37 @@ async def initialize(app, container: ServiceContainer) -> None:
             ),
         )
 
+    # Loading-plan executor (loading-plan-executor K1). Registered on the
+    # protocol after construction because the order services exist only now.
+    # It shares PLAN_EXECUTION_LOCK (the default) with FuelPlanDispatchService
+    # above, so the two never claim one tenant's orders concurrently (freeze 1).
+    if container.has("order_repository") and container.has("order_service"):
+        from fuel.services.loading_plan_executor import LoadingPlanExecutor
+        loading_plan_executor = LoadingPlanExecutor(
+            es_service=es_service,
+            order_repository=container.get("order_repository"),
+            order_service=container.get("order_service"),
+            feature_flag_service=(
+                container.ops_feature_flags if container.has("ops_feature_flags") else None
+            ),
+        )
+        container.loading_plan_executor = loading_plan_executor
+        confirmation_protocol.set_loading_plan_executor(loading_plan_executor)
+        # A released order no longer holds an executed plan's overlap (OI-18).
+        approval_queue_service.set_order_repository(container.get("order_repository"))
+        logger.info("LoadingPlanExecutor registered")
+    else:
+        logger.error(
+            "LoadingPlanExecutor not wired: order_repository/order_service missing; "
+            "loading approvals will record executor_unavailable"
+        )
+    from commerce.services import commerce_persistence_bridge as _bridge
+    if _bridge.read_from_postgres() and not _bridge.dual_write_enabled():
+        logger.error(
+            "Order reads are cut over to Postgres but dual-write is off: applied "
+            "loading plans will report projection_mirror_disabled"
+        )
+
     configure_mvp_endpoints(
         pipeline=mvp_pipeline,
         es_service=es_service,
@@ -803,6 +1319,19 @@ async def initialize(app, container: ServiceContainer) -> None:
     # the idempotent helper: including it again would duplicate every MVP route.
     mount_router(app, mvp_router)
     logger.info("MVP endpoints configured and router registered")
+
+    # Dispatch Board (dispatch-board K11, plan task 13). Built after the
+    # dispatch service and executor above (Phase 2 publish needs both). The
+    # validators come from earlier bootstrap modules, except HOS, which
+    # ``bootstrap/driver.py`` builds after this module: every collaborator is
+    # resolved at call time through ``Lazy`` so a later registration is seen.
+    try:
+        _wire_dispatch_board(
+            app, container, es_service, _agent_redis_client,
+            plan_execution_service=plan_execution_service,
+        )
+    except Exception as exc:
+        logger.error("Dispatch Board not wired: %s", type(exc).__name__, exc_info=True)
 
     # ---- Fuel Ops Hardening endpoints (Phase 3 Task 3.6 et al.) ----
     # Register the fuel-domain router that owns the customer-tanks CRUD
@@ -903,26 +1432,64 @@ async def initialize(app, container: ServiceContainer) -> None:
             wait_report_repository=sourcing_wait_report_repo,
         )
 
-        # Rack-price provider: default to the CSV-backed fallback
-        # adapter. The CSV loader is a no-op async callable until a
-        # tenant uploads a rack sheet via the admin UI; the provider
-        # safely degrades to an empty candidate set when no CSV is
-        # present, which the recommender surfaces as
-        # ``no_price_available``. Swap in ``OPISRackPriceProvider`` here
-        # once the tenant has subscribed.
+        # Rack-price provider.
+        #
+        # This used to hardcode ``CSVFallbackRackPriceProvider`` with a loader
+        # that raised ``FileNotFoundError`` on every call, so terminal sourcing
+        # had NO price data for any tenant and every recommendation came back
+        # ``no_price_available``. The finished ``OPISRackPriceProvider`` was
+        # never constructed.
+        #
+        # OPIS is now used whenever its credential is present. It resolves
+        # OPIS_API_KEY / OPIS_API_SECRET / OPIS_BASE_URL itself, so bootstrap
+        # only has to decide which adapter to build.
         from integrations.rack_price_provider_base import (
-            CSVFallbackRackPriceProvider,
+            OPIS_API_KEY_ENV,
+            build_rack_price_provider,
         )
 
-        async def _noop_csv_loader(tenant_id: str) -> bytes:
+        async def _uploaded_csv_loader(tenant_id: str) -> bytes:
+            """Load the tenant's uploaded rack sheet.
+
+            Still unimplemented, and now says so once at wiring time rather
+            than only per call. Completing it needs two things this backend
+            does not have yet: an upload endpoint for the ``rack_csv``
+            category, and somewhere to record the resulting ``file_ref``.
+            A deterministic key cannot substitute — ``_assert_tenant_prefix``
+            validates the dated/uuid key shape that ``_build_key`` produces,
+            and ``FileStorageService`` exposes no list operation, so "the
+            latest sheet for this tenant" is not resolvable from the ref alone.
+            """
             raise FileNotFoundError(
                 f"no rack-price CSV configured for tenant {tenant_id!r}"
             )
 
-        sourcing_rack_provider = CSVFallbackRackPriceProvider(
-            csv_loader=_noop_csv_loader,
-            redis_client=_agent_redis_client,
-        )
+        _rack_name = (
+            os.environ.get("FUEL_OPS_RACK_PRICE_PROVIDER") or ""
+        ).strip().lower()
+        if not _rack_name:
+            _rack_name = "opis" if os.environ.get(OPIS_API_KEY_ENV) else "csv_fallback"
+
+        if _rack_name == "opis":
+            sourcing_rack_provider = build_rack_price_provider(
+                _rack_name, redis_client=_agent_redis_client
+            )
+            logger.info(
+                "Rack-price provider: OPIS (live rack feed) — terminal sourcing "
+                "will score candidates on real prices"
+            )
+        else:
+            sourcing_rack_provider = build_rack_price_provider(
+                _rack_name,
+                csv_loader=_uploaded_csv_loader,
+                redis_client=_agent_redis_client,
+            )
+            logger.warning(
+                "Rack-price provider: csv_fallback with NO uploaded sheet "
+                "(set %s for the live OPIS feed). Terminal sourcing has no "
+                "price data and will return no_price_available",
+                OPIS_API_KEY_ENV,
+            )
         sourcing_rack_sync = RackPriceSyncService(es_service=es_service)
 
         # Tenant-config handle — the recommender uses the same minimal
@@ -1438,31 +2005,24 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
             container.invoice_erp_export_worker = invoice_erp_export_worker
 
-            async def _periodic_invoice_erp_export() -> None:
-                try:
-                    while True:
-                        try:
-                            counts = (
-                                await invoice_erp_export_worker.export_pending()
-                            )
-                            if counts["examined"]:
-                                logger.info(
-                                    "Invoice ERP export recovery cycle: %s",
-                                    counts,
-                                )
-                        except Exception as exc:
-                            logger.exception(
-                                "Invoice ERP export recovery cycle failed: %s",
-                                exc,
-                            )
-                        await asyncio.sleep(ERP_EXPORT_INTERVAL_SECONDS)
-                except asyncio.CancelledError:
+            async def _invoice_erp_export_cycle() -> None:
+                """One recovery pass exporting pending invoices to the ERP."""
+                counts = await invoice_erp_export_worker.export_pending()
+                if counts["examined"]:
                     logger.info(
-                        "Invoice ERP export recovery task cancelled"
+                        "Invoice ERP export recovery cycle: %s",
+                        counts,
                     )
 
+            # The original loop worked before its first sleep, so the recovery
+            # pass ran at boot. ``run_immediately`` preserves that.
             _erp_invoice_export_task = asyncio.create_task(
-                _periodic_invoice_erp_export()
+                run_periodic(
+                    "commerce.invoice-erp-export",
+                    ERP_EXPORT_INTERVAL_SECONDS,
+                    _invoice_erp_export_cycle,
+                    run_immediately=True,
+                )
             )
             logger.info(
                 "Invoice ERP export recovery started (interval: %ds)",
@@ -1557,42 +2117,16 @@ async def initialize(app, container: ServiceContainer) -> None:
             else None
         )
 
-        async def _stripe_connector_factory(tenant_id: str):
-            """Resolve the Stripe connector for ``tenant_id``.
+        # WARN-only key-mode checks (review R4): live keys are expected only
+        # in production.
+        _stripe_live_keys_expected = (
+            getattr(settings.environment, "value", settings.environment)
+            == "production"
+        )
 
-            Returns ``None`` when the tenant has no active Stripe
-            integration instance so the endpoints surface HTTP 404
-            ``stripe_integration_not_configured`` uniformly.
-            """
-
-            if _stripe_repository is None or credentials_vault is None:
-                return None
-            try:
-                instances = await _stripe_repository.list_for_tenant(
-                    tenant_id=tenant_id,
-                    provider_name=StripeConnector.provider_name,
-                    enabled=None,
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                logger.warning(
-                    "Stripe connector factory: repository lookup failed "
-                    "tenant=%s: %s",
-                    tenant_id,
-                    exc,
-                )
-                return None
-
-            if not instances:
-                return None
-            # Prefer an enabled instance; fall back to the first record
-            # so a disabled integration still serves webhooks (Stripe
-            # will keep delivering events until the operator removes
-            # the endpoint from their dashboard).
-            instance = next(
-                (i for i in instances if i.enabled), instances[0]
-            )
-
+        def _build_stripe_connector(tenant_id: str, instance):
             return StripeConnector(
+                live_keys_expected=_stripe_live_keys_expected,
                 tenant_id=tenant_id,
                 instance_id=instance.instance_id,
                 credentials_vault=credentials_vault,
@@ -1603,6 +2137,25 @@ async def initialize(app, container: ServiceContainer) -> None:
                 redis_client=_agent_redis_client,
                 es_service=es_service,
             )
+
+        # Resolve the Stripe connector for ``tenant_id``; ``None`` when the
+        # tenant has no Stripe integration instance so the endpoints surface
+        # HTTP 404 ``stripe_integration_not_configured`` uniformly.
+        _stripe_connector_factory = _make_stripe_connector_factory(
+            repository=_stripe_repository,
+            vault=credentials_vault,
+            build_connector=_build_stripe_connector,
+            enabled_only=False,
+        )
+        # Customer portal (design §3.1): enabled instances only, so ``None``
+        # means "the portal can't take payments". Webhooks keep the factory
+        # above, so events for a since-disabled instance still verify.
+        _portal_stripe_connector_factory = _make_stripe_connector_factory(
+            repository=_stripe_repository,
+            vault=credentials_vault,
+            build_connector=_build_stripe_connector,
+            enabled_only=True,
+        )
 
         async def _stripe_payment_mapper(tenant_id: str, external_ids):
             """Map external Stripe charge ids → canonical commerce payments.
@@ -1626,13 +2179,48 @@ async def initialize(app, container: ServiceContainer) -> None:
                 external_ids=list(external_ids),
             )
 
+        # Customer-portal ACH payments (design §3.1, §6.3): the portal
+        # factory and commerce PaymentService for payment create, and the
+        # reconciler that routes portal PaymentIntent webhooks.
+        from portal.services.portal_payment_reconciler import (
+            PortalPaymentReconciler,
+        )
+        from portal.services.portal_payment_service import (
+            PortalPaymentAttemptStore,
+            configure_portal_payments,
+        )
+
+        _portal_pay_svc = (
+            container.commerce_payment_service
+            if container.has("commerce_payment_service")
+            else None
+        )
+        _portal_inv_svc = (
+            container.commerce_invoice_service
+            if container.has("commerce_invoice_service")
+            else None
+        )
+        configure_portal_payments(
+            connector_factory=_portal_stripe_connector_factory,
+            payment_service=_portal_pay_svc,
+        )
+        _portal_payment_handler = None
+        if _portal_pay_svc is not None and _portal_inv_svc is not None:
+            _portal_payment_handler = PortalPaymentReconciler(
+                store=PortalPaymentAttemptStore(),
+                payment_service=_portal_pay_svc,
+                invoice_service=_portal_inv_svc,
+            ).handle
+
         configure_stripe_endpoints(
             connector_factory=_stripe_connector_factory,
             payment_mapper=_stripe_payment_mapper,
+            portal_payment_handler=_portal_payment_handler,
         )
         logger.info(
             "Stripe REST endpoints + webhook router configured "
-            "(connector factory ready)"
+            "(connector factory ready; portal payments %s)",
+            "on" if _portal_payment_handler is not None else "off",
         )
     except Exception as exc:
         logger.warning(
@@ -1723,6 +2311,19 @@ async def initialize(app, container: ServiceContainer) -> None:
 
     logger.info("Fuel-ops hardening bootstrap complete")
 
+    # Last step: re-apply the HTTP-client / LiteLLM log levels (N1). litellm is
+    # first imported during this bootstrap, after TelemetryService applied them,
+    # and may set its own loggers and handler to DEBUG on import. Its debug and
+    # httpx INFO lines carry request URLs, including Gemini's ``?key=``.
+    try:
+        from telemetry.log_safety import apply_library_log_levels
+
+        apply_library_log_levels(
+            getattr(settings, "http_client_log_level", "WARNING")
+        )
+    except Exception as exc:  # noqa: BLE001 — logging setup must not fail boot
+        logger.warning("Re-applying HTTP client log levels failed: %s", exc)
+
 
 async def shutdown(app, container: ServiceContainer) -> None:
     """Stop agents in order: L2 → L1 → L0, then close resources (Req 10.5)."""
@@ -1730,6 +2331,7 @@ async def shutdown(app, container: ServiceContainer) -> None:
     global _storm_mode_evaluator, _integration_scheduler
     global _erp_invoice_export_task
     global _approval_expiry_task
+    global _outcome_tracking_task
 
     # Stop the approval-expiry sweep first — it's a standalone asyncio task
     # with no dependency on the scheduler.
@@ -1740,6 +2342,15 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except (asyncio.CancelledError, Exception):
             pass
         _approval_expiry_task = None
+
+    # Stop the outcome-tracking sweep — same standalone-task shape.
+    if _outcome_tracking_task is not None:
+        _outcome_tracking_task.cancel()
+        try:
+            await _outcome_tracking_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _outcome_tracking_task = None
 
     if _erp_invoice_export_task is not None:
         _erp_invoice_export_task.cancel()
@@ -1832,6 +2443,13 @@ async def shutdown(app, container: ServiceContainer) -> None:
                     getattr(agent, "agent_id", "<unknown>"),
                     exc,
                 )
+
+    # Shut down the Dispatch Board WS manager (dispatch-board K10)
+    if container.has("dispatch_board_ws_manager"):
+        try:
+            await container.dispatch_board_ws_manager.shutdown()
+        except Exception as exc:
+            logger.exception("Dispatch board WS manager shutdown failed: %s", exc)
 
     # Shut down agent WS manager
     if container.has("agent_ws_manager"):

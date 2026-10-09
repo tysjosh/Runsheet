@@ -21,10 +21,17 @@ import { useCallback, useEffect, useState } from "react";
 import {
   EntityLink,
   entityHref,
+  Field,
+  FormDialog,
+  INPUT_CLASS,
+  Select,
   ToastContainer,
   useToasts,
 } from "@/components/ui";
+import { hasAnyRole } from "../../config/modules";
+import { dateTime as formatDateTimeShared, pct } from "../../lib/format";
 import { ApiError } from "../../services/api";
+import { PORTAL_REVIEW_HOLD_REASON } from "../../services/orderHoldReasons";
 import {
   type AssignDriverPayload,
   assignDriver,
@@ -39,20 +46,15 @@ import {
   releaseHoldOrder,
   updateOrderStatus,
 } from "../../services/ordersApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import DriverPicker from "../ops/DriverPicker";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatDateTime(dateStr?: string | null): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return formatDateTimeShared(dateStr);
 }
 
 function getStatusColor(status: OrderStatus): string {
@@ -187,7 +189,7 @@ function IntakeMetadataSection({ order }: { order: FuelOrder }) {
             {meta.agent_confidence != null && (
               <div className="flex justify-between">
                 <span className="text-gray-500">Agent Confidence</span>
-                <span>{(meta.agent_confidence * 100).toFixed(0)}%</span>
+                <span>{pct(meta.agent_confidence, { fraction: true })}</span>
               </div>
             )}
             {meta.call_id && (
@@ -226,7 +228,7 @@ function IntakeMetadataSection({ order }: { order: FuelOrder }) {
               <div className="flex justify-between">
                 <span className="text-gray-500">Import Batch</span>
                 <a
-                  href={`/admin/imports/${meta.import_batch_id}`}
+                  href={`/dashboard/settings?tab=import&batch=${encodeURIComponent(meta.import_batch_id)}`}
                   className="text-info hover:underline text-xs font-mono"
                 >
                   {meta.import_batch_id}
@@ -295,6 +297,102 @@ function EventTimeline({ events }: { events: FuelOrderEvent[] }) {
   );
 }
 
+// ─── Portal request confirm / decline (PD24) ─────────────────────────────────
+
+/** Shown after a 409 INVALID_STATUS_TRANSITION reload (design §10.3). */
+export const PORTAL_REQUEST_CHANGED_MESSAGE =
+  "This request changed. Reloaded the latest version.";
+
+function isStaleTransition(err: unknown): boolean {
+  const e = err as { status?: unknown; code?: unknown } | null;
+  return e?.status === 409 && e?.code === "INVALID_STATUS_TRANSITION";
+}
+
+/**
+ * Confirm (`release-hold` with `notes: "confirmed"`) or Decline (`cancel`
+ * with `reason: "declined_by_dispatcher"`) a customer-portal request that is
+ * awaiting confirmation. Admin and dispatcher only; the API re-checks.
+ */
+function PortalRequestControls({
+  order,
+  roles,
+  onChanged,
+  addToast,
+}: {
+  order: FuelOrder;
+  roles: readonly string[] | null;
+  onChanged: (notice: string | null) => void;
+  addToast: (message: string, type: "success" | "error") => void;
+}) {
+  const [working, setWorking] = useState<"confirm" | "decline" | null>(null);
+  if (
+    order.status !== "on_hold" ||
+    order.hold_reason !== PORTAL_REVIEW_HOLD_REASON ||
+    !hasAnyRole(roles, ["admin", "dispatcher"])
+  ) {
+    return null;
+  }
+
+  const run = async (action: "confirm" | "decline") => {
+    if (working) return;
+    setWorking(action);
+    try {
+      if (action === "confirm") {
+        await releaseHoldOrder(order.order_id, { notes: "confirmed" });
+        addToast("Request confirmed", "success");
+      } else {
+        await cancelOrder(order.order_id, { reason: "declined_by_dispatcher" });
+        addToast("Request declined", "success");
+      }
+      onChanged(null);
+    } catch (err) {
+      if (isStaleTransition(err)) {
+        onChanged(PORTAL_REQUEST_CHANGED_MESSAGE);
+      } else {
+        addToast(
+          err instanceof ApiError
+            ? err.message
+            : action === "confirm"
+              ? "Failed to confirm the request"
+              : "Failed to decline the request",
+          "error",
+        );
+      }
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  return (
+    <div
+      className="flex flex-wrap items-center gap-3 rounded-xl border border-warning-light bg-warning-light px-4 py-3"
+      data-testid="portal-request-controls"
+    >
+      <p className="flex-1 text-sm font-medium text-warning-dark">
+        Customer portal request awaiting confirmation
+      </p>
+      <button
+        type="button"
+        onClick={() => run("confirm")}
+        disabled={working !== null}
+        className="px-3 py-1.5 text-xs font-medium text-white bg-success-dark rounded-lg hover:opacity-90 disabled:opacity-50 inline-flex items-center gap-1"
+      >
+        {working === "confirm" && <Loader2 className="w-3 h-3 animate-spin" />}
+        Confirm
+      </button>
+      <button
+        type="button"
+        onClick={() => run("decline")}
+        disabled={working !== null}
+        className="px-3 py-1.5 text-xs font-medium text-error-dark border border-error-light bg-white rounded-lg hover:bg-error-light disabled:opacity-50 inline-flex items-center gap-1"
+      >
+        {working === "decline" && <Loader2 className="w-3 h-3 animate-spin" />}
+        Decline
+      </button>
+    </div>
+  );
+}
+
 // ─── Mutation Controls ───────────────────────────────────────────────────────
 
 interface MutationControlsProps {
@@ -303,100 +401,42 @@ interface MutationControlsProps {
   addToast: (message: string, type: "success" | "error") => void;
 }
 
+const STATUS_OPTIONS: { value: OrderStatus; label: string }[] = [
+  { value: "confirmed", label: "Confirmed" },
+  { value: "scheduled", label: "Scheduled" },
+  { value: "dispatched", label: "Dispatched" },
+  { value: "in_transit", label: "In transit" },
+  { value: "delivered", label: "Delivered" },
+  { value: "failed", label: "Failed" },
+  { value: "on_hold", label: "On hold" },
+];
+
+/** API message for a failed mutation (FormDialog shows it in the dialog). */
+function mutationError(err: unknown, fallback: string): Error {
+  return new Error(err instanceof ApiError ? err.message : fallback);
+}
+
+/**
+ * Order actions (UI revamp, design.md §5 "Order status / hold": sm
+ * FormDialog). Change status, Assign driver, Place on hold and Cancel order
+ * each open a small FormDialog: validation and API errors stay inline in the
+ * dialog, success closes it and shows the page toast. Release hold has no
+ * input and stays a direct action.
+ */
 function MutationControls({
   order,
   onMutationSuccess,
   addToast,
 }: MutationControlsProps) {
-  const [showAssignModal, setShowAssignModal] = useState(false);
-  const [showCancelModal, setShowCancelModal] = useState(false);
-  const [showStatusModal, setShowStatusModal] = useState(false);
-  const [showHoldModal, setShowHoldModal] = useState(false);
+  const [open, setOpen] = useState<
+    "assign" | "cancel" | "status" | "hold" | null
+  >(null);
   const [working, setWorking] = useState(false);
-
-  // Assign driver
-  const [assignDriverId, setAssignDriverId] = useState("");
-  const handleAssign = useCallback(async () => {
-    if (!assignDriverId.trim()) return;
-    setWorking(true);
-    try {
-      const payload: AssignDriverPayload = { driver_id: assignDriverId.trim() };
-      await assignDriver(order.order_id, payload);
-      addToast("Driver assigned successfully", "success");
-      setShowAssignModal(false);
-      setAssignDriverId("");
-      onMutationSuccess();
-    } catch (err) {
-      const msg =
-        err instanceof ApiError ? err.message : "Failed to assign driver";
-      addToast(msg, "error");
-    } finally {
-      setWorking(false);
-    }
-  }, [order.order_id, assignDriverId, addToast, onMutationSuccess]);
-
-  // Cancel order (HIGH risk — modal)
-  const [cancelReason, setCancelReason] = useState("");
-  const handleCancel = useCallback(async () => {
-    if (!cancelReason.trim()) return;
-    setWorking(true);
-    try {
-      await cancelOrder(order.order_id, { reason: cancelReason.trim() });
-      addToast("Order cancelled", "success");
-      setShowCancelModal(false);
-      setCancelReason("");
-      onMutationSuccess();
-    } catch (err) {
-      const msg =
-        err instanceof ApiError ? err.message : "Failed to cancel order";
-      addToast(msg, "error");
-    } finally {
-      setWorking(false);
-    }
-  }, [order.order_id, cancelReason, addToast, onMutationSuccess]);
-
-  // Change status
-  const [newStatus, setNewStatus] = useState<OrderStatus>("confirmed");
-  const [statusReason, setStatusReason] = useState("");
-  const handleStatusChange = useCallback(async () => {
-    setWorking(true);
-    try {
-      await updateOrderStatus(order.order_id, {
-        new_status: newStatus,
-        reason: statusReason || undefined,
-      });
-      addToast(`Status changed to ${newStatus}`, "success");
-      setShowStatusModal(false);
-      setStatusReason("");
-      onMutationSuccess();
-    } catch (err) {
-      const msg =
-        err instanceof ApiError ? err.message : "Failed to change status";
-      addToast(msg, "error");
-    } finally {
-      setWorking(false);
-    }
-  }, [order.order_id, newStatus, statusReason, addToast, onMutationSuccess]);
-
-  // Place on hold
-  const [holdReason, setHoldReason] = useState("");
-  const handleHold = useCallback(async () => {
-    if (!holdReason.trim()) return;
-    setWorking(true);
-    try {
-      await holdOrder(order.order_id, { hold_reason: holdReason.trim() });
-      addToast("Order placed on hold", "success");
-      setShowHoldModal(false);
-      setHoldReason("");
-      onMutationSuccess();
-    } catch (err) {
-      const msg =
-        err instanceof ApiError ? err.message : "Failed to place order on hold";
-      addToast(msg, "error");
-    } finally {
-      setWorking(false);
-    }
-  }, [order.order_id, holdReason, addToast, onMutationSuccess]);
+  const close = () => setOpen(null);
+  const done = (message: string) => () => {
+    addToast(message, "success");
+    onMutationSuccess();
+  };
 
   // Release from hold (re-runs intake hooks server-side). The backend may
   // keep the order on_hold with a refreshed hold_reason when a re-run intake
@@ -431,7 +471,7 @@ function MutationControls({
           <>
             <button
               type="button"
-              onClick={() => setShowStatusModal(true)}
+              onClick={() => setOpen("status")}
               className="px-3 py-1.5 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50"
               aria-label="Change status"
             >
@@ -439,7 +479,7 @@ function MutationControls({
             </button>
             <button
               type="button"
-              onClick={() => setShowAssignModal(true)}
+              onClick={() => setOpen("assign")}
               className="px-3 py-1.5 text-xs font-medium border border-gray-200 rounded-lg hover:bg-gray-50"
               aria-label="Assign driver"
             >
@@ -460,7 +500,7 @@ function MutationControls({
               canHold && (
                 <button
                   type="button"
-                  onClick={() => setShowHoldModal(true)}
+                  onClick={() => setOpen("hold")}
                   className="px-3 py-1.5 text-xs font-medium text-warning-dark border border-warning-light rounded-lg hover:bg-warning-light"
                   aria-label="Place on hold"
                 >
@@ -470,7 +510,7 @@ function MutationControls({
             )}
             <button
               type="button"
-              onClick={() => setShowCancelModal(true)}
+              onClick={() => setOpen("cancel")}
               className="px-3 py-1.5 text-xs font-medium text-error-dark border border-error-light rounded-lg hover:bg-error-light"
               aria-label="Cancel order"
             >
@@ -480,203 +520,172 @@ function MutationControls({
         )}
       </div>
 
-      {/* Assign Driver Modal */}
-      {showAssignModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          role="dialog"
-          aria-modal="true"
+      {open === "assign" && (
+        <FormDialog<{ driver_id: string }>
+          open
+          size="sm"
+          title="Assign driver"
+          submitLabel="Assign"
+          successMessage={null}
+          initialValues={{ driver_id: "" }}
+          validate={(v) =>
+            v.driver_id.trim() ? {} : { driver_id: "Choose a driver." }
+          }
+          onSubmit={async (v) => {
+            const payload: AssignDriverPayload = {
+              driver_id: v.driver_id.trim(),
+            };
+            try {
+              return await assignDriver(order.order_id, payload);
+            } catch (err) {
+              throw mutationError(err, "Failed to assign driver");
+            }
+          }}
+          onSaved={done("Driver assigned successfully")}
+          onClose={close}
         >
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
-            <h3 className="text-lg font-semibold mb-4">Assign Driver</h3>
-            <div className="mb-4">
+          {({ values, set, errors }) => (
+            <div className="col-span-2">
               <DriverPicker
-                value={assignDriverId || null}
-                onChange={setAssignDriverId}
+                value={values.driver_id || null}
+                onChange={(id) => set("driver_id", id)}
                 aria-label="Driver"
               />
+              {errors.driver_id && (
+                <p className="mt-1 text-xs text-red-700">{errors.driver_id}</p>
+              )}
             </div>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowAssignModal(false)}
-                className="px-3 py-2 text-sm border border-gray-200 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleAssign}
-                disabled={working || !assignDriverId.trim()}
-                className="px-3 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-              >
-                {working ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  "Assign"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+          )}
+        </FormDialog>
       )}
 
-      {/* Cancel Order Modal (HIGH risk) */}
-      {showCancelModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          role="dialog"
-          aria-modal="true"
+      {open === "cancel" && (
+        <FormDialog<{ reason: string }>
+          open
+          size="sm"
+          title="Cancel order"
+          help="This action cannot be undone. Please provide a reason for cancellation."
+          submitLabel="Confirm cancel"
+          successMessage={null}
+          initialValues={{ reason: "" }}
+          validate={(v) =>
+            v.reason.trim() ? {} : { reason: "Enter a reason." }
+          }
+          onSubmit={async (v) => {
+            try {
+              return await cancelOrder(order.order_id, {
+                reason: v.reason.trim(),
+              });
+            } catch (err) {
+              throw mutationError(err, "Failed to cancel order");
+            }
+          }}
+          onSaved={done("Order cancelled")}
+          onClose={close}
         >
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <AlertTriangle className="w-5 h-5 text-error" />
-              <h3 className="text-lg font-semibold text-error-dark">
-                Cancel Order
-              </h3>
-            </div>
-            <p className="text-sm text-gray-600 mb-4">
-              This action cannot be undone. Please provide a reason for
-              cancellation.
-            </p>
-            <textarea
-              value={cancelReason}
-              onChange={(e) => setCancelReason(e.target.value)}
-              placeholder="Reason for cancellation"
-              rows={3}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg mb-4 focus:ring-2 focus:ring-primary focus:outline-none"
-              aria-label="Cancellation reason"
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowCancelModal(false)}
-                className="px-3 py-2 text-sm border border-gray-200 rounded-lg"
-              >
-                Keep Order
-              </button>
-              <button
-                type="button"
-                onClick={handleCancel}
-                disabled={working || !cancelReason.trim()}
-                className="px-3 py-2 text-sm font-medium text-white bg-error rounded-lg disabled:opacity-50 hover:bg-error-dark"
-              >
-                {working ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  "Confirm Cancel"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+          {({ values, set, errors }) => (
+            <Field label="Cancellation reason" required error={errors.reason}>
+              <textarea
+                id="order-cancel-reason"
+                value={values.reason}
+                onChange={(e) => set("reason", e.target.value)}
+                placeholder="Reason for cancellation"
+                rows={3}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          )}
+        </FormDialog>
       )}
 
-      {/* Place on Hold Modal */}
-      {showHoldModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          role="dialog"
-          aria-modal="true"
+      {open === "hold" && (
+        <FormDialog<{ reason: string }>
+          open
+          size="sm"
+          title="Place on hold"
+          help="Holding pauses the order until it is released (for example a credit check, or awaiting customer confirmation)."
+          submitLabel="Place on hold"
+          successMessage={null}
+          initialValues={{ reason: "" }}
+          validate={(v) =>
+            v.reason.trim() ? {} : { reason: "Enter a reason." }
+          }
+          onSubmit={async (v) => {
+            try {
+              return await holdOrder(order.order_id, {
+                hold_reason: v.reason.trim(),
+              });
+            } catch (err) {
+              throw mutationError(err, "Failed to place order on hold");
+            }
+          }}
+          onSaved={done("Order placed on hold")}
+          onClose={close}
         >
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
-            <div className="flex items-center gap-2 mb-4">
-              <AlertTriangle className="w-5 h-5 text-warning-dark" />
-              <h3 className="text-lg font-semibold text-warning-dark">
-                Place on Hold
-              </h3>
-            </div>
-            <p className="text-sm text-gray-600 mb-4">
-              Holding pauses the order until it is released. Provide a reason
-              (e.g. credit check, awaiting customer confirmation).
-            </p>
-            <textarea
-              value={holdReason}
-              onChange={(e) => setHoldReason(e.target.value)}
-              placeholder="Reason for hold"
-              rows={3}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg mb-4 focus:ring-2 focus:ring-primary focus:outline-none"
-              aria-label="Hold reason"
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowHoldModal(false)}
-                className="px-3 py-2 text-sm border border-gray-200 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleHold}
-                disabled={working || !holdReason.trim()}
-                className="px-3 py-2 text-sm font-medium text-white bg-warning-dark rounded-lg disabled:opacity-50 hover:opacity-90"
-              >
-                {working ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  "Place on Hold"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+          {({ values, set, errors }) => (
+            <Field label="Hold reason" required error={errors.reason}>
+              <textarea
+                id="order-hold-reason"
+                value={values.reason}
+                onChange={(e) => set("reason", e.target.value)}
+                placeholder="Reason for hold"
+                rows={3}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          )}
+        </FormDialog>
       )}
 
-      {/* Change Status Modal */}
-      {showStatusModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          role="dialog"
-          aria-modal="true"
+      {open === "status" && (
+        <FormDialog<{ new_status: OrderStatus; reason: string }>
+          open
+          size="sm"
+          title="Change status"
+          submitLabel="Update status"
+          successMessage={null}
+          initialValues={{ new_status: "confirmed", reason: "" }}
+          onSubmit={async (v) => {
+            try {
+              await updateOrderStatus(order.order_id, {
+                new_status: v.new_status,
+                reason: v.reason.trim() || undefined,
+              });
+              return v.new_status;
+            } catch (err) {
+              throw mutationError(err, "Failed to change status");
+            }
+          }}
+          onSaved={(s) => {
+            const label = STATUS_OPTIONS.find((o) => o.value === s)?.label ?? s;
+            addToast(`Status changed to ${label}`, "success");
+            onMutationSuccess();
+          }}
+          onClose={close}
         >
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 p-6">
-            <h3 className="text-lg font-semibold mb-4">Change Status</h3>
-            <select
-              value={newStatus}
-              onChange={(e) => setNewStatus(e.target.value as OrderStatus)}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg mb-3 focus:ring-2 focus:ring-primary focus:outline-none"
-              aria-label="New status"
-            >
-              <option value="confirmed">Confirmed</option>
-              <option value="scheduled">Scheduled</option>
-              <option value="dispatched">Dispatched</option>
-              <option value="in_transit">In Transit</option>
-              <option value="delivered">Delivered</option>
-              <option value="failed">Failed</option>
-              <option value="on_hold">On Hold</option>
-            </select>
-            <input
-              type="text"
-              value={statusReason}
-              onChange={(e) => setStatusReason(e.target.value)}
-              placeholder="Reason (optional)"
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg mb-4 focus:ring-2 focus:ring-primary focus:outline-none"
-              aria-label="Status change reason"
-            />
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setShowStatusModal(false)}
-                className="px-3 py-2 text-sm border border-gray-200 rounded-lg"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={handleStatusChange}
-                disabled={working}
-                className="px-3 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-              >
-                {working ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  "Update Status"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+          {({ values, set }) => (
+            <>
+              <Field label="New status" id="order-new-status">
+                <Select
+                  id="order-new-status"
+                  value={values.new_status}
+                  onChange={(v) => set("new_status", v as OrderStatus)}
+                  options={STATUS_OPTIONS}
+                />
+              </Field>
+              <Field label="Reason">
+                <input
+                  id="order-status-reason"
+                  type="text"
+                  value={values.reason}
+                  onChange={(e) => set("reason", e.target.value)}
+                  placeholder="Optional"
+                  className={INPUT_CLASS}
+                />
+              </Field>
+            </>
+          )}
+        </FormDialog>
       )}
     </>
   );
@@ -700,6 +709,19 @@ export default function OrderDetailView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const { toasts, addToast, dismissToast } = useToasts();
+  // Roles gate the portal Confirm / Decline controls (presentation only).
+  const [roles, setRoles] = useState<readonly string[] | null>(null);
+  const [changedNotice, setChangedNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getCurrentUserRoles().then((r) => {
+      if (!cancelled) setRoles(r ?? []);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const fetchData = useCallback(async () => {
     if (!orderId) return;
@@ -735,7 +757,13 @@ export default function OrderDetailView({
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-error mb-4">{error ?? "Order not found"}</p>
+          {/* One heading even when the order can't be shown (R2.5). */}
+          <PageTitle className="mb-1 text-base font-semibold text-slate-900">
+            Order not found
+          </PageTitle>
+          <p className="text-red-800 mb-4">
+            {error ?? `We couldn't find order "${orderId}".`}
+          </p>
           <button
             type="button"
             onClick={goBack}
@@ -775,9 +803,9 @@ export default function OrderDetailView({
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </button>
           <div className="flex-1">
-            <h1 className="text-xl font-semibold text-primary">
+            <PageTitle className="text-xl font-semibold text-primary">
               Order {order.order_id.slice(0, 16)}…
-            </h1>
+            </PageTitle>
             <p className="text-sm text-gray-500">
               Created {formatDateTime(order.created_at)}
             </p>
@@ -808,6 +836,23 @@ export default function OrderDetailView({
             </div>
           </div>
         )}
+
+        {/* Customer-portal request: Confirm / Decline (PD24) */}
+        <p
+          role="status"
+          className={changedNotice ? "text-sm text-gray-800" : "sr-only"}
+        >
+          {changedNotice ?? ""}
+        </p>
+        <PortalRequestControls
+          order={order}
+          roles={roles}
+          onChanged={(notice) => {
+            setChangedNotice(notice);
+            fetchData();
+          }}
+          addToast={addToast}
+        />
 
         {/* Mutation Controls (Task 14.5) */}
         <MutationControls

@@ -21,6 +21,7 @@
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import EmailPassword from "supertokens-auth-react/recipe/emailpassword";
+import { getCurrentUserRoles } from "../../utils/auth";
 import SignInPage from "./page";
 
 jest.mock("supertokens-auth-react/recipe/emailpassword", () => ({
@@ -39,6 +40,17 @@ jest.mock("next/navigation", () => ({
   useRouter: () => ({ replace: replaceMock, push: jest.fn() }),
 }));
 
+// Roles are read from the new session after OK to pick the landing page
+// (customer portal §10.1): customers go to /portal, staff to /dashboard.
+jest.mock("../../utils/auth", () => ({
+  __esModule: true,
+  getCurrentUserRoles: jest.fn(),
+}));
+
+const rolesMock = getCurrentUserRoles as jest.MockedFunction<
+  typeof getCurrentUserRoles
+>;
+
 const signInMock = EmailPassword.signIn as jest.MockedFunction<
   typeof EmailPassword.signIn
 >;
@@ -49,6 +61,22 @@ type SignInResult = Awaited<ReturnType<typeof EmailPassword.signIn>>;
 // type is wide, so we narrow through `unknown` for the few fields the page reads.
 function signInResult(partial: Record<string, unknown>): SignInResult {
   return partial as unknown as SignInResult;
+}
+
+// A fetch-Response-shaped 429, as supertokens-web-js rejects with.
+function fake429(body: Record<string, unknown>, retryAfter: string | null) {
+  const res = {
+    status: 429,
+    headers: {
+      get: (h: string) =>
+        h.toLowerCase() === "retry-after" ? retryAfter : null,
+    },
+    clone() {
+      return res;
+    },
+    json: async () => body,
+  };
+  return res;
 }
 
 function fillCredentials(email: string, password: string) {
@@ -67,6 +95,8 @@ function submit() {
 beforeEach(() => {
   signInMock.mockReset();
   replaceMock.mockReset();
+  rolesMock.mockReset();
+  rolesMock.mockResolvedValue(["admin"]);
 });
 
 describe("SignInPage", () => {
@@ -115,6 +145,31 @@ describe("SignInPage", () => {
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
+  it("shows the retry wait when sign-in is throttled (429)", async () => {
+    // Staging finding F5: the SDK rejects a 429 with the raw response.
+    signInMock.mockRejectedValue(
+      fake429({ details: { retry_after_seconds: 42 } }, "42"),
+    );
+    render(<SignInPage />);
+    fillCredentials("admin@runsheet.com", "wrong-password");
+    submit();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Too many attempts, try again in 42 seconds",
+    );
+    expect(replaceMock).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the Retry-After header when the body has no wait", async () => {
+    signInMock.mockRejectedValue(fake429({ error_code: "RATE_LIMITED" }, "17"));
+    render(<SignInPage />);
+    fillCredentials("admin@runsheet.com", "wrong-password");
+    submit();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Too many attempts, try again in 17 seconds",
+    );
+  });
+
   it("validates required fields before calling SuperTokens", async () => {
     render(<SignInPage />);
     submit();
@@ -134,5 +189,28 @@ describe("SignInPage", () => {
       /valid email address/i,
     );
     expect(signInMock).not.toHaveBeenCalled();
+  });
+
+  it("routes a customer to the portal after sign-in", async () => {
+    signInMock.mockResolvedValue(
+      signInResult({ status: "OK", user: { id: "st-cust-1" } }),
+    );
+    rolesMock.mockResolvedValue(["customer"]);
+    render(<SignInPage />);
+    fillCredentials("ap@customer.example", "demo1234");
+    submit();
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/portal"));
+    expect(replaceMock).not.toHaveBeenCalledWith("/dashboard");
+  });
+
+  it("routes a session with no readable roles to the dashboard", async () => {
+    signInMock.mockResolvedValue(
+      signInResult({ status: "OK", user: { id: "st-user-2" } }),
+    );
+    rolesMock.mockResolvedValue([]);
+    render(<SignInPage />);
+    fillCredentials("admin@runsheet.com", "demo1234");
+    submit();
+    await waitFor(() => expect(replaceMock).toHaveBeenCalledWith("/dashboard"));
   });
 });

@@ -2,7 +2,7 @@
 Unit tests for Route_Planning_Agent fuel-order stop building (Task 11.2).
 
 Validates: Requirements 5.2.1, 5.2.2, 5.2.3
-- Builds stops from fuel_orders_current WHERE status IN {confirmed, scheduled}
+- Builds stops from fuel_orders_current WHERE status IN LOADABLE_ORDER_STATUSES
 - Uses ship_to_lat/ship_to_lon as stop coordinate, falls back to geocoding
 - Treats delivery_window_start/delivery_window_end as hard routing constraints
 - Surfaces windows that cannot be satisfied as window_miss entries
@@ -20,6 +20,7 @@ from Agents.overlay.route_planning_agent import (
     RoutePlanningAgent,
 )
 from Agents.support.fuel_distribution_models import WindowMissEntry
+from fuel.order_models import LOADABLE_ORDER_STATUSES
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +99,8 @@ class TestFetchRoutableOrders:
     """Verify the ES query targets fuel_orders_current with correct filters."""
 
     @pytest.mark.asyncio
-    async def test_queries_confirmed_and_scheduled_statuses(self):
-        """Req 5.2.1: reads WHERE status IN {confirmed, scheduled}."""
+    async def test_queries_loadable_order_statuses(self):
+        """Req 5.2.1 / N2: reads WHERE status IN LOADABLE_ORDER_STATUSES."""
         es = AsyncMock()
         es.search_documents = AsyncMock(return_value=_es_response([]))
         agent = _make_agent(es_service=es)
@@ -115,7 +116,7 @@ class TestFetchRoutableOrders:
         # Verify the query filters by tenant_id and status
         filters = query["query"]["bool"]["filter"]
         assert {"term": {"tenant_id": "tenant-1"}} in filters
-        assert {"terms": {"status": ["confirmed", "scheduled"]}} in filters
+        assert {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}} in filters
 
     @pytest.mark.asyncio
     async def test_returns_source_docs(self):

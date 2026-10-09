@@ -20,18 +20,35 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from strands import tool
+from scheduling.models import JobStatus, JobType
 from services.elasticsearch_service import elasticsearch_service
-from ._tenant_context import get_current_tenant
+from ._tenant_context import resolve_tool_tenant
 from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
 def _resolve_tenant_id(tenant_id: str | None) -> str:
-    return tenant_id or get_current_tenant()
+    # The bound tenant wins over a model-supplied tenant_id.
+    return resolve_tool_tenant(tenant_id)
 
 JOBS_CURRENT_INDEX = "jobs_current"
 JOB_EVENTS_INDEX = "job_events"
 ASSETS_INDEX = "trucks"
+
+# Vocabularies the model reads (tool docstrings, system prompts) are derived
+# from the scheduling enums so a new job type (fuel_delivery) can never be
+# missing from what the agent is told it may search for (F5).
+JOB_TYPE_VALUES = tuple(t.value for t in JobType)
+JOB_STATUS_VALUES = tuple(s.value for s in JobStatus)
+
+
+def _normalize_vocab(value: str) -> str:
+    """``"Fuel Delivery"`` / ``"fuel-delivery"`` -> ``"fuel_delivery"``."""
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def _quoted(values) -> str:
+    return ", ".join(f'"{v}"' for v in values)
 
 
 def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
@@ -59,7 +76,6 @@ def _log_tool_invocation(tool_name: str, input_params: dict, start_time: float,
         )
 
 
-@tool
 async def search_jobs(job_type: str = None, status: str = None,
                       asset: str = None, origin: str = None,
                       destination: str = None, start_date: str = None,
@@ -69,10 +85,8 @@ async def search_jobs(job_type: str = None, status: str = None,
     All queries are tenant-scoped and read-only.
 
     Args:
-        job_type: Optional job type filter. One of: "cargo_transport", "passenger_transport",
-                  "vessel_movement", "airport_transfer", "crane_booking"
-        status: Optional status filter. One of: "scheduled", "assigned", "in_progress",
-                "completed", "cancelled", "failed"
+        job_type: Optional job type filter. One of: {job_types}
+        status: Optional status filter. One of: {statuses}
         asset: Optional asset ID filter to find jobs assigned to a specific asset
         origin: Optional origin location filter (text search)
         destination: Optional destination location filter (text search)
@@ -97,6 +111,25 @@ async def search_jobs(job_type: str = None, status: str = None,
             + (f" origin={origin}" if origin else "")
             + (f" destination={destination}" if destination else "")
         )
+
+        # Normalize and validate before querying: an unknown value would
+        # otherwise run a term filter that silently matches nothing.
+        if job_type:
+            job_type = _normalize_vocab(job_type)
+            if job_type not in JOB_TYPE_VALUES:
+                success = True
+                return (
+                    f"Unknown job_type '{job_type}'. "
+                    f"Valid job types: {', '.join(JOB_TYPE_VALUES)}."
+                )
+        if status:
+            status = _normalize_vocab(status)
+            if status not in JOB_STATUS_VALUES:
+                success = True
+                return (
+                    f"Unknown status '{status}'. "
+                    f"Valid statuses: {', '.join(JOB_STATUS_VALUES)}."
+                )
 
         filter_clauses = [{"term": {"tenant_id": tenant_id}}]
         must_clauses = []
@@ -172,6 +205,15 @@ async def search_jobs(job_type: str = None, status: str = None,
              "start_date": start_date, "end_date": end_date, "tenant_id": tenant_id},
             start_time, success, error_msg
         )
+
+
+# Fill the vocabulary placeholders before Strands reads the docstring to
+# build the tool spec, so the model sees every JobType / JobStatus value.
+search_jobs.__doc__ = search_jobs.__doc__.format(
+    job_types=_quoted(JOB_TYPE_VALUES),
+    statuses=_quoted(JOB_STATUS_VALUES),
+)
+search_jobs = tool(search_jobs)
 
 
 @tool

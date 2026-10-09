@@ -216,27 +216,3 @@ OVERLAY_INDEX_MAPPINGS = {
 }
 
 
-def setup_overlay_indices(es_service) -> None:
-    """Create overlay ES indices if they don't already exist.
-
-    Follows the same pattern as setup_agent_indices in agent_es_mappings.py.
-
-    Args:
-        es_service: An ElasticsearchService instance.
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    es_client = es_service.client
-    is_serverless = es_service.is_serverless
-
-    for index_name, mapping in OVERLAY_INDEX_MAPPINGS.items():
-        try:
-            if not es_client.indices.exists(index=index_name):
-                if is_serverless:
-                    mapping = ElasticsearchService.strip_serverless_incompatible_settings(mapping)
-                es_client.indices.create(index=index_name, body=mapping)
-                logger.info(f"Created overlay index: {index_name}")
-            else:
-                logger.info(f"Overlay index already exists: {index_name}")
-        except Exception:
-            logger.exception("Failed to create overlay index %s", index_name)

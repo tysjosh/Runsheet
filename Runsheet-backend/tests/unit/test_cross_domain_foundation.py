@@ -15,13 +15,10 @@ from pydantic import ValidationError
 from scheduling.models import RerouteJobRequest, GeoPoint
 from Agents.confirmation_protocol import (
     ConfirmationProtocol,
+    MutationExecutionError,
     MutationRequest,
 )
-from Agents.overlay.overlay_es_mappings import (
-    JOB_PRIORITIES_INDEX,
-    JOB_PRIORITIES_MAPPING,
-    setup_overlay_indices,
-)
+from Agents.overlay.overlay_es_mappings import JOB_PRIORITIES_INDEX, JOB_PRIORITIES_MAPPING
 
 
 # ---------------------------------------------------------------------------
@@ -49,6 +46,8 @@ def _make_protocol_with_es() -> ConfirmationProtocol:
     es_service = MagicMock()
     es_service.update_document = AsyncMock()
     es_service.index_document = AsyncMock()
+    # The job write helper reads the merged job back to mirror it.
+    es_service.get_document = AsyncMock(return_value=None)
 
     protocol = ConfirmationProtocol(
         risk_registry=MagicMock(),
@@ -194,7 +193,10 @@ class TestConfirmationProtocolRerouteJob:
             },
         )
 
-        result = await protocol._execute_mutation(request)
+        # Not executed: raised, never returned as a result string (D15d).
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "Failed" in result
         assert "ES connection lost" in result
@@ -291,7 +293,10 @@ class TestConfirmationProtocolTruckFuelAlert:
             parameters={"truck_id": "TRUCK_005"},
         )
 
-        result = await protocol._execute_mutation(request)
+        # Not executed: raised, never returned as a result string (D15d).
+        with pytest.raises(MutationExecutionError) as exc:
+            await protocol._execute_mutation(request)
+        result = str(exc.value)
 
         assert "Failed" in result
         assert "ES write failed" in result
@@ -357,55 +362,7 @@ class TestJobPrioritiesMapping:
 class TestSetupOverlayIndicesJobPriorities:
     """Tests that setup_overlay_indices creates the job_priorities index."""
 
-    def _make_es_service(self, existing_indices=None):
-        """Create a mock ElasticsearchService with a mock client."""
-        existing = existing_indices or set()
-        es_service = MagicMock()
-        client = MagicMock()
-        client.indices.exists.side_effect = lambda index: index in existing
-        es_service.client = client
-        type(es_service).is_serverless = PropertyMock(return_value=False)
-        return es_service
 
-    def _patch_es_module(self):
-        """Stub the ES service module to avoid real connections."""
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService = MagicMock()
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            lambda mapping: mapping
-        )
-        return patch.dict(sys.modules, {"services.elasticsearch_service": fake_module})
 
-    def test_job_priorities_index_created_when_missing(self):
-        """setup_overlay_indices creates job_priorities when it doesn't exist."""
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_overlay_indices(es_service)
 
-        create_calls = es_service.client.indices.create.call_args_list
-        created_indices = {c.kwargs["index"] for c in create_calls}
-        assert JOB_PRIORITIES_INDEX in created_indices
 
-    def test_job_priorities_index_skipped_when_exists(self):
-        """setup_overlay_indices skips job_priorities when it already exists."""
-        es_service = self._make_es_service(existing_indices={JOB_PRIORITIES_INDEX})
-        with self._patch_es_module():
-            setup_overlay_indices(es_service)
-
-        create_calls = es_service.client.indices.create.call_args_list
-        created_indices = {c.kwargs.get("index") for c in create_calls}
-        assert JOB_PRIORITIES_INDEX not in created_indices
-
-    def test_job_priorities_uses_correct_mapping(self):
-        """setup_overlay_indices passes JOB_PRIORITIES_MAPPING for job_priorities."""
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_overlay_indices(es_service)
-
-        create_calls = es_service.client.indices.create.call_args_list
-        for call_obj in create_calls:
-            if call_obj.kwargs.get("index") == JOB_PRIORITIES_INDEX:
-                assert call_obj.kwargs["body"] == JOB_PRIORITIES_MAPPING
-                break
-        else:
-            pytest.fail("job_priorities index was not created")

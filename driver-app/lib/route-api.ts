@@ -154,17 +154,20 @@ export function buildCompartmentLedger(
 /**
  * The warning sentence, naming the compartment, the prior grade, and the current
  * grade (R6.11). `null` when the compartment carries no warning.
+ * `gradeLabel` maps a grade code to what the driver sees (the screens pass
+ * `productName`); this is the only source of the sentence.
  */
 export function crossContaminationMessage(
   row: CompartmentLedgerRow,
+  gradeLabel: (grade: string) => string = (grade) => grade,
 ): string | null {
   if (!row.crossContaminationWarning) {
     return null;
   }
-  const prior = row.priorGrade ?? 'an unrecorded grade';
+  const prior = row.priorGrade ? gradeLabel(row.priorGrade) : 'an unrecorded grade';
   return (
     `Compartment ${row.compartmentId} last held ${prior} and is now loaded ` +
-    `with ${row.loadedGrade}. Confirm it was cleaned before you draw from it.`
+    `with ${gradeLabel(row.loadedGrade)}. Confirm it was cleaned before you draw from it.`
   );
 }
 

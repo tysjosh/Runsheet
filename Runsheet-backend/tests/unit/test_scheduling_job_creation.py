@@ -349,3 +349,53 @@ async def test_create_job_appends_job_created_event():
     assert event_doc["tenant_id"] == "t1"
     assert event_doc["actor_id"] == "user_1"
     assert "job" in event_doc["event_payload"]
+
+
+# ---------------------------------------------------------------------------
+# B12: scheduled_time must be ISO-8601 (decision D7)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["tomorrow", "not-a-date", "", "2026-13-40T10:00:00Z", "12/03/2026"])
+def test_create_job_rejects_non_iso_scheduled_time(bad):
+    with pytest.raises(ValidationError) as exc_info:
+        CreateJob(
+            job_type=JobType.PASSENGER_TRANSPORT,
+            origin="A",
+            destination="B",
+            scheduled_time=bad,
+        )
+    assert any(e["loc"] == ("scheduled_time",) for e in exc_info.value.errors())
+
+
+@pytest.mark.parametrize(
+    "good",
+    ["2026-03-12T10:00:00Z", "2026-03-12T10:00:00+01:00", "2026-03-12T10:00:00", "2026-03-12T10:00:00.123Z"],
+)
+def test_create_job_keeps_valid_scheduled_time_string(good):
+    job = CreateJob(
+        job_type=JobType.PASSENGER_TRANSPORT,
+        origin="A",
+        destination="B",
+        scheduled_time=good,
+    )
+    # Stored and returned as the same string, so the output format is unchanged.
+    assert job.scheduled_time == good
+
+
+# ---------------------------------------------------------------------------
+# B13: created_by is always the authenticated actor (decision D8)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_job_ignores_body_created_by():
+    es = _make_es_mock()
+    svc = _make_service(es)
+    payload = _valid_passenger_payload().model_copy(update={"created_by": "spoof"})
+
+    job = await svc.create_job(payload, tenant_id="t1", actor_id="user_7")
+
+    doc = es.index_document.await_args_list[0].args[2]
+    assert doc["created_by"] == "user_7"
+    assert job.created_by == "user_7"

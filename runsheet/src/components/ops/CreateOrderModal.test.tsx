@@ -66,9 +66,13 @@ const mockListFuelProducts = listFuelProducts as jest.MockedFunction<
  * accessible name, then click the option whose label matches `optionName`.
  * Options load asynchronously on mount, so `findByRole` polls until ready.
  */
-async function pickOption(triggerName: string, optionName: RegExp) {
+async function pickOption(
+  triggerName: string,
+  optionName: RegExp,
+  role: "button" | "combobox" = "button",
+) {
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: triggerName }));
+    fireEvent.click(screen.getByRole(role, { name: triggerName }));
   });
   const option = await screen.findByRole("option", { name: optionName });
   await act(async () => {
@@ -255,7 +259,7 @@ describe("CreateOrderModal — submission", () => {
     render(<CreateOrderModal isOpen={true} onClose={jest.fn()} />);
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     expect(mockCreateOrder).not.toHaveBeenCalled();
@@ -287,7 +291,7 @@ describe("CreateOrderModal — submission", () => {
     // Customer ID and Product Code are now searchable pickers — select rather
     // than type. The picker returns the underlying id/code as the value.
     await pickOption("Customer ID", /Acme Fuel/);
-    await pickOption("Product Code", /Diesel #2/);
+    await pickOption("Product", /Diesel #2/, "combobox");
 
     await act(async () => {
       fireEvent.change(getInput("co-customer-name"), {
@@ -308,7 +312,7 @@ describe("CreateOrderModal — submission", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     await waitFor(() => expect(mockCreateOrder).toHaveBeenCalledTimes(1));
@@ -332,7 +336,7 @@ describe("CreateOrderModal — submission", () => {
       document.getElementById(id) as HTMLInputElement;
 
     await pickOption("Customer ID", /Acme Fuel/);
-    await pickOption("Product Code", /Diesel #2/);
+    await pickOption("Product", /Diesel #2/, "combobox");
 
     await act(async () => {
       fireEvent.change(getInput("co-customer-name"), {
@@ -353,11 +357,70 @@ describe("CreateOrderModal — submission", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /submit order/i }));
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
     });
 
     await waitFor(() => {
       expect(screen.getByText(/missing_volume/i)).toBeInTheDocument();
     });
+  });
+
+  it("shows the readable message from a 409 ORDER_INTAKE_DISABLED envelope (F1)", async () => {
+    // Build the error the way ordersRequest does for a non-OK response, from
+    // the standard AppException envelope POST /api/orders returns when the
+    // tenant's order intake flag is off.
+    const { apiErrorFromResponse } = jest.requireActual<
+      typeof import("../../services/apiErrors")
+    >("../../services/apiErrors");
+    const envelope = {
+      error_code: "ORDER_INTAKE_DISABLED",
+      message: "Order intake isn't enabled for this account",
+      details: {},
+      request_id: "req-409",
+    };
+    const error = await apiErrorFromResponse({
+      status: 409,
+      json: async () => envelope,
+    } as unknown as Response);
+    mockCreateOrder.mockRejectedValue(error);
+    const onClose = jest.fn();
+
+    render(<CreateOrderModal isOpen={true} onClose={onClose} />);
+
+    const getInput = (id: string) =>
+      document.getElementById(id) as HTMLInputElement;
+
+    await pickOption("Customer ID", /Acme Fuel/);
+    await pickOption("Product", /Diesel #2/, "combobox");
+
+    await act(async () => {
+      fireEvent.change(getInput("co-customer-name"), {
+        target: { value: "Acme" },
+      });
+      fireEvent.change(getInput("co-address"), {
+        target: { value: "123 Main" },
+      });
+      fireEvent.change(getInput("co-lat"), { target: { value: "40.7" } });
+      fireEvent.change(getInput("co-lon"), { target: { value: "-74.0" } });
+      fireEvent.change(getInput("co-gallons"), { target: { value: "500" } });
+      fireEvent.change(getInput("co-window-start"), {
+        target: { value: "2024-06-01T08:00" },
+      });
+      fireEvent.change(getInput("co-window-end"), {
+        target: { value: "2024-06-01T17:00" },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Create order" }));
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(
+      "Order intake isn't enabled for this account",
+    );
+    expect(alert).not.toHaveTextContent("[object Object]");
+    expect(alert).not.toHaveTextContent("ORDER_INTAKE_DISABLED");
+    expect(onClose).not.toHaveBeenCalled();
   });
 });

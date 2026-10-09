@@ -827,8 +827,8 @@ class TestApproveAdjustment:
         assert signal.context["operator_id"] == "op_smith"
 
     @pytest.mark.asyncio
-    async def test_tank_not_found_raises_valueerror(self):
-        """Raises ValueError when tank_id is not found. Validates: 9.5"""
+    async def test_tank_not_found_raises_404(self):
+        """An unknown tank_id is a 404 resource_not_found (C11). Validates: 9.5"""
         es = _make_es_service()
         es.search_documents = AsyncMock(
             return_value={"hits": {"hits": []}}
@@ -836,10 +836,13 @@ class TestApproveAdjustment:
 
         service = KFactorCalibrationService(es_service=es)
 
-        with pytest.raises(ValueError, match="not found"):
+        from errors.exceptions import AppException
+
+        with pytest.raises(AppException, match="not found") as exc_info:
             await service.approve_adjustment(
                 "nonexistent_tank", 1.50, "op_smith", _TENANT_ID
             )
+        assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_invalid_kfactor_zero_raises_valueerror(self):

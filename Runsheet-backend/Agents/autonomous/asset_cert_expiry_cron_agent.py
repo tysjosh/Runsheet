@@ -119,6 +119,7 @@ class AssetCertExpiryCronAgent(AutonomousAgentBase):
                 alerts = await svc.check_expiry_alerts(tenant_id)
                 if alerts:
                     detections.extend(alerts)
+                    self._note_tenant_activity(tenant_id, detections=len(alerts))
                     self.logger.info(
                         "Tenant %s: %d asset certification expiry alert(s) generated",
                         tenant_id,

@@ -125,6 +125,16 @@ def _get_work_service() -> DriverWorkService:
     return _work_service
 
 
+def get_work_service() -> Optional[DriverWorkService]:
+    """The configured :class:`DriverWorkService`, or ``None``. Never raises.
+
+    For callers outside the request path that need ``invalidate`` (the
+    Dispatch Board's redispatch, dispatch-board K8.4); read at call time so a
+    later ``configure_work_endpoints`` is picked up.
+    """
+    return _work_service
+
+
 def _get_request_id(request: Request) -> str:
     """Extract ``request_id`` from request state (set by RequestIDMiddleware)."""
     return getattr(request.state, "request_id", "unknown")

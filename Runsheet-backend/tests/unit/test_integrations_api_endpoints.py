@@ -41,6 +41,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
 from integrations.api.integrations_endpoints import (
     configure_integrations_endpoints,
     router,
@@ -74,6 +75,15 @@ class _FakeESService:
         self, index: str, doc_id: str, document: Dict[str, Any]
     ) -> None:
         self.docs[doc_id] = dict(document)
+
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
 
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int
@@ -267,6 +277,7 @@ def _build_app(
     )
 
     app = FastAPI()
+    register_exception_handlers(app)
     app.include_router(router)
     app.dependency_overrides[get_tenant_context] = _tenant_ctx_factory(tenant_id)
     return app, es, scheduler, vault
@@ -473,7 +484,7 @@ class TestPatchIntegration:
             json={"enabled": True},
         )
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "integration_instance_not_found"
+        assert resp.json()["error_code"] == "integration_instance_not_found"
 
     def test_credentials_update_replaces_plaintext_under_existing_ref(self):
         app, es, _, vault = _build_app()
@@ -586,7 +597,7 @@ class TestSyncNow:
         client = TestClient(app)
         resp = client.post("/api/integrations/integration_001/sync-now")
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "instance_disabled"
+        assert resp.json()["error_code"] == "instance_disabled"
 
 
 class TestListSyncRuns:

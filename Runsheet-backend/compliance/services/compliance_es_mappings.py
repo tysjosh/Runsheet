@@ -222,6 +222,9 @@ ASSET_CERTIFICATIONS_MAPPING = {
             "issuing_authority":    {"type": "keyword"},
             # valid | expiring_soon | expired
             "status":               {"type": "keyword"},
+            # The expiry sweep's critical alert went out (OI-33). create()
+            # writes False; absent means a legacy pre-flag doc.
+            "expired_alert_sent":   {"type": "boolean"},
             # Tracks the 3-year retest requirement for cargo tank certs
             # (Req 13.6). Independent of expiry_date so short-cycle
             # certifications (e.g. annual V-test) can still be flagged
@@ -510,49 +513,3 @@ COMPLIANCE_INDEX_MAPPINGS = {
 # ---------------------------------------------------------------------------
 
 
-def setup_compliance_indices(es_service) -> None:
-    """Create Fuel Compliance Backbone ES indices if they don't already exist.
-
-    Iterates over :data:`COMPLIANCE_INDEX_MAPPINGS` and creates each index
-    idempotently — existing indices are skipped so the bootstrap hook can be
-    invoked on every application startup without side effects. On
-    Elasticsearch Serverless deployments, shard/replica settings are stripped
-    before creation via
-    :meth:`services.elasticsearch_service.ElasticsearchService.strip_serverless_incompatible_settings`.
-
-    Follows the same pattern as ``setup_commerce_indices`` in
-    ``commerce/services/commerce_es_mappings.py`` and
-    ``setup_fuel_ops_indices`` in ``fuel/services/fuel_ops_es_mappings.py``.
-
-    Args:
-        es_service: An :class:`ElasticsearchService` instance exposing
-            ``.client`` and ``.is_serverless`` attributes.
-    """
-    from services.elasticsearch_service import ElasticsearchService
-
-    es_client = es_service.client
-    is_serverless = es_service.is_serverless
-
-    # Skip indices retired in Phase 6 (migrated to Postgres + dropped) so
-    # startup does not silently recreate a dropped index.
-    try:
-        from config.settings import get_settings
-        retired = set(get_settings().retired_es_indices or [])
-    except Exception:  # noqa: BLE001
-        retired = set()
-
-    for index_name, mapping in COMPLIANCE_INDEX_MAPPINGS.items():
-        if index_name in retired:
-            logger.info("Skipping retired compliance index: %s", index_name)
-            continue
-        try:
-            if not es_client.indices.exists(index=index_name):
-                body = mapping
-                if is_serverless:
-                    body = ElasticsearchService.strip_serverless_incompatible_settings(body)
-                es_client.indices.create(index=index_name, body=body)
-                logger.info(f"Created compliance index: {index_name}")
-            else:
-                logger.info(f"Compliance index already exists: {index_name}")
-        except Exception:
-            logger.exception("Failed to create compliance index %s", index_name)

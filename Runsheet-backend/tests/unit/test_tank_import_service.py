@@ -213,3 +213,74 @@ async def test_reading_above_tank_capacity_is_rejected():
             "tenant-a",
             _reading_payload(volume_gallons=1001),
         )
+
+
+# ---------------------------------------------------------------------------
+# F7: the importer validates the tank's customer like the REST create does
+# ---------------------------------------------------------------------------
+
+
+def _customer_resolver(customers):
+    """RefResolver whose ``customer`` loader knows ``customers`` (id -> tenant)."""
+    from services.ref_resolver import RefResolver
+
+    resolver = RefResolver()
+
+    async def _load(tenant_id, customer_id):
+        if customers.get(customer_id) == tenant_id:
+            return {"customer_id": customer_id}
+        return None
+
+    resolver.register("customer", _load)
+    return resolver
+
+
+def _service(repository, resolver):
+    return TankImportService(
+        es_service=_Elasticsearch(),
+        customer_tank_repository=repository,
+        ref_resolver=resolver,
+    )
+
+
+@pytest.mark.parametrize("customer_id", ["customer-nope", "customer-other-tenant"])
+async def test_import_tank_with_unknown_customer_creates_nothing(customer_id):
+    repository = _TankRepository()
+    resolver = _customer_resolver(
+        {"customer-100": "tenant-a", "customer-other-tenant": "tenant-b"}
+    )
+    with pytest.raises(ValueError, match="customer"):
+        await _service(repository, resolver).import_tank(
+            "tenant-a", _tank_payload(customer_id=customer_id)
+        )
+    assert repository.created_payload is None
+    assert repository.tank is None
+
+
+async def test_import_tank_with_known_customer_is_created():
+    repository = _TankRepository()
+    resolver = _customer_resolver({"customer-100": "tenant-a"})
+    outcome = await _service(repository, resolver).import_tank(
+        "tenant-a", _tank_payload()
+    )
+    assert outcome.status == "created"
+
+
+async def test_import_tank_update_to_unknown_customer_is_refused():
+    repository = _TankRepository(_tank())
+    resolver = _customer_resolver({"customer-100": "tenant-a"})
+    with pytest.raises(ValueError, match="customer"):
+        await _service(repository, resolver).import_tank(
+            "tenant-a", _tank_payload(customer_id="customer-nope")
+        )
+    assert repository.updates == []
+    assert repository.tank.customer_id == "customer-100"
+
+
+async def test_import_tank_update_with_unchanged_customer_skips_the_lookup():
+    repository = _TankRepository(_tank())
+    resolver = _customer_resolver({})  # would refuse customer-100 if asked
+    outcome = await _service(repository, resolver).import_tank(
+        "tenant-a", _tank_payload(current_level_gallons=500, last_reading_at="2026-07-30T12:00:00Z")
+    )
+    assert outcome.status == "updated"

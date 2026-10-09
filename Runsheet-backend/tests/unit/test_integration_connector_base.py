@@ -89,6 +89,15 @@ class _FakeESService:
         self.docs[doc_id] = dict(document)
         return {"_id": doc_id, "result": "created"}
 
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
+
     async def update_document(
         self, index: str, doc_id: str, partial_doc: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -476,6 +485,53 @@ class TestRepositoryConstruction:
 # ---------------------------------------------------------------------------
 # Repository: create
 # ---------------------------------------------------------------------------
+
+
+class TestRepositoryCreateIsCreateIfAbsent:
+    """L1: a create on a taken instance_id is a 409, never an overwrite."""
+
+    async def test_other_tenant_cannot_create_over_an_existing_id(
+        self, repo: IntegrationInstanceRepository, es: _FakeESService
+    ):
+        from errors.codes import ErrorCode
+        from errors.exceptions import AppException
+
+        await repo.create("tenant-A", _base_instance_kwargs())
+        before = dict(es.docs["integration_001"])
+
+        with pytest.raises(AppException) as exc_info:
+            await repo.create(
+                "tenant-B",
+                _base_instance_kwargs(
+                    tenant_id="tenant-B", credentials_ref="cred:tenant-B:qbo:x"
+                ),
+            )
+
+        assert exc_info.value.error_code is ErrorCode.RESOURCE_ALREADY_EXISTS
+        assert exc_info.value.status_code == 409
+        assert "tenant-A" not in repr(exc_info.value.to_dict())
+        assert es.docs["integration_001"] == before
+        assert await repo.get("tenant-B", "integration_001") is None
+        assert (await repo.get("tenant-A", "integration_001")).credentials_ref == (
+            "cred:tenant-A:qbo:abc"
+        )
+
+    async def test_same_tenant_duplicate_is_409_and_minted_ids_still_work(
+        self, repo: IntegrationInstanceRepository, es: _FakeESService
+    ):
+        from errors.exceptions import AppException
+
+        await repo.create("tenant-A", _base_instance_kwargs())
+        with pytest.raises(AppException) as exc_info:
+            await repo.create("tenant-A", _base_instance_kwargs(enabled=False))
+        assert exc_info.value.status_code == 409
+        assert es.docs["integration_001"]["enabled"] is True
+
+        minted = _base_instance_kwargs()
+        minted.pop("instance_id")
+        created = await repo.create("tenant-A", minted)
+        assert created.instance_id.startswith("integration_")
+        assert created.instance_id != "integration_001"
 
 
 class TestRepositoryCreate:

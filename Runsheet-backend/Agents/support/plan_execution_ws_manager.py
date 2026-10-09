@@ -69,9 +69,14 @@ class PlanExecutionWSManager(BaseWSManager):
         stop_data: Dict[str, Any],
         completed_stops: int,
         total_stops: int,
+        *,
+        tenant_id: str,
     ) -> int:
         """
-        Broadcast an execution update event to all connected clients.
+        Broadcast an execution update event to the plan's tenant only.
+
+        A blank ``tenant_id`` is dropped with a WARNING (fail closed, W1); the
+        update used to reach every tenant's sockets.
 
         Wraps the data in a standard message envelope with type
         ``execution_update`` and a timestamp.
@@ -99,7 +104,10 @@ class PlanExecutionWSManager(BaseWSManager):
             },
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        return await self.broadcast(message)
+        if not tenant_id:
+            logger.warning("execution_update for plan %s without tenant_id dropped", plan_id)
+            return 0
+        return await self.broadcast_to_tenant(tenant_id, message)
 
 
 # Module-level singleton

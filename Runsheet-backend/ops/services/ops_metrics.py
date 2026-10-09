@@ -316,35 +316,27 @@ def check_alert_rules() -> list[dict]:
     return alerts
 
 
-async def _periodic_alert_checker(interval_seconds: int = 60) -> None:
+async def _alert_checker_cycle() -> None:
     """
-    Background task that periodically evaluates alert rules and emits
-    structured log entries for triggered alerts.
+    One pass evaluating alert rules and emitting structured log entries
+    for triggered alerts.
     """
-    try:
-        while True:
-            await asyncio.sleep(interval_seconds)
-            try:
-                triggered = check_alert_rules()
-                for alert in triggered:
-                    if alert["severity"] == "ERROR":
-                        logger.error(
-                            "ALERT [%s]: %s — %s",
-                            alert["severity"],
-                            alert["condition"],
-                            alert["description"],
-                        )
-                    else:
-                        logger.warning(
-                            "ALERT [%s]: %s — %s",
-                            alert["severity"],
-                            alert["condition"],
-                            alert["description"],
-                        )
-            except Exception as exc:
-                logger.error("Alert checker iteration failed: %s", exc)
-    except asyncio.CancelledError:
-        pass
+    triggered = check_alert_rules()
+    for alert in triggered:
+        if alert["severity"] == "ERROR":
+            logger.error(
+                "ALERT [%s]: %s — %s",
+                alert["severity"],
+                alert["condition"],
+                alert["description"],
+            )
+        else:
+            logger.warning(
+                "ALERT [%s]: %s — %s",
+                alert["severity"],
+                alert["condition"],
+                alert["description"],
+            )
 
 
 _alert_checker_task: Optional[asyncio.Task] = None
@@ -353,9 +345,13 @@ _alert_checker_task: Optional[asyncio.Task] = None
 def start_alert_checker(interval_seconds: int = 60) -> None:
     """Start the periodic alert checker background task."""
     global _alert_checker_task
+    from persistence.leader_election import run_periodic
+
     if _alert_checker_task is None or _alert_checker_task.done():
         _alert_checker_task = asyncio.create_task(
-            _periodic_alert_checker(interval_seconds)
+            run_periodic(
+                "ops.alert-checker", interval_seconds, _alert_checker_cycle
+            )
         )
 
 

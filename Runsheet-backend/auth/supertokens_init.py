@@ -4,18 +4,26 @@ Auth_Backend — SuperTokens SDK initialization (``init_supertokens``).
 This module initializes the SuperTokens Python SDK once at startup, before the
 FastAPI app is created, wiring the three recipes the migration uses:
 
-* **EmailPassword** — email/password sign-up + sign-in served by the SDK-owned
-  auth routes under ``/auth`` (Req 1.1–1.6). Sign-up enforces a configurable
-  minimum password length through a form-field validator (Req 1.7).
+* **EmailPassword** — email/password sign-in and password reset served by the
+  SDK-owned auth routes under ``/auth`` (Req 1.1–1.6). The public sign-up and
+  email-exists HTTP APIs are **disabled** (staging finding F1): accounts are
+  created only by :mod:`auth.provisioner`, which calls the recipe-level
+  ``sign_up`` function and is unaffected. The sign-up form-field validator
+  still enforces the configurable minimum password length (Req 1.7), because
+  the password-reset form validates against it. Sign-in and password-reset
+  are throttled per IP and per email (staging finding F5,
+  :mod:`auth.signin_throttle`).
 * **Session** — SuperTokens-issued session tokens delivered as ``HttpOnly`` /
   ``Secure`` cookies with anti-CSRF protection (Req 2.1, 2.2, 2.3, 2.5, 2.7).
-  A ``create_new_session`` override reads the signing user's ``auth_users`` row
-  and writes ``tenant_id`` / ``roles`` / ``has_pii_access`` into the
-  access-token payload so those claims are signed by the managed core and can
-  never be asserted by the client (Req 3.3).
+  A ``create_new_session`` override reads the ``auth_users`` row bound to the
+  signing SuperTokens user (``auth_users.st_user_id``) and writes
+  ``tenant_id`` / ``roles`` / ``has_pii_access`` into the access-token payload
+  so those claims are signed by the managed core and can never be asserted by
+  the client (Req 3.3).
 * **UserRoles** — represents the canonical roles listed in
   :data:`CANONICAL_ROLES`: ``admin`` / ``dispatcher`` / ``driver`` /
-  ``platform_admin`` (Req 4.4). That constant is the single source of truth;
+  ``platform_admin`` / ``customer`` (Req 4.4; ``customer`` is the exclusive
+  portal identity, OI-06). That constant is the single source of truth;
   enumerate from it rather than restating the list.
 
 Deployment is the SuperTokens **managed SaaS core**: the SDK reaches a remote
@@ -38,7 +46,7 @@ duplicated as a literal.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from supertokens_python import InputAppInfo, SupertokensConfig, init
 from supertokens_python.recipe import emailpassword, session, userroles
@@ -46,11 +54,25 @@ from supertokens_python.recipe.emailpassword import (
     InputFormField,
     InputSignUpFeature,
 )
+from supertokens_python.recipe.emailpassword.interfaces import (
+    APIInterface as EmailPasswordAPIInterface,
+    SignInPostOkResult,
+    WrongCredentialsError,
+)
+from supertokens_python.recipe.emailpassword.types import FormField
 from supertokens_python.recipe.session.interfaces import (
     RecipeInterface as SessionRecipeInterface,
 )
+from supertokens_python.types.response import GeneralErrorResponse
 
+from auth import signin_timing
+from auth.signin_throttle import (
+    configure_signin_throttle,
+    get_signin_throttle,
+    throttled_envelope,
+)
 from config.settings import Settings
+from middleware.rate_limiter import get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +108,27 @@ logger = logging.getLogger(__name__)
 #: provisioning a user, so an operator could hand it out believing it conferred
 #: access it did not. ``tests/unit/test_tenant_scope_authz.py::
 #: test_ops_manager_is_retired`` fails if it comes back.
+#:
+#: ``customer`` is the customer-portal identity (OI-06). It is **exclusive**: a
+#: customer row holds no other role, no ``driver_id`` and no PII flag, and is
+#: bound to exactly one commerce ``customer_id`` (the ``auth_users`` CHECK
+#: ``ck_auth_users_customer_binding`` owns that invariant). A customer session
+#: is refused on every route outside the portal allowlist (``portal.scope``).
+#: :data:`CUSTOMER_ASSIGNABLE_ROLES` excludes it: only the portal grant flow
+#: writes it.
 CANONICAL_ROLES: tuple[str, ...] = (
     "admin",
     "dispatcher",
     "driver",
     "platform_admin",
+    "customer",
 )
+
+#: The customer-portal role (see :data:`CANONICAL_ROLES`).
+CUSTOMER_PORTAL_ROLE: str = "customer"
+
+#: Every staff (non-portal) role. The portal staff-deny tests iterate it.
+STAFF_ROLES: tuple[str, ...] = ("admin", "dispatcher", "driver", "platform_admin")
 
 #: The Runsheet-staff role. Callers holding it may target a tenant other than
 #: their own on endpoints that take a ``tenant_id`` parameter.
@@ -99,8 +136,10 @@ PLATFORM_ADMIN_ROLE: str = "platform_admin"
 
 #: Roles a tenant's own administrator may assign. Deliberately excludes
 #: ``platform_admin`` so tenant-scoped admin cannot escalate to cross-tenant.
-#: Every other canonical role is assignable, so this is :data:`CANONICAL_ROLES`
-#: minus the staff role — but it stays an explicit tuple rather than a derived
+#: Also excludes ``customer``: portal users are created only by the portal grant
+#: flow, never by assigning a role. Every other canonical role is assignable,
+#: so this is :data:`CANONICAL_ROLES` minus those two — but it stays an explicit
+#: tuple rather than a derived
 #: one, so adding a future privileged role does not silently make it
 #: customer-assignable by omission.
 CUSTOMER_ASSIGNABLE_ROLES: tuple[str, ...] = (
@@ -248,79 +287,75 @@ def _make_password_validator(
 async def _claims_for_user(user_id: str) -> Dict[str, Any]:
     """Resolve the server-controlled session claims for a SuperTokens user.
 
-    Looks the user up by email (the provisioning idempotency key) in the
-    PostgreSQL ``auth_users`` source-of-truth and returns the ``tenant_id`` /
+    Reads the PostgreSQL ``auth_users`` row **bound** to this SuperTokens user
+    (``auth_users.st_user_id = user_id``) and returns the ``tenant_id`` /
     ``roles`` / ``has_pii_access`` (and ``driver_id`` when present) to embed in
     the access-token payload (Req 3.3, 9.6, 7.3).
 
-    Returns an empty mapping when the user's email or ``auth_users`` row cannot
-    be found, or when the persistence layer is dormant. An empty mapping means
-    the session carries no ``tenant_id`` claim, so the Session_Verifier rejects
-    it on protected routes (Req 5.3) — fail-closed by construction.
+    The binding is ``st_user_id``, which only :mod:`auth.provisioner` writes
+    (``mark_provisioned``). Email is deliberately NOT the key (staging finding
+    F1): a SuperTokens user registered by someone else under a provisioned
+    email address would otherwise inherit that row's tenant and roles.
+
+    Returns an empty mapping when no row (or more than one) is bound to the
+    user, or when the persistence layer is dormant. An empty mapping means the
+    session carries no ``tenant_id`` claim, so the Session_Verifier rejects it
+    on protected routes (Req 5.3) — fail-closed by construction.
     """
-    email = await _lookup_user_email(user_id)
-    if not email:
-        logger.warning(
-            "SuperTokens session: no email for user_id=%s; session will lack "
-            "tenant claims and be rejected on protected routes",
-            user_id,
-        )
-        return {}
-    return await _lookup_auth_user_claims(email)
+    return await _lookup_auth_user_claims(user_id)
 
 
-async def _lookup_user_email(user_id: str) -> Optional[str]:
-    """Return the primary email for a SuperTokens user id, or ``None``."""
-    # Imported lazily so importing this module never forces a core call.
-    from supertokens_python.asyncio import get_user
-
-    try:
-        user = await get_user(user_id)
-    except Exception as exc:  # pragma: no cover - defensive (network/core)
-        logger.warning("SuperTokens get_user failed for %s: %s", user_id, exc)
-        return None
-    if user is None or not user.emails:
-        return None
-    return user.emails[0]
-
-
-async def _lookup_auth_user_claims(email: str) -> Dict[str, Any]:
+async def _lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
     """Read ``tenant_id`` / ``roles`` / ``has_pii_access`` from ``auth_users``.
 
-    The ``email`` column is CITEXT (case-insensitive) and is the provisioning
-    idempotency key (Req 9.4), so it is the natural lookup key here.
+    Keyed on ``st_user_id`` (the provisioner's write-back), not ``email`` —
+    see :func:`_claims_for_user` (F1). Exactly one bound row yields claims;
+    zero or several yield ``{}`` (fail closed).
     """
     from persistence.database import is_persistence_enabled, session_scope
 
     if not is_persistence_enabled():
         logger.warning(
-            "auth_users lookup skipped for %s: persistence layer is dormant "
-            "(database_url unset)",
-            email,
+            "auth_users lookup skipped for st_user_id=%s: persistence layer is "
+            "dormant (database_url unset)",
+            st_user_id,
         )
         return {}
 
     from sqlalchemy import text
 
     query = text(
-        "SELECT tenant_id, roles, has_pii_access, driver_id "
-        "FROM auth_users WHERE email = :email"
+        "SELECT tenant_id, roles, has_pii_access, driver_id, customer_id "
+        "FROM auth_users WHERE st_user_id = :user_id"
     )
     try:
         async with session_scope() as db:
-            row = (await db.execute(query, {"email": email})).first()
+            rows = (await db.execute(query, {"user_id": st_user_id})).all()
     except Exception as exc:  # pragma: no cover - defensive (DB unavailable)
-        logger.warning("auth_users lookup failed for %s: %s", email, exc)
-        return {}
-
-    if row is None:
         logger.warning(
-            "No auth_users row for email=%s; session will lack tenant claims",
-            email,
+            "auth_users lookup failed for st_user_id=%s: %s", st_user_id, exc
         )
         return {}
 
-    tenant_id, roles, has_pii_access, driver_id = row
+    if not rows:
+        logger.warning(
+            "No auth_users row bound to st_user_id=%s; session will carry no "
+            "tenant claims",
+            st_user_id,
+        )
+        return {}
+    if len(rows) > 1:
+        logger.warning(
+            "%d auth_users rows bound to st_user_id=%s; refusing to pick one, "
+            "session will carry no tenant claims",
+            len(rows),
+            st_user_id,
+        )
+        return {}
+
+    row = tuple(rows[0])
+    tenant_id, roles, has_pii_access, driver_id = row[:4]
+    customer_id = row[4] if len(row) > 4 else None
     claims: Dict[str, Any] = {
         "tenant_id": tenant_id,
         # Only the canonical role names are stored; surface them verbatim for
@@ -332,7 +367,119 @@ async def _lookup_auth_user_claims(email: str) -> Dict[str, Any]:
     # reads it from the verified session (Req 7.3).
     if driver_id:
         claims["driver_id"] = driver_id
+    # customer_id is present only for portal (``customer``) users; the
+    # central deny and the portal guard read it from the verified session.
+    if customer_id:
+        claims["customer_id"] = customer_id
     return claims
+
+
+def _form_field_value(form_fields: List[FormField], field_id: str) -> Any:
+    for field in form_fields or []:
+        if getattr(field, "id", None) == field_id:
+            return field.value
+    return None
+
+
+def _send_throttled(api_options: Any, retry_after: int) -> GeneralErrorResponse:
+    """Write the F5 429 onto the SDK response and return a placeholder result.
+
+    In supertokens-python 0.31.3 ``FastApiResponse.set_status_code`` and
+    ``set_json_content`` are first-write-wins, so the ``send_200_response`` the
+    SDK handler runs after the override returns is a no-op and the client gets
+    this 429. Raising instead would not work: the SDK middleware sits outside
+    FastAPI's exception handlers, so an exception would surface as a 500.
+    """
+    response = api_options.response
+    response.set_status_code(429)
+    response.set_header("Retry-After", str(retry_after))
+    response.set_json_content(throttled_envelope(retry_after))
+    return GeneralErrorResponse("RATE_LIMITED")
+
+
+def _override_emailpassword_apis(
+    original_implementation: EmailPasswordAPIInterface,
+) -> EmailPasswordAPIInterface:
+    """Disable sign-up / email-exists (F1) and throttle sign-in / reset (F5).
+
+    ``POST /auth/signup`` let anyone create users in the core, and
+    ``GET /auth/signup/email/exists`` was an account-enumeration oracle (F4).
+    With the SDK flags set, the middleware no longer matches those routes, so
+    requests fall through to FastAPI and get a 404. Accounts are created only by
+    :mod:`auth.provisioner` via the recipe-level ``sign_up`` function, which
+    these flags do not affect.
+
+    Sign-in and password-reset-token stay served but are throttled per client
+    IP and per email (staging finding F5, :mod:`auth.signin_throttle`). A
+    throttled request gets a 429 error envelope with ``Retry-After``, never
+    ``WRONG_CREDENTIALS_ERROR``. The throttle is looked up per request so tests
+    can inject one.
+    """
+    original_implementation.disable_sign_up_post = True
+    original_implementation.disable_email_exists_get = True
+
+    original_sign_in_post = original_implementation.sign_in_post
+    original_reset_token_post = (
+        original_implementation.generate_password_reset_token_post
+    )
+
+    async def sign_in_post(  # type: ignore[override]
+        form_fields: List[FormField],
+        tenant_id: str,
+        session: Any,
+        should_try_linking_with_session_user: Optional[bool],
+        api_options: Any,
+        user_context: Dict[str, Any],
+    ):
+        throttle = get_signin_throttle()
+        email = _form_field_value(form_fields, "email")
+        retry = await throttle.check_sign_in(
+            get_client_ip(api_options.request.request), email
+        )
+        if retry is not None:
+            # Not padded: a 429 doesn't depend on whether the account exists.
+            return _send_throttled(api_options, retry)
+
+        started = signin_timing.now()
+        result = await original_sign_in_post(
+            form_fields,
+            tenant_id,
+            session,
+            should_try_linking_with_session_user,
+            api_options,
+            user_context,
+        )
+        if isinstance(result, WrongCredentialsError):
+            await throttle.record_sign_in_failure(email)
+        elif isinstance(result, SignInPostOkResult):
+            await throttle.clear_sign_in_failures(email)
+        if not isinstance(result, SignInPostOkResult):
+            # Fixed minimum time for every failure, so "unknown email" and
+            # "wrong password" take the same time (OI-12).
+            await signin_timing.pad_to_floor(started)
+        return result
+
+    async def generate_password_reset_token_post(  # type: ignore[override]
+        form_fields: List[FormField],
+        tenant_id: str,
+        api_options: Any,
+        user_context: Dict[str, Any],
+    ):
+        retry = await get_signin_throttle().check_password_reset(
+            get_client_ip(api_options.request.request),
+            _form_field_value(form_fields, "email"),
+        )
+        if retry is not None:
+            return _send_throttled(api_options, retry)
+        return await original_reset_token_post(
+            form_fields, tenant_id, api_options, user_context
+        )
+
+    original_implementation.sign_in_post = sign_in_post
+    original_implementation.generate_password_reset_token_post = (
+        generate_password_reset_token_post
+    )
+    return original_implementation
 
 
 def _override_session_functions(
@@ -419,9 +566,14 @@ def init_supertokens(settings: Settings) -> None:
         mode="asgi",
         recipe_list=[
             # EmailPassword: server-side credential verification only; no
-            # hardcoded credential pair (Req 1.1–1.5). Sign-up enforces the
-            # configurable minimum password length (Req 1.7).
+            # hardcoded credential pair (Req 1.1–1.5). The sign-up feature's
+            # password validator stays: the reset-password form validates
+            # against it (Req 1.7). The HTTP sign-up route itself is disabled
+            # by the APIs override (F1).
             emailpassword.init(
+                override=emailpassword.EmailPasswordOverrideConfig(
+                    apis=_override_emailpassword_apis,
+                ),
                 sign_up_feature=InputSignUpFeature(
                     form_fields=[
                         InputFormField(
@@ -453,6 +605,9 @@ def init_supertokens(settings: Settings) -> None:
     _session_lifetime_seconds = settings.session_lifetime_seconds
     _initialized = True
 
+    # Shared by the SDK override above and /auth/driver/session (F5).
+    configure_signin_throttle(settings)
+
     logger.info(
         "SuperTokens initialized (api_domain=%s, website_domain=%s, "
         "password_min_length=%d, session_lifetime_seconds=%d [enforced on the "
@@ -467,8 +622,10 @@ def init_supertokens(settings: Settings) -> None:
 __all__ = [
     "CANONICAL_ROLES",
     "CUSTOMER_ASSIGNABLE_ROLES",
+    "CUSTOMER_PORTAL_ROLE",
     "PLATFORM_ADMIN_ROLE",
     "PLATFORM_STAFF_ROLES",
+    "STAFF_ROLES",
     "SuperTokensConfigError",
     "init_supertokens",
     "is_supertokens_initialized",

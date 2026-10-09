@@ -62,12 +62,13 @@ class PoisonQueueService:
             "max_retries": MAX_RETRIES,
             "status": "pending",
         }
-        # ``OpsElasticsearchService`` exposes the underlying SYNC ES client
-        # directly via ``.client`` (there is no ``.es_service`` attribute, and
-        # the client is synchronous — ``await`` raised AttributeError /
-        # "can't be used in await"). This crashed the order-intake error path
-        # (poison-queue write), masking the real adapter error with a 500.
-        self.ops_es.client.index(index=self.INDEX_NAME, id=event_id, document=doc)
+        # Through the facade, not the raw client. Reaching ``.client`` bypasses
+        # the document-store backend switch, so this write would have kept going
+        # to Elasticsearch after the document plane moved to Postgres — and a
+        # poison-queue entry that lands in the wrong store is an incident nobody
+        # can find. It is also what removes the sync/async hazard recorded here
+        # before: ``index_document`` is async on both backends.
+        await self.ops_es.index_document(self.INDEX_NAME, event_id, doc)
         logger.warning(
             "Event %s stored in poison queue: %s (%s), trace_id=%s",
             event_id, error, error_type, trace_id,
@@ -98,11 +99,8 @@ class PoisonQueueService:
             "size": size,
             "sort": [{"created_at": "desc"}],
         }
-        es = self.ops_es
-        result = es.client.search(
-            index=self.INDEX_NAME,
-            body=body,
-            request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+        result = await self.ops_es.search_documents(
+            self.INDEX_NAME, body, request_timeout=ES_SEARCH_TIMEOUT_SECONDS
         )
         hits = result.get("hits", {})
         total = hits.get("total", {}).get("value", 0)
@@ -111,13 +109,10 @@ class PoisonQueueService:
 
     async def retry_event(self, event_id: str) -> dict:
         """Retry a poison queue event through the standard pipeline. Req 4.4"""
-        es = self.ops_es
-        try:
-            result = es.client.get(index=self.INDEX_NAME, id=event_id)
-        except Exception:
+        source = await self.ops_es.get_document(self.INDEX_NAME, event_id)
+        if source is None:
             return {"status": "not_found", "event_id": event_id}
 
-        source = result["_source"]
         current_retries = source.get("retry_count", 0)
 
         if current_retries >= MAX_RETRIES:
@@ -125,18 +120,16 @@ class PoisonQueueService:
                 "Event %s exceeded max retries (%d). Marking permanently failed.",
                 event_id, MAX_RETRIES,
             )
-            es.client.update(
-                index=self.INDEX_NAME,
-                id=event_id,
-                doc={"status": "permanently_failed"},
+            await self.ops_es.update_document(
+                self.INDEX_NAME, event_id, {"status": "permanently_failed"}
             )
             return {"status": "permanently_failed", "event_id": event_id}
 
         # Increment retry count and mark as retrying
-        es.client.update(
-            index=self.INDEX_NAME,
-            id=event_id,
-            doc={"retry_count": current_retries + 1, "status": "retrying"},
+        await self.ops_es.update_document(
+            self.INDEX_NAME,
+            event_id,
+            {"retry_count": current_retries + 1, "status": "retrying"},
         )
 
         return {
@@ -148,7 +141,7 @@ class PoisonQueueService:
 
     async def purge_event(self, event_id: str) -> None:
         """Permanently remove a failed event from the queue. Req 4.7"""
-        self.ops_es.client.delete(index=self.INDEX_NAME, id=event_id, ignore=[404])
+        await self.ops_es.delete_document(self.INDEX_NAME, event_id)
         logger.info("Purged event %s from poison queue", event_id)
 
     async def get_queue_depth(self, tenant_id: Optional[str] = None) -> int:
@@ -156,5 +149,9 @@ class PoisonQueueService:
         query: dict = {"match_all": {}}
         if tenant_id:
             query = {"term": {"tenant_id": tenant_id}}
-        result = self.ops_es.client.count(index=self.INDEX_NAME, query=query)
-        return result.get("count", 0)
+        # ``size: 0`` makes this a count: the response carries the total and no
+        # hit bodies, which is what the dedicated ``_count`` API gave us.
+        result = await self.ops_es.search_documents(
+            self.INDEX_NAME, {"query": query, "size": 0}
+        )
+        return result.get("hits", {}).get("total", {}).get("value", 0)

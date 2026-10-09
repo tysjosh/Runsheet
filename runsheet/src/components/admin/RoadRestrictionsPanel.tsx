@@ -27,14 +27,23 @@ import {
   Check,
   Loader2,
   Map as MapIcon,
-  Plus,
   RefreshCw,
   ShieldAlert,
   Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ToastContainer, useToasts } from "@/components/ui";
+import {
+  Button,
+  Field,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
+  Select,
+  Toolbar,
+  usePageChrome,
+} from "@/components/ui";
 import { hasAnyRole } from "../../config/modules";
+import { dateTime, number } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import type {
   StormRoadRestriction,
@@ -45,6 +54,8 @@ import {
   listStormRoadRestrictions,
   uploadStormRoadRestriction,
 } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
 
 // ─── Role gate (mirrors StormModeBanner) ─────────────────────────────────────
 
@@ -165,20 +176,7 @@ export function parseGeoJsonPolygon(
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
 function formatTimestamp(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+  return dateTime(iso);
 }
 
 /** Truncated, pretty-printed preview of a GeoJSON polygon. */
@@ -293,14 +291,14 @@ function RestrictionCard({ restriction }: RestrictionCardProps) {
   );
 }
 
-// ─── Upload Form ─────────────────────────────────────────────────────────────
+// ─── Upload dialog ───────────────────────────────────────────────────────────
 
-interface UploadFormValues {
+type UploadFormValues = {
   name: string;
   severity: WeatherAlertSeverity;
   active: boolean;
   polygon: string;
-}
+};
 
 const EMPTY_UPLOAD_FORM: UploadFormValues = {
   name: "",
@@ -309,219 +307,107 @@ const EMPTY_UPLOAD_FORM: UploadFormValues = {
   polygon: "",
 };
 
-interface UploadFormProps {
+/**
+ * The restriction's attributes and polygon (task 3.8, design.md §5: md
+ * FormDialog; the list stays the panel).
+ */
+function UploadDialog({
+  onClose,
+  onSuccess,
+}: {
+  onClose: () => void;
   onSuccess: (restriction: StormRoadRestriction) => void;
-  onError: (message: string) => void;
-}
-
-function UploadForm({ onSuccess, onError }: UploadFormProps) {
-  const [form, setForm] = useState<UploadFormValues>(EMPTY_UPLOAD_FORM);
-  const [polygonError, setPolygonError] = useState<string | null>(null);
-  const [nameError, setNameError] = useState<string | null>(null);
-  const [apiError, setApiError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-  const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setApiError(null);
-    setNameError(null);
-    setPolygonError(null);
-
-    const name = form.name.trim();
-    if (!name) {
-      setNameError("Name is required.");
-      return;
-    }
-
-    const parsed = parseGeoJsonPolygon(form.polygon);
-    if (!parsed.ok) {
-      setPolygonError(parsed.error);
-      return;
-    }
-
+}) {
+  const submit = async (v: UploadFormValues) => {
+    const parsed = parseGeoJsonPolygon(v.polygon);
+    if (!parsed.ok) throw new Error(parsed.error);
     const now = new Date().toISOString();
     const body: StormRoadRestrictionCreateRequest = {
       polygon: parsed.value,
       effective_from: now,
-      effective_to: form.active ? null : now,
+      effective_to: v.active ? null : now,
       source: DEFAULT_UPLOAD_SOURCE,
-      severity: form.severity,
-      reason: name,
+      severity: v.severity,
+      reason: v.name.trim(),
     };
-
-    setSubmitting(true);
     try {
-      const created = await uploadStormRoadRestriction(body);
-      setForm(EMPTY_UPLOAD_FORM);
-      onSuccess(created);
+      return await uploadStormRoadRestriction(body);
     } catch (err) {
-      let message: string;
-      if (err instanceof ApiError) {
-        message = err.message || `Request failed (HTTP ${err.status}).`;
-      } else {
-        message =
-          err instanceof Error
-            ? err.message
-            : "Failed to upload road restriction.";
-      }
-      setApiError(message);
-      onError(message);
-    } finally {
-      setSubmitting(false);
+      if (err instanceof ApiError)
+        throw new Error(err.message || `Request failed (HTTP ${err.status}).`);
+      throw err;
     }
-  }
-
+  };
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-4 space-y-3"
-      data-testid="road-restriction-upload-form"
-      aria-label="Upload road restriction"
+    <FormDialog<UploadFormValues, StormRoadRestriction>
+      open
+      size="md"
+      title="Upload road restriction"
+      help="A road-closure polygon shown on the Storm mode map and respected by the route solver."
+      submitLabel="Upload restriction"
+      successMessage={null}
+      initialValues={EMPTY_UPLOAD_FORM}
+      validate={(v) => {
+        const parsed = parseGeoJsonPolygon(v.polygon);
+        return {
+          name: v.name.trim() ? undefined : "Name is required.",
+          polygon: parsed.ok ? undefined : parsed.error,
+        };
+      }}
+      onSubmit={submit}
+      onSaved={onSuccess}
+      onClose={onClose}
     >
-      <div className="flex items-center gap-2">
-        <Upload className="w-4 h-4 text-gray-500" aria-hidden="true" />
-        <h2 className="text-sm font-semibold text-primary">
-          Upload a road restriction
-        </h2>
-      </div>
-
-      {apiError && (
-        <p
-          role="alert"
-          className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-          data-testid="road-restriction-api-error"
-        >
-          {apiError}
-        </p>
-      )}
-
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-        <div className="sm:col-span-2">
-          <label
-            htmlFor="rr-name"
-            className="block text-xs font-medium text-gray-600 mb-1"
-          >
-            Name
+      {({ values, set, errors }) => (
+        <>
+          <Field label="Name" required span={1} error={errors.name}>
+            <input
+              id="rr-name"
+              type="text"
+              className={INPUT_CLASS}
+              value={values.name}
+              onChange={(e) => set("name", e.target.value)}
+              placeholder="e.g. Broad St bridge closure"
+            />
+          </Field>
+          <Field label="Severity" span={1}>
+            <Select
+              id="rr-severity"
+              value={values.severity}
+              onChange={(v) => set("severity", v as WeatherAlertSeverity)}
+              options={SEVERITIES}
+            />
+          </Field>
+          <label className="col-span-2 flex items-center gap-2 text-sm text-text">
+            <input
+              id="rr-active"
+              type="checkbox"
+              checked={values.active}
+              onChange={(e) => set("active", e.target.checked)}
+            />
+            Active now (no end time)
           </label>
-          <input
-            id="rr-name"
-            type="text"
-            className={nameError ? errorInputClass : inputClass}
-            value={form.name}
-            onChange={(e) => {
-              setForm((prev) => ({ ...prev, name: e.target.value }));
-              if (nameError) setNameError(null);
-            }}
-            placeholder="e.g. Broad St bridge closure"
+          <Field
+            label="GeoJSON polygon"
             required
-          />
-          {nameError && <p className="text-xs text-error mt-1">{nameError}</p>}
-        </div>
-
-        <div>
-          <label
-            htmlFor="rr-severity"
-            className="block text-xs font-medium text-gray-600 mb-1"
+            help="A Polygon or MultiPolygon with WGS84 [lon, lat] coordinates. The server checks the geometry before saving."
+            error={errors.polygon}
           >
-            Severity
-          </label>
-          <select
-            id="rr-severity"
-            className={inputClass}
-            value={form.severity}
-            onChange={(e) =>
-              setForm((prev) => ({
-                ...prev,
-                severity: e.target.value as WeatherAlertSeverity,
-              }))
-            }
-          >
-            {SEVERITIES.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <input
-          id="rr-active"
-          type="checkbox"
-          checked={form.active}
-          onChange={(e) =>
-            setForm((prev) => ({ ...prev, active: e.target.checked }))
-          }
-          className="w-4 h-4 rounded border-gray-300"
-        />
-        <label htmlFor="rr-active" className="text-xs text-gray-700">
-          Active (no effective_to set)
-        </label>
-      </div>
-
-      <div>
-        <label
-          htmlFor="rr-polygon"
-          className="block text-xs font-medium text-gray-600 mb-1"
-        >
-          GeoJSON polygon
-        </label>
-        <textarea
-          id="rr-polygon"
-          rows={6}
-          className={`${polygonError ? errorInputClass : inputClass} font-mono text-[11px]`}
-          value={form.polygon}
-          onChange={(e) => {
-            setForm((prev) => ({ ...prev, polygon: e.target.value }));
-            if (polygonError) setPolygonError(null);
-          }}
-          placeholder={'{"type":"Polygon","coordinates":[[[...],[...],...]]}'}
-          data-testid="road-restriction-polygon-input"
-          required
-        />
-        {polygonError && (
-          <p
-            className="text-xs text-error mt-1"
-            data-testid="road-restriction-polygon-error"
-          >
-            {polygonError}
-          </p>
-        )}
-        <p className="text-[10px] text-gray-500 mt-1">
-          Paste a GeoJSON Polygon or MultiPolygon with WGS84 [lon, lat]
-          coordinates. The backend validates the geometry before persisting.
-        </p>
-      </div>
-
-      <div className="flex items-center justify-end">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
-        >
-          {submitting ? (
-            <>
-              <Loader2
-                className="w-3.5 h-3.5 animate-spin"
-                aria-hidden="true"
-              />
-              Uploading...
-            </>
-          ) : (
-            <>
-              <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-              Upload restriction
-            </>
-          )}
-        </button>
-      </div>
-    </form>
+            <textarea
+              id="rr-polygon"
+              rows={6}
+              className={`${INPUT_CLASS} h-auto py-1.5 font-mono text-[11px]`}
+              value={values.polygon}
+              onChange={(e) => set("polygon", e.target.value)}
+              placeholder={
+                '{"type":"Polygon","coordinates":[[[...],[...],...]]}'
+              }
+              data-testid="road-restriction-polygon-input"
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }
 
@@ -530,25 +416,24 @@ function UploadForm({ onSuccess, onError }: UploadFormProps) {
 export interface RoadRestrictionsPanelProps {
   /**
    * Caller's role list for the UI-side gate (Req 9.3.3). The backend
-   * re-checks the JWT context so a caller with no roles will still get
-   * HTTP 403 on upload; the prop exists so non-permitted operators
-   * don't see an upload form that would only error on submit.
+   * re-checks the JWT context so a caller with no roles still gets HTTP 403
+   * on upload; the prop exists so non-permitted operators don't see an
+   * upload action that would only error on submit.
    */
   roles?: readonly string[] | null;
 }
 
 /**
- * Admin panel for Storm_Mode road restrictions. Lists active polygons
- * and lets dispatchers / admins upload new ones. Mounts as a dashboard
- * case in :file:`app/dashboard/page.tsx`.
+ * Settings → Company → Road restrictions: Storm mode road-closure polygons.
+ * Lists them and lets dispatchers / admins upload new ones.
  */
 export default function RoadRestrictionsPanel({
   roles,
 }: RoadRestrictionsPanelProps = {}) {
-  const { toasts, addToast, dismissToast } = useToasts();
   const [items, setItems] = useState<StormRoadRestriction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
 
   const canUpload = useMemo(() => canUploadRoadRestriction(roles), [roles]);
 
@@ -574,117 +459,107 @@ export default function RoadRestrictionsPanel({
     void fetchRestrictions();
   }, [fetchRestrictions]);
 
-  const handleUploadSuccess = useCallback(
-    (restriction: StormRoadRestriction) => {
-      addToast(
-        `Road restriction "${restriction.reason ?? restriction.restriction_id}" uploaded.`,
-        "success",
-      );
-      void fetchRestrictions();
-    },
-    [addToast, fetchRestrictions],
+  const actions = useMemo(
+    () =>
+      canUpload ? (
+        <Button
+          size="sm"
+          icon={<Upload className="h-3.5 w-3.5" />}
+          onClick={() => setUploading(true)}
+          data-testid="road-restriction-upload-button"
+        >
+          Upload restriction
+        </Button>
+      ) : null,
+    [canUpload],
   );
-
-  const handleUploadError = useCallback(
-    (message: string) => {
-      addToast(message, "error");
-    },
-    [addToast],
-  );
+  const embedded = usePageChrome({ actions });
 
   return (
-    <div className="flex-1 flex flex-col p-6 bg-gray-50 overflow-auto">
-      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-      <div className="max-w-5xl w-full mx-auto space-y-4">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-semibold text-primary mb-1 flex items-center gap-2">
-              <MapIcon className="w-5 h-5" aria-hidden="true" />
-              Road restrictions
-            </h1>
-            <p className="text-sm text-gray-500">
-              Dispatcher-authored road-closure polygons surfaced on the
-              Storm_Mode map overlay and respected by the route solver.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => void fetchRestrictions()}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200 disabled:opacity-50"
-            aria-label="Refresh road restrictions"
-          >
-            <RefreshCw
-              className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`}
-              aria-hidden="true"
-            />
-            Refresh
-          </button>
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center gap-2 border-b border-slate-200 px-4">
+          <MapIcon aria-hidden="true" className="h-4 w-4 text-slate-600" />
+          <PageTitle className="text-base font-semibold text-text">
+            Road restrictions
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
         </div>
-
+      )}
+      <Toolbar
+        label="Road restrictions"
+        filters={
+          <span className="text-xs text-text-muted">
+            {loading ? "Loading…" : `${number(items.length)} active`}
+          </span>
+        }
+        end={
+          <IconButton
+            label="Refresh road restrictions"
+            size="sm"
+            onClick={() => void fetchRestrictions()}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
+      />
+      <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
         {!canUpload && (
           <div
-            className="flex items-start gap-2 p-3 rounded-lg bg-gray-50 border border-gray-200 text-xs text-gray-600"
+            className="flex items-start gap-2 rounded-lg border border-slate-200 bg-slate-50 p-3 text-xs text-slate-700"
             data-testid="road-restriction-role-gate-notice"
           >
             <ShieldAlert
-              className="w-4 h-4 text-gray-500 mt-0.5 flex-shrink-0"
+              className="mt-0.5 h-4 w-4 flex-shrink-0 text-slate-500"
               aria-hidden="true"
             />
             <span>
-              Uploading road restrictions requires a dispatcher or admin role.
-              Ask a dispatcher to file the polygon on your behalf.
+              Uploading road restrictions needs a dispatcher or admin role. Ask
+              a dispatcher to file the polygon for you.
             </span>
           </div>
         )}
-
-        {canUpload && (
-          <UploadForm
-            onSuccess={handleUploadSuccess}
-            onError={handleUploadError}
-          />
+        {error && (
+          <p
+            role="alert"
+            className="rounded-lg border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800"
+          >
+            {error}
+          </p>
         )}
-
-        <div className="bg-white border border-gray-200 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-sm font-semibold text-primary">
-              Active restrictions
-            </h2>
-            <span className="text-xs text-gray-500">
-              {loading ? "Loading…" : `${items.length} total`}
-            </span>
+        {loading ? (
+          <div className="flex items-center justify-center py-10 text-sm text-text-muted">
+            <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+            Loading road restrictions…
           </div>
-
-          {error && (
-            <p
-              role="alert"
-              className="text-sm text-error bg-error-light px-3 py-2 rounded-lg mb-3"
-            >
-              {error}
-            </p>
-          )}
-
-          {loading ? (
-            <div className="flex items-center justify-center py-10 text-sm text-gray-500">
-              <Loader2
-                className="w-4 h-4 animate-spin mr-2"
-                aria-hidden="true"
-              />
-              Loading road restrictions…
-            </div>
-          ) : items.length === 0 && !error ? (
-            <div className="text-center py-10 border border-dashed border-gray-200 rounded-lg text-sm text-gray-500">
-              No road restrictions configured for this tenant.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {items.map((r) => (
-                <RestrictionCard key={r.restriction_id} restriction={r} />
-              ))}
-            </div>
-          )}
-        </div>
+        ) : items.length === 0 && !error ? (
+          <div className="rounded-lg border border-dashed border-slate-200 py-10 text-center text-sm text-text-muted">
+            No road restrictions configured for this tenant.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+            {items.map((r) => (
+              <RestrictionCard key={r.restriction_id} restriction={r} />
+            ))}
+          </div>
+        )}
       </div>
+
+      {uploading && (
+        <UploadDialog
+          onClose={() => setUploading(false)}
+          onSuccess={(restriction) => {
+            notify({
+              type: "success",
+              message: `Road restriction "${restriction.reason ?? restriction.restriction_id}" uploaded.`,
+            });
+            void fetchRestrictions();
+          }}
+        />
+      )}
     </div>
   );
 }

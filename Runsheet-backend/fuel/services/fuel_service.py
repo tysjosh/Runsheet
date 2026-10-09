@@ -13,10 +13,14 @@ Requirements covered:
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Sequence, Union
 
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_fields,
+    mirror_current_state_upsert,
+)
 from config.settings import get_settings
-from errors.exceptions import resource_not_found, validation_error
+from errors.exceptions import already_exists, resource_not_found, validation_error
 from fuel.models import (
     BatchResult,
     ConsumptionEvent,
@@ -35,10 +39,12 @@ from fuel.models import (
     UpdateFuelStation,
 )
 from fuel.services.fuel_es_mappings import FUEL_EVENTS_INDEX, FUEL_STATIONS_INDEX
+from services.document_loading import load_valid_documents
 from services.elasticsearch_service import ElasticsearchService
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
+    get_product,
 )
 
 logger = logging.getLogger(__name__)
@@ -143,7 +149,7 @@ class FuelService:
     async def list_stations(
         self,
         tenant_id: str,
-        fuel_type: Optional[str] = None,
+        fuel_type: Optional[Union[str, Sequence[str]]] = None,
         status: Optional[str] = None,
         location: Optional[str] = None,
         page: int = 1,
@@ -152,12 +158,24 @@ class FuelService:
         """
         List fuel stations with optional filtering and pagination.
 
+        ``fuel_type`` is either one stored value (exact match) or a list of
+        catalog codes from ``resolve_product_filter``. A list also matches
+        each code's legacy aliases, because stations are stored under the
+        canonical code since Req 6.1.4 but older rows may still hold
+        ``AGO``/``PMS``/``ATK``/``LPG`` (F12/S6).
+
         Validates: Requirement 1.1, 1.6
         """
         filters: list[dict] = [{"term": {"tenant_id": tenant_id}}]
 
-        if fuel_type:
+        if isinstance(fuel_type, str) and fuel_type:
             filters.append({"term": {"fuel_type": fuel_type}})
+        elif fuel_type:
+            values: list[str] = []
+            for code in fuel_type:
+                values.append(code)
+                values.extend(get_product(code).aliases)
+            filters.append({"terms": {"fuel_type": values}})
         if status:
             filters.append({"term": {"status": status}})
         if location:
@@ -183,9 +201,13 @@ class FuelService:
         )
 
         total = response["hits"]["total"]["value"]
-        stations = [
-            FuelStation(**hit["_source"]) for hit in response["hits"]["hits"]
-        ]
+        # One malformed document must not 500 the whole list.
+        stations, _ = load_valid_documents(
+            response["hits"]["hits"],
+            FuelStation,
+            index=FUEL_STATIONS_INDEX,
+            tenant_id=tenant_id,
+        )
 
         return PaginatedResponse[FuelStation](
             data=stations,
@@ -329,7 +351,23 @@ class FuelService:
         }
 
         doc_id = self._make_doc_id(station.station_id, canonical_fuel_type)
-        await self._es.index_document(FUEL_STATIONS_INDEX, doc_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a station another tenant owns (S7). Refused before the mirror
+        # write so the relational row can't be overwritten either.
+        created = await self._es.create_document(FUEL_STATIONS_INDEX, doc_id, doc)
+        if not created:
+            raise already_exists(
+                "A station with this id and fuel type already exists",
+                details={
+                    "station_id": station.station_id,
+                    "fuel_type": canonical_fuel_type,
+                },
+            )
+        # Postgres source of truth. ``fuel_stations`` existed only in
+        # Elasticsearch, so recreating the cluster destroyed retail tank
+        # inventory outright. ``doc_id`` is passed explicitly because the
+        # composite id cannot be derived from the document body.
+        await mirror_current_state_upsert("fuel_station", doc, doc_id=doc_id)
 
         logger.info(
             "Created fuel station %s (fuel_type=%s, tenant=%s)",
@@ -374,6 +412,22 @@ class FuelService:
         existing = hits[0]["_source"]
         doc_id = hits[0]["_id"]
 
+        # Same invariant create enforces (stock <= capacity). Without it a
+        # shrunk capacity left stock above 100% and the status math kept the
+        # station "normal", so no low-stock alert could fire (F6).
+        current_stock_liters = existing.get("current_stock_liters", 0.0)
+        if (
+            update.capacity_liters is not None
+            and update.capacity_liters < current_stock_liters
+        ):
+            raise validation_error(
+                "capacity_liters cannot be below current_stock_liters",
+                details={
+                    "capacity_liters": update.capacity_liters,
+                    "current_stock_liters": current_stock_liters,
+                },
+            )
+
         # Build partial update from non-None fields
         partial: dict = {}
         if update.name is not None:
@@ -406,6 +460,9 @@ class FuelService:
         )
 
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial
+        )
 
         # Merge partial into existing to return the full updated station
         merged = {**existing, **partial}
@@ -532,6 +589,9 @@ class FuelService:
             "last_updated": now,
         }
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial_update)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial_update
+        )
 
         logger.info(
             "Recorded consumption: station=%s, quantity=%.2f, new_stock=%.2f, status=%s",
@@ -677,6 +737,9 @@ class FuelService:
             "last_updated": now,
         }
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial_update)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial_update
+        )
 
         logger.info(
             "Recorded refill: station=%s, quantity=%.2f, new_stock=%.2f, status=%s",
@@ -800,6 +863,9 @@ class FuelService:
         }
 
         await self._es.update_document(FUEL_STATIONS_INDEX, doc_id, partial)
+        await mirror_current_state_fields(
+            "fuel_station", tenant_id, doc_id, partial
+        )
 
         merged = {**existing, **partial}
         logger.info(
@@ -1010,7 +1076,12 @@ class FuelService:
                 "total_capacity": {"sum": {"field": "capacity_liters"}},
                 "total_stock": {"sum": {"field": "current_stock_liters"}},
                 "total_daily_consumption": {"sum": {"field": "daily_consumption_rate"}},
-                "avg_days_until_empty": {"avg": {"field": "days_until_empty"}},
+                # Stations with no consumption carry the 99999 "never"
+                # sentinel; averaging it in gave 33478.2 days on staging (F5).
+                "avg_days_until_empty": {
+                    "filter": {"range": {"daily_consumption_rate": {"gt": 0}}},
+                    "aggs": {"v": {"avg": {"field": "days_until_empty"}}},
+                },
                 "by_status": {
                     "terms": {
                         "field": "status",
@@ -1045,9 +1116,10 @@ class FuelService:
             + status_counts["empty"]
         )
 
-        avg_days = aggs.get("avg_days_until_empty", {}).get("value")
-        if avg_days is None:
-            avg_days = 0.0
+        # None when no station consumes fuel: "not available", not 0 days.
+        avg_days = aggs.get("avg_days_until_empty", {}).get("v", {}).get("value")
+        if avg_days is not None:
+            avg_days = round(avg_days, 1)
 
         return FuelNetworkSummary(
             total_stations=total_stations,

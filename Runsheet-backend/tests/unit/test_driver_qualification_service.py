@@ -1618,3 +1618,492 @@ class TestDriverQualificationServiceDashboard:
 
         assert result.generated_at is not None
         assert isinstance(result.generated_at, datetime)
+
+
+# ---------------------------------------------------------------------------
+# Tests: C10 expired-at-create status and expired vs expiring dashboard split
+# ---------------------------------------------------------------------------
+
+
+class TestDriverQualificationC10ExpiredStatus:
+    """An already-expired CDL or medical card stores ``expired``; the
+    dashboard counts expired drivers separately from expiring ones."""
+
+    @staticmethod
+    def _create_kwargs(cdl_expiry: date, medical_expiry: date) -> Dict[str, Any]:
+        return dict(
+            full_name="QA Expired",
+            cdl_number="CDL999",
+            cdl_state="TX",
+            cdl_class="A",
+            cdl_expiry_date=cdl_expiry,
+            medical_card_expiry_date=medical_expiry,
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_with_past_cdl_is_expired(self):
+        from datetime import timedelta
+
+        today = date.today()
+        es = _make_es_service()
+        service = DriverQualificationService(es)
+
+        result = await service.create(
+            _TENANT_ID,
+            **self._create_kwargs(today - timedelta(days=1), today + timedelta(days=200)),
+        )
+
+        assert result["status"] == "expired"
+        assert es.index_document.call_args[0][2]["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_create_with_past_medical_card_is_expired(self):
+        from datetime import timedelta
+
+        today = date.today()
+        service = DriverQualificationService(_make_es_service())
+
+        result = await service.create(
+            _TENANT_ID,
+            **self._create_kwargs(today + timedelta(days=200), today - timedelta(days=30)),
+        )
+
+        assert result["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_create_with_valid_dates_stays_active(self):
+        from datetime import timedelta
+
+        today = date.today()
+        service = DriverQualificationService(_make_es_service())
+
+        result = await service.create(
+            _TENANT_ID,
+            # Expiring today is not yet expired.
+            **self._create_kwargs(today, today + timedelta(days=200)),
+        )
+
+        assert result["status"] == "active"
+
+    @pytest.mark.asyncio
+    async def test_create_explicit_suspended_is_kept(self):
+        from datetime import timedelta
+
+        today = date.today()
+        service = DriverQualificationService(_make_es_service())
+
+        result = await service.create(
+            _TENANT_ID,
+            status="suspended",
+            **self._create_kwargs(today - timedelta(days=1), today - timedelta(days=1)),
+        )
+
+        assert result["status"] == "suspended"
+
+    @pytest.mark.asyncio
+    async def test_update_moving_medical_card_into_past_sets_expired(self):
+        from datetime import timedelta
+
+        today = date.today()
+        es = _make_es_service()
+        existing = _make_driver_doc(status="active")
+        existing["cdl_expiry_date"] = (today + timedelta(days=300)).isoformat()
+        existing["medical_card_expiry_date"] = (today + timedelta(days=300)).isoformat()
+        es.get_document = AsyncMock(return_value=existing)
+        es.search_documents = AsyncMock(return_value=_es_search_response([existing]))
+        service = DriverQualificationService(es)
+
+        result = await service.update(
+            _TENANT_ID,
+            existing["driver_id"],
+            medical_card_expiry_date=today - timedelta(days=2),
+        )
+
+        partial = es.update_document.call_args[0][2]
+        assert partial["status"] == "expired"
+        assert result["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_update_setting_active_on_expired_driver_stays_expired(self):
+        from datetime import timedelta
+
+        today = date.today()
+        es = _make_es_service()
+        existing = _make_driver_doc(status="expired")
+        existing["cdl_expiry_date"] = (today - timedelta(days=5)).isoformat()
+        existing["medical_card_expiry_date"] = (today + timedelta(days=300)).isoformat()
+        es.get_document = AsyncMock(return_value=existing)
+        es.search_documents = AsyncMock(return_value=_es_search_response([existing]))
+        service = DriverQualificationService(es)
+
+        await service.update(_TENANT_ID, existing["driver_id"], status="active")
+
+        assert es.update_document.call_args[0][2]["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_update_renewing_cdl_does_not_force_status(self):
+        from datetime import timedelta
+
+        today = date.today()
+        es = _make_es_service()
+        existing = _make_driver_doc(status="active")
+        existing["cdl_expiry_date"] = (today + timedelta(days=10)).isoformat()
+        existing["medical_card_expiry_date"] = (today + timedelta(days=300)).isoformat()
+        es.get_document = AsyncMock(return_value=existing)
+        es.search_documents = AsyncMock(return_value=_es_search_response([existing]))
+        service = DriverQualificationService(es)
+
+        await service.update(
+            _TENANT_ID,
+            existing["driver_id"],
+            cdl_expiry_date=today + timedelta(days=700),
+        )
+
+        assert "status" not in es.update_document.call_args[0][2]
+
+    @pytest.mark.asyncio
+    async def test_dashboard_counts_expired_separately_from_expiring(self):
+        from datetime import timedelta
+
+        today = date.today()
+        recent_test = (today - timedelta(days=30)).isoformat()
+        far = (today + timedelta(days=365)).isoformat()
+
+        def _driver(driver_id: str, status: str, cdl: str) -> Dict[str, Any]:
+            d = _make_driver_doc(driver_id=driver_id, status=status)
+            d["cdl_expiry_date"] = cdl
+            d["medical_card_expiry_date"] = far
+            d["hazmat_endorsement_expiry_date"] = far
+            d["tanker_endorsement_expiry_date"] = far
+            d["last_drug_test_date"] = recent_test
+            return d
+
+        drivers = [
+            _driver("d_status_expired", "expired", far),
+            _driver("d_past", "active", (today - timedelta(days=10)).isoformat()),
+            _driver("d_soon", "active", (today + timedelta(days=10)).isoformat()),
+        ]
+        es = _make_es_service()
+        es.search_documents = AsyncMock(return_value=_es_search_response(drivers))
+        service = DriverQualificationService(es)
+
+        result = await service.get_dqf_dashboard(_TENANT_ID)
+
+        assert result.expired_drivers == 2
+        assert result.expiring_within_60_days == 1
+        assert result.expiring_within_30_days == 1
+        assert result.expiring_within_7_days == 0
+        # The detail table still lists the expired qualification.
+        past = next(d for d in result.drivers if d.driver_id == "d_past")
+        assert any(q.alert_level == "expired" for q in past.qualifications)
+
+
+# ---------------------------------------------------------------------------
+# Tests: qualification summary by ops driver id (B10)
+# ---------------------------------------------------------------------------
+
+
+def _ops_ref_search(linked_by_ops_id: Dict[str, Dict[str, Any]], by_dq_id=None):
+    """A search fake that answers the ``get`` lookup and the ops-id lookup.
+
+    ``linked_by_ops_id`` maps an ops driver id to the DQ record that carries it
+    in ``external_refs.ops_driver_id``; ``by_dq_id`` maps a DQ ``driver_id`` to
+    its record. Every query must carry the tenant filter.
+    """
+    import json
+
+    by_dq_id = by_dq_id or {}
+    seen: list = []
+
+    async def _search(index, query, size=None, **kw):
+        text = json.dumps(query)
+        seen.append(query)
+        assert _TENANT_ID in text, "query is not tenant-filtered"
+        musts = query["query"]["bool"].get("must", [])
+        flat = json.dumps(musts) + json.dumps(query["query"]["bool"].get("filter", []))
+        for ops_id, doc in linked_by_ops_id.items():
+            if f'"external_refs.ops_driver_id": "{ops_id}"' in flat:
+                return _es_search_response([doc])
+        for dq_id, doc in by_dq_id.items():
+            if f'"driver_id": "{dq_id}"' in flat:
+                return _es_search_response([doc])
+        return {"hits": {"hits": []}}
+
+    return _search, seen
+
+
+class TestQualificationSummaryOpsRef:
+    """get_qualification_summary resolves an ops driver id via external_refs (B10)."""
+
+    @pytest.mark.asyncio
+    async def test_ops_driver_id_resolves_linked_dq_driver(self):
+        linked = _make_driver_doc(driver_id="driver_" + "a" * 8 + "-" + "b" * 27)
+        linked["external_refs"] = {"ops_driver_id": "DRV-001"}
+        es = _make_es_service()
+        search, seen = _ops_ref_search({"DRV-001": linked})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        summary = await service.get_qualification_summary(_TENANT_ID, "DRV-001")
+
+        assert summary.full_name == "John Smith"
+        assert summary.driver_id == linked["driver_id"]
+        assert any(
+            "external_refs.ops_driver_id" in str(q) for q in seen
+        ), "no ops-id lookup was made"
+
+    @pytest.mark.asyncio
+    async def test_unlinked_ops_driver_id_is_not_found(self):
+        es = _make_es_service()
+        search, _ = _ops_ref_search({})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        with pytest.raises(AppException) as exc_info:
+            await service.get_qualification_summary(_TENANT_ID, "DRV-404")
+
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_dq_shaped_id_still_resolves_directly(self):
+        dq_id = "driver_12345678-1234-1234-1234-123456789abc"
+        doc = _make_driver_doc(driver_id=dq_id)
+        es = _make_es_service()
+        search, seen = _ops_ref_search({}, by_dq_id={dq_id: doc})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        summary = await service.get_qualification_summary(_TENANT_ID, dq_id)
+
+        assert summary.driver_id == dq_id
+        assert not any("external_refs.ops_driver_id" in str(q) for q in seen)
+
+    @pytest.mark.asyncio
+    async def test_dq_shaped_id_not_found_falls_back_to_ops_ref(self):
+        """A DQ-shaped id with no DQ record is tried as an ops id too."""
+        dq_shaped = "driver_12345678-1234-1234-1234-123456789abc"
+        linked = _make_driver_doc(driver_id="driver_linked")
+        linked["external_refs"] = {"ops_driver_id": dq_shaped}
+        es = _make_es_service()
+        search, _ = _ops_ref_search({dq_shaped: linked})
+        es.search_documents = AsyncMock(side_effect=search)
+        service = DriverQualificationService(es)
+
+        summary = await service.get_qualification_summary(_TENANT_ID, dq_shaped)
+
+        assert summary.driver_id == "driver_linked"
+
+
+# ---------------------------------------------------------------------------
+# Tests: expired at create/update and the dashboard split (C10, D4)
+# ---------------------------------------------------------------------------
+
+
+def _days(n: int) -> date:
+    from datetime import timedelta
+
+    return date.today() + timedelta(days=n)
+
+
+async def _create(service, **overrides):
+    kwargs = dict(
+        full_name="QA Driver",
+        cdl_number="CDL-QA",
+        cdl_state="TX",
+        cdl_class="A",
+        cdl_expiry_date=_days(365),
+        medical_card_expiry_date=_days(365),
+    )
+    kwargs.update(overrides)
+    return await service.create(_TENANT_ID, **kwargs)
+
+
+class TestEffectiveStatusC10:
+    """A driver whose CDL or medical card is past due is stored as expired."""
+
+    @pytest.mark.asyncio
+    async def test_create_with_cdl_expired_yesterday_is_expired(self):
+        es = _make_es_service()
+        result = await _create(DriverQualificationService(es), cdl_expiry_date=_days(-1))
+
+        assert result["status"] == "expired"
+        assert es.index_document.call_args.args[2]["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_create_with_medical_card_expired_is_expired(self):
+        es = _make_es_service()
+        result = await _create(
+            DriverQualificationService(es), medical_card_expiry_date=_days(-30)
+        )
+
+        assert result["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_create_with_valid_dates_is_active(self):
+        es = _make_es_service()
+        result = await _create(DriverQualificationService(es))
+
+        assert result["status"] == "active"
+
+    @pytest.mark.asyncio
+    async def test_create_expiring_today_is_still_active(self):
+        es = _make_es_service()
+        result = await _create(DriverQualificationService(es), cdl_expiry_date=_days(0))
+
+        assert result["status"] == "active"
+
+    @pytest.mark.asyncio
+    async def test_create_suspended_stays_suspended(self):
+        es = _make_es_service()
+        result = await _create(
+            DriverQualificationService(es),
+            cdl_expiry_date=_days(-1),
+            status="suspended",
+        )
+
+        assert result["status"] == "suspended"
+
+    @pytest.mark.asyncio
+    async def test_update_medical_card_into_the_past_is_expired(self):
+        es = _make_es_service()
+        doc = _make_driver_doc()
+        doc["cdl_expiry_date"] = _days(365).isoformat()
+        doc["medical_card_expiry_date"] = _days(365).isoformat()
+        es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+        service = DriverQualificationService(es)
+
+        result = await service.update(
+            _TENANT_ID, "driver_test123", medical_card_expiry_date=_days(-1)
+        )
+
+        assert result["status"] == "expired"
+        assert es.update_document.call_args.args[2]["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_update_to_active_with_stored_past_due_cdl_is_expired(self):
+        es = _make_es_service()
+        doc = _make_driver_doc(status="suspended")
+        doc["cdl_expiry_date"] = _days(-10).isoformat()
+        doc["medical_card_expiry_date"] = _days(365).isoformat()
+        es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+        service = DriverQualificationService(es)
+
+        result = await service.update(_TENANT_ID, "driver_test123", status="active")
+
+        assert result["status"] == "expired"
+
+    @pytest.mark.asyncio
+    async def test_update_suspended_stays_suspended(self):
+        es = _make_es_service()
+        doc = _make_driver_doc(status="suspended")
+        doc["cdl_expiry_date"] = _days(365).isoformat()
+        doc["medical_card_expiry_date"] = _days(365).isoformat()
+        es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+        service = DriverQualificationService(es)
+
+        result = await service.update(
+            _TENANT_ID, "driver_test123", cdl_expiry_date=_days(-1)
+        )
+
+        assert result["status"] == "suspended"
+        assert "status" not in es.update_document.call_args.args[2]
+
+    @pytest.mark.asyncio
+    async def test_update_with_valid_dates_keeps_active(self):
+        es = _make_es_service()
+        doc = _make_driver_doc()
+        doc["cdl_expiry_date"] = _days(365).isoformat()
+        doc["medical_card_expiry_date"] = _days(365).isoformat()
+        es.search_documents = AsyncMock(return_value=_es_search_response([doc]))
+        service = DriverQualificationService(es)
+
+        result = await service.update(_TENANT_ID, "driver_test123", full_name="Renamed")
+
+        assert result["status"] == "active"
+        assert "status" not in es.update_document.call_args.args[2]
+
+
+class TestDashboardExpiredExpiringSplitC10:
+    """expired_drivers and expiring_drivers are reported separately (D4)."""
+
+    @staticmethod
+    def _driver(driver_id: str, *, cdl_days: int, medical_days: int = 365, status="active"):
+        doc = _make_driver_doc(driver_id=driver_id, status=status)
+        doc["cdl_expiry_date"] = _days(cdl_days).isoformat()
+        doc["medical_card_expiry_date"] = _days(medical_days).isoformat()
+        doc["hazmat_endorsement_expiry_date"] = _days(365).isoformat()
+        doc["tanker_endorsement_expiry_date"] = _days(365).isoformat()
+        doc["last_drug_test_date"] = _days(-30).isoformat()
+        return doc
+
+    @pytest.mark.asyncio
+    async def test_expired_by_date_and_expiring_are_split(self):
+        es = _make_es_service()
+        past_due = self._driver("d1", cdl_days=-3)
+        expiring = self._driver("d2", cdl_days=10)
+        es.search_documents = AsyncMock(
+            return_value=_es_search_response([past_due, expiring])
+        )
+
+        result = await DriverQualificationService(es).get_dqf_dashboard(_TENANT_ID)
+
+        assert result.total_drivers == 2
+        assert result.expired_drivers == 1
+        assert result.active_drivers == 1
+        assert result.expiring_drivers == 1
+        assert result.expiring_within_60_days == 1
+        assert result.expiring_within_30_days == 1
+        assert result.expiring_within_7_days == 0
+
+    @pytest.mark.asyncio
+    async def test_past_due_never_counts_in_expiring_windows(self):
+        """Negative days are expired, not 'expiring within 7 days'."""
+        es = _make_es_service()
+        past_due = self._driver("d1", cdl_days=-1, medical_days=5)
+        es.search_documents = AsyncMock(return_value=_es_search_response([past_due]))
+
+        result = await DriverQualificationService(es).get_dqf_dashboard(_TENANT_ID)
+
+        assert result.expired_drivers == 1
+        assert result.active_drivers == 0
+        assert result.expiring_within_7_days == 0
+        assert result.expiring_within_60_days == 0
+        assert result.expiring_drivers == 0
+
+    @pytest.mark.asyncio
+    async def test_stored_expired_counted_once(self):
+        es = _make_es_service()
+        stored = self._driver("d1", cdl_days=-5, status="expired")
+        es.search_documents = AsyncMock(return_value=_es_search_response([stored]))
+
+        result = await DriverQualificationService(es).get_dqf_dashboard(_TENANT_ID)
+
+        assert result.expired_drivers == 1
+        assert result.active_drivers == 0
+
+    @pytest.mark.asyncio
+    async def test_alert_list_still_shows_expired_alerts(self):
+        es = _make_es_service()
+        past_due = self._driver("d1", cdl_days=-3)
+        es.search_documents = AsyncMock(return_value=_es_search_response([past_due]))
+
+        result = await DriverQualificationService(es).get_dqf_dashboard(_TENANT_ID)
+
+        assert len(result.drivers) == 1
+        entry = result.drivers[0]
+        assert entry.status == "expired"
+        assert any(
+            q.qualification_type == "cdl" and q.alert_level == "expired"
+            for q in entry.qualifications
+        )
+
+    @pytest.mark.asyncio
+    async def test_suspended_with_past_due_dates_stays_suspended(self):
+        es = _make_es_service()
+        suspended = self._driver("d1", cdl_days=-3, status="suspended")
+        es.search_documents = AsyncMock(return_value=_es_search_response([suspended]))
+
+        result = await DriverQualificationService(es).get_dqf_dashboard(_TENANT_ID)
+
+        assert result.suspended_drivers == 1
+        assert result.expired_drivers == 0

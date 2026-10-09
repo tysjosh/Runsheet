@@ -579,22 +579,42 @@ class SalesPricingEngine:
         # contract price, contract id, contract type, and any split-line
         # fields exactly as the resolver computed them.
         if self._price_protection_service is not None:
-            if market_price_cents is None:
+            contract_market = market_price_cents
+            rack_error: Optional[PricingRackPriceUnavailableError] = None
+            if contract_market is None:
                 # Resolve the rack price from the rack_prices index so the
                 # price-protection resolver can dispatch on contract_type
-                # and build split-line outputs. Falls back to a typed
-                # PricingRackPriceUnavailableError when no rack row exists.
-                market_price_cents = await self.get_rack_price(
-                    product_code=product_code,
-                    terminal_id=terminal_id,
-                )
+                # and build split-line outputs.
+                try:
+                    contract_market = await self.get_rack_price(
+                        product_code=product_code,
+                        terminal_id=terminal_id,
+                    )
+                    # Rule strategies reuse the resolved rack price.
+                    market_price_cents = contract_market
+                except PricingRackPriceUnavailableError as exc:
+                    # Freeze decision D3 (N-CFV-4): probe the resolver
+                    # with a zero market. Only a single-price fixed_price
+                    # contract is independent of the market, so only
+                    # that result is used; any other contract re-raises,
+                    # and no contract falls through to the rules.
+                    rack_error = exc
+                    contract_market = 0
             resolution = await self._price_protection_service.resolve_price(
                 customer_id=customer_id,
                 product_code=product_code,
-                market_price_cents=market_price_cents,
+                market_price_cents=contract_market,
                 gallons=gallons,
                 effective_date=effective_date,
             )
+            if resolution.contract_id is not None and rack_error is not None:
+                market_independent = (
+                    resolution.contract_type == "fixed_price"
+                    and resolution.split_gallons_at_contract_price is None
+                    and resolution.split_gallons_at_market_price is None
+                )
+                if not market_independent:
+                    raise rack_error
             if resolution.contract_id is not None:
                 logger.debug(
                     "SalesPricingEngine: price-protection contract "
@@ -605,8 +625,108 @@ class SalesPricingEngine:
                     product_code,
                     resolution.contract_id,
                 )
+                if (resolution.split_gallons_at_market_price or 0) > 0:
+                    # Gallons the contract doesn't cover bill at the
+                    # customer's normal price, not bare rack (D14c).
+                    resolution.excess_price_cents = await self.excess_price_cents(
+                        customer_id=customer_id,
+                        product_code=product_code,
+                        gallons=gallons,
+                        terminal_id=terminal_id,
+                        route_miles=route_miles,
+                        effective_date=effective_date,
+                        market_price_cents=resolution.market_price_cents,
+                        account_id=account_id,
+                    )
                 return resolution
 
+        # Fall-through: the customer's price-book rule (Req 11.2).
+        return await self._resolve_by_rule(
+            customer_id=customer_id,
+            product_code=product_code,
+            gallons=gallons,
+            terminal_id=terminal_id,
+            route_miles=route_miles,
+            effective_date=effective_date,
+            market_price_cents=market_price_cents,
+            account_id=account_id,
+        )
+
+    async def excess_price_cents(
+        self,
+        *,
+        customer_id: str,
+        product_code: str,
+        gallons: float,
+        terminal_id: str,
+        route_miles: float,
+        effective_date: date,
+        market_price_cents: int,
+        account_id: Optional[str],
+    ) -> int:
+        """Per-gallon price for delivered gallons a contract doesn't cover.
+
+        The price-book rule price for this delivery, exactly as a customer
+        with no contract would pay (D14c). Running out of a contract must
+        not make a customer cheaper than never having one, which billing
+        the excess at bare rack did. With no matching rule there is no
+        price-book price, so the excess bills at ``market_price_cents``.
+        """
+        try:
+            rule_resolution = await self._resolve_by_rule(
+                customer_id=customer_id,
+                product_code=product_code,
+                gallons=gallons,
+                terminal_id=terminal_id,
+                route_miles=route_miles,
+                effective_date=effective_date,
+                market_price_cents=market_price_cents or None,
+                account_id=account_id,
+            )
+        except PricingNoRuleMatchedError:
+            logger.warning(
+                "SalesPricingEngine: no pricing rule for contract excess "
+                "tenant=%s customer=%s product=%s; billing it at market",
+                self._tenant_id,
+                customer_id,
+                product_code,
+            )
+            return int(market_price_cents)
+        return int(rule_resolution.effective_price_cents)
+
+    async def consume_contract_gallons(self, contract_id: str, gallons: float) -> float:
+        """Consume contract volume for an invoice; returns gallons granted."""
+        if self._price_protection_service is None:
+            return 0.0
+        return await self._price_protection_service.consume_gallons(contract_id, gallons)
+
+    async def restore_contract_gallons(self, contract_id: str, gallons: float) -> None:
+        """Return gallons an invoice consumed (void or failed write)."""
+        if self._price_protection_service is None:
+            return
+        await self._price_protection_service.restore_gallons(contract_id, gallons)
+
+    async def _resolve_by_rule(
+        self,
+        *,
+        customer_id: str,
+        product_code: str,
+        gallons: float,
+        terminal_id: str,
+        route_miles: float,
+        effective_date: date,
+        market_price_cents: Optional[int],
+        account_id: Optional[str],
+    ) -> PriceResolution:
+        """Price a delivery from the pricing rules, ignoring contracts.
+
+        The non-contract half of :meth:`resolve_price`, shared with
+        :meth:`excess_price_cents` so contract excess bills at the same
+        price a delivery with no contract would.
+
+        Raises:
+            PricingNoRuleMatchedError: No rule matches.
+        """
         # Fall-through: consult the pricing_rules index and dispatch
         # on the rule's ``strategy`` (Req 11.2). Task 5.2 establishes
         # the dispatch structure — every strategy branch raises
@@ -932,3 +1052,21 @@ class SalesPricingEngine:
             f"in rule_id={rule_id!r}. Ensure tier_thresholds covers "
             "the full gallon range."
         )
+
+
+def build_sales_pricing_engine(es_service: Any, tenant_id: str) -> SalesPricingEngine:
+    """Build the tenant-scoped engine with the price-protection resolver wired.
+
+    The single builder for ``POST /api/commerce/pricing/resolve`` and for
+    the :class:`InvoiceService` pricing factory, so an invoice line is
+    priced exactly as the resolve endpoint quotes it (OI-14). Before this,
+    the invoice factory built the engine without the contract resolver,
+    so active fixed/cap/collar contracts never reached an invoice.
+    """
+    return SalesPricingEngine(
+        es_service=es_service,
+        tenant_id=tenant_id,
+        price_protection_service=PriceProtectionService(
+            es_service, tenant_id=tenant_id
+        ),
+    )

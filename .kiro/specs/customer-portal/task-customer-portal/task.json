@@ -1,0 +1,7 @@
+{
+  "task_id": "task-customer-portal",
+  "task_description": "Implement the Runsheet customer portal v1 (OI-06) from the approved design (.kiro/specs/customer-portal/design.md revision 3, review pass 4 APPROVED) and requirements: exclusive `customer` role bound to one commerce customer, central default-deny for customer sessions, /api/portal/* with per-customer and per-tenant scoping, order requests through OrderIntakePipeline on web_portal with on_hold review and graceful 409 ORDER_INTAKE_DISABLED, read-only invoices with PDF/CSV, Stripe ACH payments with idempotency and webhook reconciliation, tank view, portal_audit logging, per-user rate limits, the accessible Next.js /portal route group and staff admin/confirm UI, single alembic head, and the full isolation / cross-role / payment-idempotency / intake-disabled test matrix, verified with the CI-equivalent suites.",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-005", "FEAT-006"],
+  "blocked_reason": null
+}

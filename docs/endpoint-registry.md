@@ -27,6 +27,7 @@
 | POST | `/api/agent/{agent_id}/resume` | /api/agent | session_required | — | — | — |
 | GET | `/api/analytics/metrics` | /api/analytics | session_required | — | — | — |
 | GET | `/api/analytics/routes` | /api/analytics | session_required | — | — | — |
+| GET | `/api/analytics/timeseries` | /api/analytics | session_required | — | — | — |
 | POST | `/api/auth/account/change-password` | — | session_required | — | — | ChangePasswordResponse |
 | GET | `/api/auth/account/me` | — | session_required | — | — | AccountProfileResponse |
 | POST | `/api/auth/admin/password-reset-link` | — | session_required | — | — | PasswordResetLinkResponse |
@@ -47,16 +48,43 @@
 | POST | `/api/commerce/customers` | — | session_required | — | — | dict |
 | GET | `/api/commerce/customers/{customer_id}` | — | session_required | — | — | dict |
 | PATCH | `/api/commerce/customers/{customer_id}` | — | session_required | — | — | dict |
+| GET | `/api/commerce/customers/{customer_id}/portal-users` | — | session_required | — | — | PortalUserListResponse |
+| POST | `/api/commerce/customers/{customer_id}/portal-users` | — | session_required | — | — | PortalUserInviteResponse |
+| DELETE | `/api/commerce/customers/{customer_id}/portal-users/{grant_id}` | — | session_required | — | — | PortalUserRevokeResponse |
+| POST | `/api/commerce/customers/{customer_id}/portal-users/{grant_id}/resend` | — | session_required | — | — | PortalUserLinkResponse |
 | GET | `/api/commerce/invoices` | — | session_required | — | — | dict |
+| GET | `/api/commerce/invoices/export` | — | session_required | — | — | — |
 | GET | `/api/commerce/invoices/{invoice_id}` | — | session_required | — | — | dict |
 | GET | `/api/commerce/invoices/{invoice_id}/events` | — | session_required | — | — | dict |
 | POST | `/api/commerce/invoices/{invoice_id}/finalize` | — | session_required | — | — | dict |
 | POST | `/api/commerce/invoices/{invoice_id}/retry-qbo-push` | — | session_required | — | — | dict |
 | POST | `/api/commerce/invoices/{invoice_id}/void` | — | session_required | — | — | dict |
+| GET | `/api/commerce/margin/alerts` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/alerts/{alert_id}/acknowledge` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/alerts/{alert_id}/approve` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/alerts/{alert_id}/dismiss` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/cost-basis` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/cost-entries` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries/import` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries/{entry_id}/supersede` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/cost-entries/{entry_id}/void` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/preview` | — | session_required | — | — | Dict |
+| POST | `/api/commerce/margin/recompute` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/recompute/{run_id}` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/records` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/records/export` | — | session_required | — | — | — |
+| GET | `/api/commerce/margin/records/{record_id}` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/reports` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/settings` | — | session_required | — | — | Dict |
+| PUT | `/api/commerce/margin/settings` | — | session_required | — | — | Dict |
+| GET | `/api/commerce/margin/summary` | — | session_required | — | — | Dict |
 | GET | `/api/commerce/payments` | — | session_required | — | — | dict |
 | POST | `/api/commerce/payments` | — | session_required | — | — | dict |
 | GET | `/api/commerce/payments/{payment_id}` | — | session_required | — | — | dict |
 | POST | `/api/commerce/payments/{payment_id}/reverse` | — | session_required | — | — | dict |
+| GET | `/api/commerce/portal-settings` | — | session_required | — | — | PortalSettings |
+| PUT | `/api/commerce/portal-settings` | — | session_required | — | — | PortalSettings |
 | GET | `/api/commerce/price-books` | — | session_required | — | — | dict |
 | POST | `/api/commerce/price-books` | — | session_required | — | — | dict |
 | POST | `/api/commerce/price-books/resolve` | — | session_required | — | — | dict |
@@ -79,15 +107,20 @@
 | GET | `/api/compliance/drivers` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/drivers` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/drivers/dashboard` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/drivers/export` | — | session_required | — | — | — |
 | GET | `/api/compliance/drivers/{driver_id}` | — | session_required | — | — | Dict |
 | PUT | `/api/compliance/drivers/{driver_id}` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/exemptions` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/exemptions` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/hos-records` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/hos-records/daily-summary/export` | — | session_required | — | — | — |
 | GET | `/api/compliance/ifta/adjustments` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/ifta/adjustments` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/completeness` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/fleet-mpg` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/ifta/report` | — | session_required | — | — | Dict |
+| GET | `/api/compliance/ifta/report/export` | — | session_required | — | — | — |
+| GET | `/api/compliance/inspections` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/kfactor/dashboard` | — | session_required | — | — | Dict |
 | POST | `/api/compliance/kfactor/{tank_id}/approve` | — | session_required | — | — | Dict |
 | GET | `/api/compliance/kfactor/{tank_id}/suggest` | — | session_required | — | — | Dict |
@@ -124,6 +157,14 @@
 | GET | `/api/fleet/trucks` | /api/fleet | session_required | — | — | — |
 | GET | `/api/fleet/trucks/{truck_id}` | /api/fleet | session_required | — | — | — |
 | GET | `/api/fuel/alerts` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/status` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/{service_date}` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/commands` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/{service_date}/history` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/publish` | /api/fuel | session_required | — | — | dict |
+| GET | `/api/fuel/board/{service_date}/publish/{publish_id}` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/suggestions/{plan_id}/reject` | /api/fuel | session_required | — | — | dict |
+| POST | `/api/fuel/board/{service_date}/validate` | /api/fuel | session_required | — | — | dict |
 | POST | `/api/fuel/consumption` | /api/fuel | session_required | — | ConsumptionEvent | dict |
 | POST | `/api/fuel/consumption/batch` | /api/fuel | session_required | — | — | dict |
 | GET | `/api/fuel/destinations` | /api/fuel | session_required | — | — | DeliveryDestinationsResponse |
@@ -158,6 +199,7 @@
 | GET | `/api/fuel/mvp/priorities` | /api/fuel | session_required | — | — | Dict |
 | GET | `/api/fuel/mvp/priority-clusters` | /api/fuel | session_required | — | — | PriorityClustersResponse |
 | GET | `/api/fuel/mvp/reconciliation` | /api/fuel | session_required | — | — | ReconciliationListResponse |
+| GET | `/api/fuel/mvp/reconciliation/export` | /api/fuel | session_required | — | — | — |
 | GET | `/api/fuel/mvp/replans/{event_id}/diff` | /api/fuel | session_required | — | — | ReplanDiffResponse |
 | POST | `/api/fuel/mvp/routes/{route_id}/emergency-stop` | /api/fuel | session_required | — | — | EmergencyStopResponse |
 | GET | `/api/fuel/mvp/trucks/{truck_id}/compartments` | /api/fuel | session_required | — | — | TruckCompartmentListResponse |
@@ -243,6 +285,8 @@
 | GET | `/api/notifications/{notification_id}` | — | session_required | — | — | — |
 | POST | `/api/notifications/{notification_id}/retry` | — | session_required | — | — | — |
 | POST | `/api/ops/admin/feature-flags/{tenant_id}/disable` | /api/ops/admin | session_required | — | — | dict |
+| GET | `/api/ops/admin/feature-flags/{tenant_id}/dispatch-board` | /api/ops/admin | session_required | — | — | dict |
+| POST | `/api/ops/admin/feature-flags/{tenant_id}/dispatch-board/{new_state}` | /api/ops/admin | session_required | — | — | dict |
 | POST | `/api/ops/admin/feature-flags/{tenant_id}/enable` | /api/ops/admin | session_required | — | — | dict |
 | GET | `/api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline` | /api/ops/admin | session_required | — | — | dict |
 | POST | `/api/ops/admin/feature-flags/{tenant_id}/order-intake-pipeline/{new_state}` | /api/ops/admin | session_required | — | — | dict |
@@ -253,6 +297,7 @@
 | GET | `/api/ops/drivers/utilization` | /api/ops | session_required | — | — | DriverUtilizationResponse |
 | GET | `/api/ops/drivers/{driver_id}` | /api/ops | session_required | — | — | DriverResponse |
 | PATCH | `/api/ops/drivers/{driver_id}` | /api/ops | session_required | — | — | DriverResponse |
+| GET | `/api/ops/drivers/{driver_id}/activity` | /api/ops | session_required | — | — | dict |
 | DELETE | `/api/ops/drivers/{driver_id}/app-access` | /api/ops | session_required | — | — | AppAccessResponse |
 | POST | `/api/ops/drivers/{driver_id}/app-access` | /api/ops | session_required | — | — | AppAccessResponse |
 | GET | `/api/ops/drivers/{driver_id}/profile` | /api/ops | session_required | — | — | DriverProfileResponse |
@@ -262,8 +307,6 @@
 | GET | `/api/ops/metrics/riders` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/metrics/shipments` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/metrics/sla` | /api/ops | session_required | — | — | — |
-| GET | `/api/ops/monitoring/indexing` | /api/ops | session_required | — | — | — |
-| GET | `/api/ops/monitoring/ingestion` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/monitoring/poison-queue` | /api/ops | session_required | — | — | — |
 | GET | `/api/ops/replay/status/{job_id}` | /api/ops | session_required | — | — | dict |
 | POST | `/api/ops/replay/trigger` | /api/ops | session_required | — | ReplayTriggerRequest | dict |
@@ -277,6 +320,7 @@
 | GET | `/api/orders` | /api/orders | session_required | — | — | OrderListResponse |
 | POST | `/api/orders` | /api/orders | session_required | — | — | IntakeResultResponse |
 | POST | `/api/orders/bulk` | /api/orders | session_required | — | — | BulkOrderResponse |
+| GET | `/api/orders/export` | /api/orders | session_required | — | — | — |
 | GET | `/api/orders/{order_id}` | /api/orders | session_required | — | — | — |
 | PATCH | `/api/orders/{order_id}/assign` | /api/orders | session_required | — | — | OrderResponse |
 | POST | `/api/orders/{order_id}/cancel` | /api/orders | session_required | — | — | OrderResponse |
@@ -284,11 +328,26 @@
 | POST | `/api/orders/{order_id}/hold` | /api/orders | session_required | — | — | OrderResponse |
 | POST | `/api/orders/{order_id}/release-hold` | /api/orders | session_required | — | — | OrderResponse |
 | PATCH | `/api/orders/{order_id}/status` | /api/orders | session_required | — | — | OrderResponse |
+| GET | `/api/portal/invoices` | — | session_required | — | — | PortalInvoiceListEnvelope |
+| GET | `/api/portal/invoices/export` | — | session_required | — | — | — |
+| GET | `/api/portal/invoices/{invoice_id}` | — | session_required | — | — | PortalInvoiceEnvelope |
+| POST | `/api/portal/invoices/{invoice_id}/payments` | — | session_required | — | — | PortalPaymentCreatedEnvelope |
+| GET | `/api/portal/invoices/{invoice_id}/pdf` | — | session_required | — | — | — |
+| GET | `/api/portal/me` | — | session_required | — | — | PortalMeEnvelope |
+| GET | `/api/portal/orders` | — | session_required | — | — | PortalOrderListEnvelope |
+| POST | `/api/portal/orders` | — | session_required | — | — | PortalOrderEnvelope |
+| GET | `/api/portal/orders/{order_id}` | — | session_required | — | — | PortalOrderEnvelope |
+| POST | `/api/portal/orders/{order_id}/cancel` | — | session_required | — | — | PortalOrderEnvelope |
+| GET | `/api/portal/payment-attempts/{payment_attempt_id}` | — | session_required | — | — | PortalPaymentAttemptEnvelope |
+| GET | `/api/portal/tanks` | — | session_required | — | — | PortalTankListEnvelope |
+| GET | `/api/portal/tanks/{customer_tank_id}` | — | session_required | — | — | PortalTankEnvelope |
+| GET | `/api/portal/tanks/{customer_tank_id}/deliveries` | — | session_required | — | — | PortalTankDeliveryListEnvelope |
 | GET | `/api/scheduling/cargo/search` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs` | /api/scheduling | session_required | — | CreateJob | dict |
 | GET | `/api/scheduling/jobs/active` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs/delayed` | /api/scheduling | session_required | — | — | dict |
+| GET | `/api/scheduling/jobs/export` | /api/scheduling | session_required | — | — | — |
 | GET | `/api/scheduling/jobs/{job_id}` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs/{job_id}/accept` | /api/scheduling | session_required | — | — | dict |
 | POST | `/api/scheduling/jobs/{job_id}/ack` | /api/scheduling | session_required | — | AckRequest | dict |
@@ -296,6 +355,7 @@
 | GET | `/api/scheduling/jobs/{job_id}/cargo` | /api/scheduling | session_required | — | — | dict |
 | PATCH | `/api/scheduling/jobs/{job_id}/cargo` | /api/scheduling | session_required | — | UpdateCargoManifest | dict |
 | PATCH | `/api/scheduling/jobs/{job_id}/cargo/{item_id}/status` | /api/scheduling | session_required | — | UpdateCargoItemStatus | dict |
+| GET | `/api/scheduling/jobs/{job_id}/driver-activity` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs/{job_id}/eta` | /api/scheduling | session_required | — | — | dict |
 | GET | `/api/scheduling/jobs/{job_id}/events` | /api/scheduling | session_required | — | — | dict |
 | PATCH | `/api/scheduling/jobs/{job_id}/reassign` | /api/scheduling | session_required | — | AssignAsset | dict |
@@ -342,6 +402,7 @@
 | `/api/fleet/live` | location_update, fleet_status | session_required |
 | `/ws/agent-activity` | agent_activity, approval_event | session_required |
 | `/ws/commerce/invoices` | — | session_required |
+| `/ws/dispatch-board` | — | session_required |
 | `/ws/driver` | — | session_required |
 | `/ws/fuel-planning` | — | session_required |
 | `/ws/notifications` | — | session_required |

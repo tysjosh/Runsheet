@@ -248,13 +248,13 @@ describe("IntegrationCard — connect flow", () => {
     });
 
     fireEvent.change(
-      dialogQueries.getByLabelText("api_token") as HTMLInputElement,
+      dialogQueries.getByLabelText(/^API token/) as HTMLInputElement,
       {
         target: { value: "  tok-123  " },
       },
     );
     fireEvent.change(
-      dialogQueries.getByLabelText("API endpoint") as HTMLInputElement,
+      dialogQueries.getByLabelText(/^API endpoint/) as HTMLInputElement,
       {
         target: { value: "  https://monitor.example.test  " },
       },
@@ -303,7 +303,7 @@ describe("IntegrationCard — connect flow", () => {
     // validation rejects it — which is the behaviour operators rely on
     // so a stray space doesn't get vaulted as a credential.
     fireEvent.change(
-      dialogQueries.getByLabelText("api_token") as HTMLInputElement,
+      dialogQueries.getByLabelText(/^API token/) as HTMLInputElement,
       { target: { value: "   " } },
     );
     await act(async () => {
@@ -312,9 +312,10 @@ describe("IntegrationCard — connect flow", () => {
       );
     });
 
-    expect(await dialogQueries.findByRole("alert")).toHaveTextContent(
-      /api_token is required/i,
-    );
+    // Field-level error in the FormDialog (task 3.8; labels are words now).
+    expect(
+      await dialogQueries.findByText("API token is required."),
+    ).toBeInTheDocument();
     expect(h.onConnect).not.toHaveBeenCalled();
   });
 
@@ -336,13 +337,13 @@ describe("IntegrationCard — connect flow", () => {
     fireEvent.click(screen.getByTestId("connect-button"));
 
     const clientIdInput = screen.getByLabelText(
-      "client_id",
+      /^Client ID/,
     ) as HTMLInputElement;
     const clientSecretInput = screen.getByLabelText(
-      "client_secret",
+      /^Client secret/,
     ) as HTMLInputElement;
     const refreshTokenInput = screen.getByLabelText(
-      "refresh_token",
+      /^Refresh token/,
     ) as HTMLInputElement;
 
     // client_id → plain text, the other two → obscured password

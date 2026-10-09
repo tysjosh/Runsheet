@@ -28,6 +28,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from errors.handlers import register_exception_handlers
+
 from Agents.overlay.data_contracts import (
     InterventionProposal,
     RiskSignal,
@@ -365,7 +367,7 @@ class TestReplanDiffReadyEnvelope:
     @pytest.mark.asyncio
     async def test_envelope_shape(self):
         mgr = FuelPlanningWSManager()
-        mgr.broadcast = AsyncMock(return_value=0)
+        mgr.broadcast_to_tenant = AsyncMock(return_value=0)
 
         await mgr.broadcast_replan_diff_ready(
             event_id="evt-1",
@@ -384,8 +386,8 @@ class TestReplanDiffReadyEnvelope:
             patched_route_id="r-p",
         )
 
-        mgr.broadcast.assert_awaited_once()
-        envelope = mgr.broadcast.await_args.args[0]
+        mgr.broadcast_to_tenant.assert_awaited_once()
+        envelope = mgr.broadcast_to_tenant.await_args.args[1]
         assert envelope["type"] == "replan_diff_ready"
         data = envelope["data"]
         assert data["event_id"] == "evt-1"
@@ -398,7 +400,7 @@ class TestReplanDiffReadyEnvelope:
     @pytest.mark.asyncio
     async def test_optional_fields_omitted_when_none(self):
         mgr = FuelPlanningWSManager()
-        mgr.broadcast = AsyncMock(return_value=0)
+        mgr.broadcast_to_tenant = AsyncMock(return_value=0)
 
         await mgr.broadcast_replan_diff_ready(
             event_id="evt-2",
@@ -406,7 +408,7 @@ class TestReplanDiffReadyEnvelope:
             tenant_id="tenant-a",
             summary={},
         )
-        data = mgr.broadcast.await_args.args[0]["data"]
+        data = mgr.broadcast_to_tenant.await_args.args[1]["data"]
         assert "replan_type" not in data
         assert "original_route_id" not in data
         assert "patched_route_id" not in data
@@ -414,7 +416,7 @@ class TestReplanDiffReadyEnvelope:
     @pytest.mark.asyncio
     async def test_extra_cannot_overwrite_required_fields(self):
         mgr = FuelPlanningWSManager()
-        mgr.broadcast = AsyncMock(return_value=0)
+        mgr.broadcast_to_tenant = AsyncMock(return_value=0)
 
         await mgr.broadcast_replan_diff_ready(
             event_id="evt-3",
@@ -423,7 +425,7 @@ class TestReplanDiffReadyEnvelope:
             summary={},
             extra={"event_id": "EVIL", "bonus": "hi"},
         )
-        data = mgr.broadcast.await_args.args[0]["data"]
+        data = mgr.broadcast_to_tenant.await_args.args[1]["data"]
         assert data["event_id"] == "evt-3"
         assert data["bonus"] == "hi"
 
@@ -442,6 +444,8 @@ def _build_fastapi_app(es_service) -> FastAPI:
     configure_fuel_ops_endpoints(es_service=es_service)
 
     app = FastAPI()
+    # Fuel-ops errors are AppExceptions in the standard envelope (F11).
+    register_exception_handlers(app)
     app.include_router(mvp_router)
 
     async def _stub_tenant():
@@ -525,7 +529,7 @@ class TestReplanDiffEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/fuel/mvp/replans/missing/diff")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "replan_event_not_found"
+        assert resp.json()["error_code"] == "replan_event_not_found"
 
     def test_cross_tenant_event_returns_404(self):
         """Simulate a misconfigured ES that returns a row belonging to
@@ -540,7 +544,7 @@ class TestReplanDiffEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/fuel/mvp/replans/evt-1/diff")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "replan_event_not_found"
+        assert resp.json()["error_code"] == "replan_event_not_found"
 
     def test_event_without_structured_diff_returns_distinct_404(self):
         doc = _sample_event_doc(include_diff=False)
@@ -554,7 +558,7 @@ class TestReplanDiffEndpoint:
             resp = client.get("/api/fuel/mvp/replans/evt-1/diff")
         assert resp.status_code == 404
         assert (
-            resp.json()["detail"]["error_code"] == "replan_diff_not_available"
+            resp.json()["error_code"] == "replan_diff_not_available"
         )
 
     def test_es_failure_returns_502(self):
@@ -565,4 +569,4 @@ class TestReplanDiffEndpoint:
         with TestClient(app) as client:
             resp = client.get("/api/fuel/mvp/replans/evt-1/diff")
         assert resp.status_code == 502
-        assert resp.json()["detail"]["error_code"] == "replan_events_unavailable"
+        assert resp.json()["error_code"] == "replan_events_unavailable"

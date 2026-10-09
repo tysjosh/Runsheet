@@ -149,48 +149,20 @@ def test_no_mapping_declares_semantic_text(declared_fields):
     )
 
 
-class TestTheLegacyCoreIndicesDeclareTenantId:
-    """The four indices that were created dynamically must now be buildable.
-
-    Removing ``semantic_text`` only helps if the mapping that finally applies
-    actually pins ``tenant_id`` — three of these four never declared it, and were
-    relying on the inference that broke them.
-    """
-
-    @pytest.fixture(scope="class")
-    def core_mappings(self):
-        from services.elasticsearch_service import elasticsearch_service as es
-
-        return {
-            "trucks": es._get_trucks_mapping(),
-            "locations": es._get_locations_mapping(),
-            "inventory": es._get_inventory_mapping(),
-            "support_tickets": es._get_support_tickets_mapping(),
-        }
-
-    def test_every_core_mapping_declares_tenant_id_as_keyword(self, core_mappings):
-        for index, mapping in sorted(core_mappings.items()):
-            props = mapping["mappings"]["properties"]
-            assert "tenant_id" in props, f"{index} does not declare tenant_id"
-            assert props["tenant_id"]["type"] == "keyword", (
-                f"{index}.tenant_id is {props['tenant_id']['type']!r}"
-            )
-
-    def test_no_core_mapping_declares_semantic_text(self, core_mappings):
-        def types(node) -> Set[str]:
-            out: Set[str] = set()
-            if isinstance(node, dict):
-                if isinstance(node.get("type"), str):
-                    out.add(node["type"])
-                for value in node.values():
-                    out |= types(value)
-            return out
-
-        for index, mapping in sorted(core_mappings.items()):
-            assert "semantic_text" not in types(mapping), (
-                f"{index} still declares semantic_text, so indices.create will "
-                f"keep failing and the index will keep being built dynamically"
-            )
+# ``TestTheLegacyCoreIndicesDeclareTenantId`` was removed here.
+#
+# It read the ``trucks`` / ``locations`` / ``inventory`` / ``support_tickets``
+# mappings off ``ElasticsearchService._get_*_mapping`` and asserted each declared
+# ``tenant_id`` as ``keyword``. Phase 6 deleted those methods along with
+# ``setup_indices``, so the declarations do not exist to check — these four indices
+# have no declared mapping at all now.
+#
+# That is a smaller loss than it looks. The failure the file exists to prevent is a
+# ``term`` filter matching nothing because ``tenant_id`` was inferred as analyzed
+# ``text``. There is no analyzer any more: ``tenant_id`` is a typed column on
+# ``es_documents``, and a ``term`` compiles to exact jsonb containment. The three
+# remaining tests still guard the declared mappings that DO exist, because
+# ``document_field_policy`` reads them.
 
 
 def test_the_stripe_demo_index_has_a_declared_mapping():
@@ -210,26 +182,17 @@ def test_the_stripe_demo_index_has_a_declared_mapping():
     # would have inferred whatever the first document looked like.
     assert props["created"]["type"] == "date"
 
-    import seed_all_data
+    # The ``seed_all_data._managed_index_mappings()`` assertion that was here is
+    # gone with the seeder's index-setup step: there is no managed index set, and
+    # ``--recreate`` no longer drops anything. ``STRIPE_PAYMENT_INTENTS_INDEX`` is
+    # still imported above so a rename breaks this test rather than passing quietly.
+    assert STRIPE_PAYMENT_INTENTS_INDEX
 
-    assert STRIPE_PAYMENT_INTENTS_INDEX in seed_all_data._managed_index_mappings(), (
-        "the index must be in the managed set, or --recreate leaves it behind "
-        "with the dynamic mapping it has today"
-    )
 
-
-def test_the_stripe_index_is_created_before_the_fixtures_load():
-    """Order matters: a bulk write to a missing index creates it dynamically.
-
-    Registering the mapping is not enough if the fixture load gets there first.
-    Step 1 of ``main()`` runs the setup functions and step 2 loads the fixtures,
-    so it is sufficient that the setup function is registered — this pins that
-    registration, which is the part a future edit could drop.
-    """
-    import seed_all_data
-
-    labels = [label for label, _fn in seed_all_data._index_setup_functions()]
-    assert "Stripe demo indices" in labels, (
-        "setup_stripe_indices is not registered, so stripe_payment_intents is "
-        "created by the fixture bulk write with a dynamic mapping"
-    )
+# ``test_the_stripe_index_is_created_before_the_fixtures_load`` was removed here.
+#
+# It asserted that ``seed_all_data`` registered ``setup_stripe_indices`` so step 1
+# created ``stripe_payment_intents`` before step 2 bulk-loaded the fixtures — because
+# a bulk write to a missing index created it with a dynamic mapping. There is no
+# index creation step any more, and a write to ``es_documents`` cannot invent a
+# mapping. The declaration itself is still pinned by the test above.

@@ -32,7 +32,7 @@ from fastapi.testclient import TestClient
 from scheduling.api.driver_endpoints import (
     router as driver_router,
     configure_driver_endpoints,
-    _check_driver_assignment,
+    _authorize_driver,
 )
 from driver.api.message_endpoints import (
     router as message_router,
@@ -120,6 +120,7 @@ def _make_job_service() -> MagicMock:
     """Create a mock JobService with the methods used by driver endpoints."""
     es = MagicMock()
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
 
     svc = MagicMock()
     svc._es = es
@@ -204,6 +205,7 @@ def _make_es_service() -> MagicMock:
     es = MagicMock()
     es.index_document = AsyncMock()
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     es.search_documents = AsyncMock(return_value={
         "hits": {"hits": [], "total": {"value": 0}},
     })
@@ -211,48 +213,65 @@ def _make_es_service() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Test: _check_driver_assignment helper
+# Test: _authorize_driver helper
 # ---------------------------------------------------------------------------
 
 
-class TestCheckDriverAssignment:
-    """Tests for the _check_driver_assignment access control helper."""
+def _driver_ctx(user_id: str = "driver-1", driver_id: str = "DRV-1"):
+    from auth.test_auth import issue_test_context
 
-    def test_assigned_driver_passes(self):
-        """Assigned driver passes the check. Validates: Req 11.2"""
+    return issue_test_context(
+        TENANT_ID, roles=["driver"], user_id=user_id, driver_id=driver_id,
+    )
+
+
+class TestAuthorizeDriver:
+    """Tests for the _authorize_driver access control helper (B5, D3)."""
+
+    def test_named_driver_passes(self):
+        """The job's named driver passes. Validates: Req 11.2"""
+        doc = _job_doc(asset_assigned="TRUCK-1")
+        doc["assigned_driver_id"] = "DRV-1"
+        _authorize_driver(doc, _driver_ctx(), "JOB_1")
+
+    def test_dispatcher_linked_driver_id_passes(self):
+        doc = _job_doc(asset_assigned="TRUCK-1")
+        doc["driver_id"] = "DRV-1"
+        _authorize_driver(doc, _driver_ctx(), "JOB_1")
+
+    def test_other_named_driver_raises_403(self):
+        """Another named driver gets 403 'Assignment revoked'. Validates: Req 11.2"""
         doc = _job_doc(asset_assigned="driver-1")
-        # Should not raise
-        _check_driver_assignment(doc, "driver-1", "JOB_1")
-
-    def test_non_assigned_driver_raises_403(self):
-        """Non-assigned driver gets 403 'Assignment revoked'. Validates: Req 11.2"""
-        doc = _job_doc(asset_assigned="driver-2")
+        doc["assigned_driver_id"] = "DRV-2"
         with pytest.raises(AppException) as exc_info:
-            _check_driver_assignment(doc, "driver-1", "JOB_1")
+            _authorize_driver(doc, _driver_ctx(), "JOB_1")
         assert exc_info.value.status_code == 403
         assert "Assignment revoked" in exc_info.value.message
 
+    def test_pre_migration_user_id_passes(self):
+        """asset_assigned == the caller's user id authorizes a pre-migration doc."""
+        _authorize_driver(_job_doc(asset_assigned="driver-1"), _driver_ctx(), "JOB_1")
+
+    def test_other_asset_assigned_raises_403(self):
+        """A truck id (or another user id) in asset_assigned is not the caller's."""
+        with pytest.raises(AppException) as exc_info:
+            _authorize_driver(_job_doc(asset_assigned="driver-2"), _driver_ctx(), "JOB_1")
+        assert exc_info.value.status_code == 403
+
     def test_no_asset_assigned_passes(self):
-        """Job with no asset_assigned passes (no driver to check against)."""
-        doc = _job_doc(asset_assigned=None)
-        # Should not raise
-        _check_driver_assignment(doc, "driver-1", "JOB_1")
+        """An unclaimed job (no named driver, no asset) passes."""
+        _authorize_driver(_job_doc(asset_assigned=None), _driver_ctx(), "JOB_1")
 
     def test_empty_asset_assigned_passes(self):
-        """Job with empty string asset_assigned passes."""
-        doc = _job_doc(asset_assigned="")
-        # Should not raise (empty string is falsy)
-        _check_driver_assignment(doc, "driver-1", "JOB_1")
+        _authorize_driver(_job_doc(asset_assigned=""), _driver_ctx(), "JOB_1")
 
-    def test_error_details_include_driver_ids(self):
-        """Error details include requesting and assigned driver IDs. Validates: Req 11.2"""
+    def test_error_details_name_only_the_job(self):
+        """Details carry the job id only, never either identity (R15.14)."""
         doc = _job_doc(asset_assigned="driver-new")
+        doc["assigned_driver_id"] = "DRV-NEW"
         with pytest.raises(AppException) as exc_info:
-            _check_driver_assignment(doc, "driver-old", "JOB_1")
-        details = exc_info.value.details
-        assert details["requesting_driver"] == "driver-old"
-        assert details["assigned_driver"] == "driver-new"
-        assert details["job_id"] == "JOB_1"
+            _authorize_driver(doc, _driver_ctx(user_id="driver-old"), "JOB_1")
+        assert exc_info.value.details == {"job_id": "JOB_1"}
 
 
 # ---------------------------------------------------------------------------
@@ -573,6 +592,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -619,6 +639,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -661,6 +682,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -712,6 +734,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)
@@ -750,6 +773,7 @@ class TestReassignAssetWSEvents:
             },
         })
         es.update_document = AsyncMock(return_value={"result": "updated"})
+        es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
         es.index_document = AsyncMock()
 
         svc = JobService(es, redis_url=None)

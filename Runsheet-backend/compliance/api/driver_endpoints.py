@@ -33,9 +33,9 @@ from __future__ import annotations
 
 import logging
 from datetime import date
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Mapping, Optional, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -43,7 +43,17 @@ from compliance.services.driver_qualification_service import (
     DriverQualificationService,
 )
 from errors.exceptions import AppException
+from middleware.rate_limiter import limiter
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from services.csv_export import (
+    EXPORT_PAGE_SIZE,
+    EXPORT_RATE_LIMIT,
+    MAX_EXPORT_ROWS,
+    ExportColumn,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -262,12 +272,10 @@ async def list_drivers(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.list_failed",
+            message="Failed to list drivers.",
             status_code=500,
-            detail={
-                "error_code": "drivers.list_failed",
-                "message": "Failed to list drivers.",
-            },
         )
 
     return {
@@ -277,6 +285,127 @@ async def list_drivers(
         "count": len(result["items"]),
         "request_id": _get_request_id(request),
     }
+
+
+# ---------------------------------------------------------------------------
+# GET /api/compliance/drivers/export (OI-57, owner decision 2026-10-07)
+# Declared above GET /{driver_id}, otherwise "export" binds as a driver id.
+# ---------------------------------------------------------------------------
+
+#: DQ expiry columns. Excludes the CDL number, phone and email (data-export
+#: FR4); ``full_name`` is operational, like customer names (D6).
+_DQ_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "driver_id", "full_name", "driver_status",
+        "cdl_expiry_date", "medical_card_expiry_date",
+        "hazmat_endorsement_expiry_date", "tanker_endorsement_expiry_date",
+        "nearest_expiry_date", "nearest_expiry_type",
+        "days_until_nearest_expiry", "overall_status",
+    )
+]
+
+
+def _dq_export_row(
+    svc: DriverQualificationService, driver: Dict[str, Any], today: date
+) -> Dict[str, Any]:
+    summary = svc.summarize_qualifications(driver, today, driver.get("driver_id"))
+    nearest = min(
+        summary.qualifications, key=lambda q: q.expiry_date, default=None
+    )
+    return {
+        "driver_id": driver.get("driver_id"),
+        "full_name": driver.get("full_name"),
+        "driver_status": summary.driver_status,
+        "cdl_expiry_date": driver.get("cdl_expiry_date"),
+        "medical_card_expiry_date": driver.get("medical_card_expiry_date"),
+        "hazmat_endorsement_expiry_date": driver.get("hazmat_endorsement_expiry_date"),
+        "tanker_endorsement_expiry_date": driver.get("tanker_endorsement_expiry_date"),
+        "nearest_expiry_date": nearest.expiry_date if nearest else None,
+        "nearest_expiry_type": nearest.qualification_type if nearest else None,
+        "days_until_nearest_expiry": nearest.days_until_expiry if nearest else None,
+        "overall_status": summary.overall_status,
+    }
+
+
+class _DriverQualificationSource:
+    """ExportSource over ``DriverQualificationService.list`` (one pass).
+
+    The service has no count, so ``count()`` pages the tenant's drivers once
+    (stopping as soon as the cap is passed, so ``stream_csv_export`` answers
+    413) and ``pages()`` replays them.
+    """
+
+    def __init__(
+        self,
+        svc: DriverQualificationService,
+        tenant_id: str,
+        status: Optional[str],
+        max_rows: int,
+    ) -> None:
+        self._svc = svc
+        self._tenant_id = tenant_id
+        self._status = status
+        self._max_rows = max_rows
+        self._rows: List[Dict[str, Any]] = []
+
+    async def count(self) -> int:
+        today = date.today()
+        drivers: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        while True:
+            page = await self._svc.list(
+                self._tenant_id, cursor=cursor, limit=EXPORT_PAGE_SIZE,
+                status=self._status,
+            )
+            for driver in page.get("items") or []:
+                # Re-check the tenant on the row, in case a backend ignores
+                # the filter.
+                if driver.get("tenant_id") != self._tenant_id:
+                    logger.warning(
+                        "drivers.export: dropping row with mismatched tenant_id "
+                        "%s (expected %s)",
+                        driver.get("tenant_id"), self._tenant_id,
+                    )
+                    continue
+                drivers.append(driver)
+            if len(drivers) > self._max_rows:
+                return len(drivers)
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+        self._rows = [_dq_export_row(self._svc, d, today) for d in drivers]
+        return len(self._rows)
+
+    async def pages(self) -> AsyncIterator[Sequence[Mapping[str, Any]]]:
+        for start in range(0, len(self._rows), EXPORT_PAGE_SIZE):
+            yield self._rows[start:start + EXPORT_PAGE_SIZE]
+
+
+@router.get("/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_driver_qualifications(
+    request: Request,
+    tenant: TenantContext = Depends(export_guard("admin", base=get_tenant_context)),
+    status: Optional[str] = Query(
+        default=None,
+        description="Filter by driver status: active, suspended, or expired.",
+    ),
+):
+    """CSV of driver qualification expiry dates and status (admin).
+
+    ``overall_status`` (``valid`` / ``expiring`` / ``expired``) uses the same
+    60-day rule as ``DriverQualificationService.get_qualification_summary``
+    (the Drivers → Utilization status chip).
+    """
+    source = _DriverQualificationSource(
+        _get_driver_service(), tenant.tenant_id, status, MAX_EXPORT_ROWS
+    )
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="driver_qualifications",
+        columns=_DQ_EXPORT_COLUMNS, source=source, filters={"status": status},
+        max_rows=MAX_EXPORT_ROWS,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -308,12 +437,10 @@ async def get_driver_dashboard(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.dashboard_failed",
+            message="Failed to generate DQF dashboard.",
             status_code=500,
-            detail={
-                "error_code": "drivers.dashboard_failed",
-                "message": "Failed to generate DQF dashboard.",
-            },
         )
 
     return {
@@ -362,12 +489,10 @@ async def create_driver(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.invalid_payload",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "drivers.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -375,12 +500,10 @@ async def create_driver(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.create_failed",
+            message="Failed to create driver.",
             status_code=500,
-            detail={
-                "error_code": "drivers.create_failed",
-                "message": "Failed to create driver.",
-            },
         )
 
     logger.info(
@@ -427,12 +550,10 @@ async def get_driver(
             driver_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.get_failed",
+            message="Failed to retrieve driver.",
             status_code=500,
-            detail={
-                "error_code": "drivers.get_failed",
-                "message": "Failed to retrieve driver.",
-            },
         )
 
     return {
@@ -504,12 +625,10 @@ async def update_driver(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.invalid_payload",
+            message=str(exc),
             status_code=422,
-            detail={
-                "error_code": "drivers.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -518,12 +637,10 @@ async def update_driver(
             driver_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="drivers.update_failed",
+            message="Failed to update driver.",
             status_code=500,
-            detail={
-                "error_code": "drivers.update_failed",
-                "message": "Failed to update driver.",
-            },
         )
 
     logger.info(

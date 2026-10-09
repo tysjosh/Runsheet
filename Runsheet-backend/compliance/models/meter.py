@@ -22,7 +22,7 @@ from datetime import date, datetime
 from typing import Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from services.time_utils import utcnow
 
@@ -65,6 +65,7 @@ class MeterRegistration(BaseModel):
     - ``meter_number`` is non-empty.
     - ``truck_id`` is non-empty.
     - ``tenant_id`` is non-empty.
+    - ``calibration_expiry_date`` is on or after ``calibration_date``.
     """
 
     model_config = ConfigDict(extra="forbid", validate_assignment=True)
@@ -162,6 +163,15 @@ class MeterRegistration(BaseModel):
         if not stripped:
             raise ValueError("tenant_id must not be empty or whitespace")
         return stripped
+
+    @model_validator(mode="after")
+    def expiry_not_before_calibration(self) -> "MeterRegistration":
+        """A calibration cannot expire before it was performed (finding C7)."""
+        if self.calibration_expiry_date < self.calibration_date:
+            raise ValueError(
+                "calibration_expiry_date must be on or after calibration_date"
+            )
+        return self
 
     # ------------------------------------------------------------------
     # Uniform cross-module subject reference (cross-module-entity-linkage

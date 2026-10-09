@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type Column, Table } from "@/components/ui";
+import { number as fmtNumber, pct } from "../../lib/format";
 import type {
   AssetUtilizationMetric,
   CompletionMetric,
@@ -42,6 +43,7 @@ import {
   getDelayMetrics,
   getJobMetrics,
 } from "../../services/schedulingApi";
+import { PageTitle } from "../ui/PageHeader";
 
 // ─── Section Card ────────────────────────────────────────────────────────────
 
@@ -122,7 +124,7 @@ function StatCard({ label, value, icon, accent = "blue" }: StatCardProps) {
         <span className="text-xs text-gray-500">{label}</span>
       </div>
       <p className={`text-xl font-bold ${style.text}`}>
-        {typeof value === "number" ? value.toLocaleString() : value}
+        {typeof value === "number" ? fmtNumber(value) : value}
       </p>
     </div>
   );
@@ -130,12 +132,46 @@ function StatCard({ label, value, icon, accent = "blue" }: StatCardProps) {
 
 // ─── Table columns ───────────────────────────────────────────────────────────
 
-const jobMetricsColumns: Column<JobMetricsBucket>[] = [
+const UTC_DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const UTC_HOUR = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "UTC",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+
+/**
+ * Bucket label in UTC (F11). Buckets are UTC days/hours on the backend, so a
+ * browser-local date string showed the 10-06 bucket as "10/5/2026, 8:00 PM".
+ * Daily: "YYYY-MM-DD"; hourly: "YYYY-MM-DD HH:00 UTC".
+ */
+export function formatBucketLabel(
+  timestamp: string,
+  granularity: "hourly" | "daily",
+): string {
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return timestamp;
+  const day = UTC_DAY.format(d);
+  return granularity === "daily" ? day : `${day} ${UTC_HOUR.format(d)}:00 UTC`;
+}
+
+/** Completion rate from the API is already a percentage (0–100) (F4). */
+export function completionBarWidth(rate: number): string {
+  return `${Math.min(Math.max(rate, 0), 100)}%`;
+}
+
+const buildJobMetricsColumns = (
+  granularity: "hourly" | "daily",
+): Column<JobMetricsBucket>[] => [
   {
     key: "timestamp",
-    label: "Timestamp",
+    label: granularity === "daily" ? "Date (UTC)" : "Hour (UTC)",
     className: "text-gray-700 whitespace-nowrap",
-    render: (bucket) => new Date(bucket.timestamp).toLocaleString(),
+    render: (bucket) => formatBucketLabel(bucket.timestamp, granularity),
   },
   {
     key: "counts_by_status",
@@ -213,14 +249,14 @@ const assetUtilizationColumns: Column<AssetUtilizationMetric>[] = [
     label: "Active Hours",
     align: "right",
     className: "text-gray-700",
-    render: (asset) => asset.total_active_hours.toFixed(1),
+    render: (asset) => fmtNumber(asset.total_active_hours, { decimals: 1 }),
   },
   {
     key: "idle_hours",
     label: "Idle Hours",
     align: "right",
     className: "text-gray-700",
-    render: (asset) => asset.idle_hours.toFixed(1),
+    render: (asset) => fmtNumber(asset.idle_hours, { decimals: 1 }),
   },
 ];
 
@@ -234,6 +270,8 @@ export default function SchedulingMetricsPage() {
 
   // ── Section data ─────────────────────────────────────────────────────────
   const [jobMetrics, setJobMetrics] = useState<JobMetricsBucket[]>([]);
+  // Granularity the backend actually used (it may coarsen hourly to daily).
+  const [jobBucket, setJobBucket] = useState<"hourly" | "daily">("daily");
   const [completionMetrics, setCompletionMetrics] = useState<
     CompletionMetric[]
   >([]);
@@ -269,8 +307,15 @@ export default function SchedulingMetricsPage() {
           getDelayMetrics(filters),
         ]);
 
-      if (jobRes.status === "fulfilled")
+      if (jobRes.status === "fulfilled") {
         setJobMetrics((jobRes.value as any).data ?? []);
+        const used = (jobRes.value as any).bucket;
+        setJobBucket(
+          used === "hourly" || used === "daily"
+            ? used
+            : (filters.bucket ?? "daily"),
+        );
+      }
       if (completionRes.status === "fulfilled")
         setCompletionMetrics((completionRes.value as any).data ?? []);
       if (assetRes.status === "fulfilled")
@@ -312,9 +357,9 @@ export default function SchedulingMetricsPage() {
               <TrendingUp className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h1 className="text-2xl font-semibold text-primary">
+              <PageTitle className="text-2xl font-semibold text-primary">
                 Scheduling Metrics
-              </h1>
+              </PageTitle>
               <p className="text-gray-500">
                 Job counts, completion rates, asset utilization & delay
                 statistics
@@ -384,6 +429,8 @@ export default function SchedulingMetricsPage() {
             />
           </div>
 
+          <span className="text-xs text-gray-500">Dates are in UTC</span>
+
           {/* Clear filters */}
           {(startDate || endDate) && (
             <button
@@ -424,7 +471,7 @@ export default function SchedulingMetricsPage() {
             <Table<JobMetricsBucket>
               ariaLabel="Job metrics"
               variant="compact"
-              columns={jobMetricsColumns}
+              columns={buildJobMetricsColumns(jobBucket)}
               data={jobMetrics}
               getRowId={(bucket) => bucket.timestamp}
             />
@@ -457,14 +504,15 @@ export default function SchedulingMetricsPage() {
                         Completion Rate
                       </span>
                       <span className="text-sm font-semibold text-primary">
-                        {(metric.completion_rate * 100).toFixed(1)}%
+                        {/* Already a percentage (0–100) from the API (F4). */}
+                        {pct(metric.completion_rate, { decimals: 1 })}
                       </span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-1.5">
                       <div
                         className="bg-success h-1.5 rounded-full transition-all"
                         style={{
-                          width: `${Math.min(metric.completion_rate * 100, 100)}%`,
+                          width: completionBarWidth(metric.completion_rate),
                         }}
                       />
                     </div>
@@ -473,7 +521,10 @@ export default function SchedulingMetricsPage() {
                         Avg Completion
                       </span>
                       <span className="text-sm font-semibold text-primary">
-                        {metric.avg_completion_minutes.toFixed(1)} min
+                        {fmtNumber(metric.avg_completion_minutes, {
+                          decimals: 1,
+                        })}{" "}
+                        min
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-xs text-gray-500">
@@ -531,7 +582,7 @@ export default function SchedulingMetricsPage() {
                 />
                 <StatCard
                   label="Avg Delay"
-                  value={`${((delayMetrics as any).avg_delay_minutes ?? 0).toFixed(1)} min`}
+                  value={`${fmtNumber((delayMetrics as any).avg_delay_minutes ?? 0, { decimals: 1 })} min`}
                   icon={<Clock className="w-3.5 h-3.5 text-warning" />}
                   accent="yellow"
                 />
@@ -555,7 +606,10 @@ export default function SchedulingMetricsPage() {
                           </span>
                           <span className="flex items-center gap-2">
                             <span className="text-xs text-gray-500">
-                              {row.avg_delay_minutes.toFixed(1)} min avg
+                              {fmtNumber(row.avg_delay_minutes, {
+                                decimals: 1,
+                              })}{" "}
+                              min avg
                             </span>
                             <span className="text-sm font-semibold text-primary bg-gray-100 px-2 py-0.5 rounded">
                               {row.count}

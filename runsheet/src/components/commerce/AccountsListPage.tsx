@@ -1,15 +1,24 @@
 "use client";
 
+/**
+ * Billing → Accounts (UI revamp task 3.4): one toolbar (status chips with
+ * counts, a Filters popover for tier and credit state), a DataTable, and
+ * money and terms through `lib/format`.
+ */
+import { Eye, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
-  Badge,
-  Button,
-  EmptyState,
-  FilterBar,
-  PageHeader,
-  Pagination,
-  Table,
+  type Column,
+  DataTable,
+  Field,
+  FilterChips,
+  FilterPopover,
+  IconButton,
+  Select,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { humanize, money, number } from "../../lib/format";
 import {
   type Account,
   type AccountFilters,
@@ -18,6 +27,46 @@ import {
   type CreditState,
   getAccounts,
 } from "../../services/commerceApi";
+import { PageTitle } from "../ui/PageHeader";
+import {
+  ACCOUNT_STATUS,
+  AccountStatusBadge,
+  CREDIT_STATE,
+  CreditStateBadge,
+} from "./billingStatus";
+
+const PAGE_SIZE = 20;
+
+const STATUS_CHIPS: { id: "" | AccountStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "active", label: "Active" },
+  { id: "suspended", label: "Suspended" },
+  { id: "closed", label: "Closed" },
+];
+
+const TIERS: { value: "" | AccountTier; label: string }[] = [
+  { value: "", label: "Any tier" },
+  { value: "default", label: "Default" },
+  { value: "platinum", label: "Platinum" },
+  { value: "gold", label: "Gold" },
+  { value: "silver", label: "Silver" },
+  { value: "bronze", label: "Bronze" },
+];
+
+const CREDIT_STATES: { value: "" | CreditState; label: string }[] = [
+  { value: "", label: "Any credit state" },
+  ...(Object.keys(CREDIT_STATE) as CreditState[]).map((k) => ({
+    value: k,
+    label: CREDIT_STATE[k].label,
+  })),
+];
+
+type Counts = Partial<Record<"" | AccountStatus, number>>;
+
+function totalOf(response: unknown): number | undefined {
+  const r = response as { pagination?: { total?: number }; total?: number };
+  return r.pagination?.total ?? r.total;
+}
 
 interface AccountsListPageProps {
   onSelectAccount?: (accountId: string) => void;
@@ -36,16 +85,17 @@ export default function AccountsListPage({
   const [creditStateFilter, setCreditStateFilter] = useState<CreditState | "">(
     "",
   );
+  const [counts, setCounts] = useState<Counts>({});
+  const [reload, setReload] = useState(0);
 
   const fetchAccounts = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const filters: AccountFilters = { page, size: 20 };
+      const filters: AccountFilters = { page, size: PAGE_SIZE };
       if (statusFilter) filters.status = statusFilter;
       if (tierFilter) filters.tier = tierFilter;
       if (creditStateFilter) filters.credit_state = creditStateFilter;
-
       const response = await getAccounts(filters);
       setAccounts(response.data ?? []);
       const pagination = (response as { pagination?: { total_pages?: number } })
@@ -59,166 +109,203 @@ export default function AccountsListPage({
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter, tierFilter, creditStateFilter]);
+    // `reload` forces a refetch from the Refresh button.
+  }, [page, statusFilter, tierFilter, creditStateFilter, reload]);
 
   useEffect(() => {
     fetchAccounts();
   }, [fetchAccounts]);
 
-  const getCreditStateBadgeVariant = (state: string) => {
-    if (state === "ok") return "success";
-    if (state === "hold") return "error";
-    if (state === "override") return "info";
-    return "warning";
-  };
+  // Chip counts: one `size: 1` read per status within the popover filters
+  // (no aggregate endpoint). A failed or total-less read leaves no count.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const next: Counts = {};
+      await Promise.allSettled(
+        STATUS_CHIPS.map(async (c) => {
+          const f: AccountFilters = { page: 1, size: 1 };
+          if (c.id) f.status = c.id;
+          if (tierFilter) f.tier = tierFilter;
+          if (creditStateFilter) f.credit_state = creditStateFilter;
+          next[c.id] = totalOf(await getAccounts(f));
+        }),
+      );
+      if (!cancelled) setCounts(next);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [tierFilter, creditStateFilter, reload]);
+
+  const embedded = usePageChrome({});
+  const open = (a: Account) => onSelectAccount?.(a.account_id);
+
+  const columns: Column<Account>[] = [
+    {
+      key: "display_name",
+      header: "Account",
+      truncate: true,
+      title: (a) => a.display_name,
+      className: "font-medium text-text",
+      cell: (a) => a.display_name,
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 130,
+      cell: (a) => <AccountStatusBadge status={a.status} />,
+    },
+    {
+      key: "tier",
+      header: "Tier",
+      width: 110,
+      className: "text-slate-700",
+      cell: (a) => humanize(a.tier),
+    },
+    {
+      key: "credit_state",
+      header: "Credit",
+      width: 120,
+      cell: (a) => <CreditStateBadge state={a.credit_state} />,
+    },
+    {
+      key: "credit_limit_cents",
+      header: "Credit limit",
+      align: "right",
+      width: 140,
+      className: "tabular-nums text-slate-700",
+      cell: (a) => money(a.credit_limit_cents / 100),
+    },
+    {
+      key: "open_balance_cents",
+      header: "Open balance",
+      align: "right",
+      width: 140,
+      className: "tabular-nums text-text",
+      cell: (a) => money(a.open_balance_cents / 100),
+    },
+    {
+      key: "net_terms_days",
+      header: "Terms",
+      align: "right",
+      width: 100,
+      className: "tabular-nums text-slate-700",
+      cell: (a) => `Net ${number(a.net_terms_days)}`,
+    },
+  ];
+
+  const popoverCount = (tierFilter ? 1 : 0) + (creditStateFilter ? 1 : 0);
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Accounts"
-        subtitle="Manage billing accounts, credit states, and aging."
-      />
-
-      <FilterBar
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Accounts
+          </PageTitle>
+        </div>
+      )}
+      <Toolbar
+        label="Accounts"
         filters={
           <>
-            <select
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value as AccountStatus | "");
+            <FilterChips
+              label="Account status"
+              options={STATUS_CHIPS.map((c) => ({
+                id: c.id || "all",
+                label: c.label,
+                count: counts[c.id],
+                status: c.id ? ACCOUNT_STATUS[c.id].status : undefined,
+              }))}
+              value={statusFilter || "all"}
+              onChange={(v) => {
+                setStatusFilter(v === "all" ? "" : (v as AccountStatus));
                 setPage(1);
               }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Status"
-            >
-              <option value="">All</option>
-              <option value="active">Active</option>
-              <option value="suspended">Suspended</option>
-              <option value="closed">Closed</option>
-            </select>
-            <select
-              value={tierFilter}
-              onChange={(e) => {
-                setTierFilter(e.target.value as AccountTier | "");
+            />
+            <FilterPopover
+              count={popoverCount}
+              label="Account filters"
+              onClear={() => {
+                setTierFilter("");
+                setCreditStateFilter("");
                 setPage(1);
               }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Tier"
             >
-              <option value="">All</option>
-              <option value="default">Default</option>
-              <option value="platinum">Platinum</option>
-              <option value="gold">Gold</option>
-              <option value="silver">Silver</option>
-              <option value="bronze">Bronze</option>
-            </select>
-            <select
-              value={creditStateFilter}
-              onChange={(e) => {
-                setCreditStateFilter(e.target.value as CreditState | "");
-                setPage(1);
-              }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Credit State"
-            >
-              <option value="">All</option>
-              <option value="ok">OK</option>
-              <option value="hold">Hold</option>
-              <option value="override">Override</option>
-            </select>
+              <Field label="Tier" id="accounts-filter-tier">
+                <Select
+                  id="accounts-filter-tier"
+                  value={tierFilter}
+                  onChange={(v) => {
+                    setTierFilter(v as AccountTier | "");
+                    setPage(1);
+                  }}
+                  options={TIERS}
+                />
+              </Field>
+              <Field label="Credit state" id="accounts-filter-credit">
+                <Select
+                  id="accounts-filter-credit"
+                  value={creditStateFilter}
+                  onChange={(v) => {
+                    setCreditStateFilter(v as CreditState | "");
+                    setPage(1);
+                  }}
+                  options={CREDIT_STATES}
+                />
+              </Field>
+            </FilterPopover>
           </>
         }
-      />
-
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
-
-      {loading && (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading accounts...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      )}
-
-      {!loading &&
-        !error &&
-        (accounts.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">📊</span>}
-            title="No accounts found"
-            description="Try adjusting your filters"
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
           />
-        ) : (
-          <>
-            <Table
-              columns={[
-                { key: "display_name", label: "Account" },
-                {
-                  key: "tier",
-                  label: "Tier",
-                  render: (account) => (
-                    <span className="capitalize">{account.tier}</span>
-                  ),
-                },
-                {
-                  key: "credit_state",
-                  label: "Credit State",
-                  render: (account) => (
-                    <Badge
-                      variant={getCreditStateBadgeVariant(account.credit_state)}
-                    >
-                      {account.credit_state.replace(/_/g, " ")}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "credit_limit_cents",
-                  label: "Credit Limit",
-                  render: (account) =>
-                    `$${(account.credit_limit_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
-                },
-                {
-                  key: "open_balance_cents",
-                  label: "Open Balance",
-                  render: (account) =>
-                    `$${(account.open_balance_cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
-                },
-                {
-                  key: "net_terms_days",
-                  label: "Net Terms",
-                  render: (account) => `${account.net_terms_days} days`,
-                },
-                {
-                  key: "actions",
-                  label: "Actions",
-                  render: (account) => (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => onSelectAccount?.(account.account_id)}
-                    >
-                      View Details
-                    </Button>
-                  ),
-                },
-              ]}
-              data={accounts}
-              keyExtractor={(account) => account.account_id}
-            />
-
-            <Pagination
-              currentPage={page}
-              totalPages={totalPages}
-              onPageChange={setPage}
-            />
-          </>
-        ))}
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<Account>
+          ariaLabel="Accounts"
+          columns={columns}
+          data={loading || error ? [] : accounts}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchAccounts } : null}
+          getRowId={(a) => a.account_id}
+          rowLabel={(a) => a.display_name}
+          onRowClick={onSelectAccount ? open : undefined}
+          rowMenu={
+            onSelectAccount
+              ? (a) => [
+                  {
+                    id: "view",
+                    label: "View account",
+                    icon: <Eye className="h-3.5 w-3.5" />,
+                    onSelect: () => open(a),
+                  },
+                ]
+              : undefined
+          }
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No accounts found</p>
+              <p className="mt-1 text-xs">Try adjusting your filters</p>
+            </div>
+          }
+        />
+      </div>
     </div>
   );
 }

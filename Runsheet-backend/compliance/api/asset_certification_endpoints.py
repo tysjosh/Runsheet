@@ -36,7 +36,7 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -47,6 +47,7 @@ from compliance.services.compliance_subject_ref import (
     subject_ref_for_kind,
     validate_subject_ref,
 )
+from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 from services.ref_resolver import get_ref_resolver
@@ -252,12 +253,10 @@ async def list_asset_certifications(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="asset_certifications.list_failed",
+            message="Failed to list asset certifications.",
             status_code=500,
-            detail={
-                "error_code": "asset_certifications.list_failed",
-                "message": "Failed to list asset certifications.",
-            },
         )
 
     return {
@@ -298,12 +297,10 @@ async def get_fleet_certification_dashboard(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="asset_certifications.dashboard_failed",
+            message="Failed to generate fleet certification dashboard.",
             status_code=500,
-            detail={
-                "error_code": "asset_certifications.dashboard_failed",
-                "message": "Failed to generate fleet certification dashboard.",
-            },
         )
 
     # Calculate summary counts
@@ -367,12 +364,10 @@ async def create_asset_certification(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "asset_certifications.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -380,12 +375,10 @@ async def create_asset_certification(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="asset_certifications.create_failed",
+            message="Failed to create asset certification.",
             status_code=500,
-            detail={
-                "error_code": "asset_certifications.create_failed",
-                "message": "Failed to create asset certification.",
-            },
         )
 
     logger.info(
@@ -433,12 +426,10 @@ async def get_asset_certification(
             cert_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="asset_certifications.get_failed",
+            message="Failed to retrieve asset certification.",
             status_code=500,
-            detail={
-                "error_code": "asset_certifications.get_failed",
-                "message": "Failed to retrieve asset certification.",
-            },
         )
 
     return {
@@ -490,12 +481,10 @@ async def update_asset_certification(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.ASSET_CERTIFICATIONS_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "asset_certifications.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -504,12 +493,10 @@ async def update_asset_certification(
             cert_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="asset_certifications.update_failed",
+            message="Failed to update asset certification.",
             status_code=500,
-            detail={
-                "error_code": "asset_certifications.update_failed",
-                "message": "Failed to update asset certification.",
-            },
         )
 
     logger.info(

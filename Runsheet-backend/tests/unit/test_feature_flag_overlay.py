@@ -168,3 +168,32 @@ class TestSetOverlayState:
         svc.client = None
         with pytest.raises(ValueError, match="Invalid overlay state"):
             await svc.set_overlay_state("flag", "t1", "invalid", "u1")
+
+
+class TestGetOverlayStateStrict:
+    """Strict read for the loading-plan executor (design K8): errors raise."""
+
+    @pytest.mark.asyncio
+    async def test_redis_error_propagates(self, service):
+        service.client.get = AsyncMock(side_effect=ConnectionError("Redis down"))
+        with pytest.raises(ConnectionError):
+            await service.get_overlay_state_strict("overlay.compartment_loading", "t1")
+
+    @pytest.mark.asyncio
+    async def test_bytes_are_decoded(self, service):
+        service.client.get = AsyncMock(return_value=b"shadow")
+        result = await service.get_overlay_state_strict("overlay.compartment_loading", "t1")
+        assert result == "shadow"
+        service.client.get.assert_awaited_once_with(
+            "overlay_ff:overlay.compartment_loading:t1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_key_returns_none(self, service):
+        service.client.get = AsyncMock(return_value=None)
+        assert await service.get_overlay_state_strict("overlay.compartment_loading", "t1") is None
+
+    @pytest.mark.asyncio
+    async def test_raises_runtime_error_when_not_connected(self, disconnected_service):
+        with pytest.raises(RuntimeError, match="Redis client not connected"):
+            await disconnected_service.get_overlay_state_strict("overlay.compartment_loading", "t1")

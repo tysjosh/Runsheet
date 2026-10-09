@@ -5,326 +5,232 @@ import {
   ArrowUp,
   Clock,
   Droplets,
-  Fuel,
-  MapPin,
   TrendingDown,
-  X,
 } from "lucide-react";
 import { useState } from "react";
-import type {
-  FuelStation,
-  FuelStationDetail as FuelStationDetailType,
-  FuelType,
-  StationStatus,
-} from "../../services/fuelApi";
+import { gallons, number, pct } from "../../lib/format";
+import type { FuelStationDetail as FuelStationDetailType } from "../../services/fuelApi";
 import {
+  displayDaysUntilEmpty,
   getEventQuantityGallons,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
   getFuelStationDailyConsumptionGallons,
 } from "../../services/fuelApi";
+import { STATUS } from "../../styles/tokens";
+import { ProductChip, StatusBadge } from "../ui";
 import FuelEventForm from "./FuelEventForm";
+import { STATION_STATUS } from "./FuelStationList";
 
 interface FuelStationDetailProps {
   detail: FuelStationDetailType;
+  /** Kept for callers; the surrounding Drawer owns the close button. */
   onClose?: () => void;
   onEventRecorded?: () => void;
 }
 
-const STATUS_CONFIG: Record<
-  StationStatus,
-  { label: string; color: string; bg: string }
-> = {
-  normal: {
-    label: "Normal",
-    color: "text-success-dark",
-    bg: "bg-success-light",
-  },
-  low: { label: "Low", color: "text-warning-dark", bg: "bg-warning-light" },
-  critical: {
-    label: "Critical",
-    color: "text-error-dark",
-    bg: "bg-error-light",
-  },
-  empty: { label: "Empty", color: "text-gray-700", bg: "bg-gray-100" },
-};
-
-const STATUS_BAR_COLORS: Record<StationStatus, string> = {
-  normal: "bg-success",
-  low: "bg-warning",
-  critical: "bg-error",
-  empty: "bg-gray-400",
-};
-
-const FUEL_TYPE_LABELS: Record<FuelType, string> = {
-  DIESEL_2: "Diesel #2 (ULSD)",
-  GASOLINE_REG: "Regular Unleaded",
-  GASOLINE_PREM: "Premium Unleaded",
-  HEATING_OIL: "Heating Oil",
-  PROPANE: "Propane",
-  KEROSENE: "Kerosene",
-  OFF_ROAD_DIESEL: "Off-Road Diesel",
-  DEF: "DEF",
-};
-
-function getCapacityGallons(station: FuelStation): number {
-  return getFuelStationCapacityGallons(station);
-}
-
-function getCurrentStockGallons(station: FuelStation): number {
-  return getFuelStationCurrentStockGallons(station);
-}
-
-function formatGallons(gallons: number): string {
-  if (gallons >= 1_000_000) return `${(gallons / 1_000_000).toFixed(1)}M gal`;
-  if (gallons >= 1_000) return `${(gallons / 1_000).toFixed(1)}K gal`;
-  return `${gallons.toFixed(0)} gal`;
-}
-
 /**
- * Station detail panel showing stock level, recent consumption events,
- * recent refill events, and daily consumption rate.
+ * Station detail (shown in the Stations drawer): product, status, stock bar
+ * with gallons and percentage as text, daily rate, days left, threshold,
+ * record consumption / refill, and recent events.
  *
  * Validates: Requirements 6.6
  */
 export default function FuelStationDetail({
   detail,
-  onClose,
   onEventRecorded,
 }: FuelStationDetailProps) {
   const { station, recent_consumption_events, recent_refill_events } = detail;
   const [activeForm, setActiveForm] = useState<"consumption" | "refill" | null>(
     null,
   );
-  const stockPct =
-    getCapacityGallons(station) > 0
-      ? (getCurrentStockGallons(station) / getCapacityGallons(station)) * 100
-      : 0;
-  const statusCfg = STATUS_CONFIG[station.status] ?? STATUS_CONFIG.normal;
-  const barColor = STATUS_BAR_COLORS[station.status] ?? "bg-gray-400";
+  const capacity = getFuelStationCapacityGallons(station);
+  const stock = getFuelStationCurrentStockGallons(station);
+  const stockPct = capacity > 0 ? (stock / capacity) * 100 : 0;
+  const cfg = STATION_STATUS[station.status] ?? STATION_STATUS.normal;
+
+  const metric = (icon: React.ReactNode, value: string, label: string) => (
+    <div className="text-center">
+      <div className="flex items-center justify-center gap-1">
+        {icon}
+        <span className="text-base font-semibold tabular-nums text-text">
+          {value}
+        </span>
+      </div>
+      <div className="text-xs text-text-muted">{label}</div>
+    </div>
+  );
+
+  // null for a station with no consumption: shown as "—" (F5).
+  const daysLeft = displayDaysUntilEmpty(station);
 
   return (
-    <div
-      className="bg-white border border-gray-200 rounded-lg shadow-sm"
-      role="region"
+    <section
+      className="flex flex-col gap-4"
       aria-label={`Station detail: ${station.name}`}
     >
-      {/* Header */}
-      <div className="flex items-start justify-between p-4 border-b border-gray-100">
-        <div>
-          <h3 className="text-lg font-semibold text-primary">{station.name}</h3>
-          <div className="flex items-center gap-3 mt-1 text-sm text-gray-500">
-            <span className="flex items-center gap-1">
-              <Fuel className="w-3.5 h-3.5" aria-hidden="true" />
-              {FUEL_TYPE_LABELS[station.fuel_type] ?? station.fuel_type}
-            </span>
-            {station.location_name && (
-              <span className="flex items-center gap-1">
-                <MapPin className="w-3.5 h-3.5" aria-hidden="true" />
-                {station.location_name}
-              </span>
-            )}
-            <span
-              className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${statusCfg.bg} ${statusCfg.color}`}
-            >
-              {statusCfg.label}
-            </span>
-          </div>
+      <header className="flex flex-col gap-1.5">
+        <h3 className="text-base font-semibold text-text">{station.name}</h3>
+        <div className="flex flex-wrap items-center gap-2 text-sm text-text-muted">
+          <ProductChip code={station.fuel_type} variant="chip" />
+          <StatusBadge status={cfg.status} label={cfg.label} />
+          {station.location_name && <span>{station.location_name}</span>}
         </div>
-        {onClose && (
-          <button
-            type="button"
-            onClick={onClose}
-            className="p-1 rounded-md hover:bg-gray-100 text-gray-500 hover:text-gray-600 transition-colors"
-            aria-label="Close station detail"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        )}
-      </div>
+      </header>
 
-      {/* Stock overview */}
-      <div className="p-4 border-b border-gray-100">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm font-medium text-gray-700">Stock Level</span>
-          <span className="text-sm text-gray-500">
-            {formatGallons(getCurrentStockGallons(station))} /{" "}
-            {formatGallons(getCapacityGallons(station))}
+      <div>
+        <div className="mb-1.5 flex items-center justify-between text-sm">
+          <span className="font-medium text-text">Stock level</span>
+          <span className="tabular-nums text-text-muted">
+            {number(stock)} / {gallons(capacity)} · {pct(stockPct)}
           </span>
         </div>
         <div
-          className="w-full h-3 bg-gray-200 rounded-full overflow-hidden"
+          className="h-3 w-full overflow-hidden rounded-full bg-slate-200"
           role="progressbar"
           aria-valuenow={Math.round(stockPct)}
           aria-valuemin={0}
           aria-valuemax={100}
-          aria-label={`Stock level ${stockPct.toFixed(1)}%`}
+          aria-label={`Stock level ${pct(stockPct)}`}
         >
           <div
-            className={`h-full rounded-full transition-all ${barColor}`}
-            style={{ width: `${Math.min(stockPct, 100)}%` }}
-          />
-        </div>
-        <div className="text-right text-xs text-gray-500 mt-1">
-          {stockPct.toFixed(1)}%
-        </div>
-
-        {/* Key metrics */}
-        <div className="grid grid-cols-3 gap-4 mt-4">
-          <div className="text-center">
-            <div className="flex items-center justify-center gap-1">
-              <TrendingDown
-                className="w-3.5 h-3.5 text-gray-500"
-                aria-hidden="true"
-              />
-              <span className="text-lg font-semibold text-primary">
-                {station.daily_consumption_rate > 0
-                  ? formatGallons(
-                      getFuelStationDailyConsumptionGallons(station),
-                    )
-                  : "—"}
-              </span>
-            </div>
-            <div className="text-xs text-gray-500">Daily Rate</div>
-          </div>
-          <div className="text-center">
-            <div className="flex items-center justify-center gap-1">
-              <Clock className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
-              <span className="text-lg font-semibold text-primary">
-                {station.days_until_empty > 0
-                  ? `${station.days_until_empty.toFixed(1)}d`
-                  : "—"}
-              </span>
-            </div>
-            <div className="text-xs text-gray-500">Days Left</div>
-          </div>
-          <div className="text-center">
-            <div className="flex items-center justify-center gap-1">
-              <Droplets
-                className="w-3.5 h-3.5 text-gray-500"
-                aria-hidden="true"
-              />
-              <span className="text-lg font-semibold text-primary">
-                {station.alert_threshold_pct}%
-              </span>
-            </div>
-            <div className="text-xs text-gray-500">Alert Threshold</div>
-          </div>
-        </div>
-      </div>
-
-      {/* Action buttons */}
-      <div className="px-4 pb-2 pt-3 border-b border-gray-100 flex gap-2">
-        <button
-          type="button"
-          onClick={() =>
-            setActiveForm(activeForm === "consumption" ? null : "consumption")
-          }
-          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
-            activeForm === "consumption"
-              ? "bg-error text-white"
-              : "bg-error-light text-error-dark hover:bg-error-light"
-          }`}
-        >
-          <ArrowDown className="w-3.5 h-3.5" aria-hidden="true" />
-          Record Consumption
-        </button>
-        <button
-          type="button"
-          onClick={() =>
-            setActiveForm(activeForm === "refill" ? null : "refill")
-          }
-          className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors ${
-            activeForm === "refill"
-              ? "bg-success text-white"
-              : "bg-success-light text-success-dark hover:bg-success-light"
-          }`}
-        >
-          <ArrowUp className="w-3.5 h-3.5" aria-hidden="true" />
-          Record Refill
-        </button>
-      </div>
-
-      {/* Inline event form */}
-      {activeForm && (
-        <div className="px-4 py-3 border-b border-gray-100">
-          <FuelEventForm
-            station={station}
-            mode={activeForm}
-            onClose={() => setActiveForm(null)}
-            onSuccess={() => {
-              setActiveForm(null);
-              onEventRecorded?.();
+            className="h-full rounded-full"
+            style={{
+              width: `${Math.min(stockPct, 100)}%`,
+              backgroundColor: STATUS[cfg.status].dot,
             }}
           />
         </div>
+        <div className="mt-4 grid grid-cols-3 gap-4">
+          {metric(
+            <TrendingDown
+              aria-hidden="true"
+              className="h-3.5 w-3.5 text-slate-500"
+            />,
+            station.daily_consumption_rate > 0
+              ? gallons(getFuelStationDailyConsumptionGallons(station))
+              : "—",
+            "Daily rate",
+          )}
+          {metric(
+            <Clock aria-hidden="true" className="h-3.5 w-3.5 text-slate-500" />,
+            daysLeft != null ? `${number(daysLeft, { decimals: 1 })} d` : "—",
+            "Days left",
+          )}
+          {metric(
+            <Droplets
+              aria-hidden="true"
+              className="h-3.5 w-3.5 text-slate-500"
+            />,
+            pct(station.alert_threshold_pct),
+            "Alert threshold",
+          )}
+        </div>
+      </div>
+
+      <div className="flex gap-2">
+        <button
+          type="button"
+          aria-pressed={activeForm === "consumption"}
+          onClick={() =>
+            setActiveForm(activeForm === "consumption" ? null : "consumption")
+          }
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold ${
+            activeForm === "consumption"
+              ? "border-orange-700 bg-orange-700 text-white"
+              : "border-orange-300 bg-orange-50 text-orange-800 hover:bg-orange-100"
+          }`}
+        >
+          <ArrowDown className="h-3.5 w-3.5" aria-hidden="true" />
+          Record consumption
+        </button>
+        <button
+          type="button"
+          aria-pressed={activeForm === "refill"}
+          onClick={() =>
+            setActiveForm(activeForm === "refill" ? null : "refill")
+          }
+          className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold ${
+            activeForm === "refill"
+              ? "border-brand-700 bg-brand-700 text-white"
+              : "border-brand-300 bg-brand-50 text-brand-800 hover:bg-brand-100"
+          }`}
+        >
+          <ArrowUp className="h-3.5 w-3.5" aria-hidden="true" />
+          Record refill
+        </button>
+      </div>
+
+      {activeForm && (
+        <FuelEventForm
+          station={station}
+          mode={activeForm}
+          onClose={() => setActiveForm(null)}
+          onSuccess={() => {
+            setActiveForm(null);
+            onEventRecorded?.();
+          }}
+        />
       )}
 
-      {/* Recent events */}
-      <div className="p-4">
-        <h4 className="text-sm font-medium text-gray-700 mb-3">
-          Recent Events
-        </h4>
-
+      <div>
+        <h4 className="mb-2 text-sm font-semibold text-text">Recent events</h4>
         {recent_consumption_events.length === 0 &&
         recent_refill_events.length === 0 ? (
-          <p className="text-sm text-gray-500 text-center py-4">
+          <p className="py-4 text-center text-sm text-text-muted">
             No recent events
           </p>
         ) : (
-          <div className="space-y-2 max-h-64 overflow-y-auto">
-            {/* Merge and sort events by type for display */}
+          <ul className="flex flex-col gap-1.5">
             {recent_consumption_events.map((evt, i) => (
-              <div
+              <li
                 key={`consumption-${evt.asset_id}-${i}`}
-                className="flex items-center gap-3 p-2 rounded-lg bg-error-light"
+                className="flex items-center gap-3 rounded-lg border border-orange-300 bg-orange-50 p-2"
               >
                 <ArrowDown
-                  className="w-4 h-4 text-error flex-shrink-0"
+                  className="h-4 w-4 shrink-0 text-orange-700"
                   aria-hidden="true"
                 />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-gray-700">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-text">
                     <span className="font-medium">Consumption</span>
-                    {" — "}
-                    {formatGallons(getEventQuantityGallons(evt))} to{" "}
-                    {evt.asset_id}
+                    {" · "}
+                    {gallons(getEventQuantityGallons(evt))} to {evt.asset_id}
                   </div>
-                  <div className="text-xs text-gray-500">
+                  <div className="text-xs text-text-muted">
                     Operator: {evt.operator_id}
                     {evt.odometer_reading != null &&
-                      ` · Odometer: ${evt.odometer_reading} km`}
+                      ` · Odometer: ${number(evt.odometer_reading)} km`}
                   </div>
                 </div>
-              </div>
+              </li>
             ))}
             {recent_refill_events.map((evt, i) => (
-              <div
+              <li
                 key={`refill-${evt.supplier}-${i}`}
-                className="flex items-center gap-3 p-2 rounded-lg bg-success-light"
+                className="flex items-center gap-3 rounded-lg border border-brand-300 bg-brand-50 p-2"
               >
                 <ArrowUp
-                  className="w-4 h-4 text-success flex-shrink-0"
+                  className="h-4 w-4 shrink-0 text-brand-700"
                   aria-hidden="true"
                 />
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-gray-700">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm text-text">
                     <span className="font-medium">Refill</span>
-                    {" — "}
-                    {formatGallons(getEventQuantityGallons(evt))} from{" "}
-                    {evt.supplier}
+                    {" · "}
+                    {gallons(getEventQuantityGallons(evt))} from {evt.supplier}
                   </div>
-                  <div className="text-xs text-gray-500">
+                  <div className="text-xs text-text-muted">
                     Operator: {evt.operator_id}
                     {evt.delivery_reference &&
                       ` · Ref: ${evt.delivery_reference}`}
                   </div>
                 </div>
-              </div>
+              </li>
             ))}
-          </div>
+          </ul>
         )}
       </div>
-    </div>
+    </section>
   );
 }

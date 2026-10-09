@@ -2,7 +2,8 @@
 Fleet Operations Specialist Agent.
 
 Handles fleet asset management, tracking, locations, and fleet mutations.
-Wraps a Strands Agent instance with fleet-specific system prompt and tool set.
+Runs a fresh Strands Agent per request (see ``_base.SpecialistAgent``) with a
+fleet-specific system prompt and tool set.
 
 Validates:
 - Requirement 7.1: Fleet_Agent with tools limited to fleet search, summary, lookup,
@@ -13,22 +14,23 @@ Validates:
 """
 
 import logging
-from strands import Agent
-from strands.models.litellm import LiteLLMModel
 
+from Agents.specialists._base import SpecialistAgent
+from Agents.tools.search_tools import FLEET_ASSET_STATUSES
 from Agents.tools import (
     search_fleet_data,
     get_fleet_summary,
     find_truck_by_id,
     get_all_locations,
     assign_asset_to_job,
+    search_inventory,
+    get_inventory_summary,
 )
-from Agents.tools._tenant_context import require_tenant_id, set_current_tenant
 
 logger = logging.getLogger(__name__)
 
 
-class FleetAgent:
+class FleetAgent(SpecialistAgent):
     """Specialist agent for fleet operations.
 
     Manages fleet assets, tracks locations, and handles fleet mutations
@@ -40,6 +42,8 @@ class FleetAgent:
         get_fleet_summary,
         find_truck_by_id,
         get_all_locations,
+        search_inventory,
+        get_inventory_summary,
         # Fleet mutation tools
         assign_asset_to_job,
     ]
@@ -54,10 +58,13 @@ class FleetAgent:
         "- equipment: crane, forklift\n"
         "- container: cargo_container, ISO_tank\n\n"
         "**Your Tools:**\n"
-        "- `search_fleet_data(query, asset_type)` - Search fleet assets by query and optional type filter\n"
+        "- `search_fleet_data(query, asset_type, status)` - Search fleet assets by query and "
+        f"optional type and status filter (status: {', '.join(FLEET_ASSET_STATUSES)})\n"
         "- `get_fleet_summary()` - Get current fleet status overview with per-type breakdowns\n"
         "- `find_truck_by_id(truck_id)` - Find any asset by ID or plate number\n"
         "- `get_all_locations()` - Get all depots, warehouses, and stations\n"
+        "- `search_inventory(query)` - Search inventory items (parts, supplies) by name or stock status\n"
+        "- `get_inventory_summary()` - Get all inventory items organized by in-stock/low-stock/out-of-stock\n"
         "- `assign_asset_to_job(job_id, asset_id)` - Assign an asset to a job (mutation)\n\n"
         "**Guidelines:**\n"
         "- Always announce what you are searching for before using tools\n"
@@ -65,43 +72,3 @@ class FleetAgent:
         "- For mutations, explain the impact before executing\n"
         "- If you cannot fulfill a request with your tools, say so clearly"
     )
-
-    def __init__(self, model: LiteLLMModel):
-        """Initialize the Fleet Agent with a shared model.
-
-        Args:
-            model: The LiteLLM model instance (shared across specialists).
-        """
-        self.agent = Agent(
-            model=model,
-            system_prompt=self.SYSTEM_PROMPT,
-            tools=self.TOOLS,
-        )
-        logger.info("✅ FleetAgent initialized with %d tools", len(self.TOOLS))
-
-    async def handle(self, task: str, context: dict = None) -> str:
-        """Process a fleet-related subtask.
-
-        Binds the tenant id from ``context`` to the tool ContextVar before
-        dispatching the Strands agent so every ES-reading tool runs
-        tenant-scoped.
-
-        Args:
-            task: The natural language task to process.
-            context: Optional context dict (e.g. tenant_id, session_id).
-
-        Returns:
-            The agent's response as a string.
-        """
-        prompt = task
-        tenant_id = require_tenant_id((context or {}).get("tenant_id"))
-        if context:
-            ctx_parts = []
-            if tenant_id:
-                ctx_parts.append(f"Tenant: {tenant_id}")
-            if ctx_parts:
-                prompt = f"[Context: {', '.join(ctx_parts)}]\n{task}"
-
-        with set_current_tenant(tenant_id):
-            result = await self.agent.invoke_async(prompt)
-        return str(result)

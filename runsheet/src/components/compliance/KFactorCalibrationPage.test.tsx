@@ -111,12 +111,14 @@ describe("KFactorCalibrationPage", () => {
     // entry list rather than read from a backend totals object. Note
     // "Review Needed" / "Insufficient Data" also appear as table status
     // badges, so allow multiple matches.
+    // The counts now sit inside the status filter chips (R4.4).
     expect(
-      (await screen.findAllByText("Review Needed")).length,
-    ).toBeGreaterThan(0);
-    expect(screen.getAllByText("Insufficient Data").length).toBeGreaterThan(0);
-    // Two summary cards each show a "1" count.
-    expect(screen.getAllByText("1").length).toBeGreaterThanOrEqual(2);
+      await screen.findByRole("button", { name: "Review Needed 1" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Insufficient Data 1" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Insufficient Data").length).toBeGreaterThan(1);
   });
 
   it("only offers Approve for review-needed tanks with a suggestion", async () => {

@@ -28,15 +28,37 @@ import asyncio
 import logging
 
 from bootstrap.container import ServiceContainer
+from persistence.leader_election import run_periodic
 
 logger = logging.getLogger(__name__)
 
 # Module-level references so ``shutdown`` can cancel cron tasks.
 _price_protection_expiry_task = None
 _rack_price_refresh_task = None
+_dunning_evaluation_task = None
 _driver_expiry_cron_agent = None
 _asset_cert_expiry_cron_agent = None
 _meter_calibration_cron_agent = None
+_dyed_diesel_cert_expiry_cron_agent = None
+
+
+def compliance_cron_agents() -> list:
+    """The compliance cron agents this module built (skipping any that failed).
+
+    ``compliance`` boots before ``agents``, so these crons are constructed
+    with ``activity_log_service=None``; ``bootstrap.agents`` adopts them once
+    the activity log exists (late-binds it and lists them in agent health).
+    """
+    return [
+        agent
+        for agent in (
+            _driver_expiry_cron_agent,
+            _asset_cert_expiry_cron_agent,
+            _meter_calibration_cron_agent,
+            _dyed_diesel_cert_expiry_cron_agent,
+        )
+        if agent is not None
+    ]
 
 
 async def initialize(app, container: ServiceContainer) -> None:
@@ -54,9 +76,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     so that endpoint modules can resolve the dependency through the
     explicit ``ServiceContainer`` (see ``bootstrap/container.py``).
     """
-    from compliance.services.compliance_es_mappings import (
-        setup_compliance_indices,
-    )
 
     es_service = container.es_service
 
@@ -65,12 +84,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     # failures are logged but do not abort the bootstrap chain so
     # remaining modules still initialize (fail-open, per
     # ``bootstrap/__init__.py``).
-    try:
-        logger.info("Setting up compliance indices...")
-        setup_compliance_indices(es_service)
-        logger.info("Compliance indices ready")
-    except Exception as exc:
-        logger.warning("Failed to set up compliance indices: %s", exc)
 
     # ── Tax Engine REST endpoints (Task 3.9) ───────────────────────
     # Wire the application-scoped ES service into
@@ -160,32 +173,24 @@ async def initialize(app, container: ServiceContainer) -> None:
             PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS,
         )
 
-        async def _periodic_price_protection_expiry() -> None:
-            """Background task that transitions terminal contracts daily."""
-            try:
-                while True:
-                    await asyncio.sleep(
-                        PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS
-                    )
-                    try:
-                        transitioned = await run_price_protection_expiry_cycle(
-                            es_service=es_service,
-                        )
-                        if transitioned:
-                            logger.info(
-                                "Price protection expiry job: %d "
-                                "contract(s) transitioned",
-                                transitioned,
-                            )
-                    except Exception as exc:
-                        logger.error(
-                            "Price protection expiry job failed: %s", exc
-                        )
-            except asyncio.CancelledError:
-                logger.info("Price protection expiry task cancelled")
+        async def _price_protection_expiry_cycle() -> None:
+            """One pass transitioning terminal contracts."""
+            transitioned = await run_price_protection_expiry_cycle(
+                es_service=es_service,
+            )
+            if transitioned:
+                logger.info(
+                    "Price protection expiry job: %d "
+                    "contract(s) transitioned",
+                    transitioned,
+                )
 
         _price_protection_expiry_task = asyncio.create_task(
-            _periodic_price_protection_expiry()
+            run_periodic(
+                "compliance.price-protection-expiry",
+                PRICE_PROTECTION_EXPIRY_INTERVAL_SECONDS,
+                _price_protection_expiry_cycle,
+            )
         )
         logger.info(
             "Price protection expiry job started (interval: %ds)",
@@ -208,28 +213,22 @@ async def initialize(app, container: ServiceContainer) -> None:
             RACK_PRICE_REFRESH_INTERVAL_SECONDS,
         )
 
-        async def _periodic_rack_price_refresh() -> None:
-            """Background task that refreshes OPIS rack prices daily."""
-            try:
-                while True:
-                    await asyncio.sleep(RACK_PRICE_REFRESH_INTERVAL_SECONDS)
-                    try:
-                        refreshed = await refresh_rack_prices()
-                        if refreshed:
-                            logger.info(
-                                "Rack price refresh job: %d price(s) "
-                                "refreshed",
-                                refreshed,
-                            )
-                    except Exception as exc:
-                        logger.error(
-                            "Rack price refresh job failed: %s", exc
-                        )
-            except asyncio.CancelledError:
-                logger.info("Rack price refresh task cancelled")
+        async def _rack_price_refresh_cycle() -> None:
+            """One pass refreshing OPIS rack prices."""
+            refreshed = await refresh_rack_prices()
+            if refreshed:
+                logger.info(
+                    "Rack price refresh job: %d price(s) "
+                    "refreshed",
+                    refreshed,
+                )
 
         _rack_price_refresh_task = asyncio.create_task(
-            _periodic_rack_price_refresh()
+            run_periodic(
+                "compliance.rack-price-refresh",
+                RACK_PRICE_REFRESH_INTERVAL_SECONDS,
+                _rack_price_refresh_cycle,
+            )
         )
         logger.info(
             "Rack price refresh job started (interval: %ds)",
@@ -261,12 +260,14 @@ async def initialize(app, container: ServiceContainer) -> None:
     # before tax computation. Backwards compatible — if the factory
     # is absent, existing line item prices are used as-is.
     try:
-        from commerce.services.sales_pricing_engine import SalesPricingEngine
+        from commerce.services.sales_pricing_engine import (
+            build_sales_pricing_engine,
+        )
 
+        # Same builder as POST /pricing/resolve, so active price-protection
+        # contracts price invoice lines too (OI-14).
         def _sales_pricing_engine_factory(tenant_id: str):
-            return SalesPricingEngine(
-                es_service=es_service, tenant_id=tenant_id
-            )
+            return build_sales_pricing_engine(es_service, tenant_id)
 
         if container.has("commerce_invoice_service"):
             inv_svc = container.commerce_invoice_service
@@ -533,6 +534,28 @@ async def initialize(app, container: ServiceContainer) -> None:
         container.meter_audit_service = meter_service
         configure_meter_api(meter_service=meter_service)
         logger.info("Meter Audit API configured")
+
+        # Task 10.6 / Req 8.2, 8.5: wire the MeterAuditService into the
+        # InvoiceService so generate_from_order() resolves the delivery's
+        # meter_number to a registered meter, flags the invoice
+        # meter.calibration_expired when the meter's calibration has
+        # lapsed, and links the meter ticket to the invoice as an
+        # immutable audit record. This was previously implemented and
+        # unit-tested but never triggered from any production code path.
+        if container.has("commerce_invoice_service"):
+            container.commerce_invoice_service.set_meter_audit_service(
+                meter_service
+            )
+            logger.info(
+                "MeterAuditService wired into InvoiceService (task 10.6)"
+            )
+        else:
+            logger.warning(
+                "InvoiceService not present in container — "
+                "MeterAuditService not injected (task 10.6). "
+                "MeterAuditService is available on "
+                "container.meter_audit_service for deferred wiring."
+            )
     except Exception as exc:
         logger.warning("MeterAuditService wiring failed: %s", exc)
 
@@ -754,11 +777,12 @@ async def initialize(app, container: ServiceContainer) -> None:
                 "(task 9.8)"
             )
         else:
-            logger.warning(
-                "CompartmentLoadingAgent not present in container — "
-                "DyedDieselEnforcer not injected (task 9.8). "
-                "DyedDieselEnforcer is available on "
-                "container.dyed_diesel_enforcer for deferred wiring."
+            # Normal at boot: compliance runs before agents, and
+            # bootstrap/agents.py wires the enforcer when it builds the
+            # agent (OI-02).
+            logger.debug(
+                "CompartmentLoadingAgent not built yet; DyedDieselEnforcer "
+                "wiring deferred to bootstrap/agents.py (task 9.8)."
             )
 
         # Task 9.9 / Req 6.5, 6.7: Wire the DyedDieselEnforcer into
@@ -783,6 +807,71 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning(
             "DyedDieselEnforcer intake hook wiring failed (task 9.7): %s",
             exc,
+        )
+
+    # ── DyedDieselCertExpiryCronAgent (Req 6.6) ────────────────────────
+    # Daily sweep calling DyedDieselEnforcer.check_expiring_certificates()
+    # for every tenant so customers get advance warning before an IRS
+    # 637M certificate lapses and validate_order() starts blocking their
+    # dyed-diesel orders. The enforcer's validation methods were wired
+    # above (intake hook, CompartmentLoadingAgent, InvoiceService), but
+    # this proactive-alert sweep had no scheduler entry — nothing ever
+    # called check_expiring_certificates() outside its own unit tests.
+    global _dyed_diesel_cert_expiry_cron_agent
+    try:
+        from Agents.autonomous.dyed_diesel_cert_expiry_cron_agent import (
+            DyedDieselCertExpiryCronAgent,
+        )
+        from bootstrap.agent_scheduler import RestartPolicy
+
+        activity_log_service = (
+            container.get("activity_log_service")
+            if container.has("activity_log_service")
+            else None
+        )
+        ws_manager = (
+            container.get("ws_manager")
+            if container.has("ws_manager")
+            else None
+        )
+        confirmation_protocol = (
+            container.get("confirmation_protocol")
+            if container.has("confirmation_protocol")
+            else None
+        )
+        signal_bus_for_cron = (
+            container.get("signal_bus")
+            if container.has("signal_bus")
+            else None
+        )
+
+        _dyed_diesel_cert_expiry_cron_agent = DyedDieselCertExpiryCronAgent(
+            es_service=es_service,
+            activity_log_service=activity_log_service,
+            ws_manager=ws_manager,
+            confirmation_protocol=confirmation_protocol,
+            signal_bus=signal_bus_for_cron,
+        )
+
+        if container.has("agent_scheduler"):
+            scheduler = container.agent_scheduler
+            scheduler.register(
+                _dyed_diesel_cert_expiry_cron_agent, RestartPolicy.ON_FAILURE
+            )
+            await scheduler.start_all()
+            logger.info(
+                "DyedDieselCertExpiryCronAgent registered with "
+                "AgentScheduler (daily, ON_FAILURE restart)"
+            )
+        else:
+            await _dyed_diesel_cert_expiry_cron_agent.start()
+            logger.info(
+                "DyedDieselCertExpiryCronAgent started directly "
+                "(AgentScheduler unavailable)"
+            )
+    except Exception as exc:
+        logger.warning(
+            "DyedDieselCertExpiryCronAgent wiring failed: %s", exc
         )
 
     # ── IFTA Reporter → GeotabConnector wiring (Task 12.3 / Req 7.1) ──
@@ -861,6 +950,17 @@ async def initialize(app, container: ServiceContainer) -> None:
             "IFTA Reporter API wiring failed (task 12.10): %s", exc
         )
 
+    # ── VCF calculator (Req 10.4) ─────────────────────────────────
+    # Registered before the BOL block so the ingestion service's VCF
+    # cross-check runs. Nothing registered it before, so the check was
+    # silently skipped on every BOL (finding C4).
+    try:
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        container.vcf_calculator = VCFCalculator()
+        logger.info("VCFCalculator registered on container")
+    except Exception as exc:
+        logger.warning("VCFCalculator registration failed: %s", exc)
     # ── Terminal BOL Ingestion REST endpoints (Task 11.11) ────────
     # Wire the TerminalBOLIngestionService and ES service into
     # ``compliance.api.terminal_bol_endpoints`` so the POST (EDI),
@@ -876,7 +976,7 @@ async def initialize(app, container: ServiceContainer) -> None:
             TerminalBOLIngestionService,
         )
         from compliance.services.terminal_bol_edi_parser import (
-            EDIParserRegistry,
+            create_default_registry,
         )
 
         # Resolve optional dependencies for the ingestion service
@@ -896,7 +996,9 @@ async def initialize(app, container: ServiceContainer) -> None:
             else None
         )
 
-        edi_parser_registry = EDIParserRegistry()
+        # The standard X12 856 + pipe-delimited strategies. An empty registry
+        # rejects every payload as unrecognised (finding C1).
+        edi_parser_registry = create_default_registry()
         bol_ingestion_service = TerminalBOLIngestionService(
             es_service=es_service,
             edi_parser_registry=edi_parser_registry,
@@ -1059,6 +1161,80 @@ async def initialize(app, container: ServiceContainer) -> None:
             exc,
         )
 
+    # ── DunningService wiring + scheduled evaluation job (Req 7.3–7.5) ──
+    # Construct the DunningService, inject it into the already-wired
+    # InvoiceService so paid/void transitions cancel pending dunning
+    # notifications, and start a daily background job that scans overdue
+    # invoices and enqueues threshold-crossing notifications. Both the
+    # feature-flag gate (commerce.dunning_enabled) and duplicate
+    # prevention live inside DunningService itself.
+    global _dunning_evaluation_task
+    try:
+        from commerce.services.dunning_job import (
+            run_dunning_evaluation_cycle,
+            DUNNING_EVALUATION_INTERVAL_SECONDS,
+        )
+        from commerce.services.dunning_service import DunningService
+
+        notif_svc_for_dunning = (
+            container.get("notification_service")
+            if container.has("notification_service")
+            else None
+        )
+        feature_flags_for_dunning = (
+            container.get("ops_feature_flags")
+            if container.has("ops_feature_flags")
+            else None
+        )
+
+        dunning_service = DunningService(
+            es_service=es_service,
+            notification_service=notif_svc_for_dunning,
+            feature_flag_service=feature_flags_for_dunning,
+        )
+        container.dunning_service = dunning_service
+
+        if container.has("commerce_invoice_service"):
+            container.commerce_invoice_service.set_dunning_service(
+                dunning_service
+            )
+            logger.info(
+                "DunningService wired into InvoiceService for "
+                "paid/void notification cancellation"
+            )
+        else:
+            logger.warning(
+                "DunningService constructed but commerce_invoice_service "
+                "not available in container — paid/void cancellation "
+                "hook not wired"
+            )
+
+        async def _dunning_evaluation_cycle() -> None:
+            """One pass evaluating overdue invoices for dunning thresholds."""
+            enqueued = await run_dunning_evaluation_cycle(
+                es_service=es_service,
+                dunning_service=dunning_service,
+            )
+            if enqueued:
+                logger.info(
+                    "Dunning evaluation job: %d notification(s) enqueued",
+                    enqueued,
+                )
+
+        _dunning_evaluation_task = asyncio.create_task(
+            run_periodic(
+                "commerce.dunning-evaluation",
+                DUNNING_EVALUATION_INTERVAL_SECONDS,
+                _dunning_evaluation_cycle,
+            )
+        )
+        logger.info(
+            "Dunning evaluation job started (interval: %ds)",
+            DUNNING_EVALUATION_INTERVAL_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("DunningService wiring failed: %s", exc)
+
     # ── DeliveryCompletedSubscriber → order.delivered (Task 14.6 / Req 12.7) ──
     # Subscribe the DeliveryCompletedSubscriber to the OrderService's
     # order.delivered event so that a ``delivery_completed`` notification
@@ -1201,9 +1377,11 @@ async def shutdown(app, container: ServiceContainer) -> None:
     """
     global _price_protection_expiry_task
     global _rack_price_refresh_task
+    global _dunning_evaluation_task
     global _driver_expiry_cron_agent
     global _asset_cert_expiry_cron_agent
     global _meter_calibration_cron_agent
+    global _dyed_diesel_cert_expiry_cron_agent
 
     if (
         _price_protection_expiry_task is not None
@@ -1226,6 +1404,17 @@ async def shutdown(app, container: ServiceContainer) -> None:
         except asyncio.CancelledError:
             pass
         logger.info("Rack price refresh task stopped")
+
+    if (
+        _dunning_evaluation_task is not None
+        and not _dunning_evaluation_task.done()
+    ):
+        _dunning_evaluation_task.cancel()
+        try:
+            await _dunning_evaluation_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Dunning evaluation task stopped")
 
     # Stop the DriverExpiryCronAgent (Task 6.10). If it was registered
     # with the AgentScheduler, the scheduler handles its lifecycle;
@@ -1253,5 +1442,14 @@ async def shutdown(app, container: ServiceContainer) -> None:
             await _meter_calibration_cron_agent.stop()
             logger.info("MeterCalibrationCronAgent stopped (direct)")
         _meter_calibration_cron_agent = None
+
+    # Stop the DyedDieselCertExpiryCronAgent. If it was registered with
+    # the AgentScheduler, the scheduler handles its lifecycle; this is a
+    # fallback for the direct-start path.
+    if _dyed_diesel_cert_expiry_cron_agent is not None:
+        if not container.has("agent_scheduler"):
+            await _dyed_diesel_cert_expiry_cron_agent.stop()
+            logger.info("DyedDieselCertExpiryCronAgent stopped (direct)")
+        _dyed_diesel_cert_expiry_cron_agent = None
 
     logger.info("Compliance domain shut down")

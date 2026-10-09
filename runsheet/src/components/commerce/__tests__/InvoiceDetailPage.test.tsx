@@ -53,6 +53,7 @@ jest.mock("../../../services/commerceApi", () => ({
   finalizeInvoice: jest.fn(),
 }));
 
+import { ApiError } from "../../../services/api";
 import {
   finalizeInvoice,
   getInvoice,
@@ -188,6 +189,77 @@ describe("InvoiceDetailPage", () => {
     });
   });
 
+  it("shows a not-found state with a back link on 404", async () => {
+    const onBack = jest.fn();
+    mockGetInvoice.mockRejectedValue(
+      new ApiError("Invoice not found", 404, "invoice_not_found"),
+    );
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_missing" onBack={onBack} />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Invoice not found" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/invoice "inv_missing"/)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Back to Invoices/ }));
+    expect(onBack).toHaveBeenCalled();
+    expect(screen.getByRole("link", { name: "Go to Billing" })).toHaveAttribute(
+      "href",
+      "/dashboard/billing",
+    );
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("shows the module-disabled state for INVOICING_DISABLED", async () => {
+    mockGetInvoice.mockRejectedValue(
+      new ApiError(
+        "Commerce invoicing module is not enabled for this tenant",
+        404,
+        "INVOICING_DISABLED",
+      ),
+    );
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Invoicing isn't enabled for your account",
+      }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
+  it("shows the error banner with a working retry on 500", async () => {
+    mockGetInvoice.mockRejectedValue(new ApiError("boom", 500));
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r",
+    } as any);
+
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("boom");
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(
+      await screen.findByText("Invoice INV-2024-0001"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).toBeNull();
+  });
+
   it("opens void dialog and submits void request", async () => {
     const voidedInvoice = invoiceFixture({
       status: "void",
@@ -220,7 +292,7 @@ describe("InvoiceDetailPage", () => {
     });
 
     // Fill reason
-    const reasonInput = screen.getByLabelText("Reason");
+    const reasonInput = screen.getByLabelText(/^Reason/);
     fireEvent.change(reasonInput, { target: { value: "Duplicate invoice" } });
 
     // Submit
@@ -283,7 +355,7 @@ describe("InvoiceDetailPage", () => {
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
     await waitFor(() => {
-      expect(screen.getByText("dead_letter")).toBeInTheDocument();
+      expect(screen.getByText("Failed")).toBeInTheDocument();
     });
 
     fireEvent.click(screen.getByRole("button", { name: /Retry Push/i }));
@@ -320,7 +392,7 @@ describe("InvoiceDetailPage", () => {
 
     await waitFor(() => {
       expect(mockFinalizeInvoice).toHaveBeenCalledWith("inv_001");
-      expect(screen.getByText("open")).toBeInTheDocument();
+      expect(screen.getByText("Open")).toBeInTheDocument();
     });
   });
 
@@ -346,7 +418,7 @@ describe("InvoiceDetailPage", () => {
 
     render(<InvoiceDetailPage invoiceId="inv_001" />);
 
-    expect(await screen.findByText("Delivery Result")).toBeInTheDocument();
+    expect(await screen.findByText("Delivery result")).toBeInTheDocument();
     expect(screen.getByText("975.25 gal")).toBeInTheDocument();
     expect(screen.getByText("Alex Receiver")).toBeInTheDocument();
     expect(screen.getByText("pod-42")).toBeInTheDocument();
@@ -431,7 +503,7 @@ describe("InvoiceDetailPage", () => {
     const customerLink = screen.getByRole("link", { name: /cust_001/ });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/cust_001",
+      "/dashboard/customers/cust_001",
     );
   });
 
@@ -452,7 +524,7 @@ describe("InvoiceDetailPage", () => {
     });
 
     const orderLink = screen.getByRole("link", { name: /ord_777/ });
-    expect(orderLink).toHaveAttribute("href", "/orders/ord_777");
+    expect(orderLink).toHaveAttribute("href", "/dashboard/orders/ord_777");
   });
 
   it("navigates to the account in-hub via the onViewAccount callback", async () => {
@@ -476,5 +548,46 @@ describe("InvoiceDetailPage", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /acc_001/ }));
     expect(onViewAccount).toHaveBeenCalledWith("acc_001");
+  });
+});
+
+describe("InvoiceDetailPage — void FormDialog (task 3.4)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetInvoice.mockResolvedValue({
+      data: invoiceFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetInvoiceEvents.mockResolvedValue({
+      data: [],
+      request_id: "r2",
+    } as any);
+  });
+
+  it("requires a reason, shows API errors inline, and closes with the void state", async () => {
+    mockVoidInvoice
+      .mockRejectedValueOnce(new ApiError("Invoice is locked", 409))
+      .mockResolvedValueOnce({
+        data: invoiceFixture({ status: "void" }),
+        request_id: "r3",
+      } as any);
+    render(<InvoiceDetailPage invoiceId="inv_001" />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /Void invoice/i }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Confirm void" }));
+    expect(await screen.findByText("Enter a reason.")).toBeInTheDocument();
+    expect(mockVoidInvoice).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText(/^Reason/), {
+      target: { value: "Duplicate" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm void" }));
+    expect(await screen.findByText("Invoice is locked")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm void" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(screen.getByText("Void")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Void invoice/i }),
+    ).not.toBeInTheDocument();
   });
 });

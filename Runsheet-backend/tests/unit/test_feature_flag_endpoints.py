@@ -176,6 +176,8 @@ class TestRollbackFeatureFlag:
 class TestServiceNotConfigured:
     def test_enable_503_when_no_service(self):
         test_app = FastAPI()
+        from errors.handlers import register_exception_handlers
+        register_exception_handlers(test_app)
         configure_ops_api(
             ops_es_service=MagicMock(spec=OpsElasticsearchService),
             feature_flag_service=None,

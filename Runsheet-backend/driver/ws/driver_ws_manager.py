@@ -443,12 +443,18 @@ class DriverWSManager(BaseWSManager):
         if location:
             doc["last_location"] = location
 
+        from persistence.document_store import is_document_not_found
+
+        doc_id = presence_doc_id(tenant_id, driver_id)
         try:
-            await self._es.index_document(
-                DRIVER_PRESENCE_INDEX,
-                presence_doc_id(tenant_id, driver_id),
-                doc,
-            )
+            # Merge so an offline transition keeps last_location and
+            # connected_at; recreate only when no record exists (OI-31).
+            try:
+                await self._es.update_document(DRIVER_PRESENCE_INDEX, doc_id, doc)
+            except Exception as exc:
+                if not is_document_not_found(exc):
+                    raise
+                await self._es.index_document(DRIVER_PRESENCE_INDEX, doc_id, doc)
             logger.debug(
                 "Updated presence for driver %s: status=%s",
                 driver_id,
@@ -567,6 +573,8 @@ class DriverWSManager(BaseWSManager):
         doc_id = presence_doc_id(tenant_id, driver_id)
         now = datetime.now(timezone.utc).isoformat()
 
+        from persistence.document_store import is_document_not_found
+
         try:
             await self._es.update_document(
                 DRIVER_PRESENCE_INDEX,
@@ -574,6 +582,15 @@ class DriverWSManager(BaseWSManager):
                 {"last_location": location, "last_seen": now},
             )
         except Exception as exc:
+            if not is_document_not_found(exc):
+                # Recreating on any error would replace a live record with a
+                # partial one (OI-31); only a missing record is recreated.
+                logger.error(
+                    "Failed to update location for driver %s: %s",
+                    driver_id,
+                    exc,
+                )
+                return
             logger.warning(
                 "Presence location merge failed for driver %s; recreating "
                 "the record: %s",
@@ -611,17 +628,22 @@ class DriverWSManager(BaseWSManager):
     # Broadcasting to all drivers
     # ------------------------------------------------------------------
 
-    async def broadcast_to_all_drivers(self, event: dict) -> int:
+    async def broadcast_to_all_drivers(self, event: dict, *, tenant_id: str) -> int:
         """
-        Broadcast an event to all connected drivers.
+        Broadcast an event to every connected driver of one tenant.
 
-        Wraps the event in a standard message envelope with a timestamp.
+        Wraps the event in a standard message envelope with a timestamp. A
+        blank ``tenant_id`` reaches nobody (W4): this used to send to every
+        driver in every tenant.
 
         Returns the number of drivers that successfully received the message.
         """
+        if not tenant_id:
+            logger.warning("broadcast_to_all_drivers without tenant_id dropped")
+            return 0
         if "timestamp" not in event:
             event["timestamp"] = datetime.now(timezone.utc).isoformat()
-        return await self.broadcast(event)
+        return await self.broadcast_to_tenant(tenant_id, event)
 
 
 # ---------------------------------------------------------------------------

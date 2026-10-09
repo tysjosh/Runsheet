@@ -8,6 +8,7 @@ import type {
   SchedulingCargoItem,
 } from "../types/api";
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import {
   buildQueryString,
   fetchWithTimeout,
@@ -184,11 +185,7 @@ async function schedulingRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();
@@ -215,7 +212,21 @@ export async function getJobs(
   return schedulingRequest<PaginatedResponse<Job>>(`/scheduling/jobs${qs}`);
 }
 
-/** GET /scheduling/jobs/:id — single job with event history */
+/** Wire shape of GET /scheduling/jobs/:id: ``{ job, events, links? }``. */
+interface JobDetailEnvelope {
+  job: Job;
+  events?: JobEvent[];
+  links?: JobLinks;
+}
+
+/**
+ * GET /scheduling/jobs/:id — single job with event history.
+ *
+ * The backend nests the job (``data: { job, events, links? }``); this getter
+ * flattens it to ``Job & { events, links }`` so every caller can read
+ * ``data.status`` etc. directly. A response that is already flat is passed
+ * through unchanged.
+ */
 export async function getJob(
   jobId: string,
   options?: { expand?: JobExpand[] },
@@ -223,9 +234,23 @@ export async function getJob(
   const expand = options?.expand?.length
     ? `?expand=${options.expand.join(",")}`
     : "";
-  return schedulingRequest<
-    SingleResponse<Job & { events?: JobEvent[]; links?: JobLinks }>
+  const res = await schedulingRequest<
+    SingleResponse<
+      JobDetailEnvelope | (Job & { events?: JobEvent[]; links?: JobLinks })
+    >
   >(`/scheduling/jobs/${encodeURIComponent(jobId)}${expand}`);
+  const data = res.data;
+  if (data && "job" in data && data.job) {
+    return {
+      ...res,
+      data: {
+        ...data.job,
+        events: data.events ?? [],
+        ...(data.links ? { links: data.links } : {}),
+      },
+    };
+  }
+  return res as SingleResponse<Job & { events?: JobEvent[]; links?: JobLinks }>;
 }
 
 /** GET /scheduling/jobs/active — active jobs (scheduled, assigned, in_progress) */
@@ -246,6 +271,51 @@ export async function createJob(
     method: "POST",
     body: JSON.stringify(data),
   });
+}
+
+// ─── Driver Activity (G1) ────────────────────────────────────────────────────
+
+export type DriverActivityType = "message" | "exception";
+
+/**
+ * One row of ``GET /scheduling/jobs/:id/driver-activity``: a driver message
+ * (``text`` is the body) or a driver exception (``text`` is the note).
+ */
+export interface DriverActivityItem {
+  id: string;
+  type: DriverActivityType;
+  timestamp: string | null;
+  driver_id: string | null;
+  job_id: string | null;
+  order_id: string | null;
+  text: string | null;
+  /** Messages only: who sent it (driver, dispatcher, ...). */
+  sender_role?: string | null;
+  /** Exceptions only. */
+  exception_type?: string | null;
+  severity?: string | null;
+}
+
+export interface DriverActivityParams {
+  type?: DriverActivityType;
+  start_date?: string;
+  end_date?: string;
+  page?: number;
+  size?: number;
+}
+
+/** GET /scheduling/jobs/:id/driver-activity — driver messages and exceptions, newest first */
+export async function getJobDriverActivity(
+  jobId: string,
+  params: DriverActivityParams = {},
+  /** Aborts the read when the caller moves on (page, filter or job change). */
+  signal?: AbortSignal,
+): Promise<PaginatedResponse<DriverActivityItem>> {
+  const qs = buildQueryString(params);
+  return schedulingRequest<PaginatedResponse<DriverActivityItem>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/driver-activity${qs}`,
+    signal ? { signal } : undefined,
+  );
 }
 
 // ─── Status Transition Endpoint ──────────────────────────────────────────────
@@ -366,21 +436,25 @@ export async function getDelayMetrics(
   );
 }
 
+/**
+ * Live ETA payload. The backend omits ``eta_minutes`` when there is no live
+ * ETA (e.g. a scheduled job), so every field is optional.
+ */
+export interface JobEta {
+  eta_minutes?: number | null;
+  estimated_arrival?: string | null;
+  calculated_at?: string;
+  delayed?: boolean;
+  delay_duration_minutes?: number | null;
+}
+
 /** GET /scheduling/jobs/:id/eta — get ETA for a job */
-export async function getJobEta(jobId: string): Promise<
-  SingleResponse<{
-    eta_minutes: number;
-    estimated_arrival: string;
-    calculated_at: string;
-  }>
-> {
-  return schedulingRequest<
-    SingleResponse<{
-      eta_minutes: number;
-      estimated_arrival: string;
-      calculated_at: string;
-    }>
-  >(`/scheduling/jobs/${encodeURIComponent(jobId)}/eta`);
+export async function getJobEta(
+  jobId: string,
+): Promise<SingleResponse<JobEta>> {
+  return schedulingRequest<SingleResponse<JobEta>>(
+    `/scheduling/jobs/${encodeURIComponent(jobId)}/eta`,
+  );
 }
 
 /** PATCH /scheduling/jobs/:id/reassign — reassign asset to a job */
@@ -498,11 +572,7 @@ export async function rerouteJob(
       body: JSON.stringify(payload),
     });
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
     return await response.json();
   } catch (error) {

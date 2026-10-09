@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
+from Agents.support.plan_execution_service import merge_plan_fields
 from Agents.support.volume_units import (
     liters_to_us_gallons,
     us_gallons_to_liters,
@@ -32,6 +33,7 @@ from driver.middleware.idempotency import (
 from driver.models import GeoPoint
 from errors.exceptions import (
     AppException,
+    already_exists,
     ambiguous_volume_unit,
     elasticsearch_unavailable,
     internal_error,
@@ -41,6 +43,7 @@ from errors.exceptions import (
 )
 from errors.codes import ErrorCode
 from services.time_utils import utcnow
+from fuel.compartment_state_models import _STATE_FIELDS as _COMPARTMENT_STATE_FIELDS
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
     canonicalize,
@@ -81,11 +84,18 @@ class GeneratePlanResponse(BaseModel):
     outcome explicitly so a caller that only inspects a boolean, or only renders
     a message, is not obliged to know the state vocabulary to avoid reporting a
     silent skip as success.
+
+    ``unplaced_orders`` lists every order the loading stage could not load,
+    one entry per order and reason (OI-39). ``failed_agent`` and
+    ``error_message`` explain a ``"failed"`` run so the dispatcher sees why.
     """
     run_id: str
     status: str
     degraded: bool = False
     degradation_reasons: List[Dict[str, Any]] = Field(default_factory=list)
+    unplaced_orders: List[Dict[str, Any]] = Field(default_factory=list)
+    failed_agent: Optional[str] = None
+    error_message: Optional[str] = None
 
 
 class ReplanRequest(BaseModel):
@@ -239,6 +249,26 @@ def _get_pipeline():
     return _pipeline
 
 
+#: ``mvp_load_plans.source`` of plans published from the Dispatch Board
+#: (dispatch-board K2.4). Agent plans carry no ``source``.
+BOARD_PLAN_SOURCE = "dispatch_board"
+
+
+def _refuse_board_plan(plan_doc: Dict[str, Any], plan_id: str) -> None:
+    """409 ``BOARD_OWNED_PLAN`` for a Dispatch Board plan (dispatch-board K7.6).
+
+    Approve, reject and replan act on agent plans only; a board plan is
+    managed on the board. Called after the plan read and before any write.
+    """
+    if (plan_doc or {}).get("source") == BOARD_PLAN_SOURCE:
+        raise AppException(
+            error_code=ErrorCode.BOARD_OWNED_PLAN,
+            message="Manage this plan on the Dispatch Board",
+            status_code=409,
+            details={"plan_id": plan_id},
+        )
+
+
 def _get_es():
     if _es_service is None:
         raise RuntimeError(
@@ -299,10 +329,17 @@ async def generate_plan(
             status=status_info.get("state", "pending"),
             degraded=bool(status_info.get("degraded", False)),
             degradation_reasons=list(status_info.get("degradations") or []),
+            unplaced_orders=list(status_info.get("unplaced_orders") or []),
+            failed_agent=status_info.get("failed_agent"),
+            error_message=status_info.get("error_message"),
         )
+    except AppException:
+        # A typed error (e.g. DYED_DIESEL_CHECK_UNAVAILABLE, 503) keeps its
+        # own code and status in the standard envelope.
+        raise
     except Exception as e:
         logger.error("Failed to generate plan: %s", e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        raise internal_error(message="Plan could not be generated", details={"tenant_id": tenant_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +503,30 @@ async def replan(
         )
 
     try:
+        # Board-published plans are re-planned on the Dispatch Board, never by
+        # the agent (dispatch-board K7.6). Read the plan before any write.
+        plan_resp = await _get_es().search_documents(
+            "mvp_load_plans",
+            {
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"tenant_id": tenant_id}},
+                            {"term": {"plan_id": plan_id}},
+                        ],
+                    },
+                },
+                "size": 1,
+            },
+            1,
+        )
+    except Exception as e:
+        logger.error("Failed to read plan %s before replan: %s", plan_id, e)
+        raise internal_error(message="Replan could not be started", details={"plan_id": plan_id}) from e
+    for hit in (plan_resp or {}).get("hits", {}).get("hits", []) or []:
+        _refuse_board_plan(hit.get("_source") or {}, plan_id)
+
+    try:
         # Trigger the replanning agent's evaluation cycle
         from Agents.overlay.data_contracts import RiskSignal, Severity
 
@@ -493,9 +554,11 @@ async def replan(
             "status": "replan_triggered",
             "disruption_type": body.disruption_type,
         }
+    except AppException:
+        raise
     except Exception as e:
         logger.error("Failed to trigger replan for %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Replan could not be started", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -600,10 +663,13 @@ async def get_forecasts(
             total=total_count,
             page=page,
             page_size=size,
+            request_id=getattr(request.state, "request_id", "unknown"),
         )
     except Exception as e:
-        logger.error("Failed to query forecasts: %s", e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        # The cause stays in the log; the caller gets a generic 500 (F9),
+        # because str(e) can carry store DSNs or query internals.
+        logger.error("Failed to query forecasts: %s", e, exc_info=True)
+        raise internal_error(message="Forecasts could not be loaded") from e
 
 
 # ---------------------------------------------------------------------------
@@ -641,8 +707,26 @@ async def configure_compartments(
     tenant_id = tenant.tenant_id
 
     from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
+    from commerce.services.commerce_persistence_bridge import (
+        mirror_current_state_upsert,
+    )
 
     try:
+        # Pre-read every target document before writing any (OI-07). The
+        # composite ids are global, so a truck_id another tenant already uses
+        # would otherwise be overwritten. Refuse with a generic 409 that never
+        # names the owner, and write nothing.
+        existing_docs: Dict[str, Any] = {}
+        for compartment in body.compartments:
+            doc_id = f"{truck_id}_{compartment.compartment_id}"
+            existing = await es.get_document(TRUCK_COMPARTMENTS_INDEX, doc_id)
+            if isinstance(existing, dict) and existing.get("tenant_id") != tenant_id:
+                raise already_exists(
+                    "Truck compartments are already in use",
+                    details={"truck_id": truck_id},
+                )
+            existing_docs[doc_id] = existing
+
         # Write each compartment document to the truck_compartments index
         written_compartments = []
         for compartment in body.compartments:
@@ -675,7 +759,24 @@ async def configure_compartments(
             }
             # Use composite key: truck_id + compartment_id
             doc_id = f"{truck_id}_{compartment.compartment_id}"
+            # This write replaces the whole document, and the same document
+            # holds the compartment's lifecycle (state, last_loaded_product,
+            # last_loaded_at, last_cleaned_at) that CompartmentStateRepository
+            # maintains. Re-configuring a compartment must not erase what it
+            # last carried — the cross-contamination guard reads it — so carry
+            # those fields over from this tenant's existing document.
+            existing = existing_docs.get(doc_id)
+            if isinstance(existing, dict) and existing.get("tenant_id") == tenant_id:
+                for field in _COMPARTMENT_STATE_FIELDS:
+                    if field in existing:
+                        doc[field] = existing[field]
             await es.index_document(TRUCK_COMPARTMENTS_INDEX, doc_id, doc)
+            # Postgres source of truth. The composite id is passed explicitly
+            # because it is what every reader fetches by; the repository can
+            # rebuild it from the document but should not have to.
+            await mirror_current_state_upsert(
+                "truck_compartment", doc, doc_id=doc_id
+            )
             written_compartments.append(doc)
 
         logger.info(
@@ -717,7 +818,7 @@ async def configure_compartments(
         raise
     except Exception as e:
         logger.error("Failed to configure compartments for %s: %s", truck_id, e)
-        raise internal_error(message=str(e), details={"truck_id": truck_id})
+        raise internal_error(message="Compartments could not be configured", details={"truck_id": truck_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -732,11 +833,19 @@ async def list_plans(
     status: Optional[str] = Query(None, description="Filter by plan status"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
+    source: Optional[Literal["dispatch_board"]] = Query(
+        None,
+        description=(
+            "Pass dispatch_board to list only Dispatch Board plans (read-only). "
+            "By default board plans are hidden."
+        ),
+    ),
 ):
     """List plans for a tenant with optional status filter, paginated.
 
     Queries mvp_load_plans by tenant_id, optionally filtered by status,
-    sorted by created_at descending.
+    sorted by created_at descending. Dispatch Board plans are excluded unless
+    ``?source=dispatch_board``, which returns only them (dispatch-board K7.6).
 
     Validates: Requirements 1.1, 1.3, 1.4, 1.5
     """
@@ -746,9 +855,14 @@ async def list_plans(
     must_clauses = [{"term": {"tenant_id": tenant_id}}]
     if status:
         must_clauses.append({"term": {"status": status}})
+    bool_query: Dict[str, Any] = {"must": must_clauses}
+    if source == BOARD_PLAN_SOURCE:
+        must_clauses.append({"term": {"source": BOARD_PLAN_SOURCE}})
+    else:
+        bool_query["must_not"] = [{"term": {"source": BOARD_PLAN_SOURCE}}]
 
     query = {
-        "query": {"bool": {"must": must_clauses}},
+        "query": {"bool": bool_query},
         "sort": [{"created_at": {"order": "desc"}}],
         "from": (page - 1) * size,
         "size": size,
@@ -771,7 +885,7 @@ async def list_plans(
         )
     except Exception as e:
         logger.error("Failed to list plans: %s", e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        raise internal_error(message="Plans could not be loaded", details={"tenant_id": tenant_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -794,8 +908,9 @@ async def approve_plan(
     The ``dispatcher_id`` is derived server-side from the verified
     session (``tenant.user_id``); it is never accepted from the client.
 
-    Replaying an already-dispatched plan is idempotent. Other statuses return
-    409.
+    Replaying an already-dispatched plan is idempotent. A ``scheduled`` plan
+    (applied by the loading-plan executor) dispatches with its run and truck.
+    Other statuses return 409.
 
     Validates: Requirements 2.1, 2.3, 2.4
     """
@@ -827,9 +942,12 @@ async def approve_plan(
             )
 
         plan_doc = hits[0]["_source"]
+        _refuse_board_plan(plan_doc, plan_id)
         plan_status = plan_doc.get("status", "")
 
-        if plan_status not in ("draft", "proposed", "dispatched"):
+        # ``scheduled``: applied to its truck by the loading-plan executor
+        # (K12, R9.5); dispatch finds its orders already linked to the run.
+        if plan_status not in ("draft", "proposed", "scheduled", "dispatched"):
             raise AppException(
                 error_code=ErrorCode.INVALID_STATUS_TRANSITION,
                 message=(
@@ -868,7 +986,7 @@ async def approve_plan(
         raise
     except Exception as e:
         logger.error("Failed to approve plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan could not be approved", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -923,6 +1041,7 @@ async def reject_plan(
             )
 
         plan_doc = hits[0]["_source"]
+        _refuse_board_plan(plan_doc, plan_id)
         plan_status = plan_doc.get("status", "")
 
         if plan_status != "draft" and plan_status != "proposed":
@@ -946,7 +1065,38 @@ async def reject_plan(
         if reason:
             update_doc["rejection_reason"] = reason
 
-        await es.update_document("mvp_load_plans", plan_id, update_doc)
+        # Compare-and-set under the row lock (K12, pass-2 finding 2): the
+        # loading-plan executor may claim the plan between the read above and
+        # this write, so the status and execution checks are repeated here.
+        def _reject(current):
+            if current.get("tenant_id") != tenant_id:
+                return None
+            if current.get("status") not in ("draft", "proposed"):
+                return None
+            if current.get("execution_status") in ("in_progress", "succeeded", "incomplete"):
+                return None
+            return {**current, **update_doc}
+
+        doc, applied = await es.atomic_update("mvp_load_plans", plan_id, _reject)
+        if doc is None or doc.get("tenant_id") != tenant_id:
+            raise resource_not_found(
+                message=f"Plan {plan_id} not found",
+                details={"plan_id": plan_id},
+            )
+        if not applied:
+            raise AppException(
+                error_code=ErrorCode.INVALID_STATUS_TRANSITION,
+                message=(
+                    f"Plan {plan_id} cannot be rejected: it is being applied "
+                    "or has been applied to a truck."
+                ),
+                status_code=409,
+                details={
+                    "plan_id": plan_id,
+                    "current_status": doc.get("status"),
+                    "execution_status": doc.get("execution_status"),
+                },
+            )
 
         logger.info(
             "Rejected plan %s (tenant=%s, dispatcher=%s, reason=%s)",
@@ -968,7 +1118,7 @@ async def reject_plan(
         raise
     except Exception as e:
         logger.error("Failed to reject plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan could not be rejected", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1093,6 +1243,7 @@ async def driver_checkin(
             stop_data=stop_data,
             completed_stops=result["completed_stops"],
             total_stops=result["total_stops"],
+            tenant_id=tenant_id,
         )
 
         # If all stops are complete, transition plan to "completed" and
@@ -1100,9 +1251,9 @@ async def driver_checkin(
         if result.get("all_complete"):
             es = _get_es()
             now = utcnow().isoformat()
-            await es.update_document(
-                "mvp_load_plans", plan_id, {"status": "completed"}
-            )
+            # Merged under the row lock so a concurrent board write of a new
+            # revision survives (dispatch-board freeze rule 11 (b)).
+            await merge_plan_fields(es, plan_id, {"status": "completed"})
 
             # Trigger outcome computation (Req 4.1–4.4)
             try:
@@ -1184,7 +1335,7 @@ async def driver_checkin(
         raise
     except Exception as e:
         logger.error("Failed to record check-in for plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Check-in could not be recorded", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1270,7 +1421,7 @@ async def get_plan_outcomes(
         raise
     except Exception as e:
         logger.error("Failed to get outcomes for plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan outcomes could not be loaded", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1350,7 +1501,7 @@ async def get_plan_costs(
         raise
     except Exception as e:
         logger.error("Failed to get costs for plan %s: %s", plan_id, e)
-        raise internal_error(message=str(e), details={"plan_id": plan_id})
+        raise internal_error(message="Plan costs could not be loaded", details={"plan_id": plan_id}) from e
 
 
 # ---------------------------------------------------------------------------
@@ -1395,4 +1546,4 @@ async def update_cost_config(
 
     except Exception as e:
         logger.error("Failed to update cost config for tenant %s: %s", tenant_id, e)
-        raise internal_error(message=str(e), details={"tenant_id": tenant_id})
+        raise internal_error(message="Cost config could not be updated", details={"tenant_id": tenant_id}) from e

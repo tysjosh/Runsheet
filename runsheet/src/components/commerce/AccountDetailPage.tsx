@@ -1,8 +1,25 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EntityLink } from "@/components/ui";
+/**
+ * Account detail (UI revamp task 3.4): the detail template (title row with
+ * back, credit badge and the Credit override action), facts through
+ * `lib/format`, and the credit override as an sm FormDialog (design.md §5).
+ */
+import { useRouter } from "next/navigation";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
+import {
+  Button,
+  EntityLink,
+  Field,
+  FormDialog,
+  INPUT_CLASS,
+  InlineBanner,
+  LoadErrorState,
+  PageHeader,
+  Skeleton,
+} from "@/components/ui";
+import { dateTime, humanize, money, number } from "../../lib/format";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import type {
   Account,
   AgingBuckets,
@@ -14,6 +31,9 @@ import {
   getAccount,
   getAccountAging,
 } from "../../services/commerceApi";
+import { PageTitle } from "../ui/PageHeader";
+import { AGING_LABELS } from "./agingLabels";
+import { AccountStatusBadge, CreditStateBadge } from "./billingStatus";
 
 interface AccountDetailPageProps {
   accountId: string;
@@ -21,23 +41,47 @@ interface AccountDetailPageProps {
   onViewCustomer?: (customerId: string) => void;
 }
 
+type OverrideValues = { reason: string; expires: string };
+
+/** `datetime-local` value for a Date in the browser's zone. */
+function localInputValue(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}`;
+}
+
+export function validateOverride(v: OverrideValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.reason.trim()) errors.reason = "Enter a reason.";
+  if (v.expires) {
+    const t = new Date(v.expires).getTime();
+    if (Number.isNaN(t)) errors.expires = "Enter a valid date and time.";
+    else if (t <= Date.now()) errors.expires = "Pick a time in the future.";
+  }
+  return errors;
+}
+
 export default function AccountDetailPage({
   accountId,
   onBack,
   onViewCustomer,
 }: AccountDetailPageProps) {
+  const router = useRouter();
   const [account, setAccount] = useState<Account | null>(null);
   const [aging, setAging] = useState<AgingBuckets | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [overrideReason, setOverrideReason] = useState("");
-  const [overrideExpiry, setOverrideExpiry] = useState("");
-  const [overrideSubmitting, setOverrideSubmitting] = useState(false);
+  // Initial-fetch failures that get a dedicated state: 403 (accounts are
+  // platform_admin-only by design) and 404. Action errors keep using `error`.
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [overrideOpen, setOverrideOpen] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setLoadFailure(null);
     try {
       const [accountRes, agingRes] = await Promise.all([
         getAccount(accountId),
@@ -46,9 +90,12 @@ export default function AccountDetailPage({
       setAccount(accountRes.data);
       setAging(agingRes.data);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load account details",
-      );
+      const failure = classifyLoadError(err, "Failed to load account details");
+      if (failure.kind === "forbidden" || failure.kind === "not_found") {
+        setLoadFailure(failure);
+      } else {
+        setError(failure.message);
+      }
     } finally {
       setLoading(false);
     }
@@ -58,276 +105,315 @@ export default function AccountDetailPage({
     fetchData();
   }, [fetchData]);
 
-  const handleApplyOverride = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!overrideReason.trim()) return;
-    setOverrideSubmitting(true);
-    try {
-      const payload: CreditOverridePayload = {
-        reason: overrideReason,
-        authorized_by: "current_user",
-        expires_at:
-          overrideExpiry || new Date(Date.now() + 7 * 86400000).toISOString(),
-      };
-      const res = await applyCreditOverride(accountId, payload);
-      setAccount(res.data);
-      setDrawerOpen(false);
-      setOverrideReason("");
-      setOverrideExpiry("");
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to apply credit override",
-      );
-    } finally {
-      setOverrideSubmitting(false);
-    }
+  const submitOverride = async (v: OverrideValues) => {
+    const payload: CreditOverridePayload = {
+      reason: v.reason.trim(),
+      authorized_by: "current_user",
+      expires_at: v.expires
+        ? new Date(v.expires).toISOString()
+        : new Date(Date.now() + 7 * 86400000).toISOString(),
+    };
+    const res = await applyCreditOverride(accountId, payload);
+    return res.data;
   };
 
   const handleExpireOverride = async () => {
+    setActionError(null);
     try {
       const res = await deleteCreditOverride(accountId);
       setAccount(res.data);
     } catch (err) {
-      setError(
+      setActionError(
         err instanceof Error ? err.message : "Failed to expire credit override",
       );
     }
   };
 
-  const getCreditStateVariant = (
-    state: string,
-  ): "success" | "error" | "info" => {
-    if (state === "ok") return "success";
-    if (state === "hold") return "error";
-    return "info";
-  };
+  const back = () => (onBack ? onBack() : router.back());
 
   if (loading) {
     return (
-      <div role="status" className="flex justify-center py-12">
-        <span className="sr-only">Loading account details...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
+      <div className="p-4">
+        <Skeleton rows={6} label="Loading account details" />
+      </div>
+    );
+  }
+
+  if (loadFailure) {
+    const state = (
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Account"
+        entityId={accountId}
+        onBack={back}
+        homeHref="/dashboard/billing"
+        homeLabel="Go to Billing"
+        staffOnly
+      />
+    );
+    if (loadFailure.kind !== "forbidden") return state;
+    return (
+      <div>
+        <header className="flex h-11 items-center gap-2 border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Account
+          </PageTitle>
+          <p className="font-mono text-xs text-text-muted">{accountId}</p>
+        </header>
+        {state}
       </div>
     );
   }
 
   if (error) {
     return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
+      <div className="p-4">
+        <LoadErrorState
+          failure={{ kind: "error", message: error }}
+          entityLabel="Account"
+          entityId={accountId}
+          onBack={back}
+          onRetry={fetchData}
+          embedded
+        />
       </div>
     );
   }
 
   if (!account) return null;
 
-  const formatCents = (cents: number) =>
-    `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
-
   return (
-    <div className="p-6">
-      {/* Header */}
-      <header className="mb-6">
-        <div className="flex items-center gap-4 mb-2">
-          {onBack && (
-            <Button variant="ghost" onClick={onBack}>
-              ← Back to Accounts
-            </Button>
-          )}
-        </div>
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-2xl font-bold">{account.display_name}</h1>
-            <p className="text-gray-600">
-              Tier: {account.tier} · Net Terms: {account.net_terms_days} days
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            <Badge variant={getCreditStateVariant(account.credit_state)}>
-              {account.credit_state}
-            </Badge>
-            <Button onClick={() => setDrawerOpen(true)}>Credit Override</Button>
-          </div>
-        </div>
-      </header>
-
-      {/* Credit summary cards */}
-      <section aria-labelledby="credit-heading" className="mb-8">
-        <h2 id="credit-heading" className="text-lg font-semibold mb-3">
-          Credit Summary
-        </h2>
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Credit Limit</p>
-            <p className="text-2xl font-bold">
-              {formatCents(account.credit_limit_cents)}
-            </p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Open Balance</p>
-            <p className="text-2xl font-bold">
-              {formatCents(account.open_balance_cents)}
-            </p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Credit Balance</p>
-            <p className="text-2xl font-bold">
-              {formatCents(account.credit_balance_cents)}
-            </p>
-          </div>
-          <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">Net Terms</p>
-            <p className="text-2xl font-bold">{account.net_terms_days} days</p>
-          </div>
-        </div>
-        {account.credit_override_expires_at && (
-          <div className="mt-3 p-3 bg-info-light border border-info rounded flex items-center justify-between">
-            <span className="text-sm text-info-dark">
-              Credit override active until{" "}
-              {new Date(
-                account.credit_override_expires_at,
-              ).toLocaleDateString()}
-            </span>
-            <Button variant="danger" size="sm" onClick={handleExpireOverride}>
-              Expire Now
-            </Button>
-          </div>
-        )}
-      </section>
-
-      {/* Aging bucket cards */}
-      {aging && (
-        <section aria-labelledby="aging-heading" className="mb-8">
-          <h2 id="aging-heading" className="text-lg font-semibold mb-3">
-            AR Aging Buckets
-          </h2>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-            <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">0–30 Days</p>
-              <p className="text-xl font-bold">
-                {formatCents(aging.bucket_0_30_cents)}
-              </p>
-            </div>
-            <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">31–60 Days</p>
-              <p className="text-xl font-bold">
-                {formatCents(aging.bucket_31_60_cents)}
-              </p>
-            </div>
-            <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">61–90 Days</p>
-              <p className="text-xl font-bold">
-                {formatCents(aging.bucket_61_90_cents)}
-              </p>
-            </div>
-            <div className="border rounded p-4 bg-error-light">
-              <p className="text-sm text-gray-600">90+ Days</p>
-              <p className="text-xl font-bold text-error-dark">
-                {formatCents(aging.bucket_90_plus_cents)}
-              </p>
-            </div>
-            <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">Total Open</p>
-              <p className="text-xl font-bold">
-                {formatCents(aging.total_open_cents)}
-              </p>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {/* Customer link — navigation to the owning customer (Req 12.4, 13.1).
-          When an in-hub navigation callback is supplied it is used (keeps the
-          caller in control of routing); otherwise the canonical customer route
-          is linked via <EntityLink>. */}
-      <section className="mb-8">
-        {onViewCustomer ? (
-          <Button
-            variant="ghost"
-            onClick={() => onViewCustomer(account.customer_id)}
-          >
-            View Parent Customer →
+    <div className="flex h-full flex-col">
+      <PageHeader
+        host
+        title={account.display_name}
+        back={{ label: "Back", onClick: back }}
+        badge={<CreditStateBadge state={account.credit_state} />}
+        counts={
+          <span className="whitespace-nowrap">
+            {humanize(account.tier)} tier · Net {number(account.net_terms_days)}
+          </span>
+        }
+        actions={
+          <Button size="sm" onClick={() => setOverrideOpen(true)}>
+            Credit override
           </Button>
-        ) : (
-          <div className="flex items-center gap-1.5 text-sm">
-            <span className="text-gray-500">Parent Customer:</span>
-            <EntityLink type="customer" id={account.customer_id} />
+        }
+      />
+      <div className="flex-1 overflow-auto p-4">
+        {actionError && (
+          <div role="alert" className="mb-3">
+            <InlineBanner tone="critical">{actionError}</InlineBanner>
           </div>
         )}
-      </section>
-
-      {/* Credit Override Drawer */}
-      {drawerOpen && (
-        <div
-          role="dialog"
-          aria-labelledby="override-drawer-title"
-          className="fixed inset-0 z-50 flex justify-end"
-        >
-          <div
-            className="absolute inset-0 bg-black/30"
-            onClick={() => setDrawerOpen(false)}
-            onKeyDown={(e) => e.key === "Escape" && setDrawerOpen(false)}
-            role="presentation"
-          />
-          <div className="relative bg-white w-full max-w-md h-full shadow-xl p-6 overflow-y-auto">
-            <h2 id="override-drawer-title" className="text-xl font-bold mb-4">
-              Apply Credit Override
-            </h2>
-            <form onSubmit={handleApplyOverride}>
-              <div className="mb-4">
-                <label
-                  htmlFor="override-reason"
-                  className="block text-sm font-medium mb-1"
+        {account.credit_override_expires_at && (
+          <div className="mb-4">
+            <InlineBanner
+              tone="warning"
+              action={
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={handleExpireOverride}
                 >
-                  Reason
-                </label>
+                  Expire now
+                </Button>
+              }
+            >
+              Credit override active until{" "}
+              {dateTime(account.credit_override_expires_at)}
+            </InlineBanner>
+          </div>
+        )}
+
+        <section aria-labelledby="credit-heading" className="mb-6">
+          <h2
+            id="credit-heading"
+            className="mb-2 text-sm font-semibold text-text"
+          >
+            Credit summary
+          </h2>
+          <dl className="grid grid-cols-2 gap-3 md:grid-cols-5">
+            <Fact
+              label="Credit limit"
+              value={money(account.credit_limit_cents / 100)}
+            />
+            <Fact
+              label="Open balance"
+              value={money(account.open_balance_cents / 100)}
+            />
+            <Fact
+              label="Available credit"
+              value={money(account.available_credit_cents / 100)}
+            />
+            <Fact
+              label="Credit balance"
+              value={money(account.credit_balance_cents / 100)}
+            />
+            <Fact
+              label="Net terms"
+              value={`${number(account.net_terms_days)} days`}
+            />
+          </dl>
+        </section>
+
+        {aging && (
+          <section aria-labelledby="aging-heading" className="mb-6">
+            <h2
+              id="aging-heading"
+              className="mb-2 text-sm font-semibold text-text"
+            >
+              AR aging
+            </h2>
+            {/* Aged by days past due_date (F12); Current is not yet due. */}
+            <dl className="grid grid-cols-2 gap-3 md:grid-cols-6">
+              <Fact
+                label={AGING_LABELS.current}
+                value={money((aging.bucket_current_cents ?? 0) / 100)}
+              />
+              <Fact
+                label={AGING_LABELS.d1_30}
+                value={money(aging.bucket_0_30_cents / 100)}
+              />
+              <Fact
+                label={AGING_LABELS.d31_60}
+                value={money(aging.bucket_31_60_cents / 100)}
+              />
+              <Fact
+                label={AGING_LABELS.d61_90}
+                value={money(aging.bucket_61_90_cents / 100)}
+              />
+              <Fact
+                label={AGING_LABELS.d90_plus}
+                value={money(aging.bucket_90_plus_cents / 100)}
+                tone="critical"
+              />
+              <Fact
+                label="Total open"
+                value={money(aging.total_open_cents / 100)}
+              />
+            </dl>
+          </section>
+        )}
+
+        <section aria-labelledby="account-info-heading" className="mb-6">
+          <h2
+            id="account-info-heading"
+            className="mb-2 text-sm font-semibold text-text"
+          >
+            Account information
+          </h2>
+          <dl className="grid grid-cols-1 gap-x-6 gap-y-3 rounded-lg border border-slate-200 p-4 text-sm md:grid-cols-2">
+            <Row label="Status">
+              <AccountStatusBadge status={account.status} />
+            </Row>
+            <Row label="Parent customer">
+              {onViewCustomer ? (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => onViewCustomer(account.customer_id)}
+                >
+                  View parent customer →
+                </Button>
+              ) : (
+                <EntityLink type="customer" id={account.customer_id} />
+              )}
+            </Row>
+            <Row label="Account ID">
+              <span className="font-mono text-xs">{account.account_id}</span>
+            </Row>
+            <Row label="Payment preference">
+              {humanize(account.payment_method_preference)}
+            </Row>
+          </dl>
+        </section>
+      </div>
+
+      {overrideOpen && (
+        <FormDialog<OverrideValues, Account>
+          open
+          size="sm"
+          title="Apply credit override"
+          help="Lets this account order over its credit limit until the override expires."
+          submitLabel="Apply override"
+          successMessage="Credit override applied"
+          initialValues={{
+            reason: "",
+            expires: localInputValue(new Date(Date.now() + 7 * 86400000)),
+          }}
+          validate={validateOverride}
+          onSubmit={submitOverride}
+          onSaved={(a) => setAccount(a)}
+          onClose={() => setOverrideOpen(false)}
+        >
+          {({ values, set, errors }) => (
+            <>
+              <Field label="Reason" required error={errors.reason}>
                 <textarea
                   id="override-reason"
-                  value={overrideReason}
-                  onChange={(e) => setOverrideReason(e.target.value)}
-                  required
+                  value={values.reason}
+                  onChange={(e) => set("reason", e.target.value)}
                   rows={3}
-                  className="w-full border rounded px-3 py-2"
-                  placeholder="Reason for credit override..."
+                  placeholder="Why this account may exceed its limit"
+                  className={`${INPUT_CLASS} h-auto py-1.5`}
                 />
-              </div>
-              <div className="mb-6">
-                <label
-                  htmlFor="override-expiry"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Expires At
-                </label>
+              </Field>
+              <Field
+                label="Expires"
+                help="Defaults to 7 days from now."
+                error={errors.expires}
+              >
                 <input
                   id="override-expiry"
                   type="datetime-local"
-                  value={overrideExpiry}
-                  onChange={(e) => setOverrideExpiry(e.target.value)}
-                  className="w-full border rounded px-3 py-2"
+                  value={values.expires}
+                  onChange={(e) => set("expires", e.target.value)}
+                  className={INPUT_CLASS}
                 />
-              </div>
-              <div className="flex gap-3">
-                <Button
-                  type="submit"
-                  disabled={overrideSubmitting || !overrideReason.trim()}
-                  loading={overrideSubmitting}
-                >
-                  Apply Override
-                </Button>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setDrawerOpen(false)}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          </div>
-        </div>
+              </Field>
+            </>
+          )}
+        </FormDialog>
       )}
+    </div>
+  );
+}
+
+function Fact({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: string;
+  tone?: "critical";
+}) {
+  return (
+    <div
+      className={`rounded-lg border px-3 py-2 ${
+        tone === "critical"
+          ? "border-red-300 bg-red-50"
+          : "border-slate-200 bg-surface"
+      }`}
+    >
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd
+        className={`text-lg font-semibold tabular-nums ${
+          tone === "critical" ? "text-red-800" : "text-text"
+        }`}
+      >
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="text-xs text-text-muted">{label}</dt>
+      <dd className="font-medium text-text">{children}</dd>
     </div>
   );
 }

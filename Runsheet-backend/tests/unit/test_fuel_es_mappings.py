@@ -6,15 +6,7 @@ Validates: Requirements 8.2, 8.3, 8.4
 
 from unittest.mock import MagicMock, call
 
-from fuel.services.fuel_es_mappings import (
-    FUEL_EVENTS_ILM_POLICY,
-    FUEL_EVENTS_ILM_POLICY_NAME,
-    FUEL_EVENTS_INDEX,
-    FUEL_EVENTS_MAPPING,
-    FUEL_STATIONS_INDEX,
-    FUEL_STATIONS_MAPPING,
-    setup_fuel_indices,
-)
+from fuel.services.fuel_es_mappings import FUEL_EVENTS_ILM_POLICY, FUEL_EVENTS_ILM_POLICY_NAME, FUEL_EVENTS_INDEX, FUEL_EVENTS_MAPPING, FUEL_STATIONS_INDEX, FUEL_STATIONS_MAPPING
 
 
 class TestFuelEventsMapping:
@@ -79,59 +71,7 @@ class TestSetupFuelIndices:
         client.indices.exists.side_effect = lambda index: index in existing
         return client
 
-    def test_creates_both_indices_when_missing(self):
-        client = self._make_es_client()
-        setup_fuel_indices(client)
 
-        create_calls = client.indices.create.call_args_list
-        created_indices = {c.kwargs["index"] for c in create_calls}
-        assert FUEL_STATIONS_INDEX in created_indices
-        assert FUEL_EVENTS_INDEX in created_indices
 
-    def test_skips_existing_indices(self):
-        client = self._make_es_client(
-            existing_indices={FUEL_STATIONS_INDEX, FUEL_EVENTS_INDEX}
-        )
-        setup_fuel_indices(client)
-        client.indices.create.assert_not_called()
 
-    def test_creates_ilm_policy(self):
-        client = self._make_es_client()
-        setup_fuel_indices(client)
 
-        client.ilm.put_lifecycle.assert_called_once_with(
-            name=FUEL_EVENTS_ILM_POLICY_NAME,
-            body=FUEL_EVENTS_ILM_POLICY,
-        )
-
-    def test_applies_ilm_policy_to_fuel_events_index(self):
-        client = self._make_es_client()
-        # After creation, the index exists for the put_settings call
-        client.indices.exists.side_effect = (
-            lambda index: index == FUEL_EVENTS_INDEX
-            if client.indices.create.called
-            else False
-        )
-        # Simplify: just make exists return True after create
-        client.indices.exists.side_effect = None
-        client.indices.exists.return_value = True
-
-        setup_fuel_indices(client)
-
-        client.indices.put_settings.assert_called_once_with(
-            index=FUEL_EVENTS_INDEX,
-            body={
-                "index": {
-                    "lifecycle": {
-                        "name": FUEL_EVENTS_ILM_POLICY_NAME,
-                    }
-                }
-            },
-        )
-
-    def test_ilm_failure_does_not_raise(self):
-        client = self._make_es_client()
-        client.ilm.put_lifecycle.side_effect = Exception("ILM unavailable")
-
-        # Should not raise
-        setup_fuel_indices(client)

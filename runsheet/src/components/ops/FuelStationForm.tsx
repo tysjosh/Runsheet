@@ -1,27 +1,28 @@
 "use client";
 
 /**
- * FuelStationForm — Modal form for creating and editing fuel stations.
+ * FuelStationForm: create and edit a fuel station, as a `FormDialog` (UI
+ * revamp R6, design.md §5 "Fuel station": md, NumberField, ProductSelect).
  *
- * Supports three modes:
- * - "create": Empty form, calls createStation on submit
- * - "edit": Pre-populated form, calls updateStation on submit
- * - Threshold-only edit: calls updateStationThreshold when only threshold changes
+ * This is the dialog the owner picked as the create/edit standard. It also
+ * fixes the two bugs reported in it (audit §d):
  *
- * Exports `validateStationForm` for independent testing (Property 2).
+ * - Capacity showed `5283,441047162968`: a litre-based station's capacity was
+ *   converted to gallons unrounded and put into a `type=number` input. Gallons
+ *   are now rounded to whole numbers on load and edited with `NumberField`
+ *   (locale-aware display and parsing, whole gallons, min/max).
+ * - Fuel Type read `GASOLINE_REG (Regular U…`: options were `CODE (Name)`.
+ *   `ProductSelect` shows the RP 1637 cap and the readable name, with the
+ *   code as secondary text, sized to the longest label.
  *
- * Validates:
- * - Requirement 8.1: Creation form with name, fuel_type, capacity_gallons, location, alert_threshold_pct
- * - Requirement 8.2: Calls POST /fuel/stations on create
- * - Requirement 8.3: Pre-populated edit form with current values
- * - Requirement 8.4: Calls PATCH /fuel/stations/{id} on edit
- * - Requirement 8.5: Calls PATCH /fuel/stations/{id}/threshold for threshold-only edit
- * - Requirement 8.6: Validates capacity > 0 and threshold 0-100
- * - Requirement 8.7: Displays API error and retains form values
+ * Modes:
+ * - create: POST /fuel/stations
+ * - edit: PATCH /fuel/stations/{id}; when only the threshold changed, the
+ *   dedicated PATCH /fuel/stations/{id}/threshold
+ *
+ * `validateStationForm` is exported for independent testing.
  */
 
-import { X } from "lucide-react";
-import { useState } from "react";
 import type {
   CreateStationPayload,
   FuelStation,
@@ -35,22 +36,32 @@ import {
   updateStationThreshold,
 } from "../../services/fuelApi";
 import { getCurrentTenantId } from "../../services/tenant";
+import {
+  Field,
+  FormDialog,
+  INPUT_CLASS,
+  NumberField,
+  ProductSelect,
+  validateNumber,
+} from "../ui";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const FUEL_TYPES: { value: FuelType; label: string }[] = [
-  { value: "DIESEL_2", label: "DIESEL_2 (Ultra Low Sulfur Diesel)" },
-  { value: "GASOLINE_REG", label: "GASOLINE_REG (Regular Unleaded)" },
-  { value: "GASOLINE_PREM", label: "GASOLINE_PREM (Premium Unleaded)" },
-  { value: "HEATING_OIL", label: "HEATING_OIL (No. 2 Heating Oil)" },
-  { value: "PROPANE", label: "PROPANE (Propane)" },
-  { value: "KEROSENE", label: "KEROSENE (K-1)" },
-  { value: "OFF_ROAD_DIESEL", label: "OFF_ROAD_DIESEL (Dyed Diesel)" },
-  { value: "DEF", label: "DEF (Diesel Exhaust Fluid)" },
+/** Products a station can hold (the backend `FuelType` enum). */
+export const STATION_FUEL_TYPES: FuelType[] = [
+  "DIESEL_2",
+  "GASOLINE_REG",
+  "GASOLINE_PREM",
+  "HEATING_OIL",
+  "PROPANE",
+  "KEROSENE",
+  "OFF_ROAD_DIESEL",
+  "DEF",
 ];
 
-function stationCapacityGallons(station?: FuelStation | null): number {
-  return getFuelStationCapacityGallons(station);
+/** Station capacity in whole gallons (litre-based stations are converted). */
+export function stationCapacityGallons(station?: FuelStation | null): number {
+  return Math.round(getFuelStationCapacityGallons(station));
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -58,25 +69,26 @@ function stationCapacityGallons(station?: FuelStation | null): number {
 export interface StationFormValues {
   name: string;
   fuel_type: FuelType;
-  capacity_gallons: number;
-  initial_stock_gallons: number;
+  capacity_gallons: number | null;
+  initial_stock_gallons: number | null;
   location_name: string;
-  alert_threshold_pct: number;
+  alert_threshold_pct: number | null;
 }
 
 export interface ValidationErrors {
   name?: string;
   capacity_gallons?: string;
+  initial_stock_gallons?: string;
   alert_threshold_pct?: string;
 }
 
 /**
- * Pure validation function for fuel station form values.
- * Returns an object with field-level error messages, or an empty object if valid.
+ * Pure validation for station form values. Returns field-level messages, or
+ * an empty object if valid.
  *
- * Rules:
  * - name must be non-empty
- * - capacity_gallons must be a positive number (> 0)
+ * - capacity_gallons must be a positive whole number of gallons
+ * - initial_stock_gallons (create) must be 0 to capacity
  * - alert_threshold_pct must be between 0 and 100 (inclusive)
  */
 export function validateStationForm(
@@ -88,22 +100,22 @@ export function validateStationForm(
     errors.name = "Station name is required.";
   }
 
-  if (
-    values.capacity_gallons === null ||
-    values.capacity_gallons === undefined ||
-    Number.isNaN(values.capacity_gallons) ||
-    values.capacity_gallons <= 0
-  ) {
+  const cap = values.capacity_gallons;
+  if (cap === null || cap === undefined || Number.isNaN(cap) || cap <= 0) {
     errors.capacity_gallons = "Capacity must be a positive number.";
   }
 
-  if (
-    values.alert_threshold_pct === null ||
-    values.alert_threshold_pct === undefined ||
-    Number.isNaN(values.alert_threshold_pct) ||
-    values.alert_threshold_pct < 0 ||
-    values.alert_threshold_pct > 100
-  ) {
+  const stock = values.initial_stock_gallons;
+  if (stock !== null && stock !== undefined) {
+    const msg = validateNumber(stock, {
+      min: 0,
+      max: cap && cap > 0 ? cap : undefined,
+    });
+    if (msg) errors.initial_stock_gallons = msg;
+  }
+
+  const t = values.alert_threshold_pct;
+  if (t === null || t === undefined || Number.isNaN(t) || t < 0 || t > 100) {
     errors.alert_threshold_pct = "Threshold must be between 0 and 100.";
   }
 
@@ -120,339 +132,169 @@ interface FuelStationFormProps {
   onSuccess: (station: FuelStation) => void;
 }
 
+type Values = StationFormValues & Record<string, unknown>;
+
+export function initialStationValues(
+  station?: FuelStation | null,
+): StationFormValues {
+  return {
+    name: station?.name ?? "",
+    fuel_type: station?.fuel_type ?? "DIESEL_2",
+    capacity_gallons: station ? stationCapacityGallons(station) : null,
+    initial_stock_gallons: station ? null : 0,
+    location_name: station?.location_name ?? "",
+    alert_threshold_pct: station?.alert_threshold_pct ?? 20,
+  };
+}
+
 export default function FuelStationForm({
   mode,
   station,
   onClose,
   onSuccess,
 }: FuelStationFormProps) {
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState("");
-  const [fieldErrors, setFieldErrors] = useState<ValidationErrors>({});
   const tenantId = getCurrentTenantId();
+  const initial = initialStationValues(station) as Values;
 
-  const [form, setForm] = useState<StationFormValues>({
-    name: station?.name ?? "",
-    fuel_type: station?.fuel_type ?? "DIESEL_2",
-    capacity_gallons: stationCapacityGallons(station),
-    initial_stock_gallons: 0,
-    location_name: station?.location_name ?? "",
-    alert_threshold_pct: station?.alert_threshold_pct ?? 20,
-  });
+  const isThresholdOnlyChange = (form: StationFormValues) =>
+    mode === "edit" &&
+    !!station &&
+    form.name === station.name &&
+    form.fuel_type === station.fuel_type &&
+    form.capacity_gallons === initial.capacity_gallons &&
+    form.location_name === (station.location_name ?? "") &&
+    form.alert_threshold_pct !== station.alert_threshold_pct;
 
-  /**
-   * Determine if only the threshold changed (edit mode).
-   * If so, we use the dedicated threshold endpoint.
-   */
-  function isThresholdOnlyChange(): boolean {
-    if (mode !== "edit" || !station) return false;
-    return (
-      form.name === station.name &&
-      form.fuel_type === station.fuel_type &&
-      form.capacity_gallons === stationCapacityGallons(station) &&
-      form.location_name === (station.location_name ?? "") &&
-      form.alert_threshold_pct !== station.alert_threshold_pct
-    );
-  }
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    // Client-side validation
-    const errors = validateStationForm(form);
-    setFieldErrors(errors);
-    if (Object.keys(errors).length > 0) {
-      return;
+  const submit = async (form: StationFormValues): Promise<FuelStation> => {
+    const name = form.name.trim();
+    const location = form.location_name.trim();
+    const capacity = form.capacity_gallons as number;
+    const threshold = form.alert_threshold_pct as number;
+    if (mode === "create") {
+      const payload: CreateStationPayload = {
+        station_id: `FS-${Date.now().toString(36).toUpperCase()}`,
+        name,
+        fuel_type: form.fuel_type,
+        capacity_gallons: capacity,
+        initial_stock_gallons: form.initial_stock_gallons ?? 0,
+        alert_threshold_pct: threshold,
+      };
+      if (location) payload.location_name = location;
+      return createStation(payload, tenantId);
     }
-
-    setError("");
-    setSubmitting(true);
-
-    try {
-      let result: FuelStation;
-
-      if (mode === "create") {
-        const payload: CreateStationPayload = {
-          station_id: `FS-${Date.now().toString(36).toUpperCase()}`,
-          name: form.name.trim(),
-          fuel_type: form.fuel_type,
-          capacity_gallons: form.capacity_gallons,
-          initial_stock_gallons: form.initial_stock_gallons,
-          alert_threshold_pct: form.alert_threshold_pct,
-        };
-        if (form.location_name.trim()) {
-          payload.location_name = form.location_name.trim();
-        }
-        result = await createStation(payload, tenantId);
-      } else if (isThresholdOnlyChange()) {
-        if (!station) {
-          throw new Error("Station data is required for edit mode.");
-        }
-        // Threshold-only edit uses the dedicated endpoint
-        result = await updateStationThreshold(
-          station.station_id,
-          form.alert_threshold_pct,
-          tenantId,
-        );
-      } else {
-        if (!station) {
-          throw new Error("Station data is required for edit mode.");
-        }
-        // Full edit
-        const payload: UpdateStationPayload = {
-          name: form.name.trim(),
-          fuel_type: form.fuel_type,
-          capacity_gallons: form.capacity_gallons,
-          alert_threshold_pct: form.alert_threshold_pct,
-        };
-        if (form.location_name.trim()) {
-          payload.location_name = form.location_name.trim();
-        }
-        result = await updateStation(station.station_id, payload, tenantId);
-      }
-
-      onSuccess(result);
-      onClose();
-    } catch (err) {
-      // Retain form values, display error (Requirement 8.7)
-      setError(
-        err instanceof Error ? err.message : "An unexpected error occurred",
-      );
-    } finally {
-      setSubmitting(false);
+    if (!station) throw new Error("Station data is required for edit mode.");
+    if (isThresholdOnlyChange(form)) {
+      return updateStationThreshold(station.station_id, threshold, tenantId);
     }
+    const payload: UpdateStationPayload = {
+      name,
+      fuel_type: form.fuel_type,
+      alert_threshold_pct: threshold,
+    };
+    // Only send capacity when it changed, so opening and saving a litre-based
+    // station doesn't rewrite its capacity with the rounded gallon figure.
+    if (form.capacity_gallons !== initial.capacity_gallons) {
+      payload.capacity_gallons = capacity;
+    }
+    if (location) payload.location_name = location;
+    return updateStation(station.station_id, payload, tenantId);
   };
 
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
-  const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
-
-  const title = mode === "create" ? "Add Fuel Station" : "Edit Fuel Station";
-  const submitLabel = mode === "create" ? "Create Station" : "Save Changes";
-  const submittingLabel = mode === "create" ? "Creating..." : "Saving...";
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-lg font-semibold text-primary">{title}</h2>
-          <button
-            onClick={onClose}
-            className="p-1 text-gray-500 hover:text-gray-600 rounded"
-            aria-label="Close form"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="px-6 py-4 space-y-4">
-          {/* API error banner */}
-          {error && (
-            <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
-              {error}
-            </p>
-          )}
-
-          {/* Station Name */}
-          <div>
-            <label
-              htmlFor="station-name"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Station Name
-            </label>
+    <FormDialog<Values, FuelStation>
+      open
+      size="md"
+      title={mode === "create" ? "Add fuel station" : "Edit fuel station"}
+      submitLabel={mode === "create" ? "Create station" : "Save changes"}
+      successMessage={mode === "create" ? "Station created" : "Station saved"}
+      initialValues={initial}
+      validate={(v) => ({ ...validateStationForm(v) })}
+      onSubmit={submit}
+      onSaved={onSuccess}
+      onClose={onClose}
+    >
+      {({ values, set, errors }) => (
+        <>
+          <Field label="Station name" required error={errors.name}>
             <input
               id="station-name"
               type="text"
-              value={form.name}
-              onChange={(e) => {
-                setForm({ ...form, name: e.target.value });
-                if (fieldErrors.name) {
-                  setFieldErrors({ ...fieldErrors, name: undefined });
-                }
-              }}
+              value={values.name}
+              onChange={(e) => set("name", e.target.value)}
               placeholder="e.g. Houston Main Terminal"
-              className={fieldErrors.name ? errorInputClass : inputClass}
-              required
+              className={INPUT_CLASS}
             />
-            {fieldErrors.name && (
-              <p className="text-xs text-error mt-1">{fieldErrors.name}</p>
-            )}
-          </div>
-
-          {/* Fuel Type & Capacity */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label
-                htmlFor="fuel-type"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Fuel Type
-              </label>
-              <select
-                id="fuel-type"
-                value={form.fuel_type}
-                onChange={(e) =>
-                  setForm({ ...form, fuel_type: e.target.value as FuelType })
-                }
-                className={inputClass}
-              >
-                {FUEL_TYPES.map((ft) => (
-                  <option key={ft.value} value={ft.value}>
-                    {ft.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="capacity-gallons"
-                className="block text-xs font-medium text-gray-600 mb-1"
-              >
-                Capacity (Gallons)
-              </label>
-              <input
-                id="capacity-gallons"
-                type="number"
-                value={form.capacity_gallons || ""}
-                onChange={(e) => {
-                  const val =
-                    e.target.value === "" ? 0 : Number(e.target.value);
-                  setForm({ ...form, capacity_gallons: val });
-                  if (fieldErrors.capacity_gallons) {
-                    setFieldErrors({
-                      ...fieldErrors,
-                      capacity_gallons: undefined,
-                    });
-                  }
-                }}
-                placeholder="e.g. 50000"
-                min="1"
-                step="any"
-                className={
-                  fieldErrors.capacity_gallons ? errorInputClass : inputClass
-                }
-                required
-              />
-              {fieldErrors.capacity_gallons && (
-                <p className="text-xs text-error mt-1">
-                  {fieldErrors.capacity_gallons}
-                </p>
-              )}
-            </div>
-
-            {mode === "create" && (
-              <div>
-                <label
-                  htmlFor="initial-stock"
-                  className="block text-xs font-medium text-gray-600 mb-1"
-                >
-                  Initial Stock (Gallons)
-                </label>
-                <input
-                  id="initial-stock"
-                  type="number"
-                  value={form.initial_stock_gallons || ""}
-                  onChange={(e) => {
-                    const val =
-                      e.target.value === "" ? 0 : Number(e.target.value);
-                    setForm({ ...form, initial_stock_gallons: val });
-                  }}
-                  placeholder="e.g. 30000"
-                  min="0"
-                  step="any"
-                  className={inputClass}
-                  required
-                />
-              </div>
-            )}
-          </div>
-
-          {/* Location Name */}
-          <div>
-            <label
-              htmlFor="location-name"
-              className="block text-xs font-medium text-gray-600 mb-1"
+          </Field>
+          <Field label="Fuel type" required id="fuel-type">
+            <ProductSelect
+              id="fuel-type"
+              value={values.fuel_type}
+              options={STATION_FUEL_TYPES}
+              onChange={(code) => set("fuel_type", code as FuelType)}
+            />
+          </Field>
+          <Field
+            label="Capacity"
+            required
+            error={errors.capacity_gallons}
+            span={1}
+            id="capacity-gallons"
+          >
+            <NumberField
+              id="capacity-gallons"
+              unit="gal"
+              min={1}
+              value={values.capacity_gallons}
+              onChange={(n) => set("capacity_gallons", n)}
+              placeholder="50,000"
+            />
+          </Field>
+          {mode === "create" && (
+            <Field
+              label="Initial stock"
+              error={errors.initial_stock_gallons}
+              span={1}
+              id="initial-stock"
             >
-              Location Name (optional)
-            </label>
+              <NumberField
+                id="initial-stock"
+                unit="gal"
+                min={0}
+                max={values.capacity_gallons ?? undefined}
+                value={values.initial_stock_gallons}
+                onChange={(n) => set("initial_stock_gallons", n)}
+                placeholder="30,000"
+              />
+            </Field>
+          )}
+          <Field label="Location name" span={mode === "create" ? 2 : 1}>
             <input
               id="location-name"
               type="text"
-              value={form.location_name}
-              onChange={(e) =>
-                setForm({ ...form, location_name: e.target.value })
-              }
+              value={values.location_name}
+              onChange={(e) => set("location_name", e.target.value)}
               placeholder="e.g. Industrial District"
-              className={inputClass}
+              className={INPUT_CLASS}
             />
-          </div>
-
-          {/* Alert Threshold */}
-          <div>
-            <label
-              htmlFor="alert-threshold"
-              className="block text-xs font-medium text-gray-600 mb-1"
-            >
-              Alert Threshold (%)
-            </label>
-            <input
+          </Field>
+          <Field
+            label="Alert threshold"
+            required
+            help="Alert when stock falls below this percentage of capacity."
+            error={errors.alert_threshold_pct}
+            id="alert-threshold"
+          >
+            <NumberField
               id="alert-threshold"
-              type="number"
-              value={form.alert_threshold_pct}
-              onChange={(e) => {
-                const val = e.target.value === "" ? 0 : Number(e.target.value);
-                setForm({ ...form, alert_threshold_pct: val });
-                if (fieldErrors.alert_threshold_pct) {
-                  setFieldErrors({
-                    ...fieldErrors,
-                    alert_threshold_pct: undefined,
-                  });
-                }
-              }}
-              placeholder="e.g. 20"
-              min="0"
-              max="100"
-              step="1"
-              className={
-                fieldErrors.alert_threshold_pct ? errorInputClass : inputClass
-              }
-              required
+              unit="%"
+              min={0}
+              max={100}
+              value={values.alert_threshold_pct}
+              onChange={(n) => set("alert_threshold_pct", n)}
             />
-            <p className="text-xs text-gray-500 mt-1">
-              Alert when stock falls below this percentage of capacity
-            </p>
-            {fieldErrors.alert_threshold_pct && (
-              <p className="text-xs text-error mt-1">
-                {fieldErrors.alert_threshold_pct}
-              </p>
-            )}
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-end gap-3 pt-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={submitting}
-              className="px-4 py-2 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-            >
-              {submitting ? submittingLabel : submitLabel}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }

@@ -123,8 +123,12 @@ class HealthCheckService:
         - Requirement 4.4: Check Elasticsearch connectivity with a timeout of 5 seconds
         - Requirement 4.5: Include response time metrics for each dependency
         """
-        # Gather all dependency checks concurrently
-        check_tasks = [self._check_elasticsearch()]
+        # Gather all dependency checks concurrently. The document store is checked
+        # rather than Elasticsearch specifically: after the Postgres cutover the
+        # cluster is gone, its ping answers False, and reporting that as a critical
+        # failure would mark a perfectly healthy service "unhealthy" — which in an
+        # orchestrator means pulled from rotation over a dependency nothing uses.
+        check_tasks = [self._check_document_store()]
         
         # Add session store check if configured
         if self.session_store is not None:
@@ -187,50 +191,64 @@ class HealthCheckService:
             "timestamp": datetime.utcnow().isoformat() + "Z"
         }
     
-    async def _check_elasticsearch(self) -> DependencyHealth:
+    @staticmethod
+    def _document_store_name() -> str:
+        """The store that serves documents. ``postgres``, and only that now.
+
+        This read ``document_store_backend`` while the switch existed, so a health
+        payload named the store the check had actually exercised rather than saying
+        ``elasticsearch`` forever. Kept as a method rather than inlining the string
+        because it is the reported dependency name in every branch below and in
+        :meth:`_determine_overall_status`, which treats it as critical: a failure
+        means documents are unreachable.
         """
-        Check Elasticsearch connectivity with timeout.
-        
+        return "postgres"
+
+    async def _check_document_store(self) -> DependencyHealth:
+        """
+        Check document-store connectivity with timeout.
+
         Validates:
-        - Requirement 4.4: Check Elasticsearch connectivity with a timeout of 5 seconds
+        - Requirement 4.4: Check connectivity with a timeout of 5 seconds
         - Requirement 4.5: Include response time metrics for each dependency
-        
+
         Returns:
-            DependencyHealth: The health status of Elasticsearch
+            DependencyHealth: The health status of whichever store serves documents.
         """
         start_time = time.perf_counter()
-        
+        name = self._document_store_name()
+
         try:
             # Use asyncio.wait_for to enforce the 5-second timeout
             result = await asyncio.wait_for(
-                self._ping_elasticsearch(),
+                self._ping_document_store(),
                 timeout=self.check_timeout
             )
             
             elapsed_ms = (time.perf_counter() - start_time) * 1000
             
             if result:
-                logger.debug(f"Elasticsearch health check passed in {elapsed_ms:.2f}ms")
+                logger.debug(f"{name} health check passed in {elapsed_ms:.2f}ms")
                 return DependencyHealth(
-                    name="elasticsearch",
+                    name=name,
                     healthy=True,
                     response_time_ms=elapsed_ms
                 )
             else:
-                logger.warning(f"Elasticsearch ping returned False after {elapsed_ms:.2f}ms")
+                logger.warning(f"{name} ping returned False after {elapsed_ms:.2f}ms")
                 return DependencyHealth(
-                    name="elasticsearch",
+                    name=name,
                     healthy=False,
                     response_time_ms=elapsed_ms,
-                    error="Elasticsearch ping returned False"
+                    error=f"{name} ping returned False"
                 )
                 
         except asyncio.TimeoutError:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            error_msg = f"Elasticsearch health check timed out after {self.check_timeout} seconds"
+            error_msg = f"{name} health check timed out after {self.check_timeout} seconds"
             logger.warning(error_msg)
             return DependencyHealth(
-                name="elasticsearch",
+                name=name,
                 healthy=False,
                 response_time_ms=elapsed_ms,
                 error=error_msg
@@ -238,33 +256,30 @@ class HealthCheckService:
             
         except Exception as e:
             elapsed_ms = (time.perf_counter() - start_time) * 1000
-            error_msg = f"Elasticsearch health check failed: {str(e)}"
+            error_msg = f"{name} health check failed: {str(e)}"
             logger.error(error_msg)
             return DependencyHealth(
-                name="elasticsearch",
+                name=name,
                 healthy=False,
                 response_time_ms=elapsed_ms,
                 error=error_msg
             )
-    
-    async def _ping_elasticsearch(self) -> bool:
+
+    async def _ping_document_store(self) -> bool:
+        """Probe the store that serves documents.
+
+        A real query — ``SELECT 1`` through the same engine the document store uses —
+        so a readiness probe fails when the database is unreachable. It used to ping
+        the Elasticsearch cluster, which by the end of the migration meant readiness
+        tracked a cluster nothing read: the probe would have gone red on a stopped
+        cluster while every request succeeded, and green on a healthy cluster while
+        Postgres was down.
         """
-        Ping Elasticsearch to check connectivity.
-        
-        This method wraps the synchronous Elasticsearch ping in an async context.
-        
-        Returns:
-            bool: True if Elasticsearch is reachable, False otherwise
-        """
-        # The Elasticsearch client's ping() is synchronous, so we run it in a thread pool
-        loop = asyncio.get_event_loop()
-        
-        def _sync_ping() -> bool:
-            if self.es_service is None or self.es_service.client is None:
-                return False
-            return self.es_service.client.ping()
-        
-        return await loop.run_in_executor(None, _sync_ping)
+        from persistence.database import session_scope
+        from sqlalchemy import text
+
+        async with session_scope() as session:
+            return bool((await session.execute(text("SELECT 1"))).scalar_one() == 1)
     
     async def _check_session_store(self) -> DependencyHealth:
         """
@@ -359,8 +374,10 @@ class HealthCheckService:
         if not dependencies:
             return "healthy"
         
-        # Check for critical dependency failures (Elasticsearch)
-        critical_deps = ["elasticsearch"]
+        # Critical dependency failures. Both document-store names are listed
+        # because either one, when it is the ACTIVE store, means documents are
+        # unreachable — and only one of them is ever reported per check.
+        critical_deps = ["elasticsearch", "postgres"]
         critical_healthy = True
         all_healthy = True
         

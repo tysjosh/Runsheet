@@ -263,6 +263,19 @@ class OutcomeTracker:
     # KPI measurement
     # ------------------------------------------------------------------
 
+    async def measure_current_kpis(
+        self, entity_ids: List[str], tenant_id: str
+    ) -> Optional[Dict[str, float]]:
+        """Public wrapper so callers can capture a real "before" baseline.
+
+        Overlay agents call this immediately before executing a
+        proposal's mutations, then pass the result to
+        :meth:`record_proposal_execution` as ``before_kpis`` — the same
+        measurement :meth:`check_pending_outcomes` takes for "after", so
+        the two are directly comparable. Delegates to :meth:`_measure_kpis`.
+        """
+        return await self._measure_kpis(entity_ids, tenant_id)
+
     async def _measure_kpis(
         self, entity_ids: List[str], tenant_id: str
     ) -> Optional[Dict[str, float]]:

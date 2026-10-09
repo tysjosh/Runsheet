@@ -1,138 +1,138 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { type Column, EntityLink, Table } from "@/components/ui";
+/**
+ * Compliance → BOLs (UI revamp task 3.5): status chips, product and driver in
+ * the Filters popover, a DataTable with products by name and gallons through
+ * `lib/format`, and "Upload BOL" as an md FormDialog (design.md §5).
+ */
+import { RefreshCw, Upload } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Button,
+  type Column,
+  DataTable,
+  EntityLink,
+  Field,
+  FilterChips,
+  FilterPopover,
+  FormDialog,
+  IconButton,
+  ProductChip,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
+} from "@/components/ui";
+import { dateTime, gallons } from "../../lib/format";
 import {
   getTerminalBOLs,
   type TerminalBOL,
   type TerminalBOLStatus,
   uploadTerminalBOL,
 } from "../../services/complianceApi";
+import type { StatusKey } from "../../styles/tokens";
 import DriverPicker from "../ops/DriverPicker";
 import ProductPicker from "../ops/ProductPicker";
+import { PageTitle } from "../ui/PageHeader";
 
-// ─── View modes ──────────────────────────────────────────────────────────────
+const BOL_STATUS: Record<
+  TerminalBOLStatus,
+  { status: StatusKey; label: string }
+> = {
+  ingested: { status: "draft", label: "Ingested" },
+  pending_confirmation: { status: "warning", label: "Pending confirmation" },
+  linked: { status: "ok", label: "Linked" },
+};
 
-type ViewMode = "list" | "upload";
-
-// ─── Badge helpers ───────────────────────────────────────────────────────────
-
-function statusBadge(status: TerminalBOLStatus): {
-  label: string;
-  className: string;
-} {
-  switch (status) {
-    case "ingested":
-      return {
-        label: "Ingested",
-        className: "bg-success-light text-success-dark",
-      };
-    case "pending_confirmation":
-      return {
-        label: "Pending Confirmation",
-        className: "bg-warning-light text-warning-dark",
-      };
-    case "linked":
-      return { label: "Linked", className: "bg-info-light text-info-dark" };
-    default:
-      return { label: status, className: "bg-gray-100 text-gray-800" };
-  }
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
-}
-
-function formatGallons(gallons: number): string {
-  return gallons.toFixed(1);
-}
-
-// ─── Table columns ───────────────────────────────────────────────────────────
+const STATUS_CHIPS: { id: "" | TerminalBOLStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "pending_confirmation", label: "Pending" },
+  { id: "ingested", label: "Ingested" },
+  { id: "linked", label: "Linked" },
+];
 
 const bolColumns: Column<TerminalBOL>[] = [
   {
     key: "load_number",
-    label: "Load Number",
-    render: (bol) => <span className="font-medium">{bol.load_number}</span>,
-  },
-  {
-    key: "product_code",
-    label: "Product Code",
-    render: (bol) => bol.product_code,
-  },
-  {
-    key: "gross_gallons",
-    label: "Gross Gallons",
-    render: (bol) => formatGallons(bol.gross_gallons),
-  },
-  {
-    key: "net_gallons",
-    label: "Net Gallons",
-    render: (bol) => formatGallons(bol.net_gallons),
-  },
-  {
-    key: "supplier_name",
-    label: "Supplier",
-    render: (bol) => bol.supplier_name,
-  },
-  {
-    key: "terminal_name",
-    label: "Terminal",
-    render: (bol) => bol.terminal_name,
-  },
-  {
-    key: "driver_id",
-    label: "Driver ID",
-    // The terminal BOL's subject is its driver, navigable to the Drivers
-    // module (Req 11.3, 13.1).
-    render: (bol) => <EntityLink type="driver" id={bol.driver_id} />,
-  },
-  {
-    key: "timestamp",
-    label: "Timestamp",
-    render: (bol) => formatDate(bol.timestamp),
+    header: "Load",
+    width: 140,
+    className: "font-medium text-text",
+    cell: (bol) => bol.load_number,
   },
   {
     key: "status",
-    label: "Status",
-    render: (bol) => {
-      const badge = statusBadge(bol.status);
-      return (
-        <span
-          className={`inline-block px-2 py-1 rounded text-xs font-medium ${badge.className}`}
-        >
-          {badge.label}
-        </span>
-      );
+    header: "Status",
+    width: 190,
+    cell: (bol) => {
+      const s = BOL_STATUS[bol.status] ?? {
+        status: "draft" as StatusKey,
+        label: String(bol.status).replace(/_/g, " "),
+      };
+      return <StatusBadge status={s.status} label={s.label} />;
     },
+  },
+  {
+    key: "product_code",
+    header: "Product",
+    width: 200,
+    cell: (bol) => <ProductChip code={bol.product_code} />,
+  },
+  {
+    key: "gross_gallons",
+    header: "Gross",
+    align: "right",
+    width: 110,
+    className: "tabular-nums",
+    cell: (bol) => gallons(bol.gross_gallons, { decimals: 1 }),
+  },
+  {
+    key: "net_gallons",
+    header: "Net",
+    align: "right",
+    width: 110,
+    className: "tabular-nums",
+    cell: (bol) => gallons(bol.net_gallons, { decimals: 1 }),
+  },
+  {
+    key: "supplier_name",
+    header: "Supplier",
+    truncate: true,
+    title: (bol) => bol.supplier_name,
+    cell: (bol) => bol.supplier_name,
+  },
+  {
+    key: "terminal_name",
+    header: "Terminal",
+    truncate: true,
+    title: (bol) => bol.terminal_name,
+    cell: (bol) => bol.terminal_name,
+  },
+  {
+    key: "driver_id",
+    header: "Driver",
+    width: 150,
+    // The terminal BOL's subject is its driver, navigable to the Drivers
+    // module (Req 11.3, 13.1).
+    cell: (bol) => <EntityLink type="driver" id={bol.driver_id} />,
+  },
+  {
+    key: "timestamp",
+    header: "Received",
+    width: 150,
+    cell: (bol) => dateTime(bol.timestamp),
   },
 ];
 
-// ─── Main Component ──────────────────────────────────────────────────────────
-
 export default function TerminalBOLsPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [bols, setBols] = useState<TerminalBOL[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-
-  // Filters
-  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [reload, setReload] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<"" | TerminalBOLStatus>("");
   const [productCodeFilter, setProductCodeFilter] = useState<string>("");
   const [driverIdFilter, setDriverIdFilter] = useState<string>("");
-
-  // Upload state
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadSuccess, setUploadSuccess] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  // ─── Fetch BOLs ──────────────────────────────────────────────────────────
 
   const fetchBOLs = useCallback(async () => {
     setLoading(true);
@@ -144,14 +144,10 @@ export default function TerminalBOLsPage() {
         driver_id?: string;
         page: number;
         size: number;
-      } = {
-        page,
-        size: 20,
-      };
-      if (statusFilter) filters.status = statusFilter as TerminalBOLStatus;
+      } = { page, size: 20 };
+      if (statusFilter) filters.status = statusFilter;
       if (productCodeFilter) filters.product_code = productCodeFilter;
       if (driverIdFilter) filters.driver_id = driverIdFilter;
-
       const response = await getTerminalBOLs(filters);
       setBols(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
@@ -162,309 +158,164 @@ export default function TerminalBOLsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter, productCodeFilter, driverIdFilter]);
+    // `reload` refetches after an upload.
+  }, [page, statusFilter, productCodeFilter, driverIdFilter, reload]);
 
   useEffect(() => {
-    if (viewMode === "list") {
-      fetchBOLs();
-    }
-  }, [fetchBOLs, viewMode]);
+    fetchBOLs();
+  }, [fetchBOLs]);
 
-  // ─── Upload handler ──────────────────────────────────────────────────────
-
-  async function handleUpload(e: React.FormEvent) {
-    e.preventDefault();
-    if (!uploadFile) return;
-
-    setUploading(true);
-    setUploadError(null);
-    setUploadSuccess(false);
-
-    try {
-      await uploadTerminalBOL(uploadFile);
-      setUploadSuccess(true);
-      setUploadFile(null);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-      // Return to list after short delay
-      setTimeout(() => {
-        setViewMode("list");
-        setUploadSuccess(false);
-      }, 1500);
-    } catch (err) {
-      setUploadError(
-        err instanceof Error ? err.message : "Failed to upload BOL",
-      );
-    } finally {
-      setUploading(false);
-    }
-  }
-
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0] ?? null;
-    setUploadFile(file);
-    setUploadError(null);
-    setUploadSuccess(false);
-  }
-
-  // ─── Render: Listing View ────────────────────────────────────────────────
-
-  function renderList() {
-    return (
-      <>
-        {/* Filters */}
-        <div className="flex flex-wrap gap-4 mb-6 items-end">
-          <div>
-            <label
-              htmlFor="status-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Status
-            </label>
-            <select
-              id="status-filter"
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2 w-48"
-            >
-              <option value="">All Statuses</option>
-              <option value="ingested">Ingested</option>
-              <option value="pending_confirmation">Pending Confirmation</option>
-              <option value="linked">Linked</option>
-            </select>
-          </div>
-          <div>
-            <label
-              htmlFor="product-code-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Product Code
-            </label>
-            {/* Filter by a real fuel product; cleared = all products. */}
-            <div className="w-48">
-              <ProductPicker
-                id="product-code-filter"
-                aria-label="Product Code"
-                value={productCodeFilter || null}
-                onChange={(value) => {
-                  setProductCodeFilter(value);
-                  setPage(1);
-                }}
-                placeholder="All products"
-                allowClear
-              />
-            </div>
-          </div>
-          <div>
-            <label
-              htmlFor="driver-id-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Driver ID
-            </label>
-            {/* Filter by a real driver; cleared = all drivers. */}
-            <div className="w-48">
-              <DriverPicker
-                id="driver-id-filter"
-                aria-label="Driver ID"
-                value={driverIdFilter || null}
-                onChange={(value) => {
-                  setDriverIdFilter(value);
-                  setPage(1);
-                }}
-                placeholder="All drivers"
-                allowClear
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Loading state */}
-        {loading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading terminal BOLs...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Error state */}
-        {!loading && error && (
-          <div
-            role="alert"
-            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-          >
-            {error}
-          </div>
-        )}
-
-        {/* BOLs table */}
-        {!loading && !error && (
-          <>
-            <Table<TerminalBOL>
-              ariaLabel="Terminal BOLs"
-              columns={bolColumns}
-              data={bols}
-              getRowId={(bol) => bol.bol_id}
-              emptyState={
-                <span className="text-gray-500">No terminal BOLs found.</span>
-              }
-            />
-
-            {/* Pagination */}
-            <nav
-              aria-label="Pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
-          </>
-        )}
-      </>
-    );
-  }
-
-  // ─── Render: Upload Form ─────────────────────────────────────────────────
-
-  function renderUploadForm() {
-    return (
-      <form
-        onSubmit={handleUpload}
-        className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Upload className="h-3.5 w-3.5" />}
+        onClick={() => setUploading(true)}
       >
-        <h2 className="text-lg font-bold mb-4">Upload Terminal BOL</h2>
-        <p className="text-gray-600 text-sm mb-4">
-          Upload a scanned BOL document (PDF or image). The system will extract
-          data via OCR and create a pending confirmation record.
-        </p>
+        Upload BOL
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
 
-        <div className="mb-4">
-          <label htmlFor="bol-file" className="block text-sm font-medium mb-1">
-            BOL Document
-          </label>
-          <input
-            id="bol-file"
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,.png,.jpg,.jpeg,.tiff,.tif"
-            onChange={handleFileChange}
-            className="w-full border rounded px-3 py-2"
-          />
-          <p className="text-xs text-gray-500 mt-1">
-            Accepted formats: PDF, PNG, JPG, TIFF
-          </p>
-        </div>
-
-        {/* Upload error */}
-        {uploadError && (
-          <div
-            role="alert"
-            className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
-          >
-            {uploadError}
-          </div>
-        )}
-
-        {/* Upload success */}
-        {uploadSuccess && (
-          <div
-            role="status"
-            className="bg-success-light border border-success-light text-success-dark p-3 rounded mb-4 text-sm"
-          >
-            BOL uploaded successfully. Returning to list...
-          </div>
-        )}
-
-        <div className="flex gap-3">
-          <button
-            type="submit"
-            disabled={uploading || !uploadFile}
-            className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
-          >
-            {uploading ? "Uploading..." : "Upload BOL"}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setViewMode("list");
-              setUploadFile(null);
-              setUploadError(null);
-              setUploadSuccess(false);
-            }}
-            className="px-4 py-2 border rounded hover:bg-gray-50"
-          >
-            Cancel
-          </button>
-        </div>
-      </form>
-    );
-  }
-
-  // ─── Main Render ─────────────────────────────────────────────────────────
+  const popoverCount = (productCodeFilter ? 1 : 0) + (driverIdFilter ? 1 : 0);
 
   return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Terminal BOLs</h1>
-            <p className="text-gray-600 mt-1">
-              View ingested terminal Bills of Lading and manually upload scanned
-              BOL documents.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {viewMode !== "list" && (
-              <button
-                type="button"
-                onClick={() => {
-                  setViewMode("list");
-                  setUploadFile(null);
-                  setUploadError(null);
-                  setUploadSuccess(false);
-                }}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
-                Back to List
-              </button>
-            )}
-            {viewMode === "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("upload")}
-                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
-              >
-                Upload BOL
-              </button>
-            )}
-          </div>
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Terminal BOLs
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
         </div>
-      </header>
+      )}
+      <Toolbar
+        label="Terminal BOLs"
+        filters={
+          <>
+            <FilterChips
+              label="BOL status"
+              options={STATUS_CHIPS.map((c) => ({
+                id: c.id || "all",
+                label: c.label,
+                status: c.id ? BOL_STATUS[c.id].status : undefined,
+              }))}
+              value={statusFilter || "all"}
+              onChange={(v) => {
+                setStatusFilter(v === "all" ? "" : (v as TerminalBOLStatus));
+                setPage(1);
+              }}
+            />
+            <FilterPopover
+              count={popoverCount}
+              label="BOL filters"
+              onClear={() => {
+                setProductCodeFilter("");
+                setDriverIdFilter("");
+                setPage(1);
+              }}
+            >
+              <div className="grid w-80 gap-3">
+                <Field label="Product" id="product-code-filter">
+                  <ProductPicker
+                    id="product-code-filter"
+                    aria-label="Product Code"
+                    value={productCodeFilter || null}
+                    onChange={(value) => {
+                      setProductCodeFilter(value);
+                      setPage(1);
+                    }}
+                    placeholder="All products"
+                    allowClear
+                  />
+                </Field>
+                <Field label="Driver" id="driver-id-filter">
+                  <DriverPicker
+                    id="driver-id-filter"
+                    aria-label="Driver ID"
+                    value={driverIdFilter || null}
+                    onChange={(value) => {
+                      setDriverIdFilter(value);
+                      setPage(1);
+                    }}
+                    placeholder="All drivers"
+                    allowClear
+                  />
+                </Field>
+              </div>
+            </FilterPopover>
+          </>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<TerminalBOL>
+          ariaLabel="Terminal BOLs"
+          columns={bolColumns}
+          data={loading || error ? [] : bols}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchBOLs } : null}
+          getRowId={(bol) => bol.bol_id}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <span className="text-text-muted">No terminal BOLs found.</span>
+          }
+        />
+      </div>
 
-      {/* View content */}
-      {viewMode === "list" && renderList()}
-      {viewMode === "upload" && renderUploadForm()}
+      {uploading && (
+        <FormDialog<{ file: File | null }, void>
+          open
+          size="md"
+          title="Upload terminal BOL"
+          help="A scanned BOL (PDF or image). Its data is read by OCR and saved as pending confirmation."
+          submitLabel="Upload BOL"
+          successMessage="BOL uploaded"
+          initialValues={{ file: null }}
+          validate={(v) => ({
+            file: v.file ? undefined : "Choose a BOL document.",
+          })}
+          onSubmit={async (v) => {
+            if (v.file) await uploadTerminalBOL(v.file);
+          }}
+          onSaved={() => setReload((n) => n + 1)}
+          onClose={() => setUploading(false)}
+        >
+          {({ set, errors }) => (
+            <Field
+              label="BOL document"
+              required
+              help="PDF, PNG, JPG or TIFF"
+              error={errors.file}
+            >
+              <input
+                id="bol-file"
+                type="file"
+                accept=".pdf,.png,.jpg,.jpeg,.tiff,.tif"
+                onChange={(e) => set("file", e.target.files?.[0] ?? null)}
+                className="block w-full text-sm"
+              />
+            </Field>
+          )}
+        </FormDialog>
+      )}
     </div>
   );
 }

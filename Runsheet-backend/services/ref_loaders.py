@@ -38,7 +38,7 @@ EntityLoader = Callable[[str, str], Awaitable[Optional[Dict[str, Any]]]]
 
 # Canonical ES indices the loaders read from.
 CUSTOMERS_INDEX = "customers_current"
-ASSETS_INDEX = "assets"  # alias onto the migrated ``trucks`` index
+ASSETS_INDEX = "trucks"  # where trucks live; no "assets" alias exists (C3)
 DRIVERS_INDEX = "drivers_current"
 # Commerce billing projections (cross-module-entity-linkage Phase G, Req 12).
 INVOICES_INDEX = "invoices_current"
@@ -91,9 +91,8 @@ def make_customer_loader(es_service: Any) -> EntityLoader:
 def make_asset_loader(es_service: Any) -> EntityLoader:
     """Loader resolving an ``asset_id`` (a.k.a. ``truck_id``) to a summary.
 
-    The ``assets`` alias points at the ``trucks`` index whose documents key on
-    either ``asset_id`` or ``truck_id`` depending on vintage, so the lookup
-    matches both. Returns ``{name, asset_type, asset_subtype, status}``.
+    Reads the ``trucks`` index, whose documents key on either ``asset_id`` or
+    ``truck_id`` depending on vintage, so the lookup matches both. Returns ``{name, asset_type, asset_subtype, status}``.
     """
 
     async def _load(tenant_id: str, entity_id: str) -> Optional[Dict[str, Any]]:

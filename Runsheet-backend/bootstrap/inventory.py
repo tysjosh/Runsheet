@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register inventory domain services."""
-    from inventory.es_mappings import setup_inventory_indices
     from inventory.service import InventoryService
     from inventory.tenant_config import TenantInventoryConfigService
     from inventory.api.endpoints import configure_inventory_api
@@ -21,12 +20,6 @@ async def initialize(app, container: ServiceContainer) -> None:
     es_service = container.es_service
 
     # Set up inventory indices
-    try:
-        logger.info("Setting up inventory indices...")
-        setup_inventory_indices(es_service)
-        logger.info("Inventory indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up inventory indices: %s", e)
 
     # Get the fleet WS manager for broadcasting alerts (optional)
     ws_manager = None

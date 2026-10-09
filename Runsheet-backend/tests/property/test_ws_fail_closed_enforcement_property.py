@@ -245,6 +245,103 @@ class TestWsAuthenticatorFailsClosed:
 
 
 # ---------------------------------------------------------------------------
+# Property 11c — a cross-origin handshake is rejected even with a valid session
+# (Cross-Site WebSocket Hijacking, staging finding F2)
+# ---------------------------------------------------------------------------
+_ALLOWED_ORIGIN = "https://app.example.test"
+_disallowed_origins = st.one_of(
+    st.from_regex(r"https://[a-z]{3,12}\.evil\.test", fullmatch=True),
+    st.just("null"),
+    st.just(_ALLOWED_ORIGIN + ".evil.test"),
+)
+_transports = st.sampled_from(["cookie", "bearer", "query"])
+
+
+def _credential_kwargs(transport: str, origin):
+    """websocket_connect kwargs carrying a credential over ``transport``."""
+    headers = {} if origin is None else {"origin": origin}
+    path_suffix = ""
+    if transport == "cookie":
+        headers["cookie"] = "sAccessToken=valid-token"
+    elif transport == "bearer":
+        headers["authorization"] = "Bearer valid-token"
+    else:
+        path_suffix = "?token=valid-token"
+    return headers, path_suffix
+
+
+async def _always_valid(access_token, anti_csrf):  # noqa: ANN001 - mirrors seam
+    if not access_token:
+        return None
+    return {"tenant_id": "t-1", "driver_id": "d-1"}
+
+
+def _connect(path: str, headers) -> object:
+    try:
+        with _e2e_client.websocket_connect(path, headers=headers):
+            return "ACCEPTED"
+    except WebSocketDisconnect as exc:
+        return exc.code
+
+
+# Feature: staging finding F2 — WebSocket handshakes must be same-site
+class TestWsCrossOriginHandshakeRejected:
+    def setup_method(self, method):
+        self._env = patch.dict("os.environ", {"CORS_ORIGINS": f'["{_ALLOWED_ORIGIN}"]'})
+        self._env.start()
+
+    def teardown_method(self, method):
+        self._env.stop()
+        ws.configure_ws_session_verifier(None)
+
+    @given(
+        origin=_disallowed_origins,
+        transport=_transports,
+        path=st.sampled_from(["/ws/tenant", "/ws/driver"]),
+    )
+    @settings(
+        max_examples=60,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_disallowed_origin_closed_4001_never_subscribed(
+        self, origin, transport, path
+    ):
+        _spy_manager.connect_calls.clear()
+        _spy_manager.connect_driver_calls.clear()
+        ws.configure_ws_session_verifier(_always_valid)
+        headers, suffix = _credential_kwargs(transport, origin)
+
+        close_code = _connect(path + suffix, headers)
+
+        assert close_code == 4001, (
+            f"cross-origin handshake (origin={origin!r}, transport={transport}, "
+            f"path={path}) was not rejected: {close_code!r}"
+        )
+        assert _spy_manager.connect_calls == []
+        assert _spy_manager.connect_driver_calls == []
+
+    @given(
+        origin=st.sampled_from([None, _ALLOWED_ORIGIN, "http://testserver"]),
+        transport=_transports,
+        path=st.sampled_from(["/ws/tenant", "/ws/driver"]),
+    )
+    @settings(
+        max_examples=30,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_allowed_absent_or_same_origin_accepted(self, origin, transport, path):
+        ws.configure_ws_session_verifier(_always_valid)
+        headers, suffix = _credential_kwargs(transport, origin)
+
+        close_code = _connect(path + suffix, headers)
+
+        assert close_code == "ACCEPTED", (
+            f"handshake (origin={origin!r}, transport={transport}, path={path}) "
+            f"should be accepted, got {close_code!r}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Property 11b — end-to-end: connection closed with 4001 and never subscribed
 # ---------------------------------------------------------------------------
 # Feature: supertokens-auth-migration, Property 11: Fail-closed enforcement on WebSocket connections

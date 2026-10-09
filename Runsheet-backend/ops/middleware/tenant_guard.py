@@ -105,6 +105,10 @@ class TenantContext:
         default_factory=lambda: default_measurement_units_for_region("US").to_dict()
     )
     driver_id: Optional[str] = None
+    #: The commerce ``customer_id`` a portal (``customer``) session is bound
+    #: to; ``None`` for every staff caller. Appended last with a default for
+    #: the same reason as ``driver_id`` (OI-06, design §1.2).
+    customer_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -149,14 +153,45 @@ class SessionVerifier(Protocol):
         ...
 
 
+def session_check_database_enabled() -> bool:
+    """Return whether session verification must consult the core (F3).
+
+    Reads ``settings.session_check_database`` lazily. Fails safe to ``True``
+    (revocation enforced) when settings cannot be loaded.
+    """
+    try:
+        from config.settings import get_settings
+
+        return bool(getattr(get_settings(), "session_check_database", True))
+    except Exception:  # noqa: BLE001 — fail safe to the stricter check
+        return True
+
+
+#: ``request.state`` attribute holding a request's verified session, so the
+#: auth gate and ``get_tenant_context`` share one core round trip (F3).
+_VERIFIED_SESSION_STATE_ATTR = "_runsheet_verified_session"
+
+
 class _SuperTokensSessionVerifier:
     """Default :class:`SessionVerifier` backed by the SuperTokens SDK.
 
     Imports the SDK lazily so simply importing this module never forces the
     SuperTokens dependency to load or a managed-core call to occur.
+
+    Verifies with ``check_database`` (see
+    :func:`session_check_database_enabled`) so a signed-out or revoked session
+    is rejected immediately rather than when its access token expires (staging
+    finding F3). Both ``AuthEnforcementMiddleware`` and ``get_tenant_context``
+    verify each protected request, so a successful result is memoized on
+    ``request.state`` (shared by Starlette between the middleware's and the
+    endpoint's ``Request``) to keep it to one core call per request.
     """
 
     async def verify(self, request: Request) -> Optional[VerifiedSession]:
+        cached = getattr(request.state, _VERIFIED_SESSION_STATE_ATTR, None)
+        if isinstance(cached, VerifiedSession):
+            return cached
+
         # Lazy import: keep module import side-effect free and avoid pulling in
         # the SDK in environments/tests that never use the SuperTokens paths.
         from supertokens_python.recipe.session.asyncio import get_session
@@ -167,7 +202,11 @@ class _SuperTokensSessionVerifier:
         try:
             # session_required=False: returns None when no session token is
             # present, raises when a token is present but unverifiable.
-            session = await get_session(request, session_required=False)
+            session = await get_session(
+                request,
+                session_required=False,
+                check_database=session_check_database_enabled(),
+            )
         except SuperTokensSessionError as exc:
             # A session was presented but failed verification (expired, revoked,
             # token theft, ...). Reject — do not fall back (Req 2.4, 2.6).
@@ -180,10 +219,12 @@ class _SuperTokensSessionVerifier:
         if session is None:
             return None
 
-        return VerifiedSession(
+        verified = VerifiedSession(
             user_id=session.get_user_id(),
             claims=dict(session.get_access_token_payload() or {}),
         )
+        setattr(request.state, _VERIFIED_SESSION_STATE_ATTR, verified)
+        return verified
 
 
 # Module-level verifier seam. ``None`` means "use the default SDK-backed
@@ -242,6 +283,7 @@ def _build_context(
     roles: list[str],
     settings: TenantSettings,
     driver_id: Optional[str] = None,
+    customer_id: Optional[str] = None,
 ) -> TenantContext:
     return TenantContext(
         tenant_id=tenant_id,
@@ -251,6 +293,7 @@ def _build_context(
         region=settings.region,
         measurement_units=settings.measurement_units.to_dict(),
         driver_id=driver_id,
+        customer_id=customer_id,
     )
 
 
@@ -273,7 +316,23 @@ async def get_tenant_context(request: Request) -> TenantContext:
     Validates: Requirements 2.6, 3.1, 3.2, 3.3, 3.5, 5.1, 5.3, 5.4
     """
     user_id, claims = await _verify_supertokens_session(request, required=True)
-    return await _context_from_session_claims(user_id, claims, request=request)
+    context = await _context_from_session_claims(user_id, claims, request=request)
+    # E1b (OI-06, design §2.2): the central customer-portal deny, repeated
+    # here as defense in depth in case AuthEnforcementMiddleware is bypassed.
+    from portal.scope import customer_session_verdict
+
+    verdict = customer_session_verdict(
+        {"roles": context.roles, "customer_id": context.customer_id},
+        request.url.path,
+    )
+    if verdict is not None:
+        from errors.codes import ErrorCode
+        from errors.exceptions import AppException
+
+        raise AppException(
+            ErrorCode(verdict), "This account can't use this part of Runsheet"
+        )
+    return context
 
 
 async def _verify_supertokens_session(
@@ -330,15 +389,24 @@ async def _context_from_session_claims(
     driver_id = (
         raw_driver_id if isinstance(raw_driver_id, str) and raw_driver_id else None
     )
+    # customer_id: coerced exactly like driver_id (OI-06, design §1.2).
+    raw_customer_id = claims.get("customer_id")
+    customer_id = (
+        raw_customer_id
+        if isinstance(raw_customer_id, str) and raw_customer_id
+        else None
+    )
+    resolved_user_id = user_id if user_id else "unknown"
 
     request_tenant_id_var.set(tenant_id)
     if request is not None:
         # Stamped for middleware that cannot depend on get_tenant_context:
         # tenant_id unblocks idempotency replay, driver_id unblocks per-driver
-        # rate limiting.
+        # rate limiting, auth_user_id gives the portal audit line an actor
+        # even when a request is refused before the portal guard runs.
         request.state.tenant_id = tenant_id
         request.state.driver_id = driver_id
-    resolved_user_id = user_id if user_id else "unknown"
+        request.state.auth_user_id = resolved_user_id
     has_pii_access = bool(claims.get("has_pii_access", False))
     roles = [r for r in (claims.get("roles") or []) if isinstance(r, str)]
 
@@ -358,6 +426,7 @@ async def _context_from_session_claims(
         roles=roles,
         settings=tenant_settings,
         driver_id=driver_id,
+        customer_id=customer_id,
     )
 
 

@@ -274,17 +274,27 @@ class TestPriceProtectionSplitLineInvoice:
         assert pricing_call["gallons"] == DELIVERY_GALLONS
         assert pricing_call["effective_date"] == EFFECTIVE_DATE
 
-        # --- Line item price reflects the contract price (effective_price_cents)
-        # The InvoiceService sets unit_price_cents = resolution.effective_price_cents
-        # on the original line item. The split-line fields are on the resolution
-        # object for the caller to handle. For the invoice, the line is priced at
-        # the contract price and the subtotal = effective_price * total_gallons.
-        invoice_line = result["line_items"][0]
-        assert invoice_line["unit_price_cents"] == CONTRACT_PRICE_CENTS
-
-        # Subtotal is computed as effective_price_cents * quantity
-        expected_subtotal = round(CONTRACT_PRICE_CENTS * DELIVERY_GALLONS)
-        assert invoice_line["subtotal_cents"] == expected_subtotal
+        # --- The split becomes two lines (OI-14) ---
+        # The contracted 200 gal bill at the contract price and the excess
+        # 300 gal at market. Billing all 500 gal at the contract price (the
+        # old single-line assertion) under-billed the excess.
+        contract_line, market_line = result["line_items"]
+        assert contract_line["line_id"] == "line_diesel_split"
+        assert contract_line["quantity_gallons"] == SPLIT_CONTRACT_GALLONS
+        assert contract_line["unit_price_cents"] == CONTRACT_PRICE_CENTS
+        assert contract_line["subtotal_cents"] == round(
+            CONTRACT_PRICE_CENTS * SPLIT_CONTRACT_GALLONS
+        )
+        assert market_line["line_id"] != "line_diesel_split"
+        assert market_line["quantity_gallons"] == SPLIT_MARKET_GALLONS
+        assert market_line["unit_price_cents"] == MARKET_PRICE_CENTS
+        assert market_line["subtotal_cents"] == round(
+            MARKET_PRICE_CENTS * SPLIT_MARKET_GALLONS
+        )
+        expected_subtotal = (
+            contract_line["subtotal_cents"] + market_line["subtotal_cents"]
+        )
+        assert result["subtotal_cents"] == expected_subtotal
 
         # --- Tax computed on total gallons ---
         assert len(self.fake_tax.calls) == 1

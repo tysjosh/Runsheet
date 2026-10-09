@@ -135,6 +135,8 @@ def _mock_es_search_result(hits=None, total=0):
 def _create_ops_app(ff_service: FakeFeatureFlagService, tenant_id: str) -> TestClient:
     """Create a FastAPI app with ops router and mocked dependencies."""
     app = FastAPI()
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(app)
 
     # Create a mock OpsElasticsearchService with a synchronous mock client
     mock_es_client = MagicMock()
@@ -142,6 +144,16 @@ def _create_ops_app(ff_service: FakeFeatureFlagService, tenant_id: str) -> TestC
     mock_ops_es = MagicMock(spec=OpsElasticsearchService)
     mock_ops_es.client = mock_es_client
 
+    # The ops endpoints call ``es.search_documents(...)`` now instead of
+    # ``es.client.search(...)`` — a raw client call bypasses the
+    # Postgres/Elasticsearch backend switch. Delegate the facade to the same
+    # canned client so tests that reconfigure ``mock_es_client.search``
+    # mid-test keep working: the lambda reads it at call time.
+    mock_ops_es.search_documents = AsyncMock(
+        side_effect=lambda index, query, **kw: mock_es_client.search(
+            index=index, body=query
+        )
+    )
     configure_ops_api(
         ops_es_service=mock_ops_es,
         feature_flag_service=ff_service,
@@ -238,7 +250,7 @@ class TestDisabledTenantBlockedOps:
         resp = self.client.get("/api/ops/shipments")
         assert resp.status_code == 404
         body = resp.json()
-        assert body["detail"]["error_code"] == "TENANT_DISABLED"
+        assert body["error_code"] == "TENANT_DISABLED"
 
     def test_disabled_tenant_list_riders(self):
         resp = self.client.get("/api/ops/riders")

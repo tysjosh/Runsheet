@@ -49,12 +49,23 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Button,
   type Column,
   EntityLink,
+  Field,
+  type FieldErrors,
+  FormDialog,
+  INPUT_CLASS,
+  NumberField,
+  ProductChip,
+  ProductSelect,
   Table,
   ToastContainer,
+  Toolbar,
+  usePageChrome,
   useToasts,
 } from "@/components/ui";
+import { dateTime, money, number, pct, productName } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import type {
   RackPrice,
@@ -77,25 +88,6 @@ import {
 
 // ─── Defaults and constants ──────────────────────────────────────────────────
 
-/**
- * Seeded product suggestions shown in the product_code dropdown. The
- * full catalog lives in the backend (``FUEL_PRODUCT_CATALOG``) and is
- * exposed via ``GET /api/fuel/products``; the UI still accepts a free
- * form entry so newly added catalog codes do not require a frontend
- * deploy before dispatchers can rank them.
- */
-const COMMON_PRODUCT_CODES: ReadonlyArray<{ code: string; label: string }> = [
-  { code: "DIESEL_2", label: "Diesel #2" },
-  { code: "GASOLINE_REG", label: "Gasoline — Regular" },
-  { code: "GASOLINE_PREM", label: "Gasoline — Premium" },
-  { code: "PROPANE", label: "Propane" },
-  { code: "HEATING_OIL", label: "Heating Oil" },
-  { code: "KEROSENE", label: "Kerosene" },
-  { code: "OFF_ROAD_DIESEL", label: "Off-Road Diesel" },
-  { code: "DEF", label: "DEF" },
-  { code: "ETHANOL_E85", label: "Ethanol E85" },
-];
-
 /** Safety cap for the rack-prices and supplier-contract side panels. */
 const SIDE_PANEL_PAGE_SIZE = 50;
 
@@ -103,47 +95,32 @@ const SIDE_PANEL_PAGE_SIZE = 50;
 
 export function formatUsd(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
-  return value.toLocaleString(undefined, {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 4,
-    minimumFractionDigits: 4,
-  });
+  return money(value, { decimals: 4 });
 }
 
 export function formatGallons(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
-  return value.toLocaleString(undefined, { maximumFractionDigits: 0 });
+  return number(value);
 }
 
 export function formatKm(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
-  return `${value.toFixed(1)} km`;
+  return `${number(value, { decimals: 1 })} km`;
 }
 
 export function formatMinutes(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
-  return `${value.toFixed(0)} min`;
+  return `${number(value)} min`;
 }
 
 export function formatScore(value: number | null | undefined): string {
   if (value == null || Number.isNaN(value)) return "—";
-  return value.toFixed(3);
+  return number(value, { decimals: 3 });
 }
 
 function formatTimestamp(iso: string | null | undefined): string {
   if (!iso) return "—";
-  try {
-    return new Date(iso).toLocaleString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
+  return dateTime(iso);
 }
 
 /** Human-readable rank label (1st, 2nd, 3rd, 4th, …). */
@@ -181,270 +158,257 @@ const EMPTY_FORM: QueryFormState = {
   terminal_ids: "",
 };
 
-interface QueryFormProps {
+type QueryValues = Omit<
+  QueryFormState,
+  "volume_gallons" | "origin_lat" | "origin_lon"
+> & {
+  volume_gallons: number | null;
+  origin_lat: number | null;
+  origin_lon: number | null;
+};
+
+const toValues = (f: QueryFormState): QueryValues => {
+  const n = (v: string) => (v.trim() === "" ? null : Number(v));
+  return {
+    ...f,
+    volume_gallons: n(f.volume_gallons),
+    origin_lat: n(f.origin_lat),
+    origin_lon: n(f.origin_lon),
+  };
+};
+
+const toForm = (v: QueryValues): QueryFormState => {
+  const s = (x: number | null) =>
+    x === null || Number.isNaN(x) ? "" : String(x);
+  return {
+    ...v,
+    volume_gallons: s(v.volume_gallons),
+    origin_lat: s(v.origin_lat),
+    origin_lon: s(v.origin_lon),
+  };
+};
+
+/** Field-level errors for the query dialog (same rules as validateQueryForm). */
+function queryFieldErrors(v: QueryValues): FieldErrors {
+  const e: FieldErrors = {};
+  if (!v.product_code.trim()) e.product_code = "Choose a product.";
+  if (
+    v.volume_gallons === null ||
+    Number.isNaN(v.volume_gallons) ||
+    v.volume_gallons <= 0
+  )
+    e.volume_gallons = "Volume must be a positive number.";
+  if (
+    v.origin_lat === null ||
+    Number.isNaN(v.origin_lat) ||
+    v.origin_lat < -90 ||
+    v.origin_lat > 90
+  )
+    e.origin_lat = "Latitude must be between -90 and 90.";
+  if (
+    v.origin_lon === null ||
+    Number.isNaN(v.origin_lon) ||
+    v.origin_lon < -180 ||
+    v.origin_lon > 180
+  )
+    e.origin_lon = "Longitude must be between -180 and 180.";
+  const asOf = toForm(v);
+  const r = validateQueryForm(asOf);
+  if (!r.ok && Object.keys(e).length === 0) e.as_of = r.error;
+  return e;
+}
+
+interface QueryDialogProps {
+  open: boolean;
   form: QueryFormState;
-  onChange: (next: QueryFormState) => void;
-  onSubmit: () => void;
-  onReset: () => void;
-  loading: boolean;
+  onClose: () => void;
+  /** Runs the ranking; throw to keep the dialog open with the message. */
+  onSubmit: (form: QueryFormState) => Promise<void>;
   /** Canonical terminals backing the terminal-restriction picker. */
   terminals: Terminal[];
 }
 
 /**
- * Render the recommendation query form. Validation is soft — malformed
- * numeric inputs surface as toast errors on submit rather than blocking
- * the field so operators can see exactly what the backend rejected.
+ * The recommendation query, as a `FormDialog` (design.md §5 "Sourcing
+ * order": md, NumberField). Product is a `ProductSelect`; volume is whole
+ * gallons; the origin is two 4-decimal coordinates. The terminal restriction
+ * is a canonical terminal picker (cross-module-entity-linkage Req 9.2), stored
+ * as a comma-separated string so `validateQueryForm` is unchanged.
  */
-function QueryForm({
+function QueryDialog({
+  open,
   form,
-  onChange,
+  onClose,
   onSubmit,
-  onReset,
-  loading,
   terminals,
-}: QueryFormProps) {
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-  const labelClass = "block text-xs font-medium text-gray-600 mb-1";
-
-  const handleChange = <K extends keyof QueryFormState>(
-    field: K,
-    value: QueryFormState[K],
-  ) => {
-    onChange({ ...form, [field]: value });
-  };
-
-  // The terminal-restriction field is stored internally as a comma-separated
-  // string (so the pure ``validateQueryForm`` contract is unchanged) but is
-  // edited through a canonical terminal picker rather than a free-text id box
-  // (cross-module-entity-linkage Req 9.2 — references resolve to canonical
-  // terminal records, not free text).
-  const selectedTerminalIds = useMemo(
-    () =>
-      form.terminal_ids
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean),
-    [form.terminal_ids],
-  );
-
-  const handleTerminalSelection = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const chosen = Array.from(e.target.selectedOptions)
-      .map((opt) => opt.value)
-      .filter(Boolean);
-    handleChange("terminal_ids", chosen.join(","));
-  };
-
+}: QueryDialogProps) {
   return (
-    <form
-      data-testid="sourcing-query-form"
-      onSubmit={(e) => {
-        e.preventDefault();
-        onSubmit();
-      }}
-      className="space-y-3"
+    <FormDialog<QueryValues & Record<string, unknown>>
+      open={open}
+      size="md"
+      title="Rank loading terminals"
+      help="Rank terminals against live rack prices, contracts and wait times for one truck run."
+      submitLabel="Rank terminals"
+      successMessage={null}
+      initialValues={toValues(form) as QueryValues & Record<string, unknown>}
+      validate={queryFieldErrors}
+      onSubmit={(v) => onSubmit(toForm(v))}
+      onClose={onClose}
     >
-      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-3">
-        <div>
-          <label htmlFor="sourcing-product-code" className={labelClass}>
-            Product code
-          </label>
-          <input
-            id="sourcing-product-code"
-            list="sourcing-product-code-options"
-            type="text"
-            placeholder="e.g. DIESEL_2"
-            className={inputClass}
-            value={form.product_code}
-            onChange={(e) => handleChange("product_code", e.target.value)}
-            required
-          />
-          <datalist id="sourcing-product-code-options">
-            {COMMON_PRODUCT_CODES.map((p) => (
-              <option key={p.code} value={p.code}>
-                {p.label}
-              </option>
-            ))}
-          </datalist>
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-volume" className={labelClass}>
-            Volume (gallons)
-          </label>
-          <input
-            id="sourcing-volume"
-            type="number"
-            min="1"
-            step="1"
-            placeholder="e.g. 8000"
-            className={inputClass}
-            value={form.volume_gallons}
-            onChange={(e) => handleChange("volume_gallons", e.target.value)}
-            required
-          />
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-lat" className={labelClass}>
-            Origin latitude
-          </label>
-          <input
-            id="sourcing-lat"
-            type="number"
-            step="0.0001"
-            min="-90"
-            max="90"
-            placeholder="e.g. 40.7128"
-            className={inputClass}
-            value={form.origin_lat}
-            onChange={(e) => handleChange("origin_lat", e.target.value)}
-            required
-          />
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-lon" className={labelClass}>
-            Origin longitude
-          </label>
-          <input
-            id="sourcing-lon"
-            type="number"
-            step="0.0001"
-            min="-180"
-            max="180"
-            placeholder="e.g. -74.0060"
-            className={inputClass}
-            value={form.origin_lon}
-            onChange={(e) => handleChange("origin_lon", e.target.value)}
-            required
-          />
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-branded" className={labelClass}>
-            Branded filter
-          </label>
-          <select
-            id="sourcing-branded"
-            className={inputClass}
-            value={form.branded}
-            onChange={(e) =>
-              handleChange(
-                "branded",
-                e.target.value as QueryFormState["branded"],
-              )
-            }
-          >
-            <option value="any">Any</option>
-            <option value="branded">Branded only</option>
-            <option value="unbranded">Unbranded only</option>
-          </select>
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-as-of" className={labelClass}>
-            As-of time (optional)
-          </label>
-          <input
-            id="sourcing-as-of"
-            type="datetime-local"
-            className={inputClass}
-            value={form.as_of}
-            onChange={(e) => handleChange("as_of", e.target.value)}
-          />
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-truck-id" className={labelClass}>
-            Truck ID (optional)
-          </label>
-          <input
-            id="sourcing-truck-id"
-            type="text"
-            placeholder="e.g. T-0042"
-            className={inputClass}
-            value={form.truck_id}
-            onChange={(e) => handleChange("truck_id", e.target.value)}
-          />
-        </div>
-
-        <div>
-          <label htmlFor="sourcing-run-id" className={labelClass}>
-            Run ID (optional)
-          </label>
-          <input
-            id="sourcing-run-id"
-            type="text"
-            placeholder="e.g. run-1234"
-            className={inputClass}
-            value={form.run_id}
-            onChange={(e) => handleChange("run_id", e.target.value)}
-          />
-        </div>
-
-        <div className="md:col-span-2 lg:col-span-4">
-          <label htmlFor="sourcing-terminal-ids" className={labelClass}>
-            Restrict to terminals (optional)
-          </label>
-          {terminals.length > 0 ? (
-            <>
-              <select
-                id="sourcing-terminal-ids"
-                multiple
-                className={`${inputClass} h-28`}
-                value={selectedTerminalIds}
-                onChange={handleTerminalSelection}
-                aria-label="Restrict to terminals"
-              >
-                {terminals.map((t) => (
-                  <option key={t.terminal_id} value={t.terminal_id}>
-                    {t.name} ({t.terminal_id})
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-[11px] text-gray-500">
-                Select one or more canonical terminals to restrict the ranking.
-                Hold ⌘/Ctrl to choose several; leave empty to rank all.
-              </p>
-            </>
-          ) : (
-            <p
-              id="sourcing-terminal-ids"
-              className="text-[11px] text-gray-500 px-3 py-2 border border-dashed border-gray-200 rounded-lg"
+      {({ values, set, errors }) => {
+        const selected = values.terminal_ids
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
+        return (
+          <>
+            <Field
+              label="Product"
+              required
+              error={errors.product_code}
+              id="sourcing-product-code"
             >
-              No canonical terminals available yet — the ranking will consider
-              every eligible terminal. Add terminals in the Terminals admin to
-              restrict by terminal.
-            </p>
-          )}
-        </div>
-      </div>
-
-      <div className="flex items-center justify-end gap-2 pt-1">
-        <button
-          type="button"
-          onClick={onReset}
-          className="px-3 py-2 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 border border-gray-200"
-        >
-          Reset
-        </button>
-        <button
-          type="submit"
-          disabled={loading}
-          className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-primary hover:bg-primary-hover rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
-          aria-label="Rank terminals"
-        >
-          {loading ? (
-            <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <Search className="w-4 h-4" aria-hidden="true" />
-          )}
-          Rank terminals
-        </button>
-      </div>
-    </form>
+              <ProductSelect
+                id="sourcing-product-code"
+                value={values.product_code || null}
+                onChange={(code) => set("product_code", code)}
+              />
+            </Field>
+            <Field
+              label="Volume"
+              required
+              error={errors.volume_gallons}
+              span={1}
+              id="sourcing-volume"
+            >
+              <NumberField
+                id="sourcing-volume"
+                unit="gal"
+                min={1}
+                value={values.volume_gallons}
+                onChange={(n) => set("volume_gallons", n)}
+                placeholder="8,000"
+              />
+            </Field>
+            <Field label="Branded filter" span={1}>
+              <select
+                id="sourcing-branded"
+                className={INPUT_CLASS}
+                value={values.branded}
+                onChange={(e) =>
+                  set("branded", e.target.value as QueryFormState["branded"])
+                }
+              >
+                <option value="any">Any</option>
+                <option value="branded">Branded only</option>
+                <option value="unbranded">Unbranded only</option>
+              </select>
+            </Field>
+            <Field
+              label="Origin latitude"
+              required
+              error={errors.origin_lat}
+              span={1}
+              id="sourcing-lat"
+            >
+              <NumberField
+                id="sourcing-lat"
+                decimals={4}
+                min={-90}
+                max={90}
+                value={values.origin_lat}
+                onChange={(n) => set("origin_lat", n)}
+                placeholder="40.7128"
+              />
+            </Field>
+            <Field
+              label="Origin longitude"
+              required
+              error={errors.origin_lon}
+              span={1}
+              id="sourcing-lon"
+            >
+              <NumberField
+                id="sourcing-lon"
+                decimals={4}
+                min={-180}
+                max={180}
+                value={values.origin_lon}
+                onChange={(n) => set("origin_lon", n)}
+                placeholder="-74.0060"
+              />
+            </Field>
+            <Field label="Truck ID" span={1}>
+              <input
+                id="sourcing-truck-id"
+                type="text"
+                placeholder="e.g. T-0042"
+                className={INPUT_CLASS}
+                value={values.truck_id}
+                onChange={(e) => set("truck_id", e.target.value)}
+              />
+            </Field>
+            <Field label="Run ID" span={1}>
+              <input
+                id="sourcing-run-id"
+                type="text"
+                placeholder="e.g. run-1234"
+                className={INPUT_CLASS}
+                value={values.run_id}
+                onChange={(e) => set("run_id", e.target.value)}
+              />
+            </Field>
+            <Field
+              label="As-of time"
+              help="Leave blank for now."
+              error={errors.as_of}
+            >
+              <input
+                id="sourcing-as-of"
+                type="datetime-local"
+                className={INPUT_CLASS}
+                value={values.as_of}
+                onChange={(e) => set("as_of", e.target.value)}
+              />
+            </Field>
+            {terminals.length > 0 ? (
+              <Field
+                label="Restrict to terminals"
+                help="Hold ⌘/Ctrl to choose several; leave empty to rank all."
+              >
+                <select
+                  id="sourcing-terminal-ids"
+                  multiple
+                  className={`${INPUT_CLASS} h-28 py-1`}
+                  value={selected}
+                  onChange={(e) =>
+                    set(
+                      "terminal_ids",
+                      Array.from(e.target.selectedOptions)
+                        .map((o) => o.value)
+                        .filter(Boolean)
+                        .join(","),
+                    )
+                  }
+                >
+                  {terminals.map((t) => (
+                    <option key={t.terminal_id} value={t.terminal_id}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            ) : (
+              <p className="col-span-2 rounded-lg border border-dashed border-slate-300 px-3 py-2 text-xs text-text-muted">
+                No terminals set up yet, so every eligible terminal is ranked.
+                Add terminals under Compliance → Terminals to restrict by
+                terminal.
+              </p>
+            )}
+          </>
+        );
+      }}
+    </FormDialog>
   );
 }
 
@@ -646,189 +610,135 @@ interface WaitReportFormProps {
   onSubmitted: () => void;
 }
 
+type WaitReportDialogValues = Omit<WaitReportFormValues, "wait_minutes"> & {
+  wait_minutes: number | null;
+};
+
+const EMPTY_WAIT_REPORT_DIALOG: WaitReportDialogValues = {
+  ...EMPTY_WAIT_REPORT_FORM,
+  wait_minutes: null,
+};
+
 /**
- * Inline wait-report submission form rendered below the wait-summary
- * panel. Lets dispatchers file a manual observation against the
- * selected terminal without leaving the Sourcing page. The optional
- * dispatcher note typed into the Notes textarea is persisted end-to-
- * end via ``TerminalWaitReportCreateRequest.notes`` so the rolling
- * wait-time context survives into the ``terminal_wait_reports`` ES
- * index for post-hoc analytics and audit (Req 8.4.2).
+ * "Report wait time" opens an md FormDialog (D9: every create flow) to file
+ * a manual observation against the candidate terminal without leaving the
+ * Sourcing page. Whole minutes via NumberField. The optional dispatcher note
+ * is persisted end-to-end via ``TerminalWaitReportCreateRequest.notes`` so
+ * the rolling wait-time context survives into the ``terminal_wait_reports``
+ * ES index for post-hoc analytics and audit (Req 8.4.2). On success the
+ * dialog closes, toasts and the wait summary re-fetches.
  */
 function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
-  const [form, setForm] = useState<WaitReportFormValues>(
-    EMPTY_WAIT_REPORT_FORM,
-  );
-  const [fieldErrors, setFieldErrors] = useState<WaitReportFormErrors>({});
-  const [apiError, setApiError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-  const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
-
-  function updateField<K extends keyof WaitReportFormValues>(
-    key: K,
-    value: WaitReportFormValues[K],
-  ) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-    if (key in fieldErrors) {
-      setFieldErrors((prev) => ({ ...prev, [key]: undefined }));
-    }
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const errors = validateWaitReportForm(form);
-    setFieldErrors(errors);
-    if (Object.keys(errors).length > 0) return;
-
-    setApiError(null);
-    setSubmitting(true);
-    try {
-      const body: TerminalWaitReportCreateRequest = {
-        wait_minutes: Number(form.wait_minutes),
-        source: form.source,
-        observed_at: new Date().toISOString(),
-        notes: form.notes.trim() || undefined,
-      };
-      const reporter = form.reporter_id.trim();
-      if (reporter) body.reporter_id = reporter;
-      await submitTerminalWaitReport(terminalId, body);
-      setForm(EMPTY_WAIT_REPORT_FORM);
-      onSubmitted();
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setApiError(err.message || `Request failed (HTTP ${err.status}).`);
-      } else {
-        setApiError(
-          err instanceof Error ? err.message : "Failed to submit wait report.",
-        );
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
+  const [open, setOpen] = useState(false);
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="space-y-3"
-      data-testid={`wait-report-form-${terminalId}`}
-      aria-label={`Submit wait report for ${terminalId}`}
-    >
-      <div className="text-[10px] uppercase tracking-wide text-gray-500">
-        File a wait report
-      </div>
-      {apiError && (
-        <p
-          role="alert"
-          className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-          data-testid={`wait-report-error-${terminalId}`}
-        >
-          {apiError}
-        </p>
-      )}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <div>
-          <label
-            htmlFor={`wr-minutes-${terminalId}`}
-            className="block text-[10px] uppercase text-gray-500 mb-1"
-          >
-            Wait minutes
-          </label>
-          <input
-            id={`wr-minutes-${terminalId}`}
-            type="number"
-            min="0"
-            step="1"
-            className={fieldErrors.wait_minutes ? errorInputClass : inputClass}
-            value={form.wait_minutes}
-            onChange={(e) => updateField("wait_minutes", e.target.value)}
-            placeholder="e.g. 45"
-            required
-          />
-          {fieldErrors.wait_minutes && (
-            <p className="text-xs text-error mt-1">
-              {fieldErrors.wait_minutes}
-            </p>
-          )}
-        </div>
-        <div>
-          <label
-            htmlFor={`wr-source-${terminalId}`}
-            className="block text-[10px] uppercase text-gray-500 mb-1"
-          >
-            Source
-          </label>
-          <select
-            id={`wr-source-${terminalId}`}
-            className={inputClass}
-            value={form.source}
-            onChange={(e) =>
-              updateField(
-                "source",
-                e.target.value as WaitReportFormValues["source"],
-              )
-            }
-          >
-            <option value="driver_report">Driver report</option>
-            <option value="eld_geofence">ELD geofence</option>
-          </select>
-        </div>
-        <div>
-          <label
-            htmlFor={`wr-reporter-${terminalId}`}
-            className="block text-[10px] uppercase text-gray-500 mb-1"
-          >
-            Reporter ID
-            {form.source === "driver_report" && (
-              <span className="text-error"> *</span>
-            )}
-          </label>
-          <input
-            id={`wr-reporter-${terminalId}`}
-            type="text"
-            className={fieldErrors.reporter_id ? errorInputClass : inputClass}
-            value={form.reporter_id}
-            onChange={(e) => updateField("reporter_id", e.target.value)}
-            placeholder="e.g. driver-042"
-          />
-          {fieldErrors.reporter_id && (
-            <p className="text-xs text-error mt-1">{fieldErrors.reporter_id}</p>
-          )}
-        </div>
-      </div>
-      <div>
-        <label
-          htmlFor={`wr-notes-${terminalId}`}
-          className="block text-[10px] uppercase text-gray-500 mb-1"
-        >
-          Notes (optional)
-        </label>
-        <textarea
-          id={`wr-notes-${terminalId}`}
-          rows={2}
-          className={inputClass}
-          value={form.notes}
-          onChange={(e) => updateField("notes", e.target.value)}
-          placeholder="Why was this wait time observed?"
-        />
-      </div>
-      <div className="flex items-center justify-end">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
-        >
-          {submitting ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-          ) : null}
-          Submit wait report
-        </button>
-      </div>
-    </form>
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-xs text-gray-600">
+        Seen a different wait at this terminal?
+      </span>
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => setOpen(true)}
+        data-testid={`wait-report-open-${terminalId}`}
+      >
+        Report wait time
+      </Button>
+      <FormDialog<WaitReportDialogValues>
+        open={open}
+        size="md"
+        title="Report wait time"
+        help={`Terminal ${terminalId}. The report joins the rolling 2-hour wait summary.`}
+        submitLabel="Submit wait report"
+        successMessage="Wait report submitted"
+        initialValues={EMPTY_WAIT_REPORT_DIALOG}
+        validate={(v) =>
+          validateWaitReportForm({
+            ...v,
+            wait_minutes:
+              v.wait_minutes == null || Number.isNaN(v.wait_minutes)
+                ? ""
+                : String(v.wait_minutes),
+          }) as FieldErrors
+        }
+        onSubmit={async (v) => {
+          const body: TerminalWaitReportCreateRequest = {
+            wait_minutes: v.wait_minutes as number,
+            source: v.source,
+            observed_at: new Date().toISOString(),
+            notes: v.notes.trim() || undefined,
+          };
+          const reporter = v.reporter_id.trim();
+          if (reporter) body.reporter_id = reporter;
+          await submitTerminalWaitReport(terminalId, body);
+        }}
+        onSaved={onSubmitted}
+        onClose={() => setOpen(false)}
+      >
+        {({ values, set, errors }) => (
+          <>
+            <Field
+              label="Wait minutes"
+              required
+              span={1}
+              error={errors.wait_minutes}
+              id={`wr-minutes-${terminalId}`}
+            >
+              <NumberField
+                id={`wr-minutes-${terminalId}`}
+                unit="min"
+                min={0}
+                decimals={0}
+                value={values.wait_minutes}
+                onChange={(n) => set("wait_minutes", n)}
+                placeholder="45"
+              />
+            </Field>
+            <Field label="Source" span={1} id={`wr-source-${terminalId}`}>
+              <select
+                id={`wr-source-${terminalId}`}
+                className={INPUT_CLASS}
+                value={values.source}
+                onChange={(e) =>
+                  set(
+                    "source",
+                    e.target.value as WaitReportFormValues["source"],
+                  )
+                }
+              >
+                <option value="driver_report">Driver report</option>
+                <option value="eld_geofence">ELD geofence</option>
+              </select>
+            </Field>
+            <Field
+              label="Reporter ID"
+              required={values.source === "driver_report"}
+              error={errors.reporter_id}
+              id={`wr-reporter-${terminalId}`}
+            >
+              <input
+                id={`wr-reporter-${terminalId}`}
+                type="text"
+                className={INPUT_CLASS}
+                value={values.reporter_id}
+                onChange={(e) => set("reporter_id", e.target.value)}
+                placeholder="driver-042"
+              />
+            </Field>
+            <Field label="Notes (optional)" id={`wr-notes-${terminalId}`}>
+              <textarea
+                id={`wr-notes-${terminalId}`}
+                rows={2}
+                className={INPUT_CLASS}
+                value={values.notes}
+                onChange={(e) => set("notes", e.target.value)}
+                placeholder="Why was this wait time observed?"
+              />
+            </Field>
+          </>
+        )}
+      </FormDialog>
+    </div>
   );
 }
 
@@ -1141,7 +1051,7 @@ function RackPricesPanel({
             Latest rack prices
           </div>
           <div className="text-xs text-gray-500">
-            Filtered by <span className="font-mono">{productFilter}</span>
+            Filtered by <span className="font-medium">{productFilter}</span>
           </div>
         </div>
         <DollarSign className="w-4 h-4 text-gray-500" aria-hidden="true" />
@@ -1198,7 +1108,7 @@ function SupplierContractsPanel({
             Supplier contracts
           </div>
           <div className="text-xs text-gray-500">
-            Filtered by <span className="font-mono">{productFilter}</span>
+            Filtered by <span className="font-medium">{productFilter}</span>
           </div>
         </div>
         <Building2 className="w-4 h-4 text-gray-500" aria-hidden="true" />
@@ -1277,7 +1187,11 @@ function SupplierContractsPanel({
                       gal
                       {lift_summary.percent_of_minimum != null && (
                         <span className="ml-1 text-gray-500">
-                          ({lift_summary.percent_of_minimum.toFixed(1)}%)
+                          (
+                          {pct(lift_summary.percent_of_minimum, {
+                            decimals: 1,
+                          })}
+                          )
                         </span>
                       )}
                     </dd>
@@ -1329,7 +1243,7 @@ export interface SourcingPageProps {
  * Top-level terminal-sourcing operations page wiring the form, the
  * recommendation list, and the rack-price / contracts side panels.
  * Consumers mount this via the dashboard sidebar (see
- * :file:`app/dashboard/page.tsx`).
+ * :file:`app/dashboard/(today)/page.tsx`).
  */
 export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
   const { toasts, addToast, dismissToast } = useToasts();
@@ -1424,12 +1338,11 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
    * returned. Side-panel failures don't block the main recommendation
    * render — they surface inline error chips.
    */
-  const handleSubmit = useCallback(async () => {
-    const result = validateQueryForm(form);
-    if (!result.ok) {
-      addToast(result.error, "error");
-      return;
-    }
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const runQuery = useCallback(async (next: QueryFormState) => {
+    setForm(next);
+    const result = validateQueryForm(next);
+    if (!result.ok) throw new Error(result.error);
     const { query } = result.value;
 
     setLoadingRec(true);
@@ -1446,9 +1359,8 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
             ? err.message
             : "Failed to load terminal recommendations.";
       setRecError(message);
-      addToast(message, "error");
       setRecommendation(null);
-      return;
+      throw new Error(message);
     } finally {
       setLoadingRec(false);
     }
@@ -1493,7 +1405,17 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
     } finally {
       setContractsLoading(false);
     }
-  }, [form, addToast]);
+  }, []);
+
+  // Re-rank with the last query (errors show in the page's error panel).
+  const handleRerank = useCallback(() => {
+    runQuery(form).catch((err: unknown) =>
+      addToast(
+        err instanceof Error ? err.message : "Failed to rank terminals.",
+        "error",
+      ),
+    );
+  }, [runQuery, form, addToast]);
 
   const handleReset = useCallback(() => {
     setForm({ ...EMPTY_FORM });
@@ -1541,101 +1463,133 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
     };
   }, [recommendation, candidateCount]);
 
-  const productLabel = recommendation?.product_code ?? form.product_code.trim();
+  const productCode = recommendation?.product_code ?? form.product_code.trim();
+  const productLabel = productCode ? productName(productCode) : "";
+
+  const actions = useMemo(
+    () => (
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => setDialogOpen(true)}
+        icon={<Search className="h-3.5 w-3.5" aria-hidden="true" />}
+      >
+        Rank terminals
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
+
+  const querySummary = form.product_code ? (
+    <span className="flex min-w-0 items-center gap-2 text-xs text-slate-700">
+      <ProductChip code={form.product_code} variant="chip" />
+      {form.volume_gallons && (
+        <span className="whitespace-nowrap tabular-nums">
+          {formatGallons(Number(form.volume_gallons))} gal
+        </span>
+      )}
+      {form.origin_lat && form.origin_lon && (
+        <span className="inline-flex items-center gap-1 whitespace-nowrap tabular-nums">
+          <MapPin aria-hidden="true" className="h-3 w-3 text-slate-500" />
+          {number(Number(form.origin_lat), { decimals: 4 })},{" "}
+          {number(Number(form.origin_lon), { decimals: 4 })}
+        </span>
+      )}
+    </span>
+  ) : (
+    <span className="text-xs text-text-muted">No ranking yet</span>
+  );
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
+    <div className="flex h-full flex-col bg-canvas">
       <ToastContainer toasts={toasts} onDismiss={dismissToast} />
 
-      <div className="border-b border-gray-200 bg-white px-6 py-4 space-y-3">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <h1 className="text-xl font-semibold text-primary">
-              Terminal Sourcing
-            </h1>
-            <p className="text-sm text-gray-500 mt-0.5">
-              Rank loading terminals against live rack prices, contracts, and
-              wait times for a specific truck run.
-            </p>
-          </div>
-          {recommendation && (
-            <button
-              type="button"
-              onClick={handleSubmit}
-              disabled={loadingRec}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-sm text-gray-700 hover:text-gray-900 border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50"
-              aria-label="Re-rank terminals"
-            >
-              <RefreshCw
-                className={`w-3.5 h-3.5 ${loadingRec ? "animate-spin" : ""}`}
-                aria-hidden="true"
-              />
-              Re-rank
-            </button>
-          )}
-        </div>
-        <QueryForm
-          form={form}
-          onChange={setForm}
-          onSubmit={handleSubmit}
-          onReset={handleReset}
-          loading={loadingRec}
-          terminals={terminals}
-        />
-      </div>
-
-      <div className="flex-1 overflow-auto px-6 py-4 space-y-4">
-        {summary && (
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <div className="border border-gray-200 rounded-lg px-4 py-3 bg-white">
-              <div className="text-xs text-gray-500 uppercase tracking-wide">
-                Candidates
-              </div>
-              <div className="text-xl font-semibold text-gray-900">
-                {summary.candidates}
-              </div>
-            </div>
-            <div
-              className={`border rounded-lg px-4 py-3 ${
-                summary.waitWarnings > 0
-                  ? "border-error-light bg-error-light"
-                  : "border-gray-200 bg-white"
-              }`}
-            >
-              <div className="text-xs uppercase tracking-wide text-gray-500">
-                Wait warnings
-              </div>
-              <div
-                className={`text-xl font-semibold ${
-                  summary.waitWarnings > 0 ? "text-error-dark" : "text-gray-900"
-                }`}
+      <Toolbar
+        label="Sourcing"
+        search={querySummary}
+        filters={
+          summary ? (
+            <span className="flex items-center gap-3 whitespace-nowrap text-xs text-text-muted">
+              <span>
+                <b className="font-semibold text-text tabular-nums">
+                  {summary.candidates}
+                </b>{" "}
+                candidates
+              </span>
+              <span
+                className={
+                  summary.waitWarnings > 0
+                    ? "inline-flex items-center gap-1 font-semibold text-red-800"
+                    : undefined
+                }
               >
-                {summary.waitWarnings}
-              </div>
-            </div>
-            <div className="border border-gray-200 rounded-lg px-4 py-3 bg-white">
-              <div className="text-xs text-gray-500 uppercase tracking-wide">
-                Best price
-              </div>
-              <div className="text-xl font-semibold text-gray-900 font-mono">
-                {formatUsd(summary.bestPrice)}
-              </div>
-            </div>
-            <div className="border border-gray-200 rounded-lg px-4 py-3 bg-white">
-              <div className="text-xs text-gray-500 uppercase tracking-wide">
-                Top terminal
-              </div>
-              <div className="text-sm font-semibold text-gray-900 break-all">
-                {summary.bestTerminal ? (
-                  <EntityLink type="terminal" id={summary.bestTerminal} />
-                ) : (
-                  "—"
+                {summary.waitWarnings > 0 && (
+                  <AlertTriangle aria-hidden="true" className="h-3 w-3" />
                 )}
-              </div>
-            </div>
-          </div>
-        )}
+                <b className="font-semibold tabular-nums">
+                  {summary.waitWarnings}
+                </b>{" "}
+                wait warnings
+              </span>
+              <span>
+                Best{" "}
+                <b className="font-semibold text-text tabular-nums">
+                  {formatUsd(summary.bestPrice)}
+                </b>
+                /gal
+              </span>
+              {summary.bestTerminal && (
+                <span className="inline-flex items-center gap-1">
+                  at <EntityLink type="terminal" id={summary.bestTerminal} />
+                </span>
+              )}
+            </span>
+          ) : undefined
+        }
+        end={
+          <>
+            {!embedded && actions}
+            {recommendation && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                onClick={handleRerank}
+                disabled={loadingRec}
+                aria-label="Re-rank terminals"
+                icon={
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${loadingRec ? "animate-spin" : ""}`}
+                    aria-hidden="true"
+                  />
+                }
+              >
+                Re-rank
+              </Button>
+            )}
+            {(recommendation || form.product_code) && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={handleReset}
+              >
+                Reset
+              </Button>
+            )}
+          </>
+        }
+      />
+      <QueryDialog
+        open={dialogOpen}
+        form={form}
+        onClose={() => setDialogOpen(false)}
+        onSubmit={runQuery}
+        terminals={terminals}
+      />
 
+      <div className="flex-1 space-y-4 overflow-auto px-4 py-4">
         {recommendation && (
           <RecommendationBanner recommendation={recommendation} />
         )}
@@ -1688,8 +1642,8 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
               )
             ) : (
               <div className="border border-dashed border-gray-200 rounded-lg px-6 py-12 text-center text-sm text-gray-500">
-                Enter a product, volume, and origin above to rank loading
-                terminals.
+                Choose Rank terminals to enter a product, volume, and origin and
+                rank loading terminals.
               </div>
             )}
           </div>
@@ -1699,13 +1653,13 @@ export default function SourcingPage({ initialQuery }: SourcingPageProps = {}) {
               prices={rackPrices}
               loading={rackLoading}
               error={rackError}
-              productFilter={productLabel || "all products"}
+              productFilter={productLabel || "All products"}
             />
             <SupplierContractsPanel
               contracts={contracts}
               loading={contractsLoading}
               error={contractsError}
-              productFilter={productLabel || "all products"}
+              productFilter={productLabel || "All products"}
             />
           </div>
         </div>

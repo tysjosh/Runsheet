@@ -16,6 +16,12 @@ Implements :class:`FuelOrderRepository` with:
   search scoped to a single ``assigned_driver_id``, a ``terms`` filter over
   statuses, an optional ``delivery_window_start`` range, sorted by
   ``delivery_window_start`` ascending.
+* ``get_current`` — the authoritative stored document (no hybrid read).
+* ``claim_assignment`` / ``release_assignment`` — run-link CAS and release
+  by claim-id ownership (loading-plan-executor K5, FREEZE rule 2).
+* ``transition_if`` — compare-and-set status write (customer portal F3).
+* ``relink_dispatched_assignment`` — from-link CAS that moves a dispatched
+  order to another run, truck and driver (dispatch-board K8.3).
 * ``append_event`` — append an immutable event to ``fuel_order_events``.
 * ``get_events_for_order`` — retrieve the event timeline for an order.
 
@@ -31,7 +37,9 @@ Validates: Requirements 1.1.6, 9.1.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Sequence
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any, Dict, List, Literal, Optional, Sequence
 
 from fuel.order_models import FuelOrder, FuelOrderEvent
 from fuel.services.order_es_mappings import (
@@ -39,9 +47,27 @@ from fuel.services.order_es_mappings import (
     FUEL_ORDERS_CURRENT_INDEX,
 )
 from ops.middleware.tenant_guard import inject_tenant_filter
+from persistence.timestamps import parse_ts
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
+
+#: Value comparison for stored vs in-memory timestamps (design K5a).
+_ts = parse_ts
+
+#: "Argument not given" for guards where ``None`` is a meaningful value.
+_UNSET: Any = object()
+
+#: ``transition_if`` default: accept any stored ``hold_reason``.
+ANY_HOLD_REASON: Any = object()
+
+#: Statuses an order's run links can no longer be released from (P3).
+_UNRELEASABLE_STATUSES = frozenset({"dispatched", "in_transit", "delivered"})
+
+
+def _link(value: Any) -> Optional[Any]:
+    """Normalise a run/asset link: ``""`` and ``None`` both mean unlinked."""
+    return value or None
 
 
 # ---------------------------------------------------------------------------
@@ -73,26 +99,56 @@ class OrderCrossTenantAccessError(PermissionError):
         )
 
 
-# ---------------------------------------------------------------------------
-# Painless script for timestamp-guarded upsert
-# ---------------------------------------------------------------------------
+class OrderChangedConcurrentlyError(Exception):
+    """A guarded write found the stored order changed since it was read (K5a).
 
-#: Compares incoming ``last_event_timestamp`` against the stored value.
-#: If the incoming timestamp is older or equal, the operation is a noop.
-#: Otherwise all incoming fields overwrite the stored document.
-_ORDER_UPSERT_SCRIPT = """
-    if (ctx._source.containsKey('last_event_timestamp') && ctx._source.last_event_timestamp != null) {
-        ZonedDateTime existing = ZonedDateTime.parse(ctx._source.last_event_timestamp);
-        ZonedDateTime incoming = ZonedDateTime.parse(params.last_event_timestamp);
-        if (incoming.isBefore(existing) || incoming.isEqual(existing)) {
-            ctx.op = 'noop';
-            return;
-        }
-    }
-    for (entry in params.entrySet()) {
-        ctx._source[entry.getKey()] = entry.getValue();
-    }
-""".strip()
+    ``actual_status`` is ``None`` when the document no longer exists.
+    """
+
+    def __init__(
+        self,
+        order_id: str,
+        expected_status: Optional[str],
+        actual_status: Optional[str],
+    ) -> None:
+        self.order_id = order_id
+        self.expected_status = expected_status
+        self.actual_status = actual_status
+        super().__init__(
+            f"order {order_id!r} changed concurrently "
+            f"(expected status {expected_status!r}, found {actual_status!r})"
+        )
+
+
+class OrderWriteDiscardedError(Exception):
+    """A guarded write was not newer than the stored order and was discarded (K5a)."""
+
+    def __init__(self, order_id: str) -> None:
+        self.order_id = order_id
+        super().__init__(
+            f"write to order {order_id!r} discarded: stored "
+            "last_event_timestamp is newer or equal"
+        )
+
+
+@dataclass(frozen=True)
+class AssignmentClaim:
+    """Outcome of :meth:`FuelOrderRepository.claim_assignment` (design K5).
+
+    ``order`` is the stored document for ``linked`` and ``already_linked``,
+    the current same-tenant document for a ``refused`` claim whose order
+    exists, and ``None`` for ``order_not_found``.
+    """
+
+    outcome: Literal["linked", "already_linked", "refused"]
+    reason: Optional[str]
+    order: Optional[Dict[str, Any]]
+
+
+# The timestamp-guarded upsert used to be a painless script here, byte-identical
+# to the one in ``ops/services/ops_es_service.py``. Both now go through
+# ``ElasticsearchService.upsert_if_newer``, which holds one copy and lets the
+# Postgres document store answer the same call under a row lock instead.
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +365,267 @@ class FuelOrderRepository:
 
         return _safe_order_load(source)
 
+    async def get_current(
+        self, tenant_id: str, order_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """The authoritative stored order as a JSON-mode dict, or ``None``.
+
+        Reads ``es_documents`` by id, never the hybrid projection, so it sees
+        exactly what :meth:`claim_assignment` and the guarded upsert compare
+        against (design K3). Missing, cross-tenant and invalid documents all
+        return ``None``.
+        """
+        self._require_tenant(tenant_id)
+        if not order_id or not order_id.strip():
+            raise ValueError("order_id must be a non-empty string")
+        source = await self._es.get_document(self._orders_index, order_id)
+        if not source or source.get("tenant_id") != tenant_id:
+            return None
+        model = _safe_order_load(source)
+        return model.model_dump(mode="json") if model is not None else None
+
+    # ------------------------------------------------------------------
+    # Run-link claim and release (design K5, FREEZE rule 2)
+    # ------------------------------------------------------------------
+
+    async def claim_assignment(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        run_id: str,
+        asset_id: str,
+        expected_status: str,
+        claim_id: str,
+        expected_last_event_timestamp: Any = _UNSET,
+    ) -> AssignmentClaim:
+        """Link an order to one run and truck under the row lock (link CAS).
+
+        Refused when the order is missing or cross-tenant
+        (``order_not_found``), its status is not ``expected_status``
+        (``order_changed_since_plan``), or it is linked to another run or
+        truck (``order_committed_elsewhere``). When
+        ``expected_last_event_timestamp`` is given, a stored
+        ``last_event_timestamp`` that differs by value is also refused as
+        ``order_changed_since_plan``: the caller's read is stale, so a
+        same-status edit (an ERP/CSV re-sync changing quantity or tank)
+        cannot slip in between the caller's read and this claim.
+        ``already_linked`` when both links already name the targets;
+        ``assigned_claim_id`` is then left as is. ``linked`` writes both
+        links and ``assigned_claim_id``.
+
+        Never touches ``last_event_timestamp`` or ``assigned_driver_id``, and
+        writes ``es_documents`` only: the guarded upsert that follows mirrors
+        the links to the relational row.
+        """
+        self._require_tenant(tenant_id)
+        for name, value in (
+            ("order_id", order_id),
+            ("run_id", run_id),
+            ("asset_id", asset_id),
+            ("claim_id", claim_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+
+        verdict: Dict[str, Optional[str]] = {"outcome": None, "reason": None}
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("tenant_id") != tenant_id:
+                verdict["reason"] = "order_not_found"
+                return None
+            if current.get("status") != expected_status:
+                verdict["reason"] = "order_changed_since_plan"
+                return None
+            run = _link(current.get("assigned_run_id"))
+            asset = _link(current.get("assigned_asset_id"))
+            if run not in (None, run_id) or asset not in (None, asset_id):
+                verdict["reason"] = "order_committed_elsewhere"
+                return None
+            if expected_last_event_timestamp is not _UNSET:
+                try:
+                    same = _ts(current.get("last_event_timestamp")) == _ts(
+                        expected_last_event_timestamp
+                    )
+                except (TypeError, ValueError):
+                    same = False  # unparseable is never a match (K5a)
+                if not same:
+                    verdict["reason"] = "order_changed_since_plan"
+                    return None
+            if (run, asset) == (run_id, asset_id):
+                verdict["outcome"] = "already_linked"
+                return None
+            return {
+                **current,
+                "assigned_run_id": run_id,
+                "assigned_asset_id": asset_id,
+                "assigned_claim_id": claim_id,
+            }
+
+        doc, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if doc is None:
+            return AssignmentClaim("refused", "order_not_found", None)
+        if applied:
+            return AssignmentClaim("linked", None, dict(doc))
+        if verdict["outcome"] == "already_linked":
+            return AssignmentClaim("already_linked", None, dict(doc))
+        reason = verdict["reason"] or "order_not_found"
+        visible = None if reason == "order_not_found" else dict(doc)
+        return AssignmentClaim("refused", reason, visible)
+
+    async def release_assignment(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        run_id: str,
+        asset_id: str,
+        claim_id: str,
+    ) -> bool:
+        """Clear the run links this caller's claim wrote; ``True`` if cleared.
+
+        Release by ownership (FREEZE rule 2, plan P3): clears
+        ``assigned_run_id``, ``assigned_asset_id`` and ``assigned_claim_id``
+        only when the tenant matches, both links equal ``(run_id, asset_id)``,
+        ``assigned_claim_id == claim_id`` and the status is not dispatched,
+        in transit or delivered. It ignores ``last_event_timestamp`` and
+        ``assigned_driver_id`` and never writes them, so a concurrent driver
+        assignment or quantity edit cannot leave this claim's links behind.
+        Writes no event and ``es_documents`` only, as the claim does.
+        """
+        self._require_tenant(tenant_id)
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("tenant_id") != tenant_id:
+                return None
+            links = (
+                _link(current.get("assigned_run_id")),
+                _link(current.get("assigned_asset_id")),
+            )
+            if links != (run_id, asset_id):
+                return None
+            if current.get("assigned_claim_id") != claim_id:
+                return None
+            if current.get("status") in _UNRELEASABLE_STATUSES:
+                return None
+            return {
+                **current,
+                "assigned_run_id": None,
+                "assigned_asset_id": None,
+                "assigned_claim_id": None,
+            }
+
+        _doc, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if not applied:
+            logger.info(
+                "FuelOrderRepository.release_assignment: no-op for order=%s "
+                "run=%s (links, claim or status no longer owned by this claim)",
+                order_id,
+                run_id,
+            )
+        return bool(applied)
+
+    async def relink_dispatched_assignment(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        from_run_id: str,
+        from_asset_id: str,
+        from_driver_id: Optional[str],
+        to_run_id: str,
+        to_asset_id: str,
+        to_driver_id: Optional[str],
+        claim_id: str,
+    ) -> Literal["relinked", "already_relinked", "refused"]:
+        """Move a ``dispatched`` order to another run, truck and driver (CAS).
+
+        Dispatch-board K8.3 and freeze rule 2. One ``atomic_update`` on the
+        current-state document that writes ``assigned_run_id``,
+        ``assigned_asset_id``, ``assigned_driver_id``, ``assigned_claim_id``,
+        ``last_event_timestamp`` and ``updated_at`` only when the tenant
+        matches, the status is ``dispatched`` and all three current links equal
+        the ``from_*`` values. ``already_relinked`` when they already equal
+        ``to_*``; ``refused`` otherwise. Never changes ``status``.
+
+        ``last_event_timestamp`` always moves to a server time strictly later
+        than the stored one, so a driver write built from a read taken before
+        the relink fails the K5a guard (dispatch-board K8.6). The same call
+        with ``from`` and ``to`` swapped is the rollback relink.
+        """
+        self._require_tenant(tenant_id)
+        for name, value in (
+            ("order_id", order_id),
+            ("from_run_id", from_run_id),
+            ("from_asset_id", from_asset_id),
+            ("to_run_id", to_run_id),
+            ("to_asset_id", to_asset_id),
+            ("claim_id", claim_id),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+
+        want_from = (from_run_id, from_asset_id, _link(from_driver_id))
+        want_to = (to_run_id, to_asset_id, _link(to_driver_id))
+        verdict: Dict[str, Any] = {"outcome": "refused", "status": None}
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            verdict["status"] = current.get("status")
+            if current.get("tenant_id") != tenant_id:
+                verdict["status"] = None
+                return None
+            if current.get("status") != "dispatched":
+                return None
+            links = (
+                _link(current.get("assigned_run_id")),
+                _link(current.get("assigned_asset_id")),
+                _link(current.get("assigned_driver_id")),
+            )
+            if links == want_to:
+                verdict["outcome"] = "already_relinked"
+                return None
+            if links != want_from:
+                return None
+            now = utcnow()
+            stored_ts = _ts(current.get("last_event_timestamp"))
+            if stored_ts is not None and now <= stored_ts:
+                now = stored_ts + timedelta(microseconds=1)
+            stamp = now.isoformat()
+            verdict["outcome"] = "relinked"
+            return {
+                **current,
+                "assigned_run_id": to_run_id,
+                "assigned_asset_id": to_asset_id,
+                "assigned_driver_id": _link(to_driver_id),
+                "assigned_claim_id": claim_id,
+                "last_event_timestamp": stamp,
+                "updated_at": stamp,
+            }
+
+        stored, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if stored is not None and applied:
+            # No guarded upsert follows a relink, so mirror the links here.
+            from commerce.services.commerce_persistence_bridge import (
+                mirror_current_state_upsert,
+            )
+            await mirror_current_state_upsert("fuel_order", stored)
+            return "relinked"
+        if stored is not None and verdict["outcome"] == "already_relinked":
+            return "already_relinked"
+        logger.info(
+            "FuelOrderRepository.relink_dispatched_assignment: refused for "
+            "order=%s observed_status=%s (from-link or status no longer match)",
+            order_id,
+            verdict["status"],
+        )
+        return "refused"
+
     # ------------------------------------------------------------------
     # Create
     # ------------------------------------------------------------------
@@ -362,13 +679,24 @@ class FuelOrderRepository:
         self,
         tenant_id: str,
         order: FuelOrder | Dict[str, Any],
-    ) -> bool:
+        *,
+        expected_status: Optional[str] = None,
+        expected_last_event_timestamp: Any = _UNSET,
+    ) -> bool | Dict[str, Any]:
         """Scripted upsert that noops when incoming timestamp is stale.
 
         Compares incoming ``last_event_timestamp`` against the stored
         value. If the incoming event is older or equal, the operation is
         a noop and returns ``False``. Otherwise the document is updated
         and returns ``True``.
+
+        **Guarded form** (design K5a): when ``expected_status`` or
+        ``expected_last_event_timestamp`` is given, the write is one
+        ``atomic_update`` with no upsert that applies only when the stored
+        status and ``last_event_timestamp`` (compared by value) still equal
+        the expected ones and the incoming timestamp is newer. It returns the
+        stored document, or raises :class:`OrderChangedConcurrentlyError`
+        (changed or missing) / :class:`OrderWriteDiscardedError` (not newer).
 
         Raises :class:`OrderCrossTenantAccessError` if the order's
         ``tenant_id`` does not match the caller's ``tenant_id``.
@@ -393,60 +721,32 @@ class FuelOrderRepository:
         model = FuelOrder(**payload)
         doc = model.model_dump(mode="json", exclude_none=False)
 
-        try:
-            response = self._es.client.update(
-                index=self._orders_index,
-                id=order_id,
-                body={
-                    "scripted_upsert": True,
-                    "script": {
-                        "source": _ORDER_UPSERT_SCRIPT,
-                        "lang": "painless",
-                        "params": doc,
-                    },
-                    "upsert": doc,
-                },
-                refresh=True,
+        if expected_status is not None or expected_last_event_timestamp is not _UNSET:
+            return await self._guarded_upsert(
+                order_id,
+                doc,
+                expected_status=expected_status,
+                expected_last_event_timestamp=expected_last_event_timestamp,
             )
-            result = response.get("result", "")
-            if result == "noop":
-                # Two cases produce a scripted_upsert "noop":
-                #   (a) genuine stale-event discard — the doc EXISTS and the
-                #       incoming last_event_timestamp is older-or-equal; OR
-                #   (b) a serverless-ES quirk where ``scripted_upsert`` reports
-                #       "noop" AND fails to materialise the ``upsert`` body on a
-                #       FRESH insert (the doc does not exist afterwards).
-                # Case (b) silently dropped every new order from BOTH stores —
-                # and since reads are served from Postgres, the dispatcher hit a
-                # 404 immediately after a 201 create. Distinguish them: if the
-                # doc is absent, index it directly (fresh insert); only a true
-                # existing-doc noop is a stale discard.
-                exists = self._es.client.exists(
-                    index=self._orders_index, id=order_id
-                )
-                if exists:
-                    logger.info(
-                        "FuelOrderRepository.upsert_with_last_event_timestamp: "
-                        "discarded stale event for order=%s, "
-                        "incoming_timestamp=%s",
-                        order_id,
-                        doc.get("last_event_timestamp"),
-                    )
-                    return False
-                # Fresh insert that the scripted upsert failed to apply — index
-                # the document directly so ES and Postgres both receive it.
-                self._es.client.index(
-                    index=self._orders_index,
-                    id=order_id,
-                    body=doc,
-                    refresh=True,
-                )
-                logger.info(
-                    "FuelOrderRepository.upsert_with_last_event_timestamp: "
-                    "scripted_upsert no-op'd a fresh insert for order=%s; "
-                    "indexed directly (serverless-ES fallback)",
-                    order_id,
-                )
+
+        try:
+            # The stale-event comparison, the painless script that expressed it,
+            # and the serverless-Elasticsearch fresh-insert fallback all moved to
+            # ``ElasticsearchService.upsert_if_newer``. They were reaching past
+            # the facade to ``client.update`` / ``client.exists`` /
+            # ``client.index``, which meant they would keep writing to
+            # Elasticsearch after the document plane was cut over to Postgres
+            # while everything around them wrote to Postgres. Going through the
+            # facade means one implementation per backend, and on Postgres the
+            # comparison happens under a row lock rather than in a script.
+            #
+            # The return value keeps its meaning: False is a discarded stale
+            # event, and callers branch on it.
+            applied = await self._es.upsert_if_newer(
+                self._orders_index, order_id, doc
+            )
+            if not applied:
+                return False
             # Dual-write the order current-state to Postgres. The repository's
             # own stale-event guard mirrors the ES scripted-upsert semantics.
             from commerce.services.commerce_persistence_bridge import (
@@ -462,6 +762,102 @@ class FuelOrderRepository:
                 exc,
             )
             raise
+
+    async def _guarded_upsert(
+        self,
+        order_id: str,
+        doc: Dict[str, Any],
+        *,
+        expected_status: Optional[str],
+        expected_last_event_timestamp: Any,
+    ) -> Dict[str, Any]:
+        """The K5a compare-and-set write behind the guarded upsert form."""
+        verdict: Dict[str, Any] = {"changed": False, "stale": False, "status": None}
+        incoming_ts = _ts(doc.get("last_event_timestamp"))
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            verdict["status"] = current.get("status")
+            if expected_status is not None and current.get("status") != expected_status:
+                verdict["changed"] = True
+                return None
+            stored_ts = _ts(current.get("last_event_timestamp"))
+            if (
+                expected_last_event_timestamp is not _UNSET
+                and stored_ts != _ts(expected_last_event_timestamp)
+            ):
+                verdict["changed"] = True
+                return None
+            if stored_ts is not None and (incoming_ts is None or incoming_ts <= stored_ts):
+                verdict["stale"] = True
+                return None
+            return {**current, **doc}
+
+        stored, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if stored is None:
+            raise OrderChangedConcurrentlyError(order_id, expected_status, None)
+        if not applied:
+            if verdict["stale"]:
+                raise OrderWriteDiscardedError(order_id)
+            raise OrderChangedConcurrentlyError(
+                order_id, expected_status, verdict["status"]
+            )
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+        await mirror_current_state_upsert("fuel_order", stored)
+        return stored
+
+    # ------------------------------------------------------------------
+    # Compare-and-set status transition (customer portal FREEZE F3)
+    # ------------------------------------------------------------------
+
+    async def transition_if(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        expected_status: str,
+        expected_hold_reason: Any = ANY_HOLD_REASON,
+        update_fields: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Apply ``update_fields`` only if the stored order still matches.
+
+        One ``atomic_update`` (row lock / seq-no CAS): the write applies only
+        when the stored order is the caller's tenant's, its ``status`` equals
+        ``expected_status`` and, unless ``expected_hold_reason`` is
+        :data:`ANY_HOLD_REASON`, its ``hold_reason`` equals it (``None``
+        included). Returns the new document, or ``None`` when the order is
+        missing, cross-tenant or has changed, so a confirm and a customer
+        cancel can't both win.
+
+        Writes ``es_documents`` only; the caller mirrors the returned document
+        to Postgres with ``mirror_current_state_upsert``, as
+        ``_apply_order_update`` does.
+        """
+        self._require_tenant(tenant_id)
+        if not order_id or not order_id.strip():
+            raise ValueError("order_id must be a non-empty string")
+
+        def transform(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("tenant_id") != tenant_id:
+                return None
+            if current.get("status") != expected_status:
+                return None
+            if (
+                expected_hold_reason is not ANY_HOLD_REASON
+                and current.get("hold_reason") != expected_hold_reason
+            ):
+                return None
+            return {**current, **update_fields}
+
+        doc, applied = await self._es.atomic_update(
+            self._orders_index, order_id, transform
+        )
+        if not applied or doc is None:
+            return None
+        return dict(doc)
 
     # ------------------------------------------------------------------
     # List for tenant
@@ -548,6 +944,12 @@ class FuelOrderRepository:
         page: int = 1,
         size: int = DEFAULT_PAGE_SIZE,
         sort: Optional[str] = None,
+        keyset: bool = False,
+        customer_tank_id: Optional[str] = None,
+        statuses: Optional[Sequence[str]] = None,
+        hold_reason: Optional[str] = None,
+        after: Optional[tuple] = None,
+        with_total: bool = True,
     ) -> Dict[str, Any]:
         """Search orders with the full filter set from Req 2.5.1.
 
@@ -568,14 +970,28 @@ class FuelOrderRepository:
             page: 1-based page number.
             size: Page size.
             sort: Sort field and direction (e.g. "created_at:desc").
+            keyset: Data-export keyset mode. Sorts on ``(sort field,
+                order_id ASC)`` with offset 0 on every call, so ``last_key``
+                always has two values.
+            after: ``(sort_value, order_id)`` of the previous page's last raw
+                row. Requires ``keyset=True``.
+            with_total: ``False`` skips the count on the Postgres path.
+            customer_tank_id: Filter by customer_tank_id.
+            statuses: Filter by any of these statuses (ES ``terms`` /
+                Postgres ``in_filters``). ANDed with ``status``.
+            hold_reason: Filter by hold_reason (exact match).
 
         Returns:
             A dict with ``orders`` (list of FuelOrder), ``total`` (int),
-            ``page`` (int), ``size`` (int).
+            ``page`` (int), ``size`` (int), plus ``raw_count`` and
+            ``last_key`` computed from the store result before any row is
+            dropped.
 
         Cross-tenant results are silently dropped (empty list).
         """
         self._require_tenant(tenant_id)
+        if after is not None and not keyset:
+            raise ValueError("after requires keyset=True")
         if page < 1:
             page = 1
         if size <= 0:
@@ -596,7 +1012,12 @@ class FuelOrderRepository:
             "call_type": call_type,
             "product_code": product_code,
             "intake_channel": intake_channel,
+            "customer_tank_id": customer_tank_id,
+            "hold_reason": hold_reason,
         }
+        status_values = [
+            s for s in (statuses or ()) if isinstance(s, str) and s.strip()
+        ]
         if sort:
             parts = sort.split(":")
             pg_sort_field = parts[0]
@@ -606,6 +1027,7 @@ class FuelOrderRepository:
         pg = await read_hybrid_search(
             "fuel_order", tenant_id,
             term_filters=term_filters,
+            in_filters={"status": status_values} if status_values else None,
             range_field="created_at", range_gte=start_date, range_lte=end_date,
             text_query=q,
             text_fields=[
@@ -615,7 +1037,8 @@ class FuelOrderRepository:
                 "ship_to_address",
             ],
             sort_field=pg_sort_field, sort_order=pg_sort_order,
-            page=page, size=size,
+            page=1 if keyset else page, size=size,
+            **({"after": after, "with_total": with_total} if keyset else {}),
         )
         if pg is not _NOT_CUT_OVER:
             orders_pg: List[FuelOrder] = []
@@ -628,6 +1051,8 @@ class FuelOrderRepository:
                 "total": pg["total"],
                 "page": pg["page"],
                 "size": pg["size"],
+                "raw_count": pg.get("raw_count", len(pg["items"])),
+                "last_key": pg.get("last_key"),
             }
 
         # Build filter clauses
@@ -646,6 +1071,12 @@ class FuelOrderRepository:
             filters.append({"term": {"product_code": product_code}})
         if intake_channel:
             filters.append({"term": {"intake_channel": intake_channel}})
+        if customer_tank_id:
+            filters.append({"term": {"customer_tank_id": customer_tank_id}})
+        if status_values:
+            filters.append({"terms": {"status": status_values}})
+        if hold_reason:
+            filters.append({"term": {"hold_reason": hold_reason}})
 
         # Date range filter on created_at
         if start_date or end_date:
@@ -684,7 +1115,17 @@ class FuelOrderRepository:
         query["size"] = size
 
         # Sort
-        if sort:
+        if keyset:
+            # Same 2-key sort on every call (count probe and first page
+            # included), so every hit carries two sort values.
+            query["sort"] = [
+                {pg_sort_field: {"order": pg_sort_order}},
+                {"order_id": {"order": "asc"}},
+            ]
+            query["from"] = 0
+            if after is not None:
+                query["search_after"] = [after[0], after[1]]
+        elif sort:
             parts = sort.split(":")
             sort_field = parts[0]
             sort_order = parts[1] if len(parts) > 1 else "desc"
@@ -695,6 +1136,8 @@ class FuelOrderRepository:
         resp = await self._es.search_documents(
             self._orders_index, query, size
         )
+        from services.keyset_pagination import raw_keyset_info
+        raw_count, last_key = raw_keyset_info(resp, keyset=keyset)
         sources = _extract_sources(resp)
         total = _extract_total(resp)
 
@@ -717,6 +1160,8 @@ class FuelOrderRepository:
             "total": total,
             "page": page,
             "size": size,
+            "raw_count": raw_count,
+            "last_key": last_key,
         }
 
     # ------------------------------------------------------------------
@@ -1002,6 +1447,9 @@ class FuelOrderRepository:
 # ---------------------------------------------------------------------------
 
 __all__ = [
+    "AssignmentClaim",
     "FuelOrderRepository",
+    "OrderChangedConcurrentlyError",
     "OrderCrossTenantAccessError",
+    "OrderWriteDiscardedError",
 ]

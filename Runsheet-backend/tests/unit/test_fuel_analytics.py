@@ -287,7 +287,7 @@ class TestGetNetworkSummary:
                 "total_capacity": {"value": 500000.0},
                 "total_stock": {"value": 350000.0},
                 "total_daily_consumption": {"value": 5000.0},
-                "avg_days_until_empty": {"value": 70.0},
+                "avg_days_until_empty": {"v": {"value": 70.0}},
                 "by_status": {
                     "buckets": [
                         {"key": "normal", "doc_count": 6},
@@ -323,7 +323,7 @@ class TestGetNetworkSummary:
                 "total_capacity": {"value": 0.0},
                 "total_stock": {"value": 0.0},
                 "total_daily_consumption": {"value": 0.0},
-                "avg_days_until_empty": {"value": None},
+                "avg_days_until_empty": {"v": {"value": None}},
                 "by_status": {"buckets": []},
             },
         })
@@ -333,7 +333,7 @@ class TestGetNetworkSummary:
 
         assert result.total_stations == 0
         assert result.total_capacity_liters == 0.0
-        assert result.average_days_until_empty == 0.0
+        assert result.average_days_until_empty is None  # not available, not 0 days
         assert result.active_alerts == 0
 
     @pytest.mark.asyncio
@@ -345,7 +345,7 @@ class TestGetNetworkSummary:
                 "total_capacity": {"value": 0.0},
                 "total_stock": {"value": 0.0},
                 "total_daily_consumption": {"value": 0.0},
-                "avg_days_until_empty": {"value": None},
+                "avg_days_until_empty": {"v": {"value": None}},
                 "by_status": {"buckets": []},
             },
         })
@@ -358,3 +358,38 @@ class TestGetNetworkSummary:
         query_body = call_args[0][1]
         filters = query_body["query"]["bool"]["must"]
         assert {"term": {"tenant_id": TENANT}} in filters
+
+
+class TestNetworkSummaryAverageDaysExcludesSentinel:
+    """F5: stations with no consumption carry days_until_empty=99999 and must
+    not be averaged. Runs the real query through the in-memory aggregation
+    engine the document store uses."""
+
+    @staticmethod
+    def _service_over(stations):
+        from persistence.document_aggregations import run_aggregations
+
+        async def _search(index, query, size=100):
+            aggs = run_aggregations([(str(i), d) for i, d in enumerate(stations)], query["aggs"])
+            return {"hits": {"total": {"value": len(stations)}, "hits": []}, "aggregations": aggs}
+
+        es = MagicMock()
+        es.search_documents = AsyncMock(side_effect=_search)
+        return FuelService(es)
+
+    @pytest.mark.asyncio
+    async def test_staging_stations_average_217_7_not_33478_2(self, settings_mock):
+        stations = [
+            {"days_until_empty": 321.1, "daily_consumption_rate": 50.0, "status": "normal"},
+            {"days_until_empty": 114.3, "daily_consumption_rate": 85.71, "status": "normal"},
+            {"days_until_empty": 99999, "daily_consumption_rate": 0, "status": "normal"},
+        ]
+        result = await self._service_over(stations).get_network_summary(TENANT)
+        assert result.average_days_until_empty == 217.7
+
+    @pytest.mark.asyncio
+    async def test_no_consuming_station_is_none(self, settings_mock):
+        stations = [{"days_until_empty": 99999, "daily_consumption_rate": 0, "status": "normal"}]
+        result = await self._service_over(stations).get_network_summary(TENANT)
+        assert result.average_days_until_empty is None
+        assert FuelNetworkSummary.model_validate(result.model_dump()).average_days_until_empty is None

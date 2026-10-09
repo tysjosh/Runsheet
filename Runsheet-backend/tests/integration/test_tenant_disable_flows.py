@@ -199,7 +199,7 @@ class TestOpsWSManagerTenantMatrix:
         await self.manager.connect(ws, tenant_id=ENABLED_TENANT)
 
         count = await self.manager.broadcast_shipment_update(
-            {"shipment_id": "SHP-001", "status": "in_transit"},
+            {"shipment_id": "SHP-001", "status": "in_transit", "tenant_id": ENABLED_TENANT},
         )
         assert count >= 1
         # Check that the client received the broadcast
@@ -258,12 +258,13 @@ class TestFleetWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_fleet_ws_broadcast_location_update(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="tenant-fleet")
 
         count = await self.manager.broadcast_location_update(
             truck_id="TRUCK-001",
             latitude=37.7749,
             longitude=-122.4194,
+            tenant_id="tenant-fleet",
         )
         assert count == 1
         location_msgs = [m for m in ws.messages if m.get("type") == "location_update"]
@@ -381,10 +382,10 @@ class TestAgentActivityWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_agent_ws_broadcast_activity(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="t1")
 
         count = await self.manager.broadcast_activity(
-            {"agent_id": "delay_response", "action": "monitor_cycle"}
+            {"agent_id": "delay_response", "action": "monitor_cycle", "tenant_id": "t1"}
         )
         assert count == 1
         activity_msgs = [m for m in ws.messages if m.get("type") == "agent_activity"]
@@ -393,22 +394,22 @@ class TestAgentActivityWSManagerTenantMatrix:
     @pytest.mark.asyncio
     async def test_agent_ws_broadcast_approval_event(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="t1")
 
         count = await self.manager.broadcast_approval_event(
             "approval_created",
-            {"approval_id": "APR-001", "action": "reassign_asset"},
+            {"approval_id": "APR-001", "action": "reassign_asset", "tenant_id": "t1"},
         )
         assert count == 1
 
     @pytest.mark.asyncio
     async def test_agent_ws_broadcast_generic_event(self):
         ws = FakeWebSocket()
-        await self.manager.connect(ws)
+        await self.manager.connect(ws, tenant_id="t1")
 
         count = await self.manager.broadcast_event(
             "delay_alert",
-            {"job_id": "JOB-001", "delay_minutes": 45},
+            {"job_id": "JOB-001", "delay_minutes": 45, "tenant_id": "t1"},
         )
         assert count == 1
 
@@ -448,7 +449,7 @@ class TestFullDisableEnableCycleAllManagers:
 
         # Broadcast works
         count = await manager.broadcast_shipment_update(
-            {"shipment_id": "SHP-001"},
+            {"shipment_id": "SHP-001", "tenant_id": "cycle-tenant"},
         )
         assert count >= 1
 
@@ -463,7 +464,7 @@ class TestFullDisableEnableCycleAllManagers:
         assert manager.get_connection_count() == 1
 
         count = await manager.broadcast_location_update(
-            truck_id="TRUCK-001", latitude=37.7, longitude=-122.4
+            truck_id="TRUCK-001", latitude=37.7, longitude=-122.4, tenant_id="fleet-cycle"
         )
         assert count == 1
 
@@ -494,11 +495,11 @@ class TestFullDisableEnableCycleAllManagers:
         manager = AgentActivityWSManager()
 
         ws = FakeWebSocket()
-        await manager.connect(ws)
+        await manager.connect(ws, tenant_id="t1")
         assert not ws.closed
         assert manager.get_connection_count() == 1
 
-        count = await manager.broadcast_activity({"agent_id": "test"})
+        count = await manager.broadcast_activity({"agent_id": "test", "tenant_id": "t1"})
         assert count == 1
 
         await manager.disconnect(ws)

@@ -1,0 +1,44 @@
+# Keep the build context small and keep credentials out of the image.
+#
+# The COPY in the runtime stage takes the whole directory, so anything not
+# excluded here ends up in a layer — including, without these rules, every
+# .env.* file with real values.
+
+# Secrets. .env.example is deliberately NOT excluded: it is the template and
+# carries only placeholders.
+.env
+.env.*
+!.env.example
+
+# Virtualenvs — several hundred MB, and built for the host platform, so copying
+# one in would also shadow /opt/venv with macOS/arm binaries.
+venv/
+.venv/
+env/
+
+# Caches and build output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+coverage_html/
+.coverage
+coverage.xml
+
+# Tests do not run in the runtime image; CI runs them against the source tree.
+tests/
+
+# Local tooling / VCS
+.git/
+.gitignore
+.vscode/
+.idea/
+*.log
+*.sqlite3
+*.db
+
+# Local compose stack — not used by the image
+docker-compose.yml

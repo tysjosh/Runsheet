@@ -104,6 +104,18 @@ class MockESService:
             self.documents[key].update(updates)
             logger.debug(f"MockES: updated {key}")
 
+    async def atomic_update(self, index: str, doc_id: str, transform, **kwargs):
+        """Read-modify-write one document (no concurrency in these tests)."""
+        key = f"{index}:{doc_id}"
+        current = self.documents.get(key)
+        if current is None:
+            return (None, False)
+        updated = transform(dict(current))
+        if updated is None:
+            return (dict(current), False)
+        self.documents[key] = updated
+        return (dict(updated), True)
+
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int = 100
     ) -> Dict[str, Any]:
@@ -380,25 +392,24 @@ class TestPriceProtectionContractExhaustion:
         assert result["customer_id"] == CUSTOMER_ID
         assert result["status"] == InvoiceStatus.DRAFT.value
 
-        # --- Verify line items ---
-        # NOTE: The current implementation updates the unit_price_cents on the
-        # original line item but doesn't split it into two lines. This test
-        # documents the current behavior. To fully satisfy Requirement 3.5,
-        # the InvoiceService would need to be enhanced to create two separate
-        # line items when split_gallons_at_contract_price is populated.
-        
-        # Current behavior: single line item with blended pricing
-        assert len(result["line_items"]) == 1
-        line = result["line_items"][0]
-        
-        # The pricing engine should have resolved to the contract price
-        # (effective_price_cents from the resolution)
-        assert line["unit_price_cents"] == CONTRACT_PRICE_CENTS
-        
-        # Subtotal is computed as effective_price * total quantity
-        # This is the current behavior - it doesn't split the line
-        expected_subtotal = round(CONTRACT_PRICE_CENTS * DELIVERY_GALLONS)
-        assert line["subtotal_cents"] == expected_subtotal
+        # --- Verify line items (Requirement 3.5, OI-14) ---
+        # The split resolution becomes two lines: the remaining contract
+        # gallons at the contract price and the excess at market. This test
+        # used to pin the single under-billed line (all 500 gal at 280¢).
+        assert len(result["line_items"]) == 2
+        contract_line, market_line = result["line_items"]
+        assert contract_line["quantity_gallons"] == SPLIT_CONTRACT_GALLONS
+        assert contract_line["unit_price_cents"] == CONTRACT_PRICE_CENTS
+        assert market_line["quantity_gallons"] == SPLIT_MARKET_GALLONS
+        assert market_line["unit_price_cents"] == MARKET_PRICE_CENTS
+
+        expected_subtotal = round(
+            CONTRACT_PRICE_CENTS * SPLIT_CONTRACT_GALLONS
+        ) + round(MARKET_PRICE_CENTS * SPLIT_MARKET_GALLONS)
+        assert (
+            contract_line["subtotal_cents"] + market_line["subtotal_cents"]
+            == expected_subtotal
+        )
 
         # --- Verify tax computation ---
         assert len(self.fake_tax.calls) == 1
@@ -560,12 +571,18 @@ class TestPriceProtectionContractExhaustion:
 
         assert invoice["status"] == InvoiceStatus.DRAFT.value
 
-        # Step 2: Decrement the contract
+        # Step 2: The invoice consumed the contract's remaining gallons
+        # itself (D14c), so no separate decrement is needed.
         price_protection_service = PriceProtectionService(self.es, TENANT_ID)
-        await price_protection_service.decrement_gallons(
-            contract_id=CONTRACT_ID,
-            gallons=SPLIT_CONTRACT_GALLONS,
-        )
+        contract_doc = self.es.get(PRICE_PROTECTION_CONTRACTS_INDEX, CONTRACT_ID)
+        assert contract_doc["remaining_gallons"] == pytest.approx(0.0)
+        assert invoice["contract_consumption"] == [
+            {
+                "contract_id": CONTRACT_ID,
+                "line_id": invoice["line_items"][0]["line_id"],
+                "gallons": pytest.approx(SPLIT_CONTRACT_GALLONS),
+            }
+        ]
 
         # Step 3: Transition contract to exhausted
         new_status = await price_protection_service.check_and_transition_contract(

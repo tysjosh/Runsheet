@@ -302,7 +302,7 @@ class TestIngestManual:
 
         file_storage.put.assert_called_once_with(
             tenant_id=_TENANT_ID,
-            category="terminal_bols",
+            category="terminal_bol",
             content_bytes=file_bytes,
             content_type="application/pdf",
         )
@@ -435,6 +435,7 @@ class TestConfirmManualBol:
             await svc.confirm_manual_bol(_TENANT_ID, "bol_nonexistent", {"load_number": "X"})
 
         assert "not found" in str(exc_info.value).lower()
+        assert getattr(exc_info.value, "status_code", None) == 404
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +486,8 @@ class TestLinkToLoadPlan:
         assert call_args[0][0] == "terminal_bols"
         assert call_args[0][1] == bol_id
         update_payload = call_args[0][2]
-        assert update_payload["doc"]["load_plan_id"] == load_plan_id
-        assert update_payload["doc"]["status"] == "linked"
+        assert update_payload["load_plan_id"] == load_plan_id
+        assert update_payload["status"] == "linked"
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_transitions_status_to_linked(self, es_service, registry):
@@ -520,8 +521,8 @@ class TestLinkToLoadPlan:
 
         call_args = es_service.update_document.call_args
         update_payload = call_args[0][2]
-        assert update_payload["doc"]["status"] == "linked"
-        assert "updated_at" in update_payload["doc"]
+        assert update_payload["status"] == "linked"
+        assert "updated_at" in update_payload
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_raises_error_when_bol_not_found(self, es_service, registry):
@@ -542,6 +543,7 @@ class TestLinkToLoadPlan:
             await svc.link_to_load_plan("bol_nonexistent", "lp_123", _TENANT_ID)
 
         assert "not found" in str(exc_info.value).lower()
+        assert getattr(exc_info.value, "status_code", None) == 404
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_raises_error_when_bol_not_linkable(self, es_service, registry):
@@ -644,8 +646,8 @@ class TestLinkToLoadPlan:
         es_service.update_document.assert_called_once()
         call_args = es_service.update_document.call_args
         update_payload = call_args[0][2]
-        assert update_payload["doc"]["load_plan_id"] == load_plan_id
-        assert update_payload["doc"]["status"] == "linked"
+        assert update_payload["load_plan_id"] == load_plan_id
+        assert update_payload["status"] == "linked"
 
     @pytest.mark.asyncio
     async def test_link_to_load_plan_uses_tenant_scoped_query(self, es_service, registry):
@@ -1219,7 +1221,7 @@ class TestVCFCrossReference:
         # Verify the update_document call includes the flag
         update_call = es_service.update_document.call_args
         update_payload = update_call[0][2]  # third positional arg
-        assert update_payload["doc"]["vcf_discrepancy_flag"] is True
+        assert update_payload["vcf_discrepancy_flag"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1448,7 @@ class TestIngestEdiRawDocumentPersistence:
         # Verify FileStorageService.put() was called with the raw EDI bytes
         file_storage.put.assert_called_once_with(
             tenant_id=_TENANT_ID,
-            category="terminal_bols",
+            category="terminal_bol",
             content_bytes=payload,
             content_type="application/edi-x12",
         )
@@ -1554,7 +1556,7 @@ class TestIngestEdiRawDocumentPersistence:
         # Verify the exact raw bytes are stored (not the parsed version)
         file_storage.put.assert_called_once_with(
             tenant_id=_TENANT_ID,
-            category="terminal_bols",
+            category="terminal_bol",
             content_bytes=payload,
             content_type="application/edi-x12",
         )
@@ -1944,3 +1946,129 @@ class TestCombinedValidationScenarios:
         vcf_calculator.compute_net_gallons.assert_called_once()
         file_storage.put.assert_called_once()
         es_service.index_document.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Tests: VCF cross-check with the real calculator (findings C4 + C5)
+# ---------------------------------------------------------------------------
+
+
+def _pipe_bol(net_gallons: float) -> bytes:
+    header = (
+        "load_number|product_code|gross_gallons|net_gallons|observed_temperature|"
+        "api_gravity|supplier_name|terminal_name|driver_id|timestamp"
+    )
+    row = (
+        f"LOAD-VCF-{net_gallons}|ULSD|8000.0|{net_gallons}|72.0|35.0|Valero|"
+        "Houston Terminal|DRV-200|2024-01-15T10:30:00"
+    )
+    return f"{header}\n{row}\n".encode("utf-8")
+
+
+def _pending_bol_hit(bol_id: str) -> dict:
+    return {
+        "hits": {
+            "hits": [{
+                "_source": {
+                    "bol_id": bol_id,
+                    "tenant_id": _TENANT_ID,
+                    "load_number": "PENDING",
+                    "product_code": "PENDING",
+                    "gross_gallons": 0.1,
+                    "net_gallons": 0.1,
+                    "observed_temperature_f": 60.0,
+                    "api_gravity": 0.0,
+                    "supplier_name": "PENDING",
+                    "terminal_name": "PENDING",
+                    "driver_id": "PENDING",
+                    "timestamp": "2024-01-15T10:30:00+00:00",
+                    "status": "pending_confirmation",
+                    "needs_operator_confirmation": True,
+                    "created_at": "2024-01-15T10:30:00+00:00",
+                    "updated_at": "2024-01-15T10:30:00+00:00",
+                }
+            }]
+        }
+    }
+
+
+class TestRealVCFCrossCheck:
+    """A Table 6B-correct BOL is not flagged; an old-math one is."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("net", "flagged"), [(7955.6, False), (7975.3, True)])
+    async def test_ingest_edi(self, es_service, registry, net, flagged):
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            vcf_calculator=VCFCalculator(),
+        )
+        bol = await svc.ingest_edi(_pipe_bol(net), _TENANT_ID)
+        assert bol.vcf_discrepancy_flag is flagged
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("net", "flagged"), [(7955.6, False), (7975.3, True)])
+    async def test_confirm_manual_bol(self, es_service, registry, net, flagged):
+        from compliance.services.vcf_calculator import VCFCalculator
+
+        es_service.search_documents = AsyncMock(return_value=_pending_bol_hit("bol_vcf_real"))
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            vcf_calculator=VCFCalculator(),
+        )
+        await svc.confirm_manual_bol(
+            _TENANT_ID,
+            "bol_vcf_real",
+            {
+                "gross_gallons": 8000.0,
+                "net_gallons": net,
+                "observed_temperature_f": 72.0,
+                "api_gravity": 35.0,
+            },
+        )
+        payload = es_service.update_document.call_args[0][2]
+        assert payload["vcf_discrepancy_flag"] is flagged
+
+
+# ---------------------------------------------------------------------------
+# Tests: raw document storage with the real FileStorageService (finding C9)
+# ---------------------------------------------------------------------------
+
+
+class TestRawDocumentStorage:
+    """Raw documents land under the ``terminal_bol`` category.
+
+    The service used ``terminal_bols``, which FileStorageService rejects, so
+    every put raised and was swallowed as a warning.
+    """
+
+    @staticmethod
+    def _fss():
+        from services.file_storage_service import FileStorageService
+
+        return FileStorageService(bucket="b", region="us-east-2", s3_client=MagicMock())
+
+    @pytest.mark.asyncio
+    async def test_manual_scan_stores_raw_document_ref(self, es_service, registry):
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            file_storage_service=self._fss(),
+        )
+        bol = await svc.ingest_manual(b"\x89PNG\r\n\x1a\n", "image/png", _TENANT_ID)
+        assert bol.raw_document_ref is not None
+        assert bol.raw_document_ref.startswith(f"tenants/{_TENANT_ID}/terminal_bol/")
+
+    @pytest.mark.asyncio
+    async def test_edi_payload_stores_raw_document_ref(self, es_service, registry):
+        svc = TerminalBOLIngestionService(
+            es_service=es_service,
+            edi_parser_registry=registry,
+            file_storage_service=self._fss(),
+        )
+        bol = await svc.ingest_edi(_make_valid_pipe_payload(), _TENANT_ID)
+        assert bol.raw_document_ref is not None
+        assert bol.raw_document_ref.startswith(f"tenants/{_TENANT_ID}/terminal_bol/")

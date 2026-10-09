@@ -33,11 +33,12 @@ import logging
 from datetime import date
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
 from compliance.services.meter_audit_service import MeterAuditService
+from errors.codes import ErrorCode
 from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
@@ -180,12 +181,10 @@ async def list_meters(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.list_failed",
+            message="Failed to list meters.",
             status_code=500,
-            detail={
-                "error_code": "meters.list_failed",
-                "message": "Failed to list meters.",
-            },
         )
 
     return {
@@ -233,12 +232,10 @@ async def create_meter(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.METERS_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "meters.invalid_payload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -246,12 +243,10 @@ async def create_meter(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.create_failed",
+            message="Failed to register meter.",
             status_code=500,
-            detail={
-                "error_code": "meters.create_failed",
-                "message": "Failed to register meter.",
-            },
         )
 
     logger.info(
@@ -299,12 +294,10 @@ async def get_meter(
             meter_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.get_failed",
+            message="Failed to retrieve meter.",
             status_code=500,
-            detail={
-                "error_code": "meters.get_failed",
-                "message": "Failed to retrieve meter.",
-            },
         )
 
     return {
@@ -347,6 +340,8 @@ async def get_meter_audit_trail(
     svc = _get_meter_service()
 
     try:
+        # Unknown meter → 404, as GET /meters/{id} does, not 200 [] (C11).
+        await svc.get_meter(tenant.tenant_id, meter_id)
         result = await svc.get_meter_audit_trail(
             tenant.tenant_id,
             meter_id,
@@ -362,12 +357,10 @@ async def get_meter_audit_trail(
             meter_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="meters.audit_trail_failed",
+            message="Failed to retrieve meter audit trail.",
             status_code=500,
-            detail={
-                "error_code": "meters.audit_trail_failed",
-                "message": "Failed to retrieve meter audit trail.",
-            },
         )
 
     return {

@@ -30,17 +30,23 @@ Validates: Requirements 2.4, 2.5, 2.5.7, 2.5.8, 10.1.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, get_args
 
 from fastapi import APIRouter, Depends, Query, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from auth.authorization import require_role
+from errors.codes import ErrorCode
 from errors.exceptions import (
+    AppException,
+    error_code_value,
     insufficient_role,
     missing_client_event_id,
     missing_hold_reason,
+    order_intake_disabled,
     resource_not_found,
     validation_error,
 )
@@ -49,8 +55,20 @@ from fuel.order_state_machine import (
     assert_transition,
     is_terminal_status,
 )
+from fuel.services import order_actions
 from fuel.services.order_id_generator import mint_event_id
+from fuel.services.order_service import transition_order_guarded
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
+from middleware.rate_limiter import limiter
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    KeysetPage,
+    KeysetSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 from services.ref_resolver import get_ref_resolver
 from services.time_utils import utcnow
 
@@ -480,6 +498,10 @@ class OrderEventsListResponse(BaseModel):
     total: int
 
 
+#: Every value ``FuelOrder.status`` can hold, in declaration order.
+_ORDER_STATUSES: tuple[str, ...] = get_args(OrderStatus)
+
+
 class StatusTransitionRequest(BaseModel):
     """Body for ``PATCH /api/orders/{order_id}/status``."""
     model_config = ConfigDict(extra="forbid")
@@ -552,7 +574,8 @@ async def create_order(
     """Create a new fuel order via the dispatcher keyboard.
 
     Requires ``client_event_id`` in the body for idempotency. Rejects
-    with 400 ``missing_client_event_id`` when missing.
+    with 400 ``missing_client_event_id`` when missing, and with 409
+    ``ORDER_INTAKE_DISABLED`` when the tenant's intake flag is disabled.
     Role-gate: dispatcher or admin.
     Validates: Requirement 2.4.
     """
@@ -572,6 +595,12 @@ async def create_order(
         client_event_id=body.client_event_id,
     )
 
+    # ``legacy_passthrough`` means the tenant's intake flag is disabled and the
+    # pipeline stored nothing. Answering 201 would tell the dispatcher an order
+    # exists when it does not (finding F1).
+    if result.status == "legacy_passthrough":
+        raise order_intake_disabled()
+
     if result.order_id:
         response.headers["Location"] = f"/api/orders/{result.order_id}"
 
@@ -587,6 +616,27 @@ async def create_order(
 # ---------------------------------------------------------------------------
 
 
+#: Per-row text for a failure we did not author. The cause is logged instead.
+BULK_ROW_GENERIC_ERROR = "Row could not be processed"
+
+
+def _bulk_row_error(exc: Exception, idx: int, request_id: str) -> str:
+    """Map a bulk row failure to the text returned to the caller (D12).
+
+    ``AppException`` messages are written by us and safe to return, so the
+    row gets ``"<error_code>: <message>"``. Anything else could carry a DSN,
+    a stack detail or another tenant's data, so the row gets a fixed message
+    and the original exception is logged server-side only.
+    """
+    if isinstance(exc, AppException):
+        return f"{error_code_value(exc.error_code)}: {exc.message}"
+    logger.warning(
+        "order_endpoints.bulk: row %d failed (request_id=%s)",
+        idx, request_id, exc_info=exc,
+    )
+    return BULK_ROW_GENERIC_ERROR
+
+
 @router.post("/bulk", response_model=BulkOrderResponse, status_code=status.HTTP_200_OK)
 async def create_orders_bulk(
     body: BulkOrderRequest,
@@ -595,7 +645,11 @@ async def create_orders_bulk(
 ) -> BulkOrderResponse:
     """Bulk-create fuel orders (up to 1000 rows).
 
-    Supports ``dry_run`` mode which validates all rows without persisting.
+    Supports ``dry_run`` mode, which runs each row through
+    ``OrderIntakePipeline.validate_dispatcher_payload`` without persisting.
+    A failed row carries ``"<error_code>: <message>"`` for our own errors and
+    a fixed generic message otherwise; raw exception text is never returned.
+    Rows refused because intake is disabled are errors, not processed.
     Enforces the 1000-row cap — rejects with 400 when exceeded.
     Role-gate: dispatcher or admin.
     Validates: Requirement 2.4.
@@ -623,7 +677,14 @@ async def create_orders_bulk(
 
         if body.dry_run:
             try:
-                row.model_dump(exclude={"client_event_id"}, exclude_none=True)
+                payload = row.model_dump(exclude={"client_event_id"}, exclude_none=True)
+                # Run the pipeline's own value checks (adapter transform,
+                # platform stamping, tank ownership, FuelOrder rules) without
+                # writing, so a row the real run would refuse is not reported
+                # as valid (finding F2).
+                await pipeline.validate_dispatcher_payload(
+                    tenant, payload, f"{request_id}_row_{idx}"
+                )
                 results.append(BulkOrderResultItem(
                     row_index=idx, order_id=None, event_id=client_event_id,
                     status="dry_run_valid", error=None,
@@ -632,7 +693,7 @@ async def create_orders_bulk(
             except Exception as exc:
                 results.append(BulkOrderResultItem(
                     row_index=idx, order_id=None, event_id=client_event_id,
-                    status="error", error=str(exc),
+                    status="error", error=_bulk_row_error(exc, idx, request_id),
                 ))
                 error_count += 1
         else:
@@ -644,6 +705,10 @@ async def create_orders_bulk(
                     request_id=f"{request_id}_row_{idx}",
                     client_event_id=client_event_id,
                 )
+                if result.status == "legacy_passthrough":
+                    # Intake is disabled: nothing was stored, so the row is an
+                    # error rather than "processed" (finding F1).
+                    raise order_intake_disabled()
                 if result.status == "duplicate":
                     duplicate_count += 1
                     results.append(BulkOrderResultItem(
@@ -660,12 +725,8 @@ async def create_orders_bulk(
                 error_count += 1
                 results.append(BulkOrderResultItem(
                     row_index=idx, order_id=None, event_id=client_event_id,
-                    status="error", error=str(exc),
+                    status="error", error=_bulk_row_error(exc, idx, request_id),
                 ))
-                logger.warning(
-                    "order_endpoints.bulk: row %d failed for tenant=%s: %s",
-                    idx, tenant.tenant_id, exc,
-                )
 
     return BulkOrderResponse(
         total=len(body.orders), processed=processed_count,
@@ -679,6 +740,56 @@ async def create_orders_bulk(
 # ---------------------------------------------------------------------------
 
 
+#: Fields ``GET /api/orders?sort=`` may order by (decision D10). The repository
+#: passes the field straight to the store, so anything else was silently
+#: accepted. ``priority`` is listed per D10; orders don't carry it today, so it
+#: sorts as missing.
+ORDER_SORT_FIELDS = frozenset({
+    "created_at",
+    "updated_at",
+    "last_event_timestamp",
+    "delivery_window_start",
+    "delivery_window_end",
+    "priority",
+    "status",
+})
+
+_SORT_PATTERN = re.compile(r"^([a-z_]+)(?::(asc|desc))?$")
+
+
+def _list_param_error(field: str, message: str, value: str) -> AppException:
+    return AppException(
+        error_code=ErrorCode.VALIDATION_ERROR,
+        message=message,
+        status_code=422,
+        details={"field": field, "value": value},
+    )
+
+
+def _validate_list_params(
+    *, sort: Optional[str], start_date: Optional[str], end_date: Optional[str]
+) -> None:
+    """422 on a malformed ``sort`` or date before the repository runs (F8, D10)."""
+    if sort is not None:
+        match = _SORT_PATTERN.match(sort)
+        if match is None or match.group(1) not in ORDER_SORT_FIELDS:
+            raise _list_param_error(
+                "sort",
+                "sort must be <field> or <field>:asc|desc, with field one of "
+                + ", ".join(sorted(ORDER_SORT_FIELDS)),
+                sort,
+            )
+    for field, value in (("start_date", start_date), ("end_date", end_date)):
+        if value is None:
+            continue
+        try:
+            datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            raise _list_param_error(
+                field, f"{field} must be an ISO-8601 date or timestamp", value
+            ) from None
+
+
 @router.get("", response_model=OrderListResponse)
 async def list_orders(
     tenant: TenantContext = Depends(get_tenant_context),
@@ -690,6 +801,13 @@ async def list_orders(
     start_date: Optional[str] = Query(default=None),
     end_date: Optional[str] = Query(default=None),
     intake_channel: Optional[str] = Query(default=None),
+    hold_reason: Optional[str] = Query(
+        default=None,
+        description=(
+            "Exact hold reason, e.g. awaiting_dispatcher_confirmation for "
+            "customer-portal requests waiting to be confirmed."
+        ),
+    ),
     q: Optional[str] = Query(
         default=None,
         description=(
@@ -713,6 +831,7 @@ async def list_orders(
     Validates: Requirements 2.5, 3.13.
     """
     require_role(tenant, "dispatcher", "admin")
+    _validate_list_params(sort=sort, start_date=start_date, end_date=end_date)
     repo = _get_repository()
     result = await repo.search(
         tenant_id=tenant.tenant_id,
@@ -728,11 +847,120 @@ async def list_orders(
         page=page,
         size=size,
         sort=sort,
+        **({"hold_reason": hold_reason} if hold_reason else {}),
     )
     items = [OrderResponse.from_model(o) for o in result["orders"]]
     return OrderListResponse(
         items=items, total=result["total"],
         page=result["page"], size=result["size"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/orders/export (data-export §3.2)
+# ---------------------------------------------------------------------------
+
+#: Export pages only on an always-populated, immutable key (DD-4).
+_ORDER_EXPORT_SORTS = frozenset({None, "created_at", "created_at:asc", "created_at:desc"})
+
+
+def _delivery(row: Dict[str, Any], key: str) -> Any:
+    result = row.get("delivery_result") or {}
+    return result.get(key)
+
+
+_ORDER_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "order_id", "created_at", "status", "customer_id", "customer_name",
+        "ship_to_address", "customer_tank_id", "product_code",
+        "gallons_requested", "fill_to_full", "call_type", "intake_channel",
+        "delivery_window_start", "delivery_window_end", "assigned_driver_id",
+        "assigned_asset_id", "po_number",
+    )
+] + [
+    ExportColumn("delivered_at", lambda r: _delivery(r, "delivered_at")),
+    ExportColumn("delivered_gallons", lambda r: _delivery(r, "actual_gallons")),
+] + [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in ("total_cents", "hold_reason", "refusal_reason_code", "updated_at")
+]
+
+
+def _orders_export_fetch(repo: Any, tenant_id: str, filters: Dict[str, Any]):
+    """KeysetFetch over ``FuelOrderRepository.search`` in keyset mode.
+
+    ``raw_count`` / ``last_key`` come from the repository's raw store result,
+    never ``len(orders)``, so a document dropped by validation never ends
+    paging early.
+    """
+    async def fetch(after, page_size, with_total):
+        result = await repo.search(
+            tenant_id=tenant_id,
+            status=filters.get("status"),
+            customer_id=filters.get("customer_id"),
+            driver_id=filters.get("driver_id"),
+            call_type=filters.get("call_type"),
+            product_code=filters.get("product_code"),
+            start_date=filters.get("start_date"),
+            end_date=filters.get("end_date"),
+            intake_channel=filters.get("intake_channel"),
+            q=filters.get("q"),
+            size=page_size,
+            sort=filters.get("sort"),
+            keyset=True,
+            after=after,
+            with_total=with_total,
+        )
+        return KeysetPage(
+            rows=[o.model_dump(mode="json") for o in result["orders"]],
+            raw_count=result["raw_count"],
+            total=result.get("total"),
+            last_key=result["last_key"],
+        )
+    return fetch
+
+
+@router.get("/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_orders(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", "dispatcher", base=get_tenant_context)
+    ),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    customer_id: Optional[str] = Query(default=None),
+    driver_id: Optional[str] = Query(default=None),
+    call_type: Optional[str] = Query(default=None),
+    product_code: Optional[str] = Query(default=None),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+    intake_channel: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    sort: Optional[str] = Query(default=None),
+):
+    """CSV of the tenant's orders matching the list filters (admin, dispatcher)."""
+    _validate_list_params(sort=sort, start_date=start_date, end_date=end_date)
+    if sort not in _ORDER_EXPORT_SORTS:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Export supports sort=created_at[:asc|:desc] only",
+            status_code=422,
+            details={"field": "sort", "reason": "not_supported_for_export"},
+        )
+    filters = {
+        "status": status_filter, "customer_id": customer_id,
+        "driver_id": driver_id, "call_type": call_type,
+        "product_code": product_code, "start_date": start_date,
+        "end_date": end_date, "intake_channel": intake_channel,
+        "q": q, "sort": sort,
+    }
+    source = KeysetSource(
+        _orders_export_fetch(_get_repository(), tenant.tenant_id, filters)
+    )
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="orders",
+        columns=_ORDER_EXPORT_COLUMNS, source=source, filters=filters,
     )
 
 
@@ -827,8 +1055,9 @@ async def update_order_status(
 ) -> OrderResponse:
     """Apply a state-machine-guarded status transition.
 
-    Validates the transition against the order state machine. Rejects
-    invalid transitions with 409 ``invalid_status_transition``.
+    Validates the transition against the order state machine. Rejects an
+    unknown ``new_status`` with 422 ``VALIDATION_ERROR`` and a disallowed
+    transition with 409 ``invalid_status_transition``.
     Rejects transitions to scheduled/dispatched/in_transit without a
     delivery window with 409 ``missing_delivery_window``.
     Role-gate: dispatcher or admin.
@@ -844,9 +1073,31 @@ async def update_order_status(
             details={"order_id": order_id},
         )
 
-    updated = await _get_order_service().apply_status_transition(
+    # An unknown status is a bad request, not a refused transition (F11).
+    # Known-but-disallowed transitions still get the state machine's 409.
+    if body.new_status not in _ORDER_STATUSES:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="new_status is not an order status",
+            status_code=422,
+            details={"new_status": body.new_status, "allowed": list(_ORDER_STATUSES)},
+        )
+    async def _reread() -> Dict[str, Any]:
+        fresh = await repo.get(tenant.tenant_id, order_id)
+        if fresh is None:
+            raise resource_not_found(
+                message=f"Order '{order_id}' not found",
+                details={"order_id": order_id},
+            )
+        return fresh.model_dump(mode="python")
+
+    # Guarded with one re-read retry (OI-41): a concurrent executor or
+    # dispatch write is never overwritten by this read.
+    updated = await transition_order_guarded(
+        _get_order_service(),
+        _reread,
+        body.new_status,
         order=order.model_dump(mode="python"),
-        new_status=body.new_status,
         reason=body.reason,
         notes=body.notes,
         actor_user_id=tenant.user_id,
@@ -966,50 +1217,20 @@ async def cancel_order(
 
     assert_transition(order.status, "cancelled")
 
-    now = utcnow()
-    update_fields: Dict[str, Any] = {
-        "status": "cancelled",
-        "updated_at": now.isoformat(),
-        "last_event_timestamp": now.isoformat(),
-    }
-    await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
-
-    event_doc = {
-        "event_id": mint_event_id(),
-        "order_id": order_id,
-        "tenant_id": tenant.tenant_id,
-        "event_type": "order_cancelled",
-        "event_payload": {
-            "old_status": order.status,
-            "reason": body.reason,
-            "notes": body.notes,
-            "actor_user_id": tenant.user_id,
-        },
-        "event_timestamp": now.isoformat(),
-        "ingested_at": now.isoformat(),
-        "source_schema_version": "1.0",
-        "trace_id": str(uuid.uuid4()),
-    }
-    await repo.append_event(tenant.tenant_id, event_doc)
-
-    # Decrement driver's active_order_count on cancel from dispatched
-    counter_svc = _get_driver_counter_service()
-    if counter_svc is not None and order.assigned_driver_id:
-        if order.status in ("dispatched",):
-            try:
-                await counter_svc.increment_counters(
-                    driver_id=order.assigned_driver_id,
-                    tenant_id=tenant.tenant_id,
-                    delta_active=-1,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "order_endpoints.cancel: counter decrement failed for "
-                    "driver=%s, order=%s: %s",
-                    order.assigned_driver_id,
-                    order_id,
-                    exc,
-                )
+    # Compare-and-set on the status read above (customer portal F3): a
+    # concurrent change between the read and this write gives 409.
+    cancelled = await order_actions.cancel_order(
+        repo,
+        tenant.tenant_id,
+        order_id,
+        actor_user_id=tenant.user_id,
+        reason=body.reason,
+        notes=body.notes,
+        expected_status=order.status,
+        counter_service=_get_driver_counter_service(),
+    )
+    if cancelled is None:
+        raise _changed_concurrently(order_id, order.status)
 
     updated_order = await repo.get(tenant.tenant_id, order_id)
     if updated_order is None:
@@ -1017,7 +1238,22 @@ async def cancel_order(
             message=f"Order '{order_id}' not found after update",
             details={"order_id": order_id},
         )
+    # A declined customer-portal request: email the requester (best effort).
+    from portal.services.order_notifications import notify_staff_resolution
+
+    await notify_staff_resolution(tenant.tenant_id, order, updated_order, confirmed=False)
     return OrderResponse.from_model(updated_order)
+
+
+def _changed_concurrently(order_id: str, expected_status: str) -> AppException:
+    """409 ``INVALID_STATUS_TRANSITION`` for a lost compare-and-set."""
+    from errors.exceptions import conflict
+
+    return conflict(
+        message=f"Order '{order_id}' changed while this request was processed",
+        error_code="INVALID_STATUS_TRANSITION",
+        details={"order_id": order_id, "expected_status": expected_status},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1179,14 +1415,25 @@ async def release_hold_order(
         }
         await repo.append_event(tenant.tenant_id, event_doc)
     else:
-        # All hooks passed — transition back to placed
+        # All hooks passed — transition back to placed. Compare-and-set on
+        # the hold read above (F3): a customer cancel or another release in
+        # between gives 409 instead of resurrecting the order.
         update_fields = {
             "status": "placed",
             "hold_reason": None,
             "updated_at": now.isoformat(),
             "last_event_timestamp": now.isoformat(),
         }
-        await _apply_order_update(repo, order, order_id, tenant.tenant_id, update_fields)
+        released = await order_actions.transition_order_if(
+            repo,
+            tenant.tenant_id,
+            order_id,
+            expected_status="on_hold",
+            expected_hold_reason=order.hold_reason,
+            update_fields=update_fields,
+        )
+        if released is None:
+            raise _changed_concurrently(order_id, "on_hold")
 
         event_doc = {
             "event_id": mint_event_id(),
@@ -1212,4 +1459,9 @@ async def release_hold_order(
             message=f"Order '{order_id}' not found after update",
             details={"order_id": order_id},
         )
+    if not hook_failure_reason:
+        # A confirmed customer-portal request: email the requester (best effort).
+        from portal.services.order_notifications import notify_staff_resolution
+
+        await notify_staff_resolution(tenant.tenant_id, order, updated_order, confirmed=True)
     return OrderResponse.from_model(updated_order)

@@ -39,6 +39,7 @@ from scheduling.models import (
     VALID_TRANSITIONS,
 )
 from scheduling.services.job_id_generator import JobIdGenerator
+from scheduling.services.job_writes import index_job, update_job_fields
 from scheduling.services.scheduling_es_mappings import (
     JOBS_CURRENT_INDEX,
     JOB_EVENTS_INDEX,
@@ -49,6 +50,19 @@ from services.elasticsearch_service import ElasticsearchService
 
 logger = logging.getLogger(__name__)
 
+
+
+def _with_live_delay(jobs: list[dict]) -> list[dict]:
+    """Report each open delayed job's delay as of now (F10): the stored
+    ``delay_duration_minutes`` is frozen at detection time."""
+    from scheduling.services.job_metrics_aggregator import effective_delay_minutes
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for job in jobs:
+        minutes = effective_delay_minutes(job, now)
+        out.append({**job, "delay_duration_minutes": int(minutes)} if minutes is not None else job)
+    return out
 
 class JobService:
     """Manages job lifecycle: creation, assignment, status transitions, and queries.
@@ -188,7 +202,8 @@ class JobService:
             "completed_at": None,
             "created_at": now,
             "updated_at": now,
-            "created_by": data.created_by or actor_id,
+            # Always the authenticated actor; a body ``created_by`` is ignored.
+            "created_by": actor_id,
             "priority": data.priority.value,
             "delayed": False,
             "delay_duration_minutes": None,
@@ -204,13 +219,8 @@ class JobService:
             doc["destination_location"] = data.destination_location.model_dump()
 
         # --- Index into jobs_current ---
-        await self._es.index_document(JOBS_CURRENT_INDEX, job_id, doc)
-
-        # Dual-write the job current-state to the Postgres source-of-truth.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", doc)
+        # Document store + Postgres current-state row (``job_writes``).
+        await index_job(self._es, job_id, doc)
 
         # --- Append event ---
         await self._append_event(
@@ -340,16 +350,9 @@ class JobService:
         now = datetime.now(timezone.utc).isoformat()
         update_fields = {**link_fields, "updated_at": now}
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
-
-        job_doc.update(update_fields)
-
-        # Dual-write the merged current-state to Postgres (read-cutover serves
-        # from PG), mirroring create_job / assign_asset / transition_status.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         return job_doc
 
@@ -427,7 +430,9 @@ class JobService:
         if readiness_flags:
             update_fields["readiness_flags"] = readiness_flags
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # Append event
         await self._append_event(
@@ -457,16 +462,6 @@ class JobService:
         # Merge updates into doc for return / broadcast
         job_doc.update(update_fields)
 
-        # Dual-write the merged job current-state to the Postgres
-        # source-of-truth. ``_get_job_doc`` serves reads from Postgres under
-        # read-cutover, so an assignment that only touched ES would be
-        # invisible to the next status transition (it would still see
-        # ``scheduled``). Mirror here exactly as create_job / transition_status
-        # do. (Bug found in dispatcher journey: assign left PG at 'scheduled'.)
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
 
         await self._broadcast_job_update("status_changed", job_doc)
 
@@ -542,7 +537,9 @@ class JobService:
             "updated_at": now,
         }
 
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # Append asset_reassigned event with old and new asset ids
         await self._append_event(
@@ -646,12 +643,6 @@ class JobService:
 
         await self._broadcast_job_update("status_changed", job_doc)
 
-        # Dual-write the reassigned current-state to Postgres (read-cutover
-        # serves from PG). Mirrors the create_job / transition_status pattern.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
 
         return Job(**self._normalize_job_doc(job_doc))
 
@@ -801,7 +792,9 @@ class JobService:
         # changing status away from assigned/in_progress is sufficient.
 
         # Update job document
-        await self._es.update_document(JOBS_CURRENT_INDEX, job_id, update_fields)
+        # Document store + Postgres current-state row (``job_writes``); merges
+        # ``update_fields`` into ``job_doc``.
+        await update_job_fields(self._es, job_id, update_fields, job_doc=job_doc)
 
         # Append status_changed event
         await self._append_event(
@@ -833,11 +826,6 @@ class JobService:
         job_doc.update(update_fields)
         await self._broadcast_job_update("status_changed", job_doc)
 
-        # Dual-write the merged job current-state to Postgres.
-        from commerce.services.commerce_persistence_bridge import (
-            mirror_current_state_upsert,
-        )
-        await mirror_current_state_upsert("job", job_doc)
 
         # --- Auto-consume parts for completed maintenance jobs (Req 5.1, 5.3, 5.5) ---
         if target_status == JobStatus.COMPLETED:
@@ -886,11 +874,12 @@ class JobService:
         """
         doc = dict(doc)  # shallow copy
 
-        # Map legacy job_type values to valid enum values
+        # Map legacy job_type values to valid enum values. ``fuel_delivery``
+        # is a real JobType, so it is returned as stored (R-3/S4): remapping
+        # it made the detail read disagree with the list.
         job_type_map = {
             "delivery": "cargo_transport",
             "pickup": "cargo_transport",
-            "fuel_delivery": "cargo_transport",
         }
         if doc.get("job_type") in job_type_map:
             doc["job_type"] = job_type_map[doc["job_type"]]
@@ -925,6 +914,10 @@ class JobService:
         size: int = 20,
         sort_by: str = "scheduled_time",
         sort_order: str = "asc",
+        *,
+        keyset: bool = False,
+        after: Optional[tuple] = None,
+        with_total: bool = True,
     ) -> dict:
         """Paginated job listing with filters.
 
@@ -943,13 +936,22 @@ class JobService:
             size: Page size.
             sort_by: Field to sort by.
             sort_order: ``asc`` or ``desc``.
+            keyset: Data-export keyset mode: sort ``(sort_by, job_id ASC)``
+                with offset 0 on every call.
+            after: ``(sort_value, job_id)`` of the previous page's last raw
+                row. Requires ``keyset=True``.
+            with_total: ``False`` skips the count on the Postgres path.
 
         Returns:
-            Dict with ``data`` (list of Job dicts) and ``pagination`` envelope.
+            Dict with ``data`` (list of Job dicts) and ``pagination`` envelope,
+            plus ``raw_count`` and ``last_key`` from the raw store result.
 
         Raises:
             AppException: 400 for invalid filter values.
         """
+        if after is not None and not keyset:
+            raise ValueError("after requires keyset=True")
+
         # Validate filter values
         if job_type is not None:
             valid_types = [jt.value for jt in JobType]
@@ -992,11 +994,14 @@ class JobService:
             },
             range_field="scheduled_time", range_gte=start_date, range_lte=end_date,
             sort_field=sort_by, sort_order=sort_order,
-            page=page, size=size,
+            page=1 if keyset else page, size=size,
+            **({"after": after, "with_total": with_total} if keyset else {}),
         )
         if pg is not _NOT_CUT_OVER:
             total = pg["total"]
-            total_pages = math.ceil(total / size) if size > 0 else 0
+            total_pages = (
+                math.ceil(total / size) if size > 0 and total is not None else 0
+            )
             return {
                 "data": pg["items"],
                 "pagination": {
@@ -1005,6 +1010,8 @@ class JobService:
                     "total": total,
                     "total_pages": total_pages,
                 },
+                "raw_count": pg.get("raw_count", len(pg["items"])),
+                "last_key": pg.get("last_key"),
             }
 
         # Build query
@@ -1041,11 +1048,22 @@ class JobService:
             "size": size,
             "track_total_hits": True,
         }
+        if keyset:
+            # Same 2-key sort on every call, first page included.
+            query["sort"] = [
+                {sort_by: {"order": sort_order}},
+                {"job_id": {"order": "asc"}},
+            ]
+            query["from"] = 0
+            if after is not None:
+                query["search_after"] = [after[0], after[1]]
 
         response = await self._es.search_documents(
             JOBS_CURRENT_INDEX, query, size=size
         )
 
+        from services.keyset_pagination import raw_keyset_info
+        raw_count, last_key = raw_keyset_info(response, keyset=keyset)
         hits = response["hits"]["hits"]
         total = response["hits"]["total"]["value"]
         total_pages = math.ceil(total / size) if size > 0 else 0
@@ -1060,6 +1078,8 @@ class JobService:
                 "total": total,
                 "total_pages": total_pages,
             },
+            "raw_count": raw_count,
+            "last_key": last_key,
         }
 
     async def get_active_jobs(self, tenant_id: str) -> list[dict]:
@@ -1138,7 +1158,7 @@ class JobService:
             page=1, size=1000,
         )
         if pg is not _NOT_CUT_OVER:
-            return pg["items"]
+            return _with_live_delay(pg["items"])
 
         query: dict = {
             "query": {
@@ -1158,7 +1178,7 @@ class JobService:
             JOBS_CURRENT_INDEX, query, size=1000
         )
 
-        return [hit["_source"] for hit in response["hits"]["hits"]]
+        return _with_live_delay([hit["_source"] for hit in response["hits"]["hits"]])
 
     async def get_job_events(
         self, job_id: str, tenant_id: str
@@ -1463,7 +1483,7 @@ class JobService:
         if total > 0:
             conflicting = response["hits"]["hits"][0]["_source"]
             raise AppException(
-                error_code=ErrorCode.DRIFT_THRESHOLD_EXCEEDED,
+                error_code=ErrorCode.ASSET_CONFLICT,
                 message=(
                     f"Asset '{asset_id}' is already assigned to active job "
                     f"'{conflicting['job_id']}' (status: {conflicting['status']})"
@@ -1653,7 +1673,9 @@ class JobService:
         """
         if self._ws_manager is not None:
             try:
-                await self._ws_manager.broadcast(event_type, job_data)
+                await self._ws_manager.broadcast(
+                    event_type, job_data, tenant_id=job_data.get("tenant_id", "")
+                )
             except Exception as exc:
                 logger.warning(
                     "WebSocket broadcast failed for %s on job %s: %s",

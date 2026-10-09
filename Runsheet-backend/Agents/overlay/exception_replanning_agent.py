@@ -88,6 +88,10 @@ REPAIR_PART_CATEGORIES = ["tires", "brake_parts", "engine_parts"]
 #: not committed to is pointless — regenerating it is cheaper and correct.
 REPLANNABLE_PLAN_STATUSES = ("dispatched", "in_transit")
 
+#: Excludes plans and routes published from the Dispatch Board
+#: (dispatch-board K7.6); agent documents carry no ``source``.
+_NOT_BOARD_PLAN = {"term": {"source": "dispatch_board"}}
+
 #: Replan outcomes recorded on the persisted event.
 #:
 #: ``ReplanEvent.status`` used to be hardcoded to ``"applied"`` regardless of
@@ -325,6 +329,9 @@ class ExceptionReplanningAgent(OverlayAgentBase):
                             "status": list(REPLANNABLE_PLAN_STATUSES)
                         }},
                     ],
+                    # Board-published plans are re-planned on the Dispatch
+                    # Board, not by this agent (dispatch-board K7.6).
+                    "must_not": [_NOT_BOARD_PLAN],
                 },
             },
             "sort": [{"created_at": {"order": "desc"}}],
@@ -357,6 +364,7 @@ class ExceptionReplanningAgent(OverlayAgentBase):
                             "status": list(REPLANNABLE_PLAN_STATUSES)
                         }},
                     ],
+                    "must_not": [_NOT_BOARD_PLAN],
                 },
             },
             "sort": [{"timestamp": {"order": "desc"}}],

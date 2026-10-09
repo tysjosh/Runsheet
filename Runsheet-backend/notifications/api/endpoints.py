@@ -16,6 +16,7 @@ Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 6.8, 7.1, 7.2,
 """
 
 import logging
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -30,6 +31,7 @@ from errors.exceptions import (
     validation_error,
 )
 from middleware.rate_limiter import limiter
+from notifications.api._authz import notification_write_dependency
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -198,8 +200,9 @@ async def list_notifications(
             "reference/name, related entity id, subject, and message body."
         ),
     ),
-    start_date: Optional[str] = Query(None, description="Start of date range (ISO 8601)"),
-    end_date: Optional[str] = Query(None, description="End of date range (ISO 8601)"),
+    # Typed so an unparseable date is a 422 instead of being passed through (B5).
+    start_date: Optional[datetime] = Query(None, description="Start of date range (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="End of date range (ISO 8601)"),
     page: int = Query(1, ge=1, description="Page number"),
     size: int = Query(20, ge=1, le=100, description="Page size"),
 ):
@@ -224,9 +227,9 @@ async def list_notifications(
         if q:
             filters["search"] = q
         if start_date:
-            filters["start_date"] = start_date
+            filters["start_date"] = start_date.isoformat()
         if end_date:
-            filters["end_date"] = end_date
+            filters["end_date"] = end_date.isoformat()
 
         result = await svc.list_notifications(
             tenant_id=tenant.tenant_id,
@@ -241,8 +244,7 @@ async def list_notifications(
         logger.exception("Failed to list notifications")
         raise internal_error(
             message="Failed to list notifications",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 @router.get("/summary")
@@ -250,8 +252,9 @@ async def list_notifications(
 async def get_notification_summary(
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
-    start_date: Optional[str] = Query(None, description="Start of date range (ISO 8601)"),
-    end_date: Optional[str] = Query(None, description="End of date range (ISO 8601)"),
+    # Typed so an unparseable date is a 422 instead of being passed through (B5).
+    start_date: Optional[datetime] = Query(None, description="Start of date range (ISO 8601)"),
+    end_date: Optional[datetime] = Query(None, description="End of date range (ISO 8601)"),
 ):
     """
     Aggregate notification counts by type, channel, and status.
@@ -262,8 +265,8 @@ async def get_notification_summary(
     try:
         result = await svc.get_summary(
             tenant_id=tenant.tenant_id,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=start_date.isoformat() if start_date else None,
+            end_date=end_date.isoformat() if end_date else None,
         )
         return result
     except AppException:
@@ -272,8 +275,7 @@ async def get_notification_summary(
         logger.exception("Failed to get notification summary")
         raise internal_error(
             message="Failed to get notification summary",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 # ===================================================================
@@ -305,11 +307,10 @@ async def list_rules(
         logger.exception("Failed to list notification rules")
         raise internal_error(
             message="Failed to list notification rules",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
-@router.patch("/rules/{rule_id}")
+@router.patch("/rules/{rule_id}", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def update_rule(
     rule_id: str,
@@ -338,8 +339,8 @@ async def update_rule(
         logger.exception("Failed to update notification rule %s", rule_id)
         raise internal_error(
             message="Failed to update notification rule",
-            details={"rule_id": rule_id, "error": str(e)},
-        )
+            details={"rule_id": rule_id},
+        ) from e
 
 
 # ===================================================================
@@ -377,8 +378,7 @@ async def list_preferences(
         logger.exception("Failed to list notification preferences")
         raise internal_error(
             message="Failed to list notification preferences",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
 @router.get("/preferences/{customer_id}")
@@ -403,11 +403,11 @@ async def get_preference(
         logger.exception("Failed to get preference for customer %s", customer_id)
         raise internal_error(
             message="Failed to get notification preference",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
-@router.put("/preferences/{customer_id}")
+@router.put("/preferences/{customer_id}", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def upsert_preference(
     customer_id: str,
@@ -431,11 +431,11 @@ async def upsert_preference(
         logger.exception("Failed to upsert preference for customer %s", customer_id)
         raise internal_error(
             message="Failed to upsert notification preference",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
-@router.put("/preferences/{customer_id}/template-opt-outs")
+@router.put("/preferences/{customer_id}/template-opt-outs", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def update_template_opt_outs(
     customer_id: str,
@@ -467,8 +467,8 @@ async def update_template_opt_outs(
         )
         raise internal_error(
             message="Failed to update template opt-out preferences",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
 @router.get("/preferences/{customer_id}/template-opt-outs")
@@ -502,8 +502,8 @@ async def get_template_opt_outs(
         )
         raise internal_error(
             message="Failed to get template opt-out preferences",
-            details={"customer_id": customer_id, "error": str(e)},
-        )
+            details={"customer_id": customer_id},
+        ) from e
 
 
 # ===================================================================
@@ -539,11 +539,10 @@ async def list_templates(
         logger.exception("Failed to list notification templates")
         raise internal_error(
             message="Failed to list notification templates",
-            details={"error": str(e)},
-        )
+        ) from e
 
 
-@router.put("/templates/{template_id}")
+@router.put("/templates/{template_id}", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def update_template(
     template_id: str,
@@ -572,8 +571,8 @@ async def update_template(
         logger.exception("Failed to update notification template %s", template_id)
         raise internal_error(
             message="Failed to update notification template",
-            details={"template_id": template_id, "error": str(e)},
-        )
+            details={"template_id": template_id},
+        ) from e
 
 
 # ===================================================================
@@ -604,11 +603,11 @@ async def get_notification(
         logger.exception("Failed to get notification %s", notification_id)
         raise internal_error(
             message="Failed to get notification",
-            details={"notification_id": notification_id, "error": str(e)},
-        )
+            details={"notification_id": notification_id},
+        ) from e
 
 
-@router.post("/{notification_id}/retry")
+@router.post("/{notification_id}/retry", dependencies=[Depends(notification_write_dependency)])
 @limiter.limit(_notification_rate)
 async def retry_notification(
     notification_id: str,
@@ -641,5 +640,5 @@ async def retry_notification(
         logger.exception("Failed to retry notification %s", notification_id)
         raise internal_error(
             message="Failed to retry notification",
-            details={"notification_id": notification_id, "error": str(e)},
-        )
+            details={"notification_id": notification_id},
+        ) from e

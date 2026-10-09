@@ -57,6 +57,7 @@ class _FakeESService:
     :class:`DepotRepository`:
 
         * ``index_document``
+        * ``create_document``
         * ``update_document``
         * ``delete_document``
         * ``search_documents``
@@ -75,6 +76,17 @@ class _FakeESService:
         self.index_calls.append({"index": index, "id": doc_id, "doc": dict(document)})
         self.docs[doc_id] = dict(document)
         return {"_id": doc_id, "result": "created"}
+
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent on a global id, like the real store. Recorded in
+        # ``index_calls`` because that's where the assertions read writes from.
+        if doc_id in self.docs:
+            return False
+        self.index_calls.append({"index": index, "id": doc_id, "doc": dict(document)})
+        self.docs[doc_id] = dict(document)
+        return True
 
     async def update_document(
         self, index: str, doc_id: str, partial_doc: Dict[str, Any]
@@ -656,6 +668,37 @@ class TestDefaultDepotFlag:
         assert es.docs["depot_001"]["is_default"] is False
 
     @pytest.mark.asyncio
+    async def test_clearing_a_default_also_updates_the_relational_row(
+        self, repo: DepotRepository, es: _FakeESService
+    ):
+        """N6 follow-up: reads come from Postgres once cut over, so the
+        cleared flag must reach the relational mirror, not just the document
+        store. Otherwise two depots stay default."""
+        from unittest.mock import AsyncMock, patch
+
+        mirror = AsyncMock()
+        with patch(
+            "commerce.services.commerce_persistence_bridge.mirror_current_state_upsert",
+            mirror,
+        ):
+            await repo.create(
+                "tenant-A", _base_depot_kwargs(depot_id="depot_001", is_default=True)
+            )
+            await repo.create(
+                "tenant-A", _base_depot_kwargs(depot_id="depot_002", is_default=True)
+            )
+
+        writes = [(c.args[0], c.args[1]["depot_id"], c.args[1]["is_default"])
+                  for c in mirror.await_args_list]
+        assert writes[-1] == ("depot", "depot_001", False)
+        assert ("depot", "depot_002", True) in writes
+        # The mirrored row is the full depot, not a partial patch.
+        last = mirror.await_args_list[-1].args[1]
+        assert last["name"] == "Central Loading Rack"
+        assert last["tenant_id"] == "tenant-A"
+        assert es.docs["depot_001"]["is_default"] is False
+
+    @pytest.mark.asyncio
     async def test_default_is_scoped_per_tenant(
         self, repo: DepotRepository, es: _FakeESService
     ):
@@ -742,3 +785,85 @@ class TestSafeModelLoadStripsExtraFields:
         model = _safe_model_load(source)
         assert model is not None
         assert model.fuel_types_supported == ["DIESEL_2", "GASOLINE_REG"]
+
+
+# ---------------------------------------------------------------------------
+# N6: delete removes the depot from every store
+# ---------------------------------------------------------------------------
+
+
+class _KeepsDocOnDelete(_FakeESService):
+    """A store whose delete reports success but keeps the document."""
+
+    async def delete_document(self, index: str, doc_id: str) -> bool:
+        self.delete_calls.append(doc_id)
+        return True
+
+
+class TestDeleteEveryStoreN6:
+    @pytest.fixture
+    def mirror_deletes(self, monkeypatch):
+        import commerce.services.commerce_persistence_bridge as bridge
+
+        calls: List[tuple] = []
+
+        async def _record(aggregate_type, tenant_id, doc_id):
+            calls.append((aggregate_type, tenant_id, doc_id))
+
+        monkeypatch.setattr(bridge, "mirror_current_state_delete", _record)
+        return calls
+
+    @pytest.mark.asyncio
+    async def test_delete_mirrors_to_the_relational_store(
+        self, repo: DepotRepository, mirror_deletes
+    ):
+        await repo.create("tenant-A", _base_depot_kwargs())
+
+        assert await repo.delete("tenant-A", "depot_001") is True
+
+        assert mirror_deletes == [("depot", "tenant-A", "depot_001")]
+
+    @pytest.mark.asyncio
+    async def test_still_readable_after_delete_raises(self, mirror_deletes):
+        import fuel.depot_models as depot_models
+
+        es = _KeepsDocOnDelete()
+        repo = DepotRepository(es_service=es)
+        await repo.create("tenant-A", _base_depot_kwargs())
+
+        with pytest.raises(depot_models.DepotDeleteIncompleteError) as info:
+            await repo.delete("tenant-A", "depot_001")
+        assert info.value.depot_id == "depot_001"
+
+    @pytest.mark.asyncio
+    async def test_relational_only_depot_is_deleted_not_reported_missing(
+        self, repo: DepotRepository, es: _FakeESService, mirror_deletes,
+        monkeypatch,
+    ):
+        import commerce.services.commerce_persistence_bridge as bridge
+
+        async def _get_any(aggregate_type, doc_id):
+            assert aggregate_type == "depot"
+            return _base_depot_kwargs(depot_id=doc_id) if doc_id == "zombie" else None
+
+        monkeypatch.setattr(bridge, "read_hybrid_get_any", _get_any)
+
+        assert await repo.delete("tenant-A", "zombie") is True
+        assert mirror_deletes == [("depot", "tenant-A", "zombie")]
+        # Unknown everywhere stays a miss.
+        assert await repo.delete("tenant-A", "nowhere") is False
+
+    @pytest.mark.asyncio
+    async def test_relational_only_depot_of_another_tenant_is_refused(
+        self, repo: DepotRepository, mirror_deletes, monkeypatch
+    ):
+        import commerce.services.commerce_persistence_bridge as bridge
+
+        async def _get_any(aggregate_type, doc_id):
+            return _base_depot_kwargs(depot_id=doc_id, tenant_id="tenant-B")
+
+        monkeypatch.setattr(bridge, "read_hybrid_get_any", _get_any)
+
+        with pytest.raises(CrossTenantAccessError):
+            await repo.delete("tenant-A", "zombie")
+        assert mirror_deletes == []

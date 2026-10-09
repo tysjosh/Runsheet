@@ -1,14 +1,35 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+/**
+ * Billing → Contracts (price protection; UI revamp task 3.5): status chips,
+ * contract type and the market price for the variance in the Filters
+ * popover, a DataTable with products by name and prices in dollars, and
+ * create/edit as an lg FormDialog (design.md §5). Prices are stored in cents
+ * per gallon; the dialog edits dollars with 2 decimals.
+ */
+import { Pencil, Plus, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { SearchableSelectOption } from "@/components/ui";
 import {
+  Button,
   type Column,
+  DataTable,
   EntityLink,
+  Field,
+  FilterChips,
+  FilterPopover,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
+  NumberField,
+  ProductChip,
   SearchableSelect,
-  Table,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { calendarDate, gallons, money } from "../../lib/format";
 import { getAccounts } from "../../services/commerceApi";
 import {
   type ContractStatus,
@@ -20,66 +41,45 @@ import {
   type UpdatePriceProtectionContractPayload,
   updatePriceProtectionContract,
 } from "../../services/complianceApi";
+import type { StatusKey } from "../../styles/tokens";
 import CustomerPicker from "../ops/CustomerPicker";
 import ProductPicker from "../ops/ProductPicker";
+import { PageTitle } from "../ui/PageHeader";
 
-// ─── Sub-view types ──────────────────────────────────────────────────────────
+const CONTRACT_STATUS: Record<
+  ContractStatus,
+  { status: StatusKey; label: string }
+> = {
+  active: { status: "ok", label: "Active" },
+  exhausted: { status: "warning", label: "Exhausted" },
+  expired: { status: "cancelled", label: "Expired" },
+};
 
-type ViewMode = "list" | "add" | "edit";
-
-// ─── Badge helpers ───────────────────────────────────────────────────────────
-
-function statusBadge(status: ContractStatus) {
-  switch (status) {
-    case "active":
-      return "bg-success-light text-success-dark";
-    case "exhausted":
-      return "bg-warning-light text-warning-dark";
-    case "expired":
-      return "bg-error-light text-error-dark";
-    default:
-      return "bg-gray-100 text-gray-800";
-  }
-}
-
-function contractTypeBadge(type: ContractType) {
-  switch (type) {
-    case "fixed_price":
-      return "bg-info-light text-info-dark";
-    case "cap_price":
-      return "bg-brand-secondary-soft text-brand-secondary";
-    case "collar":
-      return "bg-brand-secondary-soft text-brand-secondary";
-    default:
-      return "bg-gray-100 text-gray-800";
-  }
-}
+const CONTRACT_TYPES: { value: ContractType; label: string }[] = [
+  { value: "fixed_price", label: "Fixed price" },
+  { value: "cap_price", label: "Cap price" },
+  { value: "collar", label: "Collar" },
+];
 
 function contractTypeLabel(type: ContractType): string {
-  switch (type) {
-    case "fixed_price":
-      return "Fixed Price";
-    case "cap_price":
-      return "Cap Price";
-    case "collar":
-      return "Collar";
-    default:
-      return type;
-  }
+  return CONTRACT_TYPES.find((t) => t.value === type)?.label ?? type;
 }
 
 function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
+  return dateStr ? calendarDate(dateStr) : "—";
 }
 
-function _formatCents(cents: number | null): string {
-  if (cents === null || cents === undefined) return "—";
-  return `$${(cents / 100).toFixed(2)}`;
+/** Cents per gallon → "$3.50". */
+function centsPrice(cents: number | null | undefined): string {
+  return cents == null ? "—" : money(cents / 100);
 }
 
-function formatGallons(gallons: number): string {
-  return gallons.toLocaleString(undefined, { maximumFractionDigits: 1 });
+/** The contract's price terms in one cell: "$3.50", "≤ $4.00", "$3.00–$4.00". */
+function priceTerms(c: PriceProtectionContract): string {
+  if (c.contract_type === "fixed_price") return centsPrice(c.fixed_price_cents);
+  if (c.contract_type === "cap_price")
+    return `≤ ${centsPrice(c.price_cap_cents)}`;
+  return `${centsPrice(c.price_floor_cents)}–${centsPrice(c.price_cap_cents)}`;
 }
 
 // ─── Settlement Variance Computation ─────────────────────────────────────────
@@ -145,7 +145,7 @@ function renderVarianceCell(
 ) {
   const variance = computeSettlementVariance(contract, marketPriceCents);
   if (variance.gallonsDelivered === 0) {
-    return <span className="text-gray-500">No deliveries</span>;
+    return <span className="text-text-muted">No deliveries</span>;
   }
 
   const varianceDollars = variance.varianceCents / 100;
@@ -154,140 +154,52 @@ function renderVarianceCell(
   return (
     <div className="text-sm">
       <span
-        className={`font-medium ${isPositive ? "text-success-dark" : "text-error-dark"}`}
+        className={`font-medium tabular-nums ${isPositive ? "text-emerald-800" : "text-red-800"}`}
       >
-        {isPositive ? "+" : ""}${varianceDollars.toFixed(2)}
+        {isPositive ? "+" : "−"}
+        {money(Math.abs(varianceDollars))} {isPositive ? "gain" : "loss"}
       </span>
-      <span className="text-gray-500 ml-1 text-xs">
-        ({formatGallons(variance.gallonsDelivered)} gal)
+      <span className="ml-1 text-xs text-text-muted">
+        ({gallons(variance.gallonsDelivered, { decimals: 0 })})
       </span>
     </div>
   );
 }
 
-// ─── Table columns ───────────────────────────────────────────────────────────
-
-function getContractColumns(
-  marketPriceCents: number,
-  onEdit: (contract: PriceProtectionContract) => void,
-): Column<PriceProtectionContract>[] {
-  return [
-    {
-      key: "customer_id",
-      label: "Customer ID",
-      // The contract's subject is its customer, navigable to the Commerce
-      // module (Req 11.3, 13.1).
-      render: (contract) => (
-        <EntityLink
-          type="customer"
-          id={contract.customer_id}
-          className="font-medium"
-        />
-      ),
-    },
-    {
-      key: "product_code",
-      label: "Product",
-      render: (contract) => contract.product_code,
-    },
-    {
-      key: "contract_type",
-      label: "Type",
-      render: (contract) => (
-        <span
-          className={`inline-block px-2 py-1 rounded text-xs font-medium ${contractTypeBadge(contract.contract_type)}`}
-        >
-          {contractTypeLabel(contract.contract_type)}
-        </span>
-      ),
-    },
-    {
-      key: "start_date",
-      label: "Start Date",
-      render: (contract) => formatDate(contract.start_date),
-    },
-    {
-      key: "end_date",
-      label: "End Date",
-      render: (contract) => formatDate(contract.end_date),
-    },
-    {
-      key: "contracted_gallons",
-      label: "Contracted Gal",
-      render: (contract) => formatGallons(contract.contracted_gallons),
-    },
-    {
-      key: "remaining_gallons",
-      label: "Remaining Gal",
-      render: (contract) => formatGallons(contract.remaining_gallons),
-    },
-    {
-      key: "status",
-      label: "Status",
-      render: (contract) => (
-        <span
-          className={`inline-block px-2 py-1 rounded text-xs font-medium ${statusBadge(contract.status)}`}
-        >
-          {contract.status}
-        </span>
-      ),
-    },
-    {
-      key: "settlement_variance",
-      label: "Settlement Variance",
-      render: (contract) => renderVarianceCell(contract, marketPriceCents),
-    },
-    {
-      key: "actions",
-      label: "Actions",
-      render: (contract) => (
-        <button
-          type="button"
-          onClick={() => onEdit(contract)}
-          className="text-info hover:underline text-sm"
-        >
-          Edit
-        </button>
-      ),
-    },
-  ];
-}
-
 // ─── Main Component ──────────────────────────────────────────────────────────
 
+const STATUS_CHIPS: { id: "" | ContractStatus; label: string }[] = [
+  { id: "", label: "All" },
+  { id: "active", label: "Active" },
+  { id: "exhausted", label: "Exhausted" },
+  { id: "expired", label: "Expired" },
+];
+
 export default function PriceProtectionContractsPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [contracts, setContracts] = useState<PriceProtectionContract[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [statusFilter, setStatusFilter] = useState<string>("");
+  const [reload, setReload] = useState(0);
+  const [statusFilter, setStatusFilter] = useState<"" | ContractStatus>("");
   const [contractTypeFilter, setContractTypeFilter] = useState<string>("");
-
-  // Edit state
-  const [editingContract, setEditingContract] =
-    useState<PriceProtectionContract | null>(null);
-
-  // Market price for variance display (configurable, default 350 cents = $3.50/gal)
-  const [marketPriceCents, setMarketPriceCents] = useState<number>(350);
-
-  // ─── Fetch contracts list ────────────────────────────────────────────────
+  // Market price for the variance column, dollars per gallon (default $3.50).
+  const [marketPrice, setMarketPrice] = useState<number | null>(3.5);
+  // Dialog: null = closed, "new" = create, otherwise the contract to edit.
+  const [editing, setEditing] = useState<
+    null | "new" | PriceProtectionContract
+  >(null);
 
   const fetchContracts = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const filters: {
-        status?: ContractStatus;
-        page: number;
-        size: number;
-      } = {
+      const filters: { status?: ContractStatus; page: number; size: number } = {
         page,
         size: 20,
       };
-      if (statusFilter) filters.status = statusFilter as ContractStatus;
-
+      if (statusFilter) filters.status = statusFilter;
       const response = await getPriceProtectionContracts(filters);
       setContracts(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
@@ -296,236 +208,223 @@ export default function PriceProtectionContractsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter]);
+    // `reload` refetches after a save.
+  }, [page, statusFilter, reload]);
 
   useEffect(() => {
-    if (viewMode === "list") {
-      fetchContracts();
-    }
-  }, [fetchContracts, viewMode]);
+    fetchContracts();
+  }, [fetchContracts]);
 
-  // ─── Edit contract ───────────────────────────────────────────────────────
-
-  const handleEditContract = (contract: PriceProtectionContract) => {
-    setEditingContract(contract);
-    setViewMode("edit");
-  };
-
-  // ─── Filter contracts by type (client-side since API may not support it) ─
-
+  // Contract type filters on the client (the API has no type filter).
   const filteredContracts = contractTypeFilter
     ? contracts.filter((c) => c.contract_type === contractTypeFilter)
     : contracts;
+  const marketPriceCents = Math.round((marketPrice ?? 0) * 100);
 
-  // ─── Render: Listing View ────────────────────────────────────────────────
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setEditing("new")}
+      >
+        Add Contract
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
 
-  function renderList() {
-    return (
-      <>
-        {/* Filters */}
-        <div className="flex flex-wrap gap-4 mb-6 items-end">
-          <div>
-            <label
-              htmlFor="contract-status-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Status
-            </label>
-            <select
-              id="contract-status-filter"
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2"
-            >
-              <option value="">All</option>
-              <option value="active">Active</option>
-              <option value="exhausted">Exhausted</option>
-              <option value="expired">Expired</option>
-            </select>
-          </div>
-          <div>
-            <label
-              htmlFor="contract-type-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Contract Type
-            </label>
-            <select
-              id="contract-type-filter"
-              value={contractTypeFilter}
-              onChange={(e) => setContractTypeFilter(e.target.value)}
-              className="border rounded px-3 py-2"
-            >
-              <option value="">All</option>
-              <option value="fixed_price">Fixed Price</option>
-              <option value="cap_price">Cap Price</option>
-              <option value="collar">Collar</option>
-            </select>
-          </div>
-          <div>
-            <label
-              htmlFor="market-price-input"
-              className="block text-sm font-medium mb-1"
-            >
-              Market Price (¢/gal)
-            </label>
-            <input
-              id="market-price-input"
-              type="number"
-              min={0}
-              value={marketPriceCents}
-              onChange={(e) => setMarketPriceCents(Number(e.target.value) || 0)}
-              className="border rounded px-3 py-2 w-32"
-              placeholder="350"
-            />
-          </div>
-        </div>
+  const columns: Column<PriceProtectionContract>[] = [
+    {
+      key: "customer_id",
+      header: "Customer",
+      width: 170,
+      // The contract's subject is its customer, navigable to the Commerce
+      // module (Req 11.3, 13.1).
+      cell: (c) => (
+        <EntityLink
+          type="customer"
+          id={c.customer_id}
+          className="font-medium"
+          stopPropagation
+        />
+      ),
+    },
+    {
+      key: "product_code",
+      header: "Product",
+      width: 200,
+      cell: (c) => <ProductChip code={c.product_code} />,
+    },
+    {
+      key: "contract_type",
+      header: "Type",
+      width: 110,
+      cell: (c) => contractTypeLabel(c.contract_type),
+    },
+    {
+      key: "terms",
+      header: "Price",
+      width: 140,
+      className: "tabular-nums",
+      cell: priceTerms,
+    },
+    {
+      key: "period",
+      header: "Period",
+      width: 250,
+      cell: (c) => `${formatDate(c.start_date)} – ${formatDate(c.end_date)}`,
+    },
+    {
+      key: "remaining_gallons",
+      header: "Remaining",
+      align: "right",
+      width: 170,
+      className: "tabular-nums",
+      cell: (c) =>
+        `${gallons(c.remaining_gallons)} of ${gallons(c.contracted_gallons)}`,
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 120,
+      cell: (c) => {
+        const st = CONTRACT_STATUS[c.status] ?? {
+          status: "draft" as StatusKey,
+          label: String(c.status),
+        };
+        return <StatusBadge status={st.status} label={st.label} />;
+      },
+    },
+    {
+      key: "settlement_variance",
+      header: "Settlement variance",
+      width: 210,
+      cell: (c) => renderVarianceCell(c, marketPriceCents),
+    },
+  ];
 
-        {/* Loading state */}
-        {loading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading contracts...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Contracts table */}
-        {!loading && !error && (
-          <>
-            <Table<PriceProtectionContract>
-              ariaLabel="Price protection contracts"
-              columns={getContractColumns(marketPriceCents, handleEditContract)}
-              data={filteredContracts}
-              getRowId={(contract) => contract.contract_id}
-              emptyState={
-                <span className="text-gray-500">No contracts found.</span>
-              }
-            />
-
-            {/* Pagination */}
-            <nav
-              aria-label="Pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
-          </>
-        )}
-      </>
-    );
-  }
-
-  // ─── Render: Add/Edit Form ───────────────────────────────────────────────
-
-  function renderForm() {
-    const isEdit = viewMode === "edit";
-    return (
-      <ContractForm
-        initialData={isEdit ? editingContract : null}
-        onSubmit={async (data) => {
-          setLoading(true);
-          setError(null);
-          try {
-            if (isEdit && editingContract) {
-              await updatePriceProtectionContract(
-                editingContract.contract_id,
-                data as UpdatePriceProtectionContractPayload,
-              );
-            } else {
-              await createPriceProtectionContract(
-                data as CreatePriceProtectionContractPayload,
-              );
-            }
-            setViewMode("list");
-          } catch (err) {
-            setError(
-              err instanceof Error ? err.message : "Failed to save contract",
-            );
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onCancel={() => setViewMode("list")}
-        loading={loading}
-      />
-    );
-  }
-
-  // ─── Main Render ─────────────────────────────────────────────────────────
+  const popoverCount =
+    (contractTypeFilter ? 1 : 0) + (marketPrice !== 3.5 ? 1 : 0);
 
   return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Price Protection Contracts</h1>
-            <p className="text-gray-600 mt-1">
-              Manage sell-side price-protection contracts and track settlement
-              variance.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {viewMode !== "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
-                Back to List
-              </button>
-            )}
-            {viewMode === "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("add")}
-                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
-              >
-                Add Contract
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Price Protection Contracts
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
         </div>
       )}
+      <Toolbar
+        label="Contracts"
+        filters={
+          <>
+            <FilterChips
+              label="Contract status"
+              options={STATUS_CHIPS.map((c) => ({
+                id: c.id || "all",
+                label: c.label,
+                status: c.id ? CONTRACT_STATUS[c.id].status : undefined,
+              }))}
+              value={statusFilter || "all"}
+              onChange={(v) => {
+                setStatusFilter(v === "all" ? "" : (v as ContractStatus));
+                setPage(1);
+              }}
+            />
+            <FilterPopover
+              count={popoverCount}
+              label="Contract filters"
+              onClear={() => {
+                setContractTypeFilter("");
+                setMarketPrice(3.5);
+              }}
+            >
+              <div className="grid w-80 grid-cols-2 gap-3">
+                <Field label="Contract type" id="contract-type-filter">
+                  <Select
+                    id="contract-type-filter"
+                    value={contractTypeFilter}
+                    onChange={setContractTypeFilter}
+                    placeholder="All"
+                    options={CONTRACT_TYPES}
+                  />
+                </Field>
+                <Field
+                  label="Market price"
+                  id="market-price-input"
+                  help="For the variance column"
+                >
+                  <NumberField
+                    id="market-price-input"
+                    value={marketPrice}
+                    onChange={setMarketPrice}
+                    unit="$"
+                    decimals={2}
+                    min={0}
+                  />
+                </Field>
+              </div>
+            </FilterPopover>
+          </>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<PriceProtectionContract>
+          ariaLabel="Price protection contracts"
+          columns={columns}
+          data={loading || error ? [] : filteredContracts}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchContracts } : null}
+          getRowId={(c) => c.contract_id}
+          rowLabel={(c) => `Contract ${c.contract_id}`}
+          onRowClick={(c) => setEditing(c)}
+          rowMenu={(c) => [
+            {
+              id: "edit",
+              label: "Edit",
+              icon: <Pencil className="h-3.5 w-3.5" />,
+              onSelect: () => setEditing(c),
+            },
+          ]}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <span className="text-text-muted">No contracts found.</span>
+          }
+        />
+      </div>
 
-      {/* View content */}
-      {viewMode === "list" && renderList()}
-      {(viewMode === "add" || viewMode === "edit") && renderForm()}
+      {editing && (
+        <ContractDialog
+          contract={editing === "new" ? null : editing}
+          onClose={() => setEditing(null)}
+          onSaved={() => setReload((n) => n + 1)}
+        />
+      )}
     </div>
   );
 }
 
-// ─── Contract Form Sub-Component ─────────────────────────────────────────────
+// ─── Account picker ──────────────────────────────────────────────────────────
 
 /**
  * AccountSelect — searchable account selector scoped to a customer, backed by
@@ -606,350 +505,318 @@ function AccountSelect({
   );
 }
 
-interface ContractFormProps {
-  initialData: PriceProtectionContract | null;
-  onSubmit: (
-    data:
-      | CreatePriceProtectionContractPayload
-      | UpdatePriceProtectionContractPayload,
-  ) => Promise<void>;
-  onCancel: () => void;
-  loading: boolean;
+// ─── Contract dialog ─────────────────────────────────────────────────────────
+
+type ContractValues = {
+  customer_id: string;
+  account_id: string;
+  product_code: string;
+  contract_type: ContractType;
+  start_date: string;
+  end_date: string;
+  contracted_gallons: number | null;
+  /** Dollars per gallon (stored as cents). */
+  price_cap: number | null;
+  price_floor: number | null;
+  fixed_price: number | null;
+  status: ContractStatus;
+};
+
+const toDollars = (cents: number | null | undefined) =>
+  cents == null ? null : cents / 100;
+const toCents = (dollars: number | null) =>
+  dollars == null ? null : Math.round(dollars * 100);
+
+export function validateContract(v: ContractValues, isEdit: boolean) {
+  const errors: Record<string, string | undefined> = {};
+  if (!isEdit) {
+    if (!v.customer_id) errors.customer_id = "Pick a customer.";
+    if (!v.account_id) errors.account_id = "Pick an account.";
+    if (!v.product_code) errors.product_code = "Pick a product.";
+    if (!v.start_date) errors.start_date = "Enter the start date.";
+    if (!v.end_date) errors.end_date = "Enter the end date.";
+    if (v.contracted_gallons == null || v.contracted_gallons <= 0)
+      errors.contracted_gallons = "Enter the contracted gallons.";
+  }
+  if (v.start_date && v.end_date && v.end_date <= v.start_date)
+    errors.end_date = "End date must be after the start date.";
+  if (v.contract_type === "fixed_price" && v.fixed_price == null)
+    errors.fixed_price = "Enter the fixed price.";
+  if (
+    (v.contract_type === "cap_price" || v.contract_type === "collar") &&
+    v.price_cap == null
+  )
+    errors.price_cap = "Enter the price cap.";
+  if (v.contract_type === "collar") {
+    if (v.price_floor == null) errors.price_floor = "Enter the price floor.";
+    else if (v.price_cap != null && v.price_floor > v.price_cap)
+      errors.price_floor = "Floor must not be above the cap.";
+  }
+  return errors;
 }
 
-function ContractForm({
-  initialData,
-  onSubmit,
-  onCancel,
-  loading,
-}: ContractFormProps) {
-  const isEdit = !!initialData;
-
-  const [customerId, setCustomerId] = useState(initialData?.customer_id ?? "");
-  const [accountId, setAccountId] = useState(initialData?.account_id ?? "");
-  const [productCode, setProductCode] = useState(
-    initialData?.product_code ?? "",
-  );
-  const [contractType, setContractType] = useState<ContractType>(
-    initialData?.contract_type ?? "fixed_price",
-  );
-  const [startDate, setStartDate] = useState(initialData?.start_date ?? "");
-  const [endDate, setEndDate] = useState(initialData?.end_date ?? "");
-  const [contractedGallons, setContractedGallons] = useState<string>(
-    initialData?.contracted_gallons?.toString() ?? "",
-  );
-  const [priceCapCents, setPriceCapCents] = useState<string>(
-    initialData?.price_cap_cents?.toString() ?? "",
-  );
-  const [priceFloorCents, setPriceFloorCents] = useState<string>(
-    initialData?.price_floor_cents?.toString() ?? "",
-  );
-  const [fixedPriceCents, setFixedPriceCents] = useState<string>(
-    initialData?.fixed_price_cents?.toString() ?? "",
-  );
-  const [status, setStatus] = useState<ContractStatus>(
-    initialData?.status ?? "active",
-  );
-  const [validationError, setValidationError] = useState<string | null>(null);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (isEdit) {
+function ContractDialog({
+  contract,
+  onClose,
+  onSaved,
+}: {
+  contract: PriceProtectionContract | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const isEdit = contract !== null;
+  const submit = async (v: ContractValues) => {
+    if (contract) {
       const data: UpdatePriceProtectionContractPayload = {
-        end_date: endDate || undefined,
-        price_cap_cents: priceCapCents ? Number(priceCapCents) : null,
-        price_floor_cents: priceFloorCents ? Number(priceFloorCents) : null,
-        fixed_price_cents: fixedPriceCents ? Number(fixedPriceCents) : null,
-        status,
+        end_date: v.end_date || undefined,
+        price_cap_cents: toCents(v.price_cap),
+        price_floor_cents: toCents(v.price_floor),
+        fixed_price_cents: toCents(v.fixed_price),
+        status: v.status,
       };
-      await onSubmit(data);
+      await updatePriceProtectionContract(contract.contract_id, data);
     } else {
-      // Customer, account, and product are required on create (previously
-      // enforced by native inputs now replaced with pickers).
-      if (!customerId || !accountId || !productCode) {
-        setValidationError("Customer, account, and product code are required");
-        return;
-      }
-      setValidationError(null);
       const data: CreatePriceProtectionContractPayload = {
-        customer_id: customerId,
-        account_id: accountId,
-        product_code: productCode,
-        contract_type: contractType,
-        start_date: startDate,
-        end_date: endDate,
-        contracted_gallons: Number(contractedGallons),
-        price_cap_cents: priceCapCents ? Number(priceCapCents) : null,
-        price_floor_cents: priceFloorCents ? Number(priceFloorCents) : null,
-        fixed_price_cents: fixedPriceCents ? Number(fixedPriceCents) : null,
+        customer_id: v.customer_id,
+        account_id: v.account_id,
+        product_code: v.product_code,
+        contract_type: v.contract_type,
+        start_date: v.start_date,
+        end_date: v.end_date,
+        contracted_gallons: v.contracted_gallons ?? 0,
+        price_cap_cents: toCents(v.price_cap),
+        price_floor_cents: toCents(v.price_floor),
+        fixed_price_cents: toCents(v.fixed_price),
       };
-      await onSubmit(data);
+      await createPriceProtectionContract(data);
     }
   };
-
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+    <FormDialog<ContractValues, void>
+      open
+      size="lg"
+      title={isEdit ? "Edit contract" : "Add contract"}
+      submitLabel={isEdit ? "Update Contract" : "Add Contract"}
+      successMessage={isEdit ? "Contract updated" : "Contract added"}
+      initialValues={{
+        customer_id: contract?.customer_id ?? "",
+        account_id: contract?.account_id ?? "",
+        product_code: contract?.product_code ?? "",
+        contract_type: contract?.contract_type ?? "fixed_price",
+        start_date: contract?.start_date ?? "",
+        end_date: contract?.end_date ?? "",
+        contracted_gallons: contract?.contracted_gallons ?? null,
+        price_cap: toDollars(contract?.price_cap_cents),
+        price_floor: toDollars(contract?.price_floor_cents),
+        fixed_price: toDollars(contract?.fixed_price_cents),
+        status: contract?.status ?? "active",
+      }}
+      validate={(v) => validateContract(v, isEdit)}
+      onSubmit={submit}
+      onSaved={onSaved}
+      onClose={onClose}
     >
-      <h2 className="text-lg font-bold mb-4">
-        {isEdit ? "Edit Contract" : "Add New Contract"}
-      </h2>
-
-      {validationError && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
-        >
-          {validationError}
-        </div>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Customer ID — only on create */}
-        {!isEdit && (
-          <div>
-            <label
-              htmlFor="customer-id"
-              className="block text-sm font-medium mb-1"
-            >
-              Customer ID
-            </label>
-            <CustomerPicker
-              id="customer-id"
-              aria-label="Customer ID"
-              value={customerId || null}
-              onChange={(value) => {
-                setCustomerId(value);
-                // Account is scoped to the customer; clear it on change.
-                setAccountId("");
-              }}
-              allowClear
-            />
-          </div>
-        )}
-
-        {/* Account ID — only on create */}
-        {!isEdit && (
-          <div>
-            <label
-              htmlFor="account-id"
-              className="block text-sm font-medium mb-1"
-            >
-              Account ID
-            </label>
-            <AccountSelect
-              id="account-id"
-              customerId={customerId}
-              value={accountId || null}
-              onChange={setAccountId}
-            />
-          </div>
-        )}
-
-        {/* Product Code — only on create */}
-        {!isEdit && (
-          <div>
-            <label
-              htmlFor="product-code"
-              className="block text-sm font-medium mb-1"
-            >
-              Product Code
-            </label>
-            <ProductPicker
-              id="product-code"
-              aria-label="Product Code"
-              value={productCode || null}
-              onChange={setProductCode}
-              allowClear
-            />
-          </div>
-        )}
-
-        {/* Contract Type — only on create */}
-        {!isEdit && (
-          <div>
-            <label
-              htmlFor="contract-type"
-              className="block text-sm font-medium mb-1"
-            >
-              Contract Type
-            </label>
-            <select
-              id="contract-type"
-              value={contractType}
-              onChange={(e) => setContractType(e.target.value as ContractType)}
-              className="w-full border rounded px-3 py-2"
-            >
-              <option value="fixed_price">Fixed Price</option>
-              <option value="cap_price">Cap Price</option>
-              <option value="collar">Collar</option>
-            </select>
-          </div>
-        )}
-
-        {/* Start Date — only on create */}
-        {!isEdit && (
-          <div>
-            <label
-              htmlFor="start-date"
-              className="block text-sm font-medium mb-1"
-            >
-              Start Date
-            </label>
-            <input
-              id="start-date"
-              type="date"
-              required
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-            />
-          </div>
-        )}
-
-        {/* End Date */}
-        <div>
-          <label htmlFor="end-date" className="block text-sm font-medium mb-1">
-            End Date
-          </label>
-          <input
-            id="end-date"
-            type="date"
+      {({ values, set, setValues, errors }) => (
+        <>
+          {isEdit && contract ? (
+            <dl className="col-span-2 grid grid-cols-2 gap-3 rounded-lg border border-slate-200 p-3 text-sm md:grid-cols-4">
+              <div>
+                <dt className="text-xs text-text-muted">Customer</dt>
+                <dd>
+                  <EntityLink type="customer" id={contract.customer_id} />
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-text-muted">Product</dt>
+                <dd>
+                  <ProductChip code={contract.product_code} />
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-text-muted">Type</dt>
+                <dd>{contractTypeLabel(contract.contract_type)}</dd>
+              </div>
+              <div>
+                <dt className="text-xs text-text-muted">Contracted</dt>
+                <dd className="tabular-nums">
+                  {gallons(contract.contracted_gallons)}
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <>
+              <Field
+                label="Customer ID"
+                required
+                span={1}
+                error={errors.customer_id}
+              >
+                <CustomerPicker
+                  id="customer-id"
+                  aria-label="Customer ID"
+                  value={values.customer_id || null}
+                  onChange={(value) =>
+                    // Account is scoped to the customer; clear it on change.
+                    setValues((prev) => ({
+                      ...prev,
+                      customer_id: value,
+                      account_id: "",
+                    }))
+                  }
+                  allowClear
+                />
+              </Field>
+              <Field
+                label="Account ID"
+                required
+                span={1}
+                error={errors.account_id}
+              >
+                <AccountSelect
+                  id="account-id"
+                  customerId={values.customer_id}
+                  value={values.account_id || null}
+                  onChange={(v) => set("account_id", v)}
+                />
+              </Field>
+              <Field
+                label="Product"
+                required
+                span={1}
+                error={errors.product_code}
+              >
+                <ProductPicker
+                  id="product-code"
+                  aria-label="Product Code"
+                  value={values.product_code || null}
+                  onChange={(v) => set("product_code", v)}
+                  allowClear
+                />
+              </Field>
+              <Field label="Contract type" span={1}>
+                <Select
+                  id="contract-type"
+                  value={values.contract_type}
+                  onChange={(v) => set("contract_type", v as ContractType)}
+                  options={CONTRACT_TYPES}
+                />
+              </Field>
+              <Field
+                label="Start Date"
+                required
+                span={1}
+                error={errors.start_date}
+              >
+                <input
+                  id="start-date"
+                  type="date"
+                  value={values.start_date}
+                  onChange={(e) => set("start_date", e.target.value)}
+                  className={INPUT_CLASS}
+                />
+              </Field>
+            </>
+          )}
+          <Field
+            label="End Date"
             required={!isEdit}
-            value={endDate}
-            onChange={(e) => setEndDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-
-        {/* Contracted Gallons — only on create */}
-        {!isEdit && (
-          <div>
-            <label
-              htmlFor="contracted-gallons"
-              className="block text-sm font-medium mb-1"
-            >
-              Contracted Gallons
-            </label>
+            span={1}
+            error={errors.end_date}
+          >
             <input
-              id="contracted-gallons"
-              type="number"
+              id="end-date"
+              type="date"
+              value={values.end_date}
+              onChange={(e) => set("end_date", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+          {!isEdit && (
+            <Field
+              label="Contracted Gallons"
               required
-              min={0}
-              step="0.1"
-              value={contractedGallons}
-              onChange={(e) => setContractedGallons(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-            />
-          </div>
-        )}
-
-        {/* Price Cap (cents) — for cap_price and collar */}
-        {(contractType === "cap_price" ||
-          contractType === "collar" ||
-          isEdit) && (
-          <div>
-            <label
-              htmlFor="price-cap-cents"
-              className="block text-sm font-medium mb-1"
+              span={1}
+              error={errors.contracted_gallons}
             >
-              Price Cap (¢/gal)
-            </label>
-            <input
-              id="price-cap-cents"
-              type="number"
-              min={0}
-              value={priceCapCents}
-              onChange={(e) => setPriceCapCents(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="e.g. 400"
-            />
-          </div>
-        )}
-
-        {/* Price Floor (cents) — for collar */}
-        {(contractType === "collar" || isEdit) && (
-          <div>
-            <label
-              htmlFor="price-floor-cents"
-              className="block text-sm font-medium mb-1"
+              <NumberField
+                id="contracted-gallons"
+                value={values.contracted_gallons}
+                onChange={(n) => set("contracted_gallons", n)}
+                unit="gal"
+                decimals={0}
+                min={0}
+              />
+            </Field>
+          )}
+          {values.contract_type === "fixed_price" && (
+            <Field
+              label="Fixed price"
+              required
+              span={1}
+              help="Per gallon"
+              error={errors.fixed_price}
             >
-              Price Floor (¢/gal)
-            </label>
-            <input
-              id="price-floor-cents"
-              type="number"
-              min={0}
-              value={priceFloorCents}
-              onChange={(e) => setPriceFloorCents(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="e.g. 300"
-            />
-          </div>
-        )}
-
-        {/* Fixed Price (cents) — for fixed_price */}
-        {(contractType === "fixed_price" || isEdit) && (
-          <div>
-            <label
-              htmlFor="fixed-price-cents"
-              className="block text-sm font-medium mb-1"
+              <NumberField
+                id="fixed-price"
+                value={values.fixed_price}
+                onChange={(n) => set("fixed_price", n)}
+                unit="$"
+                decimals={2}
+                min={0}
+              />
+            </Field>
+          )}
+          {(values.contract_type === "cap_price" ||
+            values.contract_type === "collar") && (
+            <Field
+              label="Price cap"
+              required
+              span={1}
+              help="Per gallon"
+              error={errors.price_cap}
             >
-              Fixed Price (¢/gal)
-            </label>
-            <input
-              id="fixed-price-cents"
-              type="number"
-              min={0}
-              value={fixedPriceCents}
-              onChange={(e) => setFixedPriceCents(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="e.g. 350"
-            />
-          </div>
-        )}
-
-        {/* Status — only on edit */}
-        {isEdit && (
-          <div>
-            <label
-              htmlFor="contract-status"
-              className="block text-sm font-medium mb-1"
+              <NumberField
+                id="price-cap"
+                value={values.price_cap}
+                onChange={(n) => set("price_cap", n)}
+                unit="$"
+                decimals={2}
+                min={0}
+              />
+            </Field>
+          )}
+          {values.contract_type === "collar" && (
+            <Field
+              label="Price floor"
+              required
+              span={1}
+              help="Per gallon"
+              error={errors.price_floor}
             >
-              Status
-            </label>
-            <select
-              id="contract-status"
-              value={status}
-              onChange={(e) => setStatus(e.target.value as ContractStatus)}
-              className="w-full border rounded px-3 py-2"
-            >
-              <option value="active">Active</option>
-              <option value="exhausted">Exhausted</option>
-              <option value="expired">Expired</option>
-            </select>
-          </div>
-        )}
-      </div>
-
-      <div className="flex gap-3 mt-6">
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
-        >
-          {loading ? "Saving..." : isEdit ? "Update Contract" : "Add Contract"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 border rounded hover:bg-gray-50"
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
+              <NumberField
+                id="price-floor"
+                value={values.price_floor}
+                onChange={(n) => set("price_floor", n)}
+                unit="$"
+                decimals={2}
+                min={0}
+              />
+            </Field>
+          )}
+          {isEdit && (
+            <Field label="Status" span={1}>
+              <Select
+                id="contract-status"
+                value={values.status}
+                onChange={(v) => set("status", v as ContractStatus)}
+                options={(Object.keys(CONTRACT_STATUS) as ContractStatus[]).map(
+                  (k) => ({ value: k, label: CONTRACT_STATUS[k].label }),
+                )}
+              />
+            </Field>
+          )}
+        </>
+      )}
+    </FormDialog>
   );
 }

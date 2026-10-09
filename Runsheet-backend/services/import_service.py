@@ -17,6 +17,8 @@ from typing import Any, Optional
 from urllib.request import urlopen
 from urllib.error import URLError, HTTPError
 
+from pydantic import ValidationError as PydanticValidationError
+
 from services.elasticsearch_service import ElasticsearchService
 from services.field_mapper import FieldMapper
 from services.import_models import (
@@ -35,6 +37,97 @@ logger = logging.getLogger(__name__)
 
 ACTIVE_IMPORT_SESSIONS_INDEX = "import_sessions_active"
 CANONICAL_IMPORT_TYPES = frozenset({"orders", "customer_tanks", "tank_readings"})
+#: Document id field per non-canonical data type (the template's id field).
+#: Document ids are global in the store, so these rows are written
+#: create-if-absent and never replace a row another tenant owns (C1).
+NON_CANONICAL_ID_FIELDS = {
+    "fleet": "truck_id",
+    "inventory": "item_id",
+    "fuel_stations": "station_id",
+    "jobs": "job_id",
+}
+#: Non-canonical types whose rows are completed and validated against the
+#: model their list endpoint reads, at validate and again at commit.
+MODEL_CHECKED_TYPES = frozenset({"inventory", "fuel_stations"})
+
+
+#: Catalog categories (``fuel_product_catalog.FuelCategory``) a tank of each
+#: ``CustomerTank.fuel_type`` may hold. Checked on import only (B7); the model
+#: itself doesn't enforce it, so stored tanks still load.
+_TANK_FUEL_FAMILIES: dict[str, frozenset[str]] = {
+    "propane": frozenset({"propane"}),
+    "heating_oil": frozenset({"heating_oil", "kerosene"}),
+    "diesel": frozenset({"diesel", "off_road"}),
+    "gasoline": frozenset({"gasoline", "ethanol"}),
+    "farm_fuel": frozenset({"off_road", "diesel", "gasoline"}),
+    "generator_fuel": frozenset({"diesel", "off_road", "propane", "gasoline"}),
+}
+
+
+class _RowFieldError(ValueError):
+    """A row validation failure attributable to one field."""
+
+    def __init__(self, field_name: str, message: str):
+        super().__init__(message)
+        self.field_name = field_name
+
+
+def _check_fuel_family(fuel_type: Optional[str], product_code: Optional[str]) -> None:
+    """Refuse a tank whose catalog product isn't in its fuel family (B7)."""
+    if not fuel_type or not product_code:
+        return
+    allowed = _TANK_FUEL_FAMILIES.get(fuel_type)
+    if allowed is None:
+        return
+    from fuel.services.fuel_product_catalog import get_product
+
+    category = get_product(product_code).category
+    if category not in allowed:
+        raise _RowFieldError(
+            "fuel_product_code",
+            f"fuel_product_code '{product_code}' ({category}) does not match "
+            f"fuel_type '{fuel_type}'",
+        )
+
+
+def _resolve_station_fuel_type(raw: str) -> str:
+    """Resolve an imported station's ``fuel_types`` cell to one catalog code.
+
+    ``FuelStation`` holds a single ``fuel_type``, so a row names exactly one
+    product: a catalog code or alias (``DIESEL_2``, ``AGO``), or a category
+    that maps to exactly one code (``diesel``, ``propane``).
+    """
+    from fuel.services.fuel_product_catalog import (
+        UnknownFuelProductError,
+        canonicalize,
+        resolve_product_filter,
+    )
+
+    values = [part.strip() for part in str(raw or "").split(",") if part.strip()]
+    if not values:
+        raise _RowFieldError("fuel_types", "fuel_types is required")
+    if len(values) > 1:
+        raise _RowFieldError(
+            "fuel_types",
+            "Import one fuel type per row; got " + ", ".join(values),
+        )
+    value = values[0]
+    try:
+        return canonicalize(value)
+    except UnknownFuelProductError:
+        pass
+    try:
+        codes = resolve_product_filter(value)
+    except UnknownFuelProductError:
+        raise _RowFieldError(
+            "fuel_types", f"Unknown fuel product '{value}'"
+        ) from None
+    if len(codes) != 1:
+        raise _RowFieldError(
+            "fuel_types",
+            f"Fuel type '{value}' is ambiguous; use one of: " + ", ".join(codes),
+        )
+    return codes[0]
 
 
 class _ActiveSession:
@@ -338,6 +431,10 @@ class ImportService:
             await self._append_canonical_validation_issues(
                 session, field_mapping, result
             )
+        elif session.data_type in NON_CANONICAL_ID_FIELDS:
+            if session.data_type in MODEL_CHECKED_TYPES:
+                self._append_model_issues(session, field_mapping, result)
+            await self._append_ownership_issues(session, field_mapping, result)
         # Stamp the session_id onto the result
         result.session_id = session_id
 
@@ -424,22 +521,13 @@ class ImportService:
             skipped += canonical_skipped
             import_errors.extend(canonical_errors)
         elif documents:
-            try:
-                bulk_result = await self.es_service.bulk_index_documents(
-                    target_index, [doc for _, doc in documents]
-                )
-                imported = bulk_result.get("successful", 0)
-                failed = bulk_result.get("failed", 0)
-                for err in bulk_result.get("errors", []):
-                    import_errors.append(str(err))
-            except Exception as exc:
-                logger.error(
-                    "Bulk indexing failed for session %s: %s",
-                    session_id,
-                    exc,
-                )
-                import_errors.append(str(exc))
-                failed = len(documents)
+            imported, failed, tenant_errors = await self._commit_tenant_documents(
+                session=session,
+                target_index=target_index,
+                documents=documents,
+                tenant=tenant,
+            )
+            import_errors.extend(tenant_errors)
 
         duration = time.time() - start_time
 
@@ -683,6 +771,236 @@ class ImportService:
                 document[target_field] = value
         return document
 
+    @staticmethod
+    def _complete_inventory_document(
+        document: dict[str, Any], tenant_id: str
+    ) -> dict[str, Any]:
+        """Fill the ``InventoryItem`` fields the import template leaves optional (OI-27).
+
+        The inventory API reads rows as ``InventoryItem``, which requires
+        fields a minimal import (``item_id``, ``name``, ``quantity``) leaves
+        out. Defaults: category ``general`` (also for an unknown category),
+        unit ``units``, min_threshold 0, max_capacity ``max(quantity, 1)``,
+        location ``Unassigned``, and a status derived from quantity and
+        threshold when missing or not an ``InventoryStatus``. The result is
+        validated as ``InventoryItem``; a ``PydanticValidationError`` means
+        the row can't be stored (for example an explicit ``max_capacity`` 0).
+        """
+        from inventory.models import InventoryCategory, InventoryItem, InventoryStatus
+        from inventory.service import InventoryService
+
+        doc = dict(document)
+        if doc.get("category") not in {c.value for c in InventoryCategory}:
+            doc["category"] = InventoryCategory.GENERAL.value
+        doc.setdefault("unit", "units")
+        doc.setdefault("min_threshold", 0)
+        doc.setdefault("max_capacity", max(doc.get("quantity") or 0, 1))
+        doc.setdefault("location", "Unassigned")
+        if doc.get("status") not in {s.value for s in InventoryStatus}:
+            try:
+                doc["status"] = InventoryService._derive_status(
+                    doc.get("quantity") or 0, doc.get("min_threshold") or 0
+                ).value
+            except TypeError:
+                doc.pop("status", None)  # model validation reports the bad field
+        doc["tenant_id"] = tenant_id or doc.get("tenant_id") or ""
+        item = InventoryItem.model_validate(doc)
+        doc.update(item.model_dump(mode="json", exclude_none=True))
+        return doc
+
+    def _complete_fuel_station_document(
+        self, document: dict[str, Any], tenant_id: str
+    ) -> dict[str, Any]:
+        """Turn a ``fuel_stations`` template row into a loadable ``FuelStation``.
+
+        The template speaks gallons, a comma list of fuel types, a text
+        ``location`` and an operational ``status``; the list endpoint reads
+        ``FuelStation`` (liters, one ``fuel_type``, ``GeoPoint`` location, stock
+        status). A row that can't be mapped raises ``_RowFieldError`` naming
+        the template field, and ``FuelStation`` validation errors propagate,
+        so a stored station always loads in ``GET /api/fuel/stations``.
+        """
+        from fuel.models import FuelStation, GeoPoint
+        from fuel.services.fuel_service import FuelService
+        from services.unit_conversion import from_canonical_volume
+
+        doc = dict(document)
+        fuel_type = _resolve_station_fuel_type(doc.pop("fuel_types", ""))
+
+        capacity_gal = doc.pop("capacity_gallons", None)
+        if capacity_gal is None:
+            raise _RowFieldError("capacity_gallons", "capacity_gallons is required")
+        if capacity_gal <= 0:
+            raise _RowFieldError(
+                "capacity_gallons", "capacity_gallons must be greater than 0"
+            )
+        stock_gal = doc.pop("current_stock_gallons", None)
+        if stock_gal is None:
+            raise _RowFieldError(
+                "current_stock_gallons", "current_stock_gallons is required"
+            )
+        if stock_gal < 0 or stock_gal > capacity_gal:
+            raise _RowFieldError(
+                "current_stock_gallons",
+                "current_stock_gallons must be between 0 and capacity_gallons",
+            )
+
+        coordinates = doc.pop("coordinates", None)
+        location_text = doc.pop("location", None)
+        if coordinates:
+            try:
+                lat, lon = (float(part) for part in str(coordinates).split(","))
+                doc["location"] = GeoPoint(lat=lat, lon=lon).model_dump()
+            except (TypeError, ValueError):  # includes pydantic ValidationError
+                raise _RowFieldError(
+                    "coordinates",
+                    "coordinates must be 'lat,lon' with lat -90..90 and lon -180..180",
+                ) from None
+        if location_text:
+            doc["location_name"] = location_text
+        if "status" in doc:
+            doc["operational_status"] = doc.pop("status")
+
+        fuel_service = FuelService(self.es_service)
+        capacity_l = from_canonical_volume(capacity_gal, "l")
+        stock_l = from_canonical_volume(stock_gal, "l")
+        threshold_pct = 20.0
+        daily_rate = 0.0
+        days_empty = fuel_service._calculate_days_until_empty(stock_l, daily_rate)
+        now = utcnow().isoformat()
+        doc.update(
+            {
+                "fuel_type": fuel_type,
+                "capacity_liters": capacity_l,
+                "current_stock_liters": stock_l,
+                "daily_consumption_rate": daily_rate,
+                "days_until_empty": days_empty,
+                "alert_threshold_pct": threshold_pct,
+                "status": fuel_service._determine_status(
+                    stock_l, capacity_l, threshold_pct, days_empty
+                ),
+                "tenant_id": tenant_id or doc.get("tenant_id") or "",
+                "created_at": now,
+                "last_updated": now,
+            }
+        )
+        station = FuelStation.model_validate(doc)
+        doc.update(station.model_dump(mode="json", exclude_none=True))
+        return doc
+
+    def _complete_document(
+        self, data_type: str, document: dict[str, Any], tenant_id: str
+    ) -> dict[str, Any]:
+        """Complete a row into the model its list endpoint reads, if checked."""
+        if data_type == "inventory":
+            return self._complete_inventory_document(document, tenant_id)
+        if data_type == "fuel_stations":
+            return self._complete_fuel_station_document(document, tenant_id)
+        return document
+
+    @staticmethod
+    def _pydantic_issues(
+        row_number: int, exc: PydanticValidationError
+    ) -> list[ValidationIssue]:
+        issues = []
+        for err in exc.errors(include_url=False):
+            field = ".".join(str(part) for part in err.get("loc") or ())
+            issues.append(
+                ValidationIssue(
+                    row_number=row_number,
+                    field_name=field or "record",
+                    description=str(err.get("msg") or "invalid value"),
+                )
+            )
+        return issues
+
+    def _append_model_issues(
+        self,
+        session: _ActiveSession,
+        field_mapping: dict[str, str],
+        result: ValidationResult,
+    ) -> None:
+        """Report rows that can't become their list model (OI-27, station 500)."""
+        rows_with_errors = {issue.row_number for issue in result.errors}
+        for row_index, row in enumerate(session.rows, start=1):
+            if row_index in rows_with_errors:
+                continue
+            try:
+                document = self._map_and_coerce_row(
+                    row, field_mapping, session.data_type
+                )
+                self._complete_document(
+                    session.data_type, document, session.tenant_id or "import"
+                )
+            except PydanticValidationError as exc:
+                result.errors.extend(self._pydantic_issues(row_index, exc))
+                rows_with_errors.add(row_index)
+            except _RowFieldError as exc:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name=exc.field_name,
+                        description=str(exc),
+                    )
+                )
+                rows_with_errors.add(row_index)
+            except (TypeError, ValueError) as exc:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name="record",
+                        description=str(exc),
+                    )
+                )
+                rows_with_errors.add(row_index)
+        result.error_count = len(result.errors)
+        result.valid_rows = result.total_rows - len(rows_with_errors)
+
+    async def _append_ownership_issues(
+        self,
+        session: _ActiveSession,
+        field_mapping: dict[str, str],
+        result: ValidationResult,
+    ) -> None:
+        """Validate-time copy of the commit-time id ownership check (OI-25).
+
+        Commit refuses a row whose id another tenant (or a legacy row with no
+        tenant) already holds. Reporting it here lets the preview show the
+        collision before commit. The text is the same generic one commit uses
+        and never names the other owner. Commit keeps its own check for rows
+        claimed between the two steps.
+        """
+        if not session.tenant_id:
+            return
+        id_field = NON_CANONICAL_ID_FIELDS[session.data_type]
+        target_index = self.schema_templates.get_index(session.data_type)
+        rows_with_errors = {issue.row_number for issue in result.errors}
+        for row_index, row in enumerate(session.rows, start=1):
+            if row_index in rows_with_errors:
+                continue
+            try:
+                document = self._map_and_coerce_row(
+                    row, field_mapping, session.data_type
+                )
+            except (TypeError, ValueError):
+                continue
+            doc_id = str(document.get(id_field) or "").strip()
+            if not doc_id:
+                continue
+            existing = await self.es_service.get_document(target_index, doc_id)
+            if existing is not None and existing.get("tenant_id") != session.tenant_id:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name=id_field,
+                        description=f"{id_field} '{doc_id}' is already in use",
+                        value=doc_id,
+                    )
+                )
+                rows_with_errors.add(row_index)
+        result.error_count = len(result.errors)
+        result.valid_rows = result.total_rows - len(rows_with_errors)
+
     async def _append_canonical_validation_issues(
         self,
         session: _ActiveSession,
@@ -697,7 +1015,25 @@ class ImportService:
                 document = self._map_and_coerce_row(
                     row, field_mapping, session.data_type
                 )
-                self._validate_canonical_document(session.data_type, document)
+                self._validate_canonical_document(
+                    session.data_type, document, tenant_id=session.tenant_id
+                )
+                if session.data_type == "customer_tanks" and session.tenant_id:
+                    issue = await self._customer_ref_issue(
+                        session.tenant_id, row_index, document
+                    )
+                    if issue is not None:
+                        result.errors.append(issue)
+                        rows_with_errors.add(row_index)
+                        continue
+                if session.data_type == "orders" and session.tenant_id:
+                    issue = await self._customer_tank_issue(
+                        session.tenant_id, row_index, document
+                    )
+                    if issue is not None:
+                        result.errors.append(issue)
+                        rows_with_errors.add(row_index)
+                        continue
                 if (
                     session.data_type == "tank_readings"
                     and self._tank_import_service is not None
@@ -706,6 +1042,32 @@ class ImportService:
                     await self._tank_import_service.validate_reading(
                         session.tenant_id, document
                     )
+            except PydanticValidationError as exc:
+                # One readable issue per field. ``include_url=False`` and
+                # dropping ``input`` keep pydantic doc links and the
+                # placeholder ids out of the message (B7).
+                for err in exc.errors(include_url=False):
+                    field = ".".join(str(part) for part in err.get("loc") or ())
+                    message = str(err.get("msg") or "invalid value")
+                    if message.startswith("Value error, "):
+                        message = message[len("Value error, "):]
+                    result.errors.append(
+                        ValidationIssue(
+                            row_number=row_index,
+                            field_name=field or "record",
+                            description=message,
+                        )
+                    )
+                rows_with_errors.add(row_index)
+            except _RowFieldError as exc:
+                result.errors.append(
+                    ValidationIssue(
+                        row_number=row_index,
+                        field_name=exc.field_name,
+                        description=str(exc),
+                    )
+                )
+                rows_with_errors.add(row_index)
             except Exception as exc:
                 result.errors.append(
                     ValidationIssue(
@@ -718,10 +1080,83 @@ class ImportService:
         result.error_count = len(result.errors)
         result.valid_rows = result.total_rows - len(rows_with_errors)
 
+    async def _customer_ref_issue(
+        self,
+        tenant_id: str,
+        row_number: int,
+        document: dict[str, Any],
+    ) -> Optional[ValidationIssue]:
+        """Validate-time copy of the commit-time customer check (B1 / F7).
+
+        Uses the same resolver choice as ``TankImportService._validate_customer``
+        so ``/api/import/validate`` reports ``customer_not_found`` rows instead
+        of letting them fail only at commit.
+        """
+        from errors.exceptions import AppException
+        from fuel.services.customer_ref import validate_customer_ref
+        from services.ref_resolver import get_ref_resolver
+
+        resolver = (
+            getattr(self._tank_import_service, "_ref_resolver", None)
+            or get_ref_resolver()
+        )
+        customer_id = document.get("customer_id")
+        # Commit skips the lookup when an existing tank keeps its customer, so
+        # validate does too; otherwise the two steps would disagree.
+        tanks = getattr(self._tank_import_service, "_tanks", None)
+        source_system = str(document.get("source_system") or "").strip()
+        external_tank_id = str(document.get("external_tank_id") or "").strip()
+        if tanks is not None and source_system and external_tank_id:
+            existing = await tanks.get_by_external_id(
+                tenant_id, source_system, external_tank_id
+            )
+            if existing is not None and existing.customer_id == customer_id:
+                return None
+        try:
+            await validate_customer_ref(resolver, tenant_id, customer_id)
+        except AppException as exc:
+            return ValidationIssue(
+                row_number=row_number,
+                field_name="customer_id",
+                description=exc.message,
+                value=str(customer_id),
+            )
+        return None
+
+    async def _customer_tank_issue(
+        self,
+        tenant_id: str,
+        row_number: int,
+        document: dict[str, Any],
+    ) -> Optional[ValidationIssue]:
+        """Validate-time copy of the intake pipeline's tank check (OI-26).
+
+        Commit refuses an order whose ``customer_tank_id`` is missing from the
+        tenant or belongs to another customer. Running the same check here
+        lets the preview report it before commit.
+        """
+        from errors.exceptions import AppException
+
+        tank_id = document.get("customer_tank_id")
+        verify = getattr(self._order_intake_pipeline, "verify_customer_tank", None)
+        if not tank_id or verify is None:
+            return None
+        try:
+            await verify(document, tenant_id)
+        except AppException as exc:
+            return ValidationIssue(
+                row_number=row_number,
+                field_name="customer_tank_id",
+                description=exc.message,
+                value=str(tank_id),
+            )
+        return None
+
     @staticmethod
     def _validate_canonical_document(
         data_type: str,
         document: dict[str, Any],
+        tenant_id: str = "",
     ) -> None:
         if data_type == "orders":
             from fuel.api.order_endpoints import BulkOrderRow
@@ -750,14 +1185,15 @@ class ImportService:
         if data_type == "customer_tanks":
             from fuel.customer_tank_models import CustomerTank
 
-            CustomerTank.model_validate(
+            tank = CustomerTank.model_validate(
                 {
                     **document,
                     "customer_tank_id": document.get("customer_tank_id")
-                    or "validation-tank",
-                    "tenant_id": "validation-tenant",
+                    or "import-tank",
+                    "tenant_id": tenant_id or "import",
                 }
             )
+            _check_fuel_family(tank.fuel_type, tank.fuel_product_code)
             return
 
         if data_type == "tank_readings":
@@ -767,6 +1203,101 @@ class ImportService:
             datetime.fromisoformat(
                 str(document["reading_at"]).replace("Z", "+00:00")
             )
+
+    async def _commit_tenant_documents(
+        self,
+        *,
+        session: _ActiveSession,
+        target_index: str,
+        documents: list[tuple[int, dict[str, Any]]],
+        tenant: Any,
+    ) -> tuple[int, int, list[str]]:
+        """Write non-canonical rows stamped with the tenant, never across tenants (C1).
+
+        Document ids are global in the store, so a blind upsert of an id another
+        tenant owns would replace that tenant's row. Each row is instead:
+
+        - updated in place if the importing tenant already owns that id,
+        - created with ``create_document`` (insert-if-absent) if the id is free,
+        - a per-row error if any other owner (or a legacy row with no tenant)
+          holds the id. The error doesn't name the other owner.
+
+        Freeze decision: if the tenant's own row is deleted and another tenant
+        recreates the id between the read and the update, the update wins. That
+        window is accepted rather than adding a new store primitive.
+        """
+        tenant_id = (
+            getattr(tenant, "tenant_id", None)
+            if tenant is not None
+            else session.tenant_id
+        )
+        if not tenant_id:
+            raise ValueError("tenant context is required for imports")
+        if session.tenant_id and session.tenant_id != tenant_id:
+            raise ValueError(f"Import session {session.session_id} not found")
+
+        id_field = NON_CANONICAL_ID_FIELDS.get(session.data_type, "id")
+        imported = 0
+        failed = 0
+        errors: list[str] = []
+        for row_number, doc in documents:
+            doc["tenant_id"] = tenant_id
+            doc_id = str(doc.get(id_field) or "").strip()
+            if not doc_id:
+                failed += 1
+                errors.append(f"row {row_number}: missing {id_field}")
+                continue
+            in_use = f"row {row_number}: {id_field} '{doc_id}' is already in use"
+            if session.data_type in MODEL_CHECKED_TYPES:
+                try:
+                    doc = self._complete_document(session.data_type, doc, tenant_id)
+                except (PydanticValidationError, TypeError, ValueError) as exc:
+                    failed += 1
+                    if isinstance(exc, PydanticValidationError):
+                        detail = "; ".join(
+                            f"{issue.field_name}: {issue.description}"
+                            for issue in self._pydantic_issues(row_number, exc)
+                        )
+                    elif isinstance(exc, _RowFieldError):
+                        detail = f"{exc.field_name}: {exc}"
+                    else:
+                        detail = str(exc)
+                    errors.append(f"row {row_number}: {detail}")
+                    continue
+            try:
+                existing = await self.es_service.get_document(target_index, doc_id)
+                if existing is not None:
+                    if existing.get("tenant_id") != tenant_id:
+                        failed += 1
+                        errors.append(in_use)
+                        continue
+                    await self.es_service.index_document(target_index, doc_id, doc)
+                    imported += 1
+                    continue
+                if await self.es_service.create_document(target_index, doc_id, doc):
+                    imported += 1
+                    continue
+                # Lost a create race, or the index takes no writes.
+                current = await self.es_service.get_document(target_index, doc_id)
+                if current is None:
+                    failed += 1
+                    errors.append(f"row {row_number}: could not be written")
+                elif current.get("tenant_id") == tenant_id:
+                    await self.es_service.index_document(target_index, doc_id, doc)
+                    imported += 1
+                else:
+                    failed += 1
+                    errors.append(in_use)
+            except Exception as exc:
+                logger.error(
+                    "Import row write failed: session=%s row=%d: %s",
+                    session.session_id,
+                    row_number,
+                    exc,
+                )
+                failed += 1
+                errors.append(f"row {row_number}: {exc}")
+        return imported, failed, errors
 
     async def _commit_canonical_documents(
         self,

@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone as _dt_timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Sequence, Union
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -267,6 +267,21 @@ class CrossTenantAccessError(PermissionError):
         self.owning_tenant_id = owning_tenant_id
 
 
+class DepotDeleteIncompleteError(RuntimeError):
+    """A delete ran but the depot is still readable afterwards (N6).
+
+    Raised instead of returning ``True`` so the REST layer answers 500 rather
+    than a false 204 when one of the stores kept its copy.
+    """
+
+    def __init__(self, tenant_id: str, depot_id: str) -> None:
+        super().__init__(
+            f"depot {depot_id!r} is still readable after delete"
+        )
+        self.tenant_id = tenant_id
+        self.depot_id = depot_id
+
+
 # ---------------------------------------------------------------------------
 # Repository
 # ---------------------------------------------------------------------------
@@ -284,7 +299,7 @@ class DepotRepository:
     trivially testable with a recording mock. The only interface the
     repository relies on is:
 
-        * ``await es.index_document(index, doc_id, document)``
+        * ``await es.create_document(index, doc_id, document)`` → bool
         * ``await es.search_documents(index, query, size)``
         * ``await es.update_document(index, doc_id, partial_doc)``
         * ``await es.delete_document(index, doc_id)`` → bool
@@ -371,7 +386,17 @@ class DepotRepository:
         model = Depot(**payload)
 
         doc = model.model_dump(mode="json", exclude_none=False)
-        await self._es.index_document(self._index, model.depot_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a depot another tenant owns (S7). Refused before the mirror
+        # write so the relational row can't be overwritten either.
+        created = await self._es.create_document(self._index, model.depot_id, doc)
+        if not created:
+            from errors.exceptions import already_exists
+
+            raise already_exists(
+                "A depot with this id already exists",
+                details={"depot_id": model.depot_id},
+            )
 
         # Dual-write the depot to the Postgres source-of-truth.
         from commerce.services.commerce_persistence_bridge import (
@@ -431,7 +456,7 @@ class DepotRepository:
         tenant_id: str,
         *,
         status: Optional[DepotStatus] = None,
-        fuel_type: Optional[str] = None,
+        fuel_type: Optional[Union[str, Sequence[str]]] = None,
         size: int = DEFAULT_LIST_SIZE,
     ) -> List[Depot]:
         """List depots for the tenant with optional filters.
@@ -443,8 +468,11 @@ class DepotRepository:
         are logged and dropped rather than raising, so a single corrupt
         record does not take out the whole list endpoint.
 
-        ``fuel_type`` is canonicalized before querying so a caller
-        filtering on ``"LPG"`` matches depots that persist ``"PROPANE"``.
+        ``fuel_type`` is either one code or alias, canonicalized before
+        querying so a caller filtering on ``"LPG"`` matches depots that
+        persist ``"PROPANE"`` (an unknown one returns ``[]``), or a list of
+        canonical codes (from ``resolve_product_filter``), any of which
+        matches.
         """
 
         self._require_tenant(tenant_id)
@@ -476,13 +504,22 @@ class DepotRepository:
         if status is not None:
             must.append({"term": {"status": status}})
         if fuel_type:
-            try:
-                canonical_fuel = canonicalize(fuel_type)
-            except UnknownFuelProductError:
-                # Unknown filter → empty result set; persist the query
-                # shape so callers see a stable error-vs-empty distinction.
-                return []
-            must.append({"term": {"fuel_types_supported": canonical_fuel}})
+            if isinstance(fuel_type, str):
+                try:
+                    codes = [canonicalize(fuel_type)]
+                except UnknownFuelProductError:
+                    # Unknown filter → empty result set; persist the query
+                    # shape so callers see a stable error-vs-empty distinction.
+                    return []
+            else:
+                codes = list(fuel_type)
+            # One code keeps the original ``term``; several use ``terms``, which
+            # matches a depot supporting any of them on ES and on the Postgres
+            # translator (array containment per value).
+            if len(codes) == 1:
+                must.append({"term": {"fuel_types_supported": codes[0]}})
+            else:
+                must.append({"terms": {"fuel_types_supported": codes}})
 
         query = {
             "query": {"bool": {"must": must}},
@@ -623,14 +660,29 @@ class DepotRepository:
             )
             return
 
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_current_state_upsert,
+        )
+
         for depot in others:
             if depot.depot_id == keep_depot_id or not depot.is_default:
                 continue
             try:
+                now = _utcnow_iso()
+                cleared = depot.model_copy(
+                    update={"is_default": False, "updated_at": datetime.fromisoformat(now)}
+                )
                 await self._es.update_document(
                     self._index,
                     depot.depot_id,
-                    {"is_default": False, "updated_at": _utcnow_iso()},
+                    {"is_default": False, "updated_at": now},
+                )
+                # The relational row too: reads (and the route resolver's
+                # is_default fallback) are served from Postgres once cut
+                # over, so clearing only the document store left two
+                # defaults (N6 follow-up).
+                await mirror_current_state_upsert(
+                    "depot", cleared.model_dump(mode="json", exclude_none=False)
                 )
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.warning(
@@ -646,21 +698,37 @@ class DepotRepository:
     # ------------------------------------------------------------------
 
     async def delete(self, tenant_id: str, depot_id: str) -> bool:
-        """Delete a depot. Returns ``True`` if the row was removed.
+        """Delete a depot from every store. Returns ``True`` if it was removed.
 
         Semantics:
-            * Not-found → ``False`` (callers translate to HTTP 404).
+            * Not-found in both stores → ``False`` (callers translate to 404).
             * Cross-tenant → :class:`CrossTenantAccessError` (→ HTTP 403).
             * Owned + deleted → ``True`` (→ HTTP 204).
+            * Still readable afterwards → :class:`DepotDeleteIncompleteError`
+              (→ HTTP 500), never a false ``True``.
+
+        Reads are served from the relational ``depots`` table once cut over,
+        so deleting only the document-store copy left the depot listed and
+        still the default (N6). Existence falls back to the relational row so
+        a depot missing from the document store can still be deleted.
         """
 
         self._require_tenant(tenant_id)
         if not depot_id or not depot_id.strip():
             raise ValueError("depot_id must be a non-empty string")
 
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            mirror_current_state_delete,
+            read_hybrid_get_any,
+        )
+
         source = await self._fetch_source(depot_id)
         if source is None:
-            return False
+            pg = await read_hybrid_get_any("depot", depot_id)
+            if pg is _NOT_CUT_OVER or pg is None:
+                return False
+            source = pg
         owner = source.get("tenant_id")
         if owner != tenant_id:
             raise CrossTenantAccessError(
@@ -669,7 +737,22 @@ class DepotRepository:
                 owning_tenant_id=owner,
             )
 
-        return bool(await self._es.delete_document(self._index, depot_id))
+        # ``False`` means the document-store copy was already gone (the
+        # relational-only case); carry on and remove the relational row.
+        await self._es.delete_document(self._index, depot_id)
+        await mirror_current_state_delete("depot", tenant_id, depot_id)
+
+        # Both deletes above are best-effort at their layer, so confirm
+        # through the same read path the API serves.
+        if await self.get(tenant_id, depot_id) is not None:
+            logger.error(
+                "DepotRepository.delete: depot=%s tenant=%s still readable "
+                "after delete",
+                depot_id,
+                tenant_id,
+            )
+            raise DepotDeleteIncompleteError(tenant_id, depot_id)
+        return True
 
     # ------------------------------------------------------------------
     # Internals
@@ -783,4 +866,5 @@ __all__ = [
     "Depot",
     "DepotRepository",
     "CrossTenantAccessError",
+    "DepotDeleteIncompleteError",
 ]

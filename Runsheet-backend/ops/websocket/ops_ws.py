@@ -238,8 +238,12 @@ class OpsWebSocketManager(BaseWSManager):
         receive the broadcast.
         """
         data_tenant_id = data.get("tenant_id", "")
+        if not data_tenant_id:
+            # Fail closed (W3): tenantless data used to reach every client.
+            logger.warning("ops WS %s without tenant_id dropped", event_type)
+            return 0
 
-        if data_tenant_id and self._feature_flag_service:
+        if self._feature_flag_service:
             try:
                 enabled = await self._feature_flag_service.is_enabled(data_tenant_id)
                 if not enabled:
@@ -266,7 +270,7 @@ class OpsWebSocketManager(BaseWSManager):
             targets = [
                 (ws, meta) for ws, meta in self._clients.items()
                 if (not meta.get("subscriptions") or event_type in meta.get("subscriptions", set()))
-                and (not data_tenant_id or meta.get("tenant_id") == data_tenant_id)
+                and meta.get("tenant_id") == data_tenant_id
             ]
 
         if not targets:

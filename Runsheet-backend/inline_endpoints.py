@@ -14,8 +14,9 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
     AppException,
     internal_error,
@@ -80,37 +81,97 @@ async def chat_endpoint(
     http_request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
+    from Agents.llm_errors import (
+        AI_SERVICE_UNAVAILABLE,
+        ChatEvent,
+        done_event,
+        error_event,
+        safe_message_for,
+        tool_result_event,
+    )
     from Agents.mainagent import LogisticsAgent
+    from middleware.request_id import get_request_id
+
+    # Captured here: the request-id ContextVar is not guaranteed to be set
+    # while the StreamingResponse body is iterated.
+    request_id = get_request_id() or None
     agent = LogisticsAgent()
+
+    def _sse(payload: dict) -> str:
+        return f"data: {json.dumps(payload, default=str)}\n\n"
+
     async def generate_response():
+        done_sent = False
+        seen_tool_uses: set = set()
         try:
             async for event in agent.chat_streaming(
                 request.message,
                 request.mode,
                 session_id=request.session_id,
                 tenant_id=tenant.tenant_id,
+                request_id=request_id,
+                user_id=tenant.user_id,
             ):
-                if isinstance(event, dict):
+                if isinstance(event, ChatEvent):
+                    # Already normalized (orchestrator path and legacy
+                    # status/error events): forward verbatim.
+                    # Not a ``break`` on done: draining lets chat_streaming
+                    # finish (it records telemetry after the last event).
+                    if event.get("type") == "done":
+                        if done_sent:
+                            continue
+                        done_sent = True
+                    yield _sse(event)
+                elif isinstance(event, dict):
+                    # Raw Strands events from the legacy direct-agent path.
                     if "error" in event:
-                        yield f"data: {json.dumps({'error': event['error']})}\n\n"
+                        logger.error("Raw error event in chat stream (request_id=%s)", request_id)
+                        yield _sse(error_event(
+                            AI_SERVICE_UNAVAILABLE,
+                            safe_message_for(AI_SERVICE_UNAVAILABLE),
+                            request_id,
+                        ))
                     elif "data" in event:
                         text = event["data"]
                         if text:
-                            yield f"data: {json.dumps({'type': 'text', 'content': text})}\n\n"
+                            yield _sse({'type': 'text', 'content': text})
                     elif "current_tool_use" in event:
-                        tool_info = event["current_tool_use"]
-                        yield f"data: {json.dumps({'type': 'tool', 'tool_name': tool_info.get('name', ''), 'tool_input': tool_info.get('input', {})})}\n\n"
+                        # Strands repeats current_tool_use for every streamed
+                        # input delta; emit one tool event per tool use, as
+                        # the specialists' stream() does (OI-39).
+                        tool_info = event["current_tool_use"] or {}
+                        use_key = tool_info.get('toolUseId') or tool_info.get('name', '')
+                        if use_key in seen_tool_uses:
+                            continue
+                        seen_tool_uses.add(use_key)
+                        yield _sse({'type': 'tool', 'tool_name': tool_info.get('name', ''), 'tool_input': tool_info.get('input', {})})
                     elif "current_tool_result" in event:
+                        # Name and status only: tool output can carry
+                        # str(exc) from a failing tool (F3).
                         tool_result = event["current_tool_result"]
-                        yield f"data: {json.dumps({'type': 'tool_result', 'tool_name': tool_result.get('name', ''), 'tool_output': tool_result.get('output', '')})}\n\n"
+                        yield _sse(tool_result_event(
+                            tool_result.get('name', ''),
+                            tool_result.get('status', 'success'),
+                        ))
                     elif event.get('event') == 'messageStop' or 'result' in event:
-                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                        break
-        except Exception as e:
-            logger.error("Error in chat streaming: %s", e)
-            yield f"data: {json.dumps({'error': str(e)})}\n\n"
-    return StreamingResponse(generate_response(), media_type="text/plain",
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive", "Content-Type": "text/plain; charset=utf-8"})
+                        if not done_sent:
+                            yield _sse(done_event())
+                            done_sent = True
+        except Exception:
+            # Full detail stays in the server log; the client gets a code, a
+            # safe message and the request id to quote (F3).
+            logger.exception("Error in chat streaming (request_id=%s)", request_id)
+            yield _sse(error_event(
+                AI_SERVICE_UNAVAILABLE,
+                safe_message_for(AI_SERVICE_UNAVAILABLE),
+                request_id,
+            ))
+        if not done_sent:
+            yield _sse(done_event())
+    # Server-Sent Events, flushed per event: ``X-Accel-Buffering: no`` stops
+    # nginx-style proxies from holding the stream until it ends (F6).
+    return StreamingResponse(generate_response(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 @router.post("/api/chat/fallback")
 async def chat_fallback_endpoint(
@@ -118,14 +179,30 @@ async def chat_fallback_endpoint(
     http_request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
+    from Agents.llm_errors import AI_RATE_LIMITED, AgentServiceError
     from Agents.mainagent import LogisticsAgent
+    from errors.exceptions import ai_rate_limited, ai_service_unavailable
+
     agent = LogisticsAgent()
-    response = await agent.chat_fallback(
-        request.message,
-        request.mode,
-        session_id=request.session_id,
-        tenant_id=tenant.tenant_id,
-    )
+    try:
+        response = await agent.chat_fallback(
+            request.message,
+            request.mode,
+            session_id=request.session_id,
+            tenant_id=tenant.tenant_id,
+            user_id=tenant.user_id,
+        )
+    except AgentServiceError as err:
+        # An AI failure is an error response, not a 200 whose text is the
+        # provider's error (F3). Only the safe message leaves the server.
+        if err.code == AI_RATE_LIMITED:
+            raise ai_rate_limited(err.safe_message, err.retry_after_seconds) from err
+        details = (
+            {"retry_after_seconds": err.retry_after_seconds}
+            if err.retry_after_seconds is not None
+            else None
+        )
+        raise ai_service_unavailable(err.safe_message, details) from err
     return {"response": response, "mode": request.mode, "session_id": request.session_id, "timestamp": utcnow().isoformat()}
 
 @router.post("/api/chat/clear")
@@ -133,12 +210,30 @@ async def clear_chat_endpoint(
     request: ClearChatRequest,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
-    # ``clear_memory`` itself is tenant-agnostic (it wipes the per-session
-    # in-memory agent state), but we still require an authenticated tenant
-    # context on this endpoint so unauthenticated callers can't clear
-    # another tenant's session by ID alone.
+    # The clear is scoped to (caller's verified tenant, user, session_id) and
+    # awaited, so it removes exactly the history the caller's next turn would
+    # load and never another tenant's entry under the same session id (F1).
+    # Specialists keep no history between requests, so the session store
+    # entries (the legacy key and its ``orch:`` transcript, OI-17) are the
+    # caller's whole history.
+    #
+    # A False result means the store delete failed (it is True when there was
+    # nothing to clear). Reporting success then would be wrong: the history is
+    # still stored and the next turn reloads it. Fail with 503 so the client
+    # can retry.
     from Agents.mainagent import LogisticsAgent
-    LogisticsAgent().clear_memory(session_id=request.session_id)
+    from errors.exceptions import session_store_unavailable
+
+    cleared = await LogisticsAgent().clear_memory(
+        session_id=request.session_id,
+        tenant_id=tenant.tenant_id,
+        user_id=tenant.user_id,
+    )
+    if not cleared:
+        raise session_store_unavailable(
+            "Chat memory could not be cleared; retry the request",
+            details={"session_id": request.session_id},
+        )
     return {"message": "Chat memory cleared successfully", "session_id": request.session_id}
 
 
@@ -168,15 +263,29 @@ async def upload_csv_temporal(
             message="No valid data found in CSV",
             details={"data_type": data_type},
         )
-    await data_seeder.upsert_batch_data(
+    outcome = await data_seeder.upsert_batch_data(
         data_type=data_type,
         documents=documents,
         batch_id=batch_id,
         operational_time=operational_time,
         tenant_id=tenant.tenant_id,
     )
-    return {"data": {"recordCount": len(documents), "batch_id": batch_id, "operational_time": operational_time},
-            "success": True, "message": f"Successfully uploaded {len(documents)} {data_type} records",
+    # Rows the store refused (an id another tenant owns) are reported, not
+    # counted as uploaded.
+    failed = outcome.get("failed", 0) if isinstance(outcome, dict) else 0
+    if not isinstance(failed, int):
+        failed = 0
+    uploaded = len(documents) - failed
+    message = f"Successfully uploaded {uploaded} {data_type} records"
+    if failed:
+        message = (
+            f"Uploaded {uploaded} of {len(documents)} {data_type} records; "
+            f"{failed} refused"
+        )
+    return {"data": {"recordCount": uploaded, "failed": failed,
+                     "errors": outcome.get("errors", []) if failed else [],
+                     "batch_id": batch_id, "operational_time": operational_time},
+            "success": not failed, "message": message,
             "timestamp": utcnow().isoformat()}
 
 @router.post("/api/upload/batch")
@@ -254,14 +363,44 @@ async def upload_sheets_temporal(
 # Location endpoints
 # ---------------------------------------------------------------------------
 
+def _invalid_location_payload(details: Optional[dict] = None) -> AppException:
+    return AppException(
+        error_code=ErrorCode.VALIDATION_ERROR,
+        message="Invalid location payload",
+        status_code=422,
+        details=details,
+    )
+
+
+async def _parse_location_body(request: Request, model):
+    """Parse the JSON body into ``model``; any bad input is a 422.
+
+    A non-JSON body, a non-object body, or a pydantic validation failure
+    (missing fields, out-of-range coordinates, an empty batch) raises a
+    ``VALIDATION_ERROR`` instead of escaping as a 500. Field errors are
+    reported without echoing the submitted input.
+    """
+    try:
+        body = await request.json()
+    except ValueError:  # json.JSONDecodeError / UnicodeDecodeError
+        raise _invalid_location_payload()
+    if not isinstance(body, dict):
+        raise _invalid_location_payload()
+    try:
+        return model(**body)
+    except ValidationError as exc:
+        raise _invalid_location_payload(
+            {"errors": exc.errors(include_url=False, include_input=False, include_context=False)}
+        )
+
+
 @router.post("/api/locations/webhook")
 async def location_webhook(
     request: Request,
     tenant: TenantContext = Depends(get_tenant_context),
 ):
     from ingestion.service import LocationUpdate
-    body = await request.json()
-    update = LocationUpdate(**body)
+    update = await _parse_location_body(request, LocationUpdate)
     # Stamp the authenticated tenant on the update so the ingestion
     # service writes tenant-scoped docs to both ``trucks`` and
     # ``locations``, and verify the referenced truck belongs to the
@@ -284,8 +423,7 @@ async def batch_location_updates(
     tenant: TenantContext = Depends(get_tenant_context),
 ):
     from ingestion.service import BatchLocationUpdate
-    body = await request.json()
-    batch = BatchLocationUpdate(**body)
+    batch = await _parse_location_body(request, BatchLocationUpdate)
     # Stamp the authenticated tenant on every update so the ingestion
     # service writes tenant-scoped docs and per-truck ownership checks
     # run against the correct tenant.

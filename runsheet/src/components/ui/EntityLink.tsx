@@ -56,21 +56,22 @@ export type EntityType =
  */
 const ENTITY_ROUTES: Record<EntityType, (id: string) => string> = {
   // Commerce
-  customer: (id) => `/commerce/customers/${encodeURIComponent(id)}`,
-  account: (id) => `/commerce/accounts/${encodeURIComponent(id)}`,
-  invoice: (id) => `/commerce/invoices/${encodeURIComponent(id)}`,
+  customer: (id) => `/dashboard/customers/${encodeURIComponent(id)}`,
+  account: (id) => `/dashboard/billing/accounts/${encodeURIComponent(id)}`,
+  invoice: (id) => `/dashboard/billing/invoices/${encodeURIComponent(id)}`,
   // Orders + scheduling
-  order: (id) => `/orders/${encodeURIComponent(id)}`,
-  job: (id) => `/ops/scheduling/${encodeURIComponent(id)}`,
+  order: (id) => `/dashboard/orders/${encodeURIComponent(id)}`,
+  job: (id) => `/dashboard/dispatch/jobs/${encodeURIComponent(id)}`,
   // Fleet / ops — the Fleet hub hosts asset tracking; `?asset=` focuses and
   // selects the asset in the tracking table (and on the map).
   asset: (id) => `/dashboard/fleet?asset=${encodeURIComponent(id)}`,
-  driver: (id) => `/dashboard/drivers?driver=${encodeURIComponent(id)}`,
+  driver: (id) =>
+    `/dashboard/fleet?tab=drivers&driver=${encodeURIComponent(id)}`,
   // Fuel ops
-  tank: (id) => `/ops/fuel/tanks/${encodeURIComponent(id)}`,
-  depot: (id) => `/ops/fuel/depots/${encodeURIComponent(id)}`,
+  tank: (id) => `/dashboard/customers/tanks/${encodeURIComponent(id)}`,
+  depot: (id) => `/dashboard/settings/depots/${encodeURIComponent(id)}`,
   // Sourcing / compliance
-  terminal: (id) => `/compliance/terminals/${encodeURIComponent(id)}`,
+  terminal: (id) => `/dashboard/compliance/terminals/${encodeURIComponent(id)}`,
 };
 
 /**

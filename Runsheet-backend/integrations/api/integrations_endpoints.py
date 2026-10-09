@@ -74,9 +74,10 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from errors.exceptions import AppException
 from fuel.services.fuel_ops_es_mappings import INTEGRATION_SYNC_RUNS_INDEX
 from integrations.connector_base import (
     CrossTenantAccessError,
@@ -91,6 +92,7 @@ from integrations.provider_catalog import (
     ProviderCatalogEntry,
     list_providers as list_catalog_providers,
 )
+from integrations.api._authz import integration_admin_dependency
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -177,16 +179,14 @@ def _get_repository() -> IntegrationInstanceRepository:
 
 def _get_scheduler_or_503() -> IntegrationScheduler:
     if _scheduler is None:
-        raise HTTPException(
+        raise AppException(
+            error_code="scheduler_unavailable",
+            message=(
+                "Integration scheduler is not configured. Finish the "
+                "bootstrap wire-up before calling scheduler-backed "
+                "endpoints."
+            ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "scheduler_unavailable",
-                "message": (
-                    "Integration scheduler is not configured. Finish the "
-                    "bootstrap wire-up before calling scheduler-backed "
-                    "endpoints."
-                ),
-            },
         )
     return _scheduler
 
@@ -207,16 +207,14 @@ def _require_credentials_vault_or_400(
     if not credentials:
         return None
     if _credentials_vault is None:
-        raise HTTPException(
+        raise AppException(
+            error_code="credentials_vault_unavailable",
+            message=(
+                "Credentials vault is not configured. Refusing to "
+                "persist an integration with a credentials payload "
+                "until the vault is wired."
+            ),
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "credentials_vault_unavailable",
-                "message": (
-                    "Credentials vault is not configured. Refusing to "
-                    "persist an integration with a credentials payload "
-                    "until the vault is wired."
-                ),
-            },
         )
     return _credentials_vault
 
@@ -414,20 +412,20 @@ class ProviderCatalogResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _translate_cross_tenant_error(exc: CrossTenantAccessError) -> HTTPException:
+def _translate_cross_tenant_error(exc: CrossTenantAccessError) -> AppException:
     """Map :class:`CrossTenantAccessError` to HTTP 403 without leaking ownership."""
 
-    return HTTPException(
+    return AppException(
+        error_code="cross_tenant_access_denied",
+        message="Integration instance belongs to a different tenant.",
         status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error_code": "cross_tenant_access_denied",
-            "message": "Integration instance belongs to a different tenant.",
+        details={
             "instance_id": exc.instance_id,
         },
     )
 
 
-def _translate_validation_error(exc: Exception) -> HTTPException:
+def _translate_validation_error(exc: Exception) -> AppException:
     """Map Pydantic and value errors to HTTP 422 with structured detail."""
 
     message = str(exc)
@@ -445,21 +443,22 @@ def _translate_validation_error(exc: Exception) -> HTTPException:
             details.append(clean)
     else:
         details = message
-    return HTTPException(
+    return AppException(
+        error_code="validation_error",
+        message=message,
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail={
-            "error_code": "validation_error",
-            "message": message,
+        details={
             "errors": details,
         },
     )
 
 
-def _not_found(instance_id: str) -> HTTPException:
-    return HTTPException(
+def _not_found(instance_id: str) -> AppException:
+    return AppException(
+        error_code="integration_instance_not_found",
+        message="Integration instance not found.",
         status_code=status.HTTP_404_NOT_FOUND,
-        detail={
-            "error_code": "integration_instance_not_found",
+        details={
             "instance_id": instance_id,
         },
     )
@@ -560,6 +559,7 @@ async def list_integration_instances(
 
 @router.post(
     "",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
     status_code=status.HTTP_201_CREATED,
 )
@@ -594,12 +594,10 @@ async def create_integration_instance(
                 provider_name=body.provider_name,
             )
         except PermissionError as exc:
-            raise HTTPException(
+            raise AppException(
+                error_code="credentials_cross_tenant",
+                message=str(exc),
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "error_code": "credentials_cross_tenant",
-                    "message": str(exc),
-                },
             )
         except (ValueError, TypeError) as exc:
             raise _translate_validation_error(exc)
@@ -612,11 +610,27 @@ async def create_integration_instance(
         payload["credentials_ref"] = credentials_ref
 
     try:
-        instance = await repo.create(tenant.tenant_id, payload)
-    except CrossTenantAccessError as exc:
-        raise _translate_cross_tenant_error(exc)
-    except (ValidationError, ValueError, TypeError) as exc:
-        raise _translate_validation_error(exc)
+        try:
+            instance = await repo.create(tenant.tenant_id, payload)
+        except CrossTenantAccessError as exc:
+            raise _translate_cross_tenant_error(exc)
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise _translate_validation_error(exc)
+    except Exception:
+        # No instance points at the credential just stored (a taken id's
+        # 409, or any other refusal); each put mints a new ref, so delete it
+        # rather than leave an orphaned secret, as intake channels do.
+        if credentials_ref is not None:
+            try:
+                await vault.delete(tenant.tenant_id, credentials_ref)
+            except Exception:  # noqa: BLE001 — best effort; the error stands
+                logger.warning(
+                    "integrations.create: could not delete the credential "
+                    "stored for a refused create (tenant=%s provider=%s)",
+                    tenant.tenant_id,
+                    body.provider_name,
+                )
+        raise
 
     logger.info(
         "integrations.create: tenant=%s instance=%s provider=%s",
@@ -636,6 +650,7 @@ async def create_integration_instance(
 
 @router.patch(
     "/{instance_id}",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
 )
 async def update_integration_instance(
@@ -682,12 +697,10 @@ async def update_integration_instance(
                     provider_name=existing.provider_name,
                 )
         except PermissionError as exc:
-            raise HTTPException(
+            raise AppException(
+                error_code="credentials_cross_tenant",
+                message=str(exc),
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "error_code": "credentials_cross_tenant",
-                    "message": str(exc),
-                },
             )
         except (ValueError, TypeError) as exc:
             raise _translate_validation_error(exc)
@@ -740,6 +753,7 @@ async def update_integration_instance(
 
 @router.delete(
     "/{instance_id}",
+    dependencies=[Depends(integration_admin_dependency)],
     status_code=status.HTTP_204_NO_CONTENT,
     response_model=None,
 )
@@ -788,6 +802,7 @@ async def delete_integration_instance(
 
 @router.post(
     "/{instance_id}/enable",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
 )
 async def enable_integration_instance(
@@ -812,12 +827,10 @@ async def enable_integration_instance(
         except RuntimeError:
             # Scheduler is wired but not started. Bubble a 503 so
             # callers can retry once bootstrap completes.
-            raise HTTPException(
+            raise AppException(
+                error_code="scheduler_not_started",
+                message="Integration scheduler has not started yet.",
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "error_code": "scheduler_not_started",
-                    "message": "Integration scheduler has not started yet.",
-                },
             )
     return IntegrationInstanceView.from_model(updated)
 
@@ -829,6 +842,7 @@ async def enable_integration_instance(
 
 @router.post(
     "/{instance_id}/disable",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=IntegrationInstanceView,
 )
 async def disable_integration_instance(
@@ -887,6 +901,7 @@ async def _flip_enabled(
 
 @router.post(
     "/{instance_id}/sync-now",
+    dependencies=[Depends(integration_admin_dependency)],
     response_model=SyncRunView,
 )
 async def sync_integration_now(
@@ -912,11 +927,11 @@ async def sync_integration_now(
     except ValueError as exc:
         # sync_now raises ValueError for disabled instances per its
         # contract. Map to HTTP 400.
-        raise HTTPException(
+        raise AppException(
+            error_code="instance_disabled",
+            message=str(exc),
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "instance_disabled",
-                "message": str(exc),
+            details={
                 "instance_id": instance_id,
             },
         )
@@ -993,12 +1008,10 @@ async def list_sync_runs(
             instance_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="sync_runs_query_failed",
+            message="Unable to query integration_sync_runs index.",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "sync_runs_query_failed",
-                "message": "Unable to query integration_sync_runs index.",
-            },
         )
 
     sources = _extract_sources(resp)

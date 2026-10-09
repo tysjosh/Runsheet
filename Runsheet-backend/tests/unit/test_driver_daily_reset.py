@@ -16,15 +16,33 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from datetime import timedelta, timezone
+
 from fuel.services.driver_daily_reset import (
     DEFAULT_TIMEZONE,
+    LEDGER_KEY_PREFIX,
     METRIC_RESET_ERRORS,
     RESET_CHECK_INTERVAL_SECONDS,
     DriverDailyResetJob,
     _get_tenant_timezone,
-    _is_midnight_window,
+    _needs_reset,
     run_daily_reset_cycle,
 )
+from persistence.periodic_runs import InMemoryRunLedger, set_run_ledger
+
+
+@pytest.fixture(autouse=True)
+def ledger():
+    """A shared ledger standing in for ``periodic_job_runs``."""
+    led = InMemoryRunLedger()
+    set_run_ledger(led)
+    yield led
+    set_run_ledger(None)
+
+
+#: 2026-10-08 12:00 America/Chicago (CDT, UTC-5).
+NOON_CHICAGO = datetime(2026, 10, 8, 17, 0, tzinfo=timezone.utc)
+YESTERDAY_CHICAGO = NOON_CHICAGO - timedelta(days=1)
 
 
 # ---------------------------------------------------------------------------
@@ -96,26 +114,23 @@ class TestGetTenantTimezone:
 # ---------------------------------------------------------------------------
 
 
-class TestIsMidnightWindow:
-    def test_new_day_triggers_reset(self):
-        # If last_reset_date is yesterday, should trigger
-        assert _is_midnight_window("America/Chicago", "2020-01-01") is True
+class TestNeedsReset:
+    def test_new_local_day_triggers_reset(self):
+        assert _needs_reset("America/Chicago", YESTERDAY_CHICAGO, NOON_CHICAGO) is True
 
-    def test_same_day_does_not_trigger(self):
-        # Get today's date in America/Chicago
-        from zoneinfo import ZoneInfo
+    def test_same_local_day_does_not_trigger(self):
+        earlier = NOON_CHICAGO - timedelta(hours=6)
+        assert _needs_reset("America/Chicago", earlier, NOON_CHICAGO) is False
 
-        tz = ZoneInfo("America/Chicago")
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-        assert _is_midnight_window("America/Chicago", today) is False
-
-    def test_none_last_reset_triggers(self):
-        assert _is_midnight_window("America/Chicago", None) is True
+    def test_utc_midnight_is_not_chicago_midnight(self):
+        """At 03:00Z the UTC date has changed but the Chicago date has not."""
+        last = datetime(2026, 10, 8, 23, 0, tzinfo=timezone.utc)  # 18:00 CDT
+        now = datetime(2026, 10, 9, 3, 0, tzinfo=timezone.utc)  # 22:00 CDT
+        assert _needs_reset("America/Chicago", last, now) is False
+        assert _needs_reset("UTC", last, now) is True
 
     def test_invalid_timezone_falls_back_to_default(self):
-        # Should not raise, falls back to America/Chicago
-        result = _is_midnight_window("Invalid/Timezone", "2020-01-01")
-        assert result is True
+        assert _needs_reset("Invalid/Timezone", YESTERDAY_CHICAGO, NOON_CHICAGO) is True
 
 
 # ---------------------------------------------------------------------------
@@ -203,48 +218,107 @@ class TestDriverDailyResetJob:
         assert after == before + 1.0
 
     @pytest.mark.asyncio
-    async def test_run_cycle_resets_tenants_past_midnight(self, es_service):
-        """run_cycle resets tenants that have crossed midnight."""
+    async def test_first_ever_cycle_seeds_and_does_not_reset(
+        self, es_service, ledger
+    ):
+        """A boot is not midnight (F6): staging wiped counters on every deploy."""
         driver_repo = FakeDriverRepository()
         job = DriverDailyResetJob(
             es_service=es_service,
             driver_repository=driver_repo,
             tenant_settings_service=None,
         )
-        # Force all tenants to appear as needing reset (no last_reset_date)
-        await job.run_cycle()
-        # Both tenants should have been reset
-        assert "tenant-a" in driver_repo.reset_calls
-        assert "tenant-b" in driver_repo.reset_calls
+        await job.run_cycle(now=NOON_CHICAGO)
+        assert driver_repo.reset_calls == []
+        assert ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] == NOON_CHICAGO
+        assert ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-b"] == NOON_CHICAGO
 
     @pytest.mark.asyncio
-    async def test_run_cycle_skips_already_reset_tenants(self, es_service):
-        """run_cycle does not double-reset a tenant on the same day."""
-        from zoneinfo import ZoneInfo
-
+    async def test_record_from_yesterday_resets_once(self, es_service, ledger):
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] = YESTERDAY_CHICAGO
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-b"] = YESTERDAY_CHICAGO
         driver_repo = FakeDriverRepository()
         job = DriverDailyResetJob(
             es_service=es_service,
             driver_repository=driver_repo,
             tenant_settings_service=None,
         )
+        await job.run_cycle(now=NOON_CHICAGO)
+        assert sorted(driver_repo.reset_calls) == ["tenant-a", "tenant-b"]
+        assert ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] == NOON_CHICAGO
 
-        # Simulate that tenant-a was already reset today
-        tz = ZoneInfo(DEFAULT_TIMEZONE)
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-        job._last_reset_dates["tenant-a"] = today
+        await job.run_cycle(now=NOON_CHICAGO + timedelta(minutes=1))
+        assert sorted(driver_repo.reset_calls) == ["tenant-a", "tenant-b"]
 
-        await job.run_cycle()
+    @pytest.mark.asyncio
+    async def test_restart_with_todays_record_does_not_reset(
+        self, es_service, ledger
+    ):
+        """A new job instance (deploy) sharing the ledger skips today's reset."""
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] = YESTERDAY_CHICAGO
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-b"] = YESTERDAY_CHICAGO
+        first = FakeDriverRepository()
+        await DriverDailyResetJob(
+            es_service=es_service, driver_repository=first
+        ).run_cycle(now=NOON_CHICAGO)
+        assert len(first.reset_calls) == 2
 
-        # Only tenant-b should be reset
-        assert "tenant-a" not in driver_repo.reset_calls
-        assert "tenant-b" in driver_repo.reset_calls
+        after_restart = FakeDriverRepository()
+        await DriverDailyResetJob(
+            es_service=es_service, driver_repository=after_restart
+        ).run_cycle(now=NOON_CHICAGO + timedelta(hours=2))
+        assert after_restart.reset_calls == []
+
+    @pytest.mark.asyncio
+    async def test_reset_waits_for_tenant_local_midnight(self, es_service, ledger):
+        """03:00Z on 10-09 is still 10-08 in Chicago: no reset until 05:00Z."""
+        seeded = datetime(2026, 10, 8, 23, 0, tzinfo=timezone.utc)
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] = seeded
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-b"] = seeded
+        driver_repo = FakeDriverRepository()
+        job = DriverDailyResetJob(es_service=es_service, driver_repository=driver_repo)
+
+        await job.run_cycle(now=datetime(2026, 10, 9, 3, 0, tzinfo=timezone.utc))
+        assert driver_repo.reset_calls == []
+        await job.run_cycle(now=datetime(2026, 10, 9, 5, 1, tzinfo=timezone.utc))
+        assert sorted(driver_repo.reset_calls) == ["tenant-a", "tenant-b"]
+
+    @pytest.mark.asyncio
+    async def test_no_ledger_falls_back_to_memory_with_seed_rule(self, es_service):
+        set_run_ledger(None)
+        with patch("persistence.database.is_persistence_enabled", return_value=False):
+            driver_repo = FakeDriverRepository()
+            job = DriverDailyResetJob(
+                es_service=es_service, driver_repository=driver_repo
+            )
+            await job.run_cycle(now=NOON_CHICAGO)
+            assert driver_repo.reset_calls == []
+            await job.run_cycle(now=NOON_CHICAGO + timedelta(days=1))
+            assert sorted(driver_repo.reset_calls) == ["tenant-a", "tenant-b"]
+        set_run_ledger(None)
+
+    @pytest.mark.asyncio
+    async def test_ledger_read_failure_skips_instead_of_seeding(self, es_service):
+        class BrokenLedger(InMemoryRunLedger):
+            async def last_run(self, job):
+                raise RuntimeError("db down")
+
+        broken = BrokenLedger()
+        set_run_ledger(broken)
+        driver_repo = FakeDriverRepository()
+        job = DriverDailyResetJob(es_service=es_service, driver_repository=driver_repo)
+        await job.run_cycle(now=NOON_CHICAGO)
+        assert driver_repo.reset_calls == []
+        assert broken.runs == {}, "seeded over a record it could not read"
 
     @pytest.mark.asyncio
     async def test_run_cycle_continues_on_single_tenant_failure(
-        self, es_service
+        self, es_service, ledger
     ):
-        """If one tenant fails, the other still gets reset."""
+        """If one tenant fails, the other still gets reset; the failed one
+        is retried on the next cycle."""
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] = YESTERDAY_CHICAGO
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-b"] = YESTERDAY_CHICAGO
         driver_repo = FakeDriverRepository(fail_for={"tenant-a"})
         job = DriverDailyResetJob(
             es_service=es_service,
@@ -252,15 +326,18 @@ class TestDriverDailyResetJob:
             tenant_settings_service=None,
         )
 
-        await job.run_cycle()
+        await job.run_cycle(now=NOON_CHICAGO)
 
-        # tenant-a failed but tenant-b should still be reset
         assert "tenant-a" in driver_repo.reset_calls
         assert "tenant-b" in driver_repo.reset_calls
+        assert ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-a"] == YESTERDAY_CHICAGO
 
     @pytest.mark.asyncio
-    async def test_tenant_timezone_used_for_midnight_check(self):
-        """Each tenant's configured timezone is used for the midnight check."""
+    async def test_tenant_timezone_used_for_midnight_check(self, ledger):
+        """Each tenant's configured timezone is used for the midnight check.
+
+        At 05:30Z on 10-09 it is 01:30 in New York (new day) but 22:30 on
+        10-08 in Los Angeles (same day as the 10-08 18:00Z record)."""
 
         class FakeTenantSettingsService:
             async def get(self, tenant_id):
@@ -268,6 +345,9 @@ class TestDriverDailyResetJob:
                     return FakeTenantSettings(timezone="US/Eastern")
                 return FakeTenantSettings(timezone="US/Pacific")
 
+        last = datetime(2026, 10, 8, 18, 0, tzinfo=timezone.utc)
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-east"] = last
+        ledger.runs[f"{LEDGER_KEY_PREFIX}tenant-pacific"] = last
         es = FakeESService(tenant_ids=["tenant-east", "tenant-pacific"])
         driver_repo = FakeDriverRepository()
         job = DriverDailyResetJob(
@@ -276,10 +356,8 @@ class TestDriverDailyResetJob:
             tenant_settings_service=FakeTenantSettingsService(),
         )
 
-        # Both should be reset (no prior reset date)
-        await job.run_cycle()
-        assert "tenant-east" in driver_repo.reset_calls
-        assert "tenant-pacific" in driver_repo.reset_calls
+        await job.run_cycle(now=datetime(2026, 10, 9, 5, 30, tzinfo=timezone.utc))
+        assert driver_repo.reset_calls == ["tenant-east"]
 
 
 # ---------------------------------------------------------------------------

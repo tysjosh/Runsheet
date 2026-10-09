@@ -1,8 +1,28 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
-import { type Column, EntityLink, Table } from "@/components/ui";
+/**
+ * Settings → Company → Exemptions (UI revamp task 3.5): type in the Filters
+ * popover, a DataTable with an expiry StatusBadge, and "Add exemption" as an
+ * md FormDialog (design.md §5).
+ */
+import { Plus, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Button,
+  type Column,
+  DataTable,
+  EntityLink,
+  Field,
+  FilterPopover,
+  FormDialog,
+  IconButton,
+  INPUT_CLASS,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
+} from "@/components/ui";
+import { calendarDate } from "../../lib/format";
 import {
   type CreateTaxExemptionPayload,
   createTaxExemption,
@@ -10,58 +30,39 @@ import {
   type TaxExemption,
 } from "../../services/complianceApi";
 import CustomerPicker from "../ops/CustomerPicker";
+import { PageTitle } from "../ui/PageHeader";
 
-// ─── Sub-view types ──────────────────────────────────────────────────────────
-
-type ViewMode = "list" | "add";
-
-// ─── Expiry status helpers ───────────────────────────────────────────────────
+// ─── Expiry status ───────────────────────────────────────────────────────────
 
 type ExpiryStatus = "active" | "expiring_soon" | "expired";
 
-function getExpiryStatus(expiryDate: string): ExpiryStatus {
-  const now = new Date();
-  const expiry = new Date(expiryDate);
+export function getExpiryStatus(
+  expiryDate: string,
+  now: Date = new Date(),
+): ExpiryStatus {
+  const expiry = new Date(
+    /^\d{4}-\d{2}-\d{2}$/.test(expiryDate)
+      ? `${expiryDate}T23:59:59Z`
+      : expiryDate,
+  );
   const diffMs = expiry.getTime() - now.getTime();
-  const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
-
-  if (diffDays < 0) return "expired";
+  if (diffMs < 0) return "expired";
+  const diffDays = Math.ceil(diffMs / 86_400_000);
   if (diffDays <= 30) return "expiring_soon";
   return "active";
 }
 
-function expiryStatusBadge(status: ExpiryStatus): string {
-  switch (status) {
-    case "active":
-      return "bg-success-light text-success-dark";
-    case "expiring_soon":
-      return "bg-warning-light text-warning-dark";
-    case "expired":
-      return "bg-error-light text-error-dark";
-    default:
-      return "bg-gray-100 text-gray-800";
-  }
-}
-
-function expiryStatusLabel(status: ExpiryStatus): string {
-  switch (status) {
-    case "active":
-      return "Active";
-    case "expiring_soon":
-      return "Expiring Soon";
-    case "expired":
-      return "Expired";
-    default:
-      return "Unknown";
-  }
-}
+const EXPIRY_BADGE = {
+  active: { status: "ok", label: "Active" },
+  expiring_soon: { status: "warning", label: "Expiring Soon" },
+  expired: { status: "critical", label: "Expired" },
+} as const;
 
 function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
+  return dateStr ? calendarDate(dateStr) : "—";
 }
 
-// ─── Exemption type options ──────────────────────────────────────────────────
+// ─── Exemption types ─────────────────────────────────────────────────────────
 
 const EXEMPTION_TYPES = [
   { value: "dyed_diesel", label: "Dyed Diesel (IRS 637M)" },
@@ -72,51 +73,46 @@ const EXEMPTION_TYPES = [
 ];
 
 function getExemptionTypeLabel(type: string): string {
-  const found = EXEMPTION_TYPES.find((t) => t.value === type);
-  return found ? found.label : type;
+  return EXEMPTION_TYPES.find((t) => t.value === type)?.label ?? type;
 }
-
-// ─── Table columns ───────────────────────────────────────────────────────────
 
 const exemptionColumns: Column<TaxExemption>[] = [
   {
     key: "customer_id",
-    label: "Customer ID",
+    header: "Customer",
+    width: 200,
     // The exemption's subject is its customer, navigable to the Commerce
     // module (Req 11.3, 13.1).
-    render: (e) => (
+    cell: (e) => (
       <EntityLink type="customer" id={e.customer_id} className="font-medium" />
     ),
   },
   {
     key: "exemption_type",
-    label: "Exemption Type",
-    render: (e) => getExemptionTypeLabel(e.exemption_type),
+    header: "Type",
+    truncate: true,
+    cell: (e) => getExemptionTypeLabel(e.exemption_type),
   },
   {
     key: "certificate_number",
-    label: "Certificate Number",
-    render: (e) => (
-      <span className="font-mono text-sm">{e.certificate_number}</span>
-    ),
+    header: "Certificate",
+    width: 180,
+    className: "font-mono text-xs",
+    cell: (e) => e.certificate_number,
   },
   {
     key: "expiry_date",
-    label: "Expiry Date",
-    render: (e) => formatDate(e.expiry_date),
+    header: "Expires",
+    width: 160,
+    cell: (e) => formatDate(e.expiry_date),
   },
   {
     key: "status",
-    label: "Status",
-    render: (e) => {
-      const status = getExpiryStatus(e.expiry_date);
-      return (
-        <span
-          className={`inline-block px-2 py-1 rounded text-xs font-medium ${expiryStatusBadge(status)}`}
-        >
-          {expiryStatusLabel(status)}
-        </span>
-      );
+    header: "Status",
+    width: 150,
+    cell: (e) => {
+      const b = EXPIRY_BADGE[getExpiryStatus(e.expiry_date)];
+      return <StatusBadge status={b.status} label={b.label} />;
     },
   },
 ];
@@ -124,15 +120,14 @@ const exemptionColumns: Column<TaxExemption>[] = [
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function ExemptionsPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [exemptions, setExemptions] = useState<TaxExemption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [typeFilter, setTypeFilter] = useState<string>("");
-
-  // ─── Fetch exemptions list ───────────────────────────────────────────────
+  const [reload, setReload] = useState(0);
+  const [adding, setAdding] = useState(false);
 
   const fetchExemptions = useCallback(async () => {
     setLoading(true);
@@ -143,7 +138,6 @@ export default function ExemptionsPage() {
         size: 20,
       };
       if (typeFilter) filters.exemption_type = typeFilter;
-
       const response = await getTaxExemptions(filters);
       setExemptions(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
@@ -154,311 +148,214 @@ export default function ExemptionsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, typeFilter]);
+    // `reload` refetches after a create.
+  }, [page, typeFilter, reload]);
 
   useEffect(() => {
-    if (viewMode === "list") {
-      fetchExemptions();
-    }
-  }, [fetchExemptions, viewMode]);
+    fetchExemptions();
+  }, [fetchExemptions]);
 
-  // ─── Render: Add Exemption Form ─────────────────────────────────────────
-
-  function renderForm() {
-    return (
-      <ExemptionForm
-        onSubmit={async (data) => {
-          setLoading(true);
-          setError(null);
-          try {
-            await createTaxExemption(data);
-            setViewMode("list");
-          } catch (err) {
-            setError(
-              err instanceof Error ? err.message : "Failed to create exemption",
-            );
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onCancel={() => setViewMode("list")}
-        loading={loading}
-      />
-    );
-  }
-
-  // ─── Render: Listing View ────────────────────────────────────────────────
-
-  function renderList() {
-    return (
-      <>
-        {/* Filters */}
-        <div className="flex gap-4 mb-6 items-end">
-          <div>
-            <label
-              htmlFor="exemption-type-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Exemption Type
-            </label>
-            <select
-              id="exemption-type-filter"
-              value={typeFilter}
-              onChange={(e) => {
-                setTypeFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2"
-            >
-              <option value="">All Types</option>
-              {EXEMPTION_TYPES.map((type) => (
-                <option key={type.value} value={type.value}>
-                  {type.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Loading state */}
-        {loading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading exemptions...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Exemptions table */}
-        {!loading && !error && (
-          <>
-            <Table<TaxExemption>
-              ariaLabel="Tax exemption certificates"
-              columns={exemptionColumns}
-              data={exemptions}
-              getRowId={(e) => e.exemption_id}
-              emptyState={
-                <span className="text-gray-500">
-                  No exemption certificates found.
-                </span>
-              }
-            />
-
-            {/* Pagination */}
-            <nav
-              aria-label="Pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
-          </>
-        )}
-      </>
-    );
-  }
-
-  // ─── Main Render ─────────────────────────────────────────────────────────
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setAdding(true)}
+      >
+        Add Exemption
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
 
   return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <h1 className="text-2xl font-bold">Tax Exemption Certificates</h1>
-            <p className="text-gray-600 mt-1">
-              Manage customer tax exemption certificates for dyed diesel, farm,
-              and road-use exemptions.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {viewMode === "add" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
-                Back to List
-              </button>
-            )}
-            {viewMode === "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("add")}
-                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
-              >
-                Add Exemption
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Tax Exemption Certificates
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
         </div>
       )}
+      <Toolbar
+        label="Exemptions"
+        filters={
+          <FilterPopover
+            count={typeFilter ? 1 : 0}
+            label="Exemption filters"
+            onClear={() => {
+              setTypeFilter("");
+              setPage(1);
+            }}
+          >
+            <Field label="Exemption type" id="exemption-type-filter">
+              <Select
+                id="exemption-type-filter"
+                value={typeFilter}
+                onChange={(v) => {
+                  setTypeFilter(v);
+                  setPage(1);
+                }}
+                placeholder="All types"
+                options={EXEMPTION_TYPES}
+              />
+            </Field>
+          </FilterPopover>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<TaxExemption>
+          ariaLabel="Tax exemption certificates"
+          columns={exemptionColumns}
+          data={loading || error ? [] : exemptions}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchExemptions } : null}
+          getRowId={(e) => e.exemption_id}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <span className="text-text-muted">
+              No exemption certificates found.
+            </span>
+          }
+        />
+      </div>
 
-      {/* View content */}
-      {viewMode === "list" && renderList()}
-      {viewMode === "add" && renderForm()}
+      {adding && (
+        <ExemptionDialog
+          onClose={() => setAdding(false)}
+          onSaved={() => setReload((n) => n + 1)}
+        />
+      )}
     </div>
   );
 }
 
-// ─── Exemption Form Sub-Component ────────────────────────────────────────────
+// ─── Add exemption dialog ────────────────────────────────────────────────────
 
-interface ExemptionFormProps {
-  onSubmit: (data: CreateTaxExemptionPayload) => Promise<void>;
-  onCancel: () => void;
-  loading: boolean;
+type ExemptionValues = {
+  customer_id: string;
+  exemption_type: string;
+  certificate_number: string;
+  expiry_date: string;
+};
+
+export function validateExemption(v: ExemptionValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.customer_id) errors.customer_id = "Pick a customer.";
+  if (!v.exemption_type) errors.exemption_type = "Pick a type.";
+  if (!v.certificate_number.trim())
+    errors.certificate_number = "Enter the certificate number.";
+  if (!v.expiry_date) errors.expiry_date = "Enter the expiry date.";
+  return errors;
 }
 
-function ExemptionForm({ onSubmit, onCancel, loading }: ExemptionFormProps) {
-  const [customerId, setCustomerId] = useState("");
-  const [exemptionType, setExemptionType] = useState("");
-  const [certificateNumber, setCertificateNumber] = useState("");
-  const [expiryDate, setExpiryDate] = useState("");
-  // The customer picker isn't a native input, so enforce "required" here.
-  const [customerError, setCustomerError] = useState<string | null>(null);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!customerId) {
-      setCustomerError("Customer ID is required.");
-      return;
-    }
+function ExemptionDialog({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const submit = async (v: ExemptionValues) => {
     const data: CreateTaxExemptionPayload = {
-      customer_id: customerId,
-      exemption_type: exemptionType,
-      certificate_number: certificateNumber,
-      expiry_date: expiryDate,
+      customer_id: v.customer_id,
+      exemption_type: v.exemption_type,
+      certificate_number: v.certificate_number.trim(),
+      expiry_date: v.expiry_date,
     };
-    await onSubmit(data);
+    await createTaxExemption(data);
   };
-
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+    <FormDialog<ExemptionValues, void>
+      open
+      size="md"
+      title="Add exemption certificate"
+      submitLabel="Add Exemption"
+      successMessage="Exemption added"
+      initialValues={{
+        customer_id: "",
+        exemption_type: "",
+        certificate_number: "",
+        expiry_date: "",
+      }}
+      validate={validateExemption}
+      onSubmit={submit}
+      onSaved={onSaved}
+      onClose={onClose}
     >
-      <h2 className="text-lg font-bold mb-4">Add New Exemption Certificate</h2>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <label
-            htmlFor="customer-id"
-            className="block text-sm font-medium mb-1"
-          >
-            Customer ID
-          </label>
-          <CustomerPicker
-            id="customer-id"
-            aria-label="Customer ID"
-            value={customerId || null}
-            onChange={(value) => {
-              setCustomerId(value);
-              setCustomerError(null);
-            }}
-          />
-          {customerError && (
-            <p className="text-xs text-error mt-1">{customerError}</p>
-          )}
-        </div>
-        <div>
-          <label
-            htmlFor="exemption-type"
-            className="block text-sm font-medium mb-1"
-          >
-            Exemption Type
-          </label>
-          <select
-            id="exemption-type"
+      {({ values, set, errors }) => (
+        <>
+          <Field label="Customer" required span={1} error={errors.customer_id}>
+            <CustomerPicker
+              id="customer-id"
+              aria-label="Customer ID"
+              value={values.customer_id || null}
+              onChange={(value) => set("customer_id", value)}
+            />
+          </Field>
+          <Field
+            label="Exemption type"
             required
-            value={exemptionType}
-            onChange={(e) => setExemptionType(e.target.value)}
-            className="w-full border rounded px-3 py-2"
+            span={1}
+            error={errors.exemption_type}
           >
-            <option value="">Select type...</option>
-            {EXEMPTION_TYPES.map((type) => (
-              <option key={type.value} value={type.value}>
-                {type.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div>
-          <label
-            htmlFor="certificate-number"
-            className="block text-sm font-medium mb-1"
-          >
-            Certificate Number
-          </label>
-          <input
-            id="certificate-number"
-            type="text"
+            <Select
+              id="exemption-type"
+              value={values.exemption_type}
+              onChange={(v) => set("exemption_type", v)}
+              placeholder="Select type…"
+              options={EXEMPTION_TYPES}
+            />
+          </Field>
+          <Field
+            label="Certificate number"
             required
-            value={certificateNumber}
-            onChange={(e) => setCertificateNumber(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-            placeholder="e.g. 637M-12345"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="expiry-date"
-            className="block text-sm font-medium mb-1"
+            span={1}
+            error={errors.certificate_number}
           >
-            Expiry Date
-          </label>
-          <input
-            id="expiry-date"
-            type="date"
+            <input
+              id="certificate-number"
+              type="text"
+              value={values.certificate_number}
+              onChange={(e) => set("certificate_number", e.target.value)}
+              className={INPUT_CLASS}
+              placeholder="e.g. 637M-12345"
+            />
+          </Field>
+          <Field
+            label="Expiry date"
             required
-            value={expiryDate}
-            onChange={(e) => setExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-      </div>
-
-      <div className="flex gap-3 mt-6">
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
-        >
-          {loading ? "Saving..." : "Add Exemption"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 border rounded hover:bg-gray-50"
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
+            span={1}
+            error={errors.expiry_date}
+          >
+            <input
+              id="expiry-date"
+              type="date"
+              value={values.expiry_date}
+              onChange={(e) => set("expiry_date", e.target.value)}
+              className={INPUT_CLASS}
+            />
+          </Field>
+        </>
+      )}
+    </FormDialog>
   );
 }

@@ -37,7 +37,7 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
+from fastapi import APIRouter, Depends, Query, Request, UploadFile, File
 from pydantic import BaseModel, ConfigDict, Field
 
 from compliance.api._authz import compliance_ops_dependency
@@ -45,7 +45,9 @@ from compliance.services.compliance_es_mappings import TERMINAL_BOLS_INDEX
 from compliance.services.terminal_bol_ingestion_service import (
     TerminalBOLIngestionService,
 )
+from errors.codes import ErrorCode
 from errors.exceptions import AppException
+from services.keyset_pagination import next_cursor_from_hits, search_after_for_cursor
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -225,12 +227,10 @@ async def ingest_edi(
     edi_payload = await request.body()
 
     if not edi_payload:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_EMPTY_PAYLOAD,
+            "EDI payload must not be empty.",
             status_code=400,
-            detail={
-                "error_code": "terminal_bols.empty_payload",
-                "message": "EDI payload must not be empty.",
-            },
         )
 
     try:
@@ -238,12 +238,10 @@ async def ingest_edi(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_EDI,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_edi",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -251,12 +249,10 @@ async def ingest_edi(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.ingest_edi_failed",
+            message="Failed to ingest EDI payload.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.ingest_edi_failed",
-                "message": "Failed to ingest EDI payload.",
-            },
         )
 
     logger.info(
@@ -302,12 +298,10 @@ async def upload_manual_bol(
     file_bytes = await file.read()
 
     if not file_bytes:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_EMPTY_FILE,
+            "Uploaded file must not be empty.",
             status_code=400,
-            detail={
-                "error_code": "terminal_bols.empty_file",
-                "message": "Uploaded file must not be empty.",
-            },
         )
 
     try:
@@ -315,12 +309,10 @@ async def upload_manual_bol(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_UPLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_upload",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -328,12 +320,10 @@ async def upload_manual_bol(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.upload_failed",
+            message="Failed to process manual BOL upload.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.upload_failed",
-                "message": "Failed to process manual BOL upload.",
-            },
         )
 
     logger.info(
@@ -391,12 +381,10 @@ async def confirm_manual_bol(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_CONFIRM,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_confirm",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -405,12 +393,10 @@ async def confirm_manual_bol(
             bol_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.confirm_failed",
+            message="Failed to confirm manual BOL.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.confirm_failed",
-                "message": "Failed to confirm manual BOL.",
-            },
         )
 
     logger.info(
@@ -454,12 +440,10 @@ async def link_bol_to_load_plan(
     except AppException:
         raise
     except ValueError as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.TERMINAL_BOLS_INVALID_LINK,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "terminal_bols.invalid_link",
-                "message": str(exc),
-            },
         )
     except Exception as exc:
         logger.error(
@@ -468,12 +452,10 @@ async def link_bol_to_load_plan(
             bol_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.link_failed",
+            message="Failed to link BOL to load plan.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.link_failed",
-                "message": "Failed to link BOL to load plan.",
-            },
         )
 
     logger.info(
@@ -525,7 +507,7 @@ async def list_terminal_bols(
         default=None,
         description=(
             "Cursor for keyset pagination — the bol_id of the last "
-            "item on the previous page."
+            "item on the previous page (next_cursor)."
         ),
     ),
     limit: int = Query(
@@ -553,18 +535,25 @@ async def list_terminal_bols(
     if load_number is not None:
         filters.append({"term": {"load_number": load_number.strip()}})
 
-    # Keyset pagination: if cursor is provided, only return BOLs with
-    # bol_id lexicographically after the cursor.
-    if cursor is not None:
-        filters.append({"range": {"bol_id": {"gt": cursor.strip()}}})
-
+    # Keyset pagination on (created_at desc, bol_id asc): the cursor is the
+    # bol_id of the last row on the previous page and resolves to that row's
+    # sort values. Paging on ``bol_id > cursor`` while sorting by created_at
+    # skipped and repeated rows (finding C13). An unknown cursor is a 400.
+    sort: List[Dict[str, Any]] = [
+        {"created_at": {"order": "desc"}},
+        {"bol_id": {"order": "asc"}},
+    ]
     base_query: Dict[str, Any] = {
         "query": (
             {"bool": {"filter": filters}} if filters else {"match_all": {}}
         ),
-        "sort": [{"created_at": {"order": "desc"}}],
+        "sort": sort,
         "size": limit,
     }
+    if cursor is not None and cursor.strip():
+        base_query["search_after"] = await search_after_for_cursor(
+            es, TERMINAL_BOLS_INDEX, cursor.strip(), sort
+        )
     query = inject_tenant_filter(base_query, tenant.tenant_id)
 
     try:
@@ -577,12 +566,10 @@ async def list_terminal_bols(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
+        raise AppException(
+            error_code="terminal_bols.list_failed",
+            message="Failed to list terminal BOLs.",
             status_code=500,
-            detail={
-                "error_code": "terminal_bols.list_failed",
-                "message": "Failed to list terminal BOLs.",
-            },
         )
 
     hits = ((response or {}).get("hits") or {}).get("hits") or []
@@ -593,10 +580,7 @@ async def list_terminal_bols(
             continue
         items.append(source)
 
-    # Determine next_cursor from the last item's bol_id
-    next_cursor: Optional[str] = None
-    if items and len(items) == limit:
-        next_cursor = items[-1].get("bol_id")
+    next_cursor = next_cursor_from_hits(hits, limit, id_field="bol_id")
 
     return {
         "data": items,

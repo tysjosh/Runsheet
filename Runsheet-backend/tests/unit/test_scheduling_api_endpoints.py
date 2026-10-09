@@ -342,6 +342,24 @@ class TestInputValidation:
 
         assert resp.status_code == 422
 
+    def test_post_job_non_iso_scheduled_time_returns_422(self):
+        """POST /scheduling/jobs with scheduled_time='tomorrow' returns 422 (B12)."""
+        es = _make_es_mock()
+        _, client = _build_app(es)
+        with _SETTINGS_PATCH:
+            resp = client.post(
+                "/api/scheduling/jobs",
+                headers=_auth_headers(),
+                json={
+                    "job_type": "passenger_transport",
+                    "origin": "Port Harcourt",
+                    "destination": "Lagos",
+                    "scheduled_time": "tomorrow",
+                },
+            )
+        assert resp.status_code == 422
+        es.index_document.assert_not_called()
+
     def test_post_job_invalid_job_type_returns_422(self):
         """POST /scheduling/jobs with invalid job_type returns 422."""
         es = _make_es_mock()
@@ -414,6 +432,46 @@ class TestInputValidation:
 # Test: Pagination
 # Validates: Requirements 5.1, 5.6
 # ---------------------------------------------------------------------------
+
+
+class TestCargoItemStatusIdMatch:
+    """OI-32: PATCH .../cargo/{item_id}/status refuses a different body item_id."""
+
+    _URL = "/api/scheduling/jobs/JOB_1/cargo/ITEM_1/status"
+
+    def test_mismatched_body_item_id_is_422(self):
+        es = _make_es_mock()
+        _, client = _build_app(es)
+        update = AsyncMock()
+
+        with patch.object(CargoService, "update_cargo_item_status", update):
+            resp = client.patch(
+                self._URL,
+                headers=_auth_headers(),
+                json={"item_id": "ITEM_2", "item_status": "loaded"},
+            )
+
+        assert resp.status_code == 422, resp.text
+        body = resp.json()
+        assert body["error_code"] == "VALIDATION_ERROR"
+        assert body["details"] == {"item_id": "ITEM_1"}
+        update.assert_not_awaited()
+
+    def test_matching_body_item_id_is_200(self):
+        es = _make_es_mock()
+        _, client = _build_app(es)
+        update = AsyncMock(return_value={"item_id": "ITEM_1", "item_status": "loaded"})
+
+        with patch.object(CargoService, "update_cargo_item_status", update):
+            resp = client.patch(
+                self._URL,
+                headers=_auth_headers(),
+                json={"item_id": "ITEM_1", "item_status": "loaded"},
+            )
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["data"]["item_status"] == "loaded"
+        assert update.await_args.args[:2] == ("JOB_1", "ITEM_1")
 
 
 class TestPagination:

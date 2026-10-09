@@ -12,12 +12,14 @@ import io
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form
+from fastapi import APIRouter, Depends, Request, UploadFile, File, Form
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth.router_guards import roles_dependency
 from config.settings import get_settings
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from middleware.rate_limiter import limiter
 from services.elasticsearch_service import elasticsearch_service
 from services.import_models import (
@@ -124,17 +126,19 @@ async def upload_csv(
     # Validate file extension
     filename = file.filename or ""
     if not filename.lower().endswith(".csv"):
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Only CSV files are supported. Please select a .csv file.",
             status_code=400,
-            detail="Only CSV files are supported. Please select a .csv file.",
         )
 
     # Read file content and validate size
     file_content = await file.read()
     if len(file_content) > MAX_FILE_SIZE:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="File exceeds the 10MB size limit. Please split your data or reduce the file size.",
             status_code=400,
-            detail="File exceeds the 10MB size limit. Please split your data or reduce the file size.",
         )
 
     try:
@@ -145,7 +149,11 @@ async def upload_csv(
             source_name=filename,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message=str(exc),
+            status_code=422,
+        )
 
     return result
 
@@ -171,7 +179,11 @@ async def upload_sheets(
             tenant_id=tenant.tenant_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message=str(exc),
+            status_code=422,
+        )
 
     return result
 
@@ -203,8 +215,16 @@ async def validate_import(
     except ValueError as exc:
         detail = str(exc)
         if "not found" in detail.lower():
-            raise HTTPException(status_code=404, detail=detail)
-        raise HTTPException(status_code=409, detail=detail)
+            raise AppException(
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                message=detail,
+                status_code=404,
+            )
+        raise AppException(
+            error_code=ErrorCode.CONFLICT,
+            message=detail,
+            status_code=409,
+        )
 
     return result
 
@@ -236,10 +256,22 @@ async def commit_import(
     except ValueError as exc:
         detail = str(exc)
         if "not found" in detail.lower():
-            raise HTTPException(status_code=404, detail=detail)
+            raise AppException(
+                error_code=ErrorCode.RESOURCE_NOT_FOUND,
+                message=detail,
+                status_code=404,
+            )
         if "not been validated" in detail.lower():
-            raise HTTPException(status_code=409, detail=detail)
-        raise HTTPException(status_code=422, detail=detail)
+            raise AppException(
+                error_code=ErrorCode.CONFLICT,
+                message=detail,
+                status_code=409,
+            )
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message=detail,
+            status_code=422,
+        )
 
     return result
 
@@ -285,9 +317,10 @@ async def get_import_session(
         tenant_id=tenant.tenant_id,
     )
     if record is None:
-        raise HTTPException(
+        raise AppException(
+            error_code=ErrorCode.RESOURCE_NOT_FOUND,
+            message=f"Import session {session_id} not found",
             status_code=404,
-            detail=f"Import session {session_id} not found",
         )
     return record
 
@@ -312,7 +345,11 @@ async def download_template(
     try:
         csv_content = await import_service.generate_template(data_type)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message=str(exc),
+            status_code=400,
+        )
 
     return StreamingResponse(
         io.StringIO(csv_content),
@@ -337,6 +374,10 @@ async def get_schema(
     try:
         template = schema_templates.get_template(data_type)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message=str(exc),
+            status_code=400,
+        )
 
     return template

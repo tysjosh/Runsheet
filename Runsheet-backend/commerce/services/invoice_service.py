@@ -15,10 +15,11 @@ Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.5, C1, C2, C3, C7
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import math
-from datetime import date, timedelta
-from typing import Any, Callable, Dict, List, Optional
+from datetime import date, datetime, timedelta
+from typing import Any, Callable, Dict, List, Optional, Sequence
 from uuid import uuid4
 
 from commerce.models.events import InvoiceEvent, InvoiceEventType
@@ -29,7 +30,13 @@ from commerce.services.commerce_es_mappings import (
     INVOICES_CURRENT_INDEX,
     PAYMENTS_CURRENT_INDEX,
 )
-from errors.exceptions import conflict, resource_not_found, validation_error
+from errors.codes import ErrorCode
+from errors.exceptions import (
+    AppException,
+    conflict,
+    resource_not_found,
+    validation_error,
+)
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.money import (
@@ -39,6 +46,10 @@ from services.money import (
     unit_price_micros_from_record,
 )
 from services.time_utils import utcnow
+from services.keyset_pagination import (
+    next_cursor_from_hits,
+    search_after_for_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +65,112 @@ _DEFAULT_DRAFT_GRACE_SECONDS = 300
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
+
+
+def _invoice_must_clauses(
+    status: Optional[str] = None,
+    customer_id: Optional[str] = None,
+    account_id: Optional[str] = None,
+    order_id: Optional[str] = None,
+    qbo_push_state: Optional[str] = None,
+    created_from: Optional[datetime] = None,
+    created_before: Optional[datetime] = None,
+    created_until: Optional[datetime] = None,
+    updated_from: Optional[datetime] = None,
+    statuses: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Document-store must-clauses shared by ``InvoiceService.list`` and ``count``.
+
+    Invoice ``created_at`` is written as ``utcnow().isoformat()`` (``+00:00``
+    suffix) and compared as text, so date bounds use the same form.
+    ``statuses`` becomes a ``terms`` clause applied together with ``status``;
+    an empty sequence matches nothing.
+    ``updated_from`` filters ``updated_at >=`` the bound (margin gap sweep);
+    it is a filter only, paging stays on the ``created_at`` keyset.
+    """
+    from services.date_range import to_doc_bound
+
+    must_clauses: List[Dict[str, Any]] = []
+    if status:
+        must_clauses.append({"term": {"status": status}})
+    if statuses is not None:
+        must_clauses.append({"terms": {"status": list(statuses)}})
+    if customer_id:
+        must_clauses.append({"term": {"customer_id": customer_id}})
+    if account_id:
+        must_clauses.append({"term": {"account_id": account_id}})
+    if order_id:
+        must_clauses.append({"term": {"order_id": order_id}})
+    if qbo_push_state:
+        must_clauses.append({"term": {"qbo_push_state": qbo_push_state}})
+    bounds: Dict[str, str] = {}
+    if created_from is not None:
+        bounds["gte"] = to_doc_bound(created_from, z_suffix=False)
+    if created_before is not None:
+        bounds["lt"] = to_doc_bound(created_before, z_suffix=False)
+    if created_until is not None:
+        bounds["lte"] = to_doc_bound(created_until, z_suffix=False)
+    if bounds:
+        must_clauses.append({"range": {"created_at": bounds}})
+    if updated_from is not None:
+        must_clauses.append(
+            {"range": {"updated_at": {"gte": to_doc_bound(updated_from, z_suffix=False)}}}
+        )
+    return must_clauses
+
+
+def _contract_split_lines(
+    item: Dict[str, Any],
+    contract_gallons: float,
+    contract_price_micros: int,
+    excess_price_micros: int,
+) -> Optional[List[Dict[str, Any]]]:
+    """Split a priced line when the contract covers only part of it (OI-14).
+
+    ``contract_gallons`` is what the contract granted this delivery (D14c:
+    consumed from its ``remaining_gallons``, so volume is honoured once
+    across invoices). Those gallons bill at the contract price and the rest
+    at ``excess_price_micros``, the customer's normal price-book price.
+
+    Returns ``None`` when the contract covers the whole line (the caller
+    keeps the line it already priced). Otherwise returns the replacement
+    lines: the contract-priced portion (omitted when nothing was granted)
+    and the excess. Each subtotal is rounded once with
+    :func:`line_subtotal_cents`, so the contract price is applied only to
+    the contracted gallons.
+    """
+    total = float(item.get("quantity_gallons", item.get("quantity", 0)) or 0)
+    contract_qty = max(0.0, min(float(contract_gallons), total))
+    # Derive the excess from the line total so the two quantities always
+    # sum to the delivered gallons (no float drift).
+    market_qty = round(total - contract_qty, 6)
+    if market_qty <= 0:
+        return None
+
+    def _line(qty: float, micros: int, *, first: bool) -> Dict[str, Any]:
+        line = dict(item)
+        if not first:
+            line["line_id"] = f"line_{uuid4()}"
+        line["quantity_gallons"] = qty
+        if "quantity" in item:
+            line["quantity"] = qty
+        line["unit_price_micros"] = micros
+        line["unit_price_cents"] = legacy_unit_price_cents(micros)
+        line["subtotal_cents"] = line_subtotal_cents(qty, micros)
+        return line
+
+    lines: List[Dict[str, Any]] = []
+    if contract_qty > 0:
+        lines.append(_line(contract_qty, contract_price_micros, first=True))
+    lines.append(_line(market_qty, excess_price_micros, first=not lines))
+    return lines
+
+
+def _engine_consumes_contracts(engine: Any) -> bool:
+    """True for an engine that can consume contract volume (D14c)."""
+    return inspect.iscoroutinefunction(
+        getattr(engine, "consume_contract_gallons", None)
+    )
 
 
 class InvoiceService:
@@ -109,6 +226,15 @@ class InvoiceService:
         # tax (Req 6.5) and logs the sale for IRS audit (Req 6.7).
         # Injected via set_dyed_diesel_enforcer() from bootstrap.
         self._dyed_diesel_enforcer: Optional[Any] = None
+        # Optional MeterAuditService instance. When supplied,
+        # generate_from_order() performs a post-generation check: if the
+        # delivery's meter (resolved from delivery_result.meter_number)
+        # has an expired calibration, the invoice is flagged with warning
+        # code meter.calibration_expired (Req 8.5) and, on success, the
+        # meter ticket is linked to the invoice as an immutable audit
+        # record (Req 8.2). Injected via set_meter_audit_service() from
+        # bootstrap.
+        self._meter_audit_service: Optional[Any] = None
         # Optional NotificationService for firing past_due_invoice
         # notifications when an invoice transitions to overdue status
         # (Req 12.6). Injected via set_notification_service() from
@@ -119,6 +245,11 @@ class InvoiceService:
         # notification sent to prevent duplicate notifications on
         # repeated overdue scans (idempotency).
         self._notified_overdue_invoices: set = set()
+        # Optional MarginHook (margin feed). Injected via set_margin_hook()
+        # from bootstrap. Its methods are synchronous and schedule the
+        # margin work in the background; _notify_margin also catches any
+        # exception, so margin work never fails or blocks an invoice call.
+        self._margin_hook: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Dependency injection setters
@@ -139,6 +270,28 @@ class InvoiceService:
         """
         self._dyed_diesel_enforcer = enforcer
 
+    def set_meter_audit_service(self, meter_audit_service) -> None:
+        """Inject the MeterAuditService for post-generation meter checks.
+
+        When set, generate_from_order() will, for invoices carrying a
+        delivery_result with a meter_number:
+        1. Resolve the meter_number to a registered meter_id and call
+           check_meter_calibration_for_delivery() — if the meter's
+           calibration has expired, the invoice is flagged with warning
+           code meter.calibration_expired (Req 8.5).
+        2. Call link_ticket_to_invoice() to record the immutable
+           audit-trail association between the meter ticket, delivery,
+           and invoice (Req 8.2).
+
+        This is a post-generation check — failures are logged as
+        warnings but do not block the invoice, and invoices with no
+        meter_number (manual gallon entry, no meter ticket) are
+        skipped entirely since there is nothing to look up.
+
+        Validates: Requirements 8.2, 8.5
+        """
+        self._meter_audit_service = meter_audit_service
+
     def set_notification_service(self, notification_service) -> None:
         """Inject the NotificationService for past_due_invoice notifications.
 
@@ -150,6 +303,45 @@ class InvoiceService:
         Validates: Requirement 12.6
         """
         self._notification_service = notification_service
+
+    def set_margin_hook(self, margin_hook) -> None:
+        """Inject the MarginHook (margin feed, FR3).
+
+        generate_from_order, finalize_draft and void hand the persisted
+        invoice doc to the hook after the operation completed. The hook
+        deep-copies the doc and schedules the margin computation; it never
+        raises and is never awaited.
+        """
+        self._margin_hook = margin_hook
+
+    def _notify_margin(self, method: str, doc: Dict[str, Any]) -> None:
+        """Call ``margin_hook.<method>(doc)``; any exception is logged, never raised."""
+        hook = self._margin_hook
+        if hook is None:
+            return
+        try:
+            getattr(hook, method)(doc)
+        except Exception as exc:  # noqa: BLE001 - margin never fails the invoice
+            logger.error(
+                "InvoiceService: margin hook %s failed for invoice %s tenant %s: %s",
+                method,
+                doc.get("invoice_id"),
+                doc.get("tenant_id"),
+                type(exc).__name__,
+            )
+
+    def set_dunning_service(self, dunning_service) -> None:
+        """Inject the DunningService for overdue-invoice dunning cancellation.
+
+        When set, apply_payment() and void() will call
+        ``dunning_service.cancel_for_invoice()`` after an invoice
+        transitions to paid or void, marking any pending dunning_events
+        as cancelled so the notification pipeline drops queued-but-unsent
+        dunning emails.
+
+        Validates: Requirement 7.5
+        """
+        self._dunning_service = dunning_service
 
     # ------------------------------------------------------------------
     # Event helpers
@@ -290,6 +482,45 @@ class InvoiceService:
             INVOICES_CURRENT_INDEX, invoice_id, partial
         )
 
+    async def _claim_void(
+        self,
+        invoice_id: str,
+        partial: Dict[str, Any],
+        event_sequence: int,
+        consumption: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Flip the projection to void under the row lock; return what to restore.
+
+        Returns the invoice's contract consumption when this call made the
+        flip, and ``[]`` when the projection was already void (another void
+        of the same invoice won). With no projection row to lock, it falls
+        back to a plain projection update and the caller's consumption.
+        """
+        partial["updated_at"] = utcnow().isoformat()
+        partial["_last_applied_seq"] = event_sequence
+
+        def _flip(current: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if current.get("status") == InvoiceStatus.VOID.value:
+                return None
+            return {**current, **partial}
+
+        document, applied = await self._es.atomic_update(
+            INVOICES_CURRENT_INDEX, invoice_id, _flip
+        )
+        if document is None:
+            await self._es.update_document(
+                INVOICES_CURRENT_INDEX, invoice_id, partial
+            )
+            return consumption
+        if not applied:
+            logger.info(
+                "InvoiceService: invoice %s was already voided; not restoring "
+                "its contract gallons again",
+                invoice_id,
+            )
+            return []
+        return list(document.get("contract_consumption") or consumption)
+
     async def _broadcast_invoice_ws(self, invoice_doc: Dict[str, Any]) -> None:
         """Non-blocking broadcast of the updated invoice projection on the WS channel.
 
@@ -414,6 +645,115 @@ class InvoiceService:
                 exc,
             )
 
+    async def _run_meter_audit_post_check(
+        self,
+        *,
+        tenant_id: str,
+        invoice_id: str,
+        order_id: str,
+        delivery_snapshot: Dict[str, Any],
+        doc: Dict[str, Any],
+    ) -> None:
+        """Post-generation meter calibration + audit-trail linking.
+
+        Called after the invoice is persisted. Non-blocking — failures
+        are logged as warnings but never block invoice generation.
+
+        Steps:
+        1. Resolve delivery_snapshot['meter_number'] to a registered
+           meter via MeterAuditService.get_meter_by_number(). Skipped
+           entirely when no meter_number is present (manual gallon
+           entry, no meter ticket photographed).
+        2. Call check_meter_calibration_for_delivery() — if the meter's
+           calibration has expired, append the meter.calibration_expired
+           warning to the invoice document (Req 8.5).
+        3. Call link_ticket_to_invoice() to record the immutable
+           audit-trail association (Req 8.2).
+
+        Validates: Requirements 8.2, 8.5
+        """
+        meter_number = delivery_snapshot.get("meter_number")
+        if not meter_number:
+            return
+
+        service = self._meter_audit_service
+
+        try:
+            meter_doc = await service.get_meter_by_number(
+                tenant_id, meter_number
+            )
+            if meter_doc is None:
+                logger.info(
+                    "InvoiceService: meter_number %s on invoice %s "
+                    "(tenant %s) is not registered — skipping meter "
+                    "audit post-check",
+                    meter_number,
+                    invoice_id,
+                    tenant_id,
+                )
+                return
+
+            meter_id = meter_doc.get("meter_id", "")
+            delivery_id = delivery_snapshot.get("pod_id", "") or order_id
+
+            calibration_result = await service.check_meter_calibration_for_delivery(
+                tenant_id,
+                meter_id=meter_id,
+                delivery_id=delivery_id,
+                invoice_id=invoice_id,
+            )
+
+            if calibration_result.get("flagged"):
+                warning_code = calibration_result["warning_code"]
+                warnings = doc.setdefault("warnings", [])
+                warnings.append(
+                    {
+                        "code": warning_code,
+                        "message": calibration_result.get("message"),
+                    }
+                )
+                await self._es.update_document(
+                    INVOICES_CURRENT_INDEX,
+                    invoice_id,
+                    {"warnings": warnings},
+                )
+                logger.warning(
+                    "InvoiceService: invoice %s (tenant %s) flagged with "
+                    "%s — meter %s calibration expired",
+                    invoice_id,
+                    tenant_id,
+                    warning_code,
+                    meter_id,
+                )
+
+            meter_ticket_id = (
+                delivery_snapshot.get("ticket_number")
+                or delivery_snapshot.get("meter_ticket_ref")
+                or ""
+            )
+            await service.link_ticket_to_invoice(
+                tenant_id,
+                meter_id=meter_id,
+                meter_ticket_id=meter_ticket_id,
+                delivery_id=delivery_id,
+                invoice_id=invoice_id,
+                gross_gallons=float(
+                    delivery_snapshot.get("actual_gallons") or 0.0
+                ),
+                timestamp=utcnow(),
+            )
+
+        except Exception as exc:
+            # Non-blocking: log the failure but never raise. The invoice
+            # generation must not be blocked by a meter-audit failure.
+            logger.warning(
+                "InvoiceService: meter audit post-check failed for "
+                "invoice %s (tenant %s): %s",
+                invoice_id,
+                tenant_id,
+                exc,
+            )
+
     # ------------------------------------------------------------------
     # Generate from order (Req 5.1)
     # ------------------------------------------------------------------
@@ -532,6 +872,12 @@ class InvoiceService:
         # resolve the sell price for each line item before tax
         # computation and update unit_price_cents on the line.
         # Backwards compatible — if no factory, use existing prices.
+        # Contract-priced lines are noted here and settled after
+        # validation (D14c): the contract's volume is consumed then, and
+        # any gallons it doesn't cover split off at the customer's normal
+        # price (OI-14). Keyed by id() of the original line.
+        contract_plans: List[tuple] = []
+        pricing_engine = None
         if self._sales_pricing_engine_factory is not None:
             try:
                 pricing_engine = self._sales_pricing_engine_factory(tenant_id)
@@ -587,6 +933,11 @@ class InvoiceService:
                             qty,
                             int(effective_price_micros),
                         )
+                        contract_id = getattr(resolution, "contract_id", None)
+                        if isinstance(contract_id, str) and contract_id:
+                            contract_plans.append(
+                                (item, resolution, int(effective_price_micros))
+                            )
                     except Exception as exc:
                         # Pricing failure for a single line item should
                         # not block the entire invoice — log and keep
@@ -620,6 +971,10 @@ class InvoiceService:
                                 qty,
                                 item["unit_price_micros"],
                             )
+
+        # Tax is computed on each delivered line's total gallons, so a
+        # contract split doesn't change tax rounding (OI-14).
+        tax_basis_items = line_items
 
         # Compute totals from line items (integer cents only, C1)
         subtotal_cents = sum(item.get("subtotal_cents", 0) for item in line_items)
@@ -656,7 +1011,7 @@ class InvoiceService:
                         tenant_id=tenant_id,
                         order_id=order_id,
                         customer_id=customer_id,
-                        line_items=line_items,
+                        line_items=tax_basis_items,
                         destination_fips=destination_fips,
                         effective_date=effective_date,
                     )
@@ -733,6 +1088,24 @@ class InvoiceService:
         if delivery_snapshot.get("pod_id"):
             external_refs["pod_id"] = delivery_snapshot["pod_id"]
 
+        # Settle contract volume last, after every validation that can
+        # refuse the invoice, so a refused invoice consumes nothing.
+        contract_consumption: List[Dict[str, Any]] = []
+        if contract_plans:
+            line_items, contract_consumption = await self._settle_contract_lines(
+                pricing_engine=pricing_engine,
+                line_items=line_items,
+                contract_plans=contract_plans,
+                customer_id=customer_id,
+                account_id=account_id,
+                effective_date=effective_date or now.date(),
+            )
+            subtotal_cents = sum(
+                item.get("subtotal_cents", 0) for item in line_items
+            )
+            total_cents = subtotal_cents + effective_tax_cents
+            remaining_cents = total_cents
+
         # Build the invoice document
         doc: Dict[str, Any] = {
             "invoice_id": invoice_id,
@@ -772,6 +1145,9 @@ class InvoiceService:
         if tax_breakdown_doc is not None:
             doc["tax_breakdown"] = tax_breakdown_doc
             doc["exemptions_applied"] = exemptions_applied
+        if contract_consumption:
+            # What void gives back to each contract (D14c).
+            doc["contract_consumption"] = contract_consumption
 
         # Write event FIRST (Constraint C7)
         event_payload: Dict[str, Any] = {
@@ -802,16 +1178,26 @@ class InvoiceService:
         else:
             event_payload["tax_source"] = "tax_cents_param"
 
-        event_doc = await self._write_invoice_event(
-            tenant_id=tenant_id,
-            invoice_id=invoice_id,
-            event_type=InvoiceEventType.CREATED,
-            payload=event_payload,
-            actor=actor,
-        )
+        if contract_consumption:
+            event_payload["contract_consumption"] = contract_consumption
 
-        # Then update projection
-        await self._es.index_document(INVOICES_CURRENT_INDEX, invoice_id, doc)
+        try:
+            event_doc = await self._write_invoice_event(
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                event_type=InvoiceEventType.CREATED,
+                payload=event_payload,
+                actor=actor,
+            )
+
+            # Then update projection
+            await self._es.index_document(INVOICES_CURRENT_INDEX, invoice_id, doc)
+        except BaseException:
+            # No invoice exists, so give the contract volume back.
+            await self._restore_contract_consumption(
+                tenant_id, invoice_id, contract_consumption, pricing_engine
+            )
+            raise
 
         # Dual-write the generated invoice to the Postgres source-of-truth
         # when opted in. Passes the service's authoritative totals (which may
@@ -841,6 +1227,25 @@ class InvoiceService:
                 doc=doc,
             )
 
+        # --- Meter audit post-generation check (Req 8.2, 8.5) ---------
+        # When a MeterAuditService is wired and the delivery snapshot
+        # carries a meter_number (i.e. the POD's gallons were resolved
+        # via OCR from a photographed meter ticket), check the meter's
+        # calibration status and link the ticket to this invoice as an
+        # immutable audit record. Non-blocking, mirroring the dyed
+        # diesel post-check above.
+        if self._meter_audit_service is not None and delivery_snapshot:
+            await self._run_meter_audit_post_check(
+                tenant_id=tenant_id,
+                invoice_id=invoice_id,
+                order_id=order_id,
+                delivery_snapshot=delivery_snapshot,
+                doc=doc,
+            )
+
+        # --- Margin feed (FR3): last statement before the log line ------
+        self._notify_margin("invoice_generated", doc)
+
         logger.info(
             "Generated invoice %s from order %s for tenant %s (total: %d cents)",
             invoice_id,
@@ -849,6 +1254,151 @@ class InvoiceService:
             total_cents,
         )
         return doc
+
+    async def _settle_contract_lines(
+        self,
+        *,
+        pricing_engine: Any,
+        line_items: List[Dict[str, Any]],
+        contract_plans: List[tuple],
+        customer_id: str,
+        account_id: str,
+        effective_date: date,
+    ) -> tuple:
+        """Consume contract volume and split off what it doesn't cover (D14c).
+
+        Each contract-priced line takes up to its gallons from the contract
+        (atomically, so volume is honoured once across invoices) and the rest
+        bills at the customer's normal price-book price. Returns the new
+        line list and the consumption to record on the invoice. If anything
+        fails part-way, what was already consumed is given back.
+        """
+        consumes = _engine_consumes_contracts(pricing_engine)
+        replacements: Dict[int, List[Dict[str, Any]]] = {}
+        consumption: List[Dict[str, Any]] = []
+        try:
+            for item, resolution, contract_micros in contract_plans:
+                total = float(
+                    item.get("quantity_gallons", item.get("quantity", 0)) or 0
+                )
+                planned = getattr(resolution, "split_gallons_at_contract_price", None)
+                wanted = total if planned is None else min(float(planned), total)
+                if consumes:
+                    granted = await pricing_engine.consume_contract_gallons(
+                        resolution.contract_id, wanted
+                    )
+                else:
+                    granted = wanted
+                if granted > 0:
+                    consumption.append(
+                        {
+                            "contract_id": resolution.contract_id,
+                            "line_id": item.get("line_id"),
+                            "gallons": granted,
+                        }
+                    )
+                if total - granted <= 1e-6:
+                    continue
+                excess_cents = getattr(resolution, "excess_price_cents", None)
+                if excess_cents is None or granted < wanted - 1e-6:
+                    # Another invoice took gallons since the quote, or the
+                    # resolver didn't price an excess: price it now.
+                    if inspect.iscoroutinefunction(
+                        getattr(pricing_engine, "excess_price_cents", None)
+                    ):
+                        excess_cents = await pricing_engine.excess_price_cents(
+                            customer_id=customer_id,
+                            product_code=item.get("product_code", ""),
+                            gallons=total,
+                            terminal_id=item.get("terminal_id", ""),
+                            route_miles=item.get("route_miles", 0.0),
+                            effective_date=effective_date,
+                            market_price_cents=resolution.market_price_cents,
+                            account_id=account_id,
+                        )
+                    else:
+                        excess_cents = resolution.market_price_cents
+                split = _contract_split_lines(
+                    item, granted, contract_micros,
+                    int(excess_cents) * MICROS_PER_CENT,
+                )
+                if split is not None:
+                    replacements[id(item)] = split
+        except BaseException:
+            await self._restore_contract_consumption(
+                None, None, consumption, pricing_engine
+            )
+            raise
+        lines = [
+            line
+            for item in line_items
+            for line in replacements.get(id(item), [item])
+        ]
+        return lines, consumption
+
+    async def _stored_contract_consumption(
+        self, tenant_id: str, invoice_id: str
+    ) -> List[Dict[str, Any]]:
+        """``contract_consumption`` from the document-store projection.
+
+        The Postgres invoice row has no column for it, so a read served from
+        Postgres (read cutover) doesn't carry it; the projection always does.
+        """
+        try:
+            query = inject_tenant_filter(
+                {"query": {"bool": {"must": [{"term": {"invoice_id": invoice_id}}]}},
+                 "size": 1},
+                tenant_id,
+            )
+            response = await self._es.search_documents(
+                INVOICES_CURRENT_INDEX, query, size=1
+            )
+            hits = ((response or {}).get("hits") or {}).get("hits") or []
+            if hits:
+                return list(hits[0].get("_source", {}).get("contract_consumption") or [])
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "InvoiceService: could not read contract consumption for %s",
+                invoice_id,
+            )
+        return []
+
+    async def _restore_contract_consumption(
+        self,
+        tenant_id: Optional[str],
+        invoice_id: Optional[str],
+        consumption: List[Dict[str, Any]],
+        pricing_engine: Any = None,
+    ) -> None:
+        """Give consumed contract gallons back; never raises (D14c)."""
+        if not consumption:
+            return
+        engine = pricing_engine
+        if engine is None and tenant_id and self._sales_pricing_engine_factory:
+            try:
+                engine = self._sales_pricing_engine_factory(tenant_id)
+            except Exception:  # noqa: BLE001
+                engine = None
+        restore = getattr(engine, "restore_contract_gallons", None)
+        if not inspect.iscoroutinefunction(restore):
+            logger.error(
+                "InvoiceService: cannot restore contract gallons for invoice "
+                "%s (no pricing engine): %s",
+                invoice_id,
+                consumption,
+            )
+            return
+        for entry in consumption:
+            try:
+                await restore(entry["contract_id"], float(entry["gallons"]))
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "InvoiceService: failed to restore %s gallons to contract "
+                    "%s for invoice %s",
+                    entry.get("gallons"),
+                    entry.get("contract_id"),
+                    invoice_id,
+                )
 
     # ------------------------------------------------------------------
     # Finalize draft (Req 5.2)
@@ -906,11 +1456,37 @@ class InvoiceService:
         # dual-write is on. This replaces the legacy Redis/ES numbering path;
         # when the persistence layer is dormant the helper returns None and the
         # invoice_number stays unset, exactly as before.
+        #
+        # When numbering IS configured, a failure to allocate must abort the
+        # finalize. Previously the helper logged the error and returned None,
+        # which is indistinguishable from "numbering is off" — so a database
+        # blip transitioned the invoice to OPEN with no invoice_number and
+        # reported success. An open invoice without a number is a defective
+        # financial record, and nothing downstream would notice: the event has
+        # already been written by the time anyone reads the projection.
         from commerce.services.commerce_persistence_bridge import (
+            InvoiceNumberingUnavailable,
             allocate_invoice_number,
             mirror_invoice_fields,
         )
-        allocated_number = await allocate_invoice_number(tenant_id)
+        try:
+            allocated_number = await allocate_invoice_number(tenant_id)
+        except InvoiceNumberingUnavailable as exc:
+            logger.error(
+                "InvoiceService.finalize_draft: refusing to finalize %s without "
+                "a number (tenant=%s): %s",
+                invoice_id,
+                tenant_id,
+                exc,
+            )
+            raise AppException(
+                error_code=ErrorCode.COMMERCE_INVOICE_NUMBERING_UNAVAILABLE,
+                message=(
+                    "Invoice numbering is unavailable; the invoice was left in "
+                    "draft rather than finalized without a number"
+                ),
+                details={"invoice_id": invoice_id},
+            ) from exc
         invoice_number_str: Optional[str] = None
         if allocated_number is not None and not invoice.get("invoice_number"):
             invoice_number_str = f"INV-{allocated_number:06d}"
@@ -957,6 +1533,9 @@ class InvoiceService:
 
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
+
+        # Margin feed (FR3): freeze the invoice's margin records.
+        self._notify_margin("invoice_finalized", merged)
 
         # Post-commit callback: fire external sync as a non-blocking
         # asyncio task so HTTP latency is unaffected by QBO push latency.
@@ -1257,9 +1836,21 @@ class InvoiceService:
             "amount_paid_cents": 0,
             "remaining_cents": 0,
         }
-        await self._update_projection(
-            invoice_id, partial, event_doc["sequence_number"]
+        consumption = list(
+            invoice.get("contract_consumption")
+            or await self._stored_contract_consumption(tenant_id, invoice_id)
         )
+        if consumption:
+            # Restoring gallons isn't idempotent, so only the void that flips
+            # the projection to void restores them; an overlapping void of
+            # the same invoice (double-click, retry) restores nothing (D14c).
+            consumption = await self._claim_void(
+                invoice_id, partial, event_doc["sequence_number"], consumption
+            )
+        else:
+            await self._update_projection(
+                invoice_id, partial, event_doc["sequence_number"]
+            )
 
         # Mirror the void transition to Postgres when opted in.
         from commerce.services.commerce_persistence_bridge import (
@@ -1278,6 +1869,12 @@ class InvoiceService:
             event_type="voided",
         )
 
+        # A void invoice bills nothing, so its contract gallons go back
+        # (D14c). Empty unless this call won the void claim above.
+        await self._restore_contract_consumption(
+            tenant_id, invoice_id, consumption
+        )
+
         merged = {**invoice, **partial, "updated_at": utcnow().isoformat()}
         logger.info(
             "Voided invoice %s (reason: %s, force: %s, reversed %d payments) tenant %s",
@@ -1290,6 +1887,9 @@ class InvoiceService:
 
         # Broadcast updated projection on WS channel (Design §6)
         await self._broadcast_invoice_ws(merged)
+
+        # Margin feed (FR3): void the invoice's margin records.
+        self._notify_margin("invoice_voided", merged)
 
         # Cancel dunning notifications when invoice is voided (Req 7.5)
         if self._dunning_service:
@@ -1553,6 +2153,53 @@ class InvoiceService:
     # List
     # ------------------------------------------------------------------
 
+    async def count(
+        self,
+        *,
+        tenant_id: str,
+        status: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        account_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+        qbo_push_state: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        created_until: Optional[datetime] = None,
+        updated_from: Optional[datetime] = None,
+        statuses: Optional[Sequence[str]] = None,
+    ) -> int:
+        """Count Invoices matching the :meth:`list` filters (data export)."""
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_invoice_count,
+        )
+        status_kwargs = {"statuses": statuses} if statuses is not None else {}
+        pg = await read_invoice_count(
+            tenant_id, status=status, customer_id=customer_id,
+            account_id=account_id, order_id=order_id,
+            qbo_push_state=qbo_push_state, created_from=created_from,
+            created_before=created_before, created_until=created_until,
+            updated_from=updated_from,
+            **status_kwargs,
+        )
+        if pg is not _NOT_CUT_OVER:
+            return int(pg)
+        clauses = _invoice_must_clauses(
+            status, customer_id, account_id, order_id, qbo_push_state,
+            created_from, created_before, created_until, updated_from,
+            statuses=statuses,
+        )
+        base_query: Dict[str, Any] = {
+            "query": {"bool": {"must": clauses if clauses else [{"match_all": {}}]}},
+            "size": 1,
+        }
+        query = inject_tenant_filter(base_query, tenant_id)
+        response = await self._es.search_documents(
+            INVOICES_CURRENT_INDEX, query, size=1
+        )
+        total = response["hits"]["total"]
+        return int(total.get("value", 0) if isinstance(total, dict) else total or 0)
+
     async def list(
         self,
         *,
@@ -1561,13 +2208,19 @@ class InvoiceService:
         customer_id: Optional[str] = None,
         account_id: Optional[str] = None,
         order_id: Optional[str] = None,
+        qbo_push_state: Optional[str] = None,
+        created_from: Optional[datetime] = None,
+        created_before: Optional[datetime] = None,
+        created_until: Optional[datetime] = None,
+        updated_from: Optional[datetime] = None,
         cursor: Optional[str] = None,
         limit: int = _DEFAULT_PAGE_LIMIT,
+        statuses: Optional[Sequence[str]] = None,
     ) -> Dict[str, Any]:
         """List Invoices for a tenant with cursor/limit pagination.
 
         Default limit is 50, max 200. Supports filtering by status,
-        customer_id, account_id, and order_id.
+        statuses (any of), customer_id, account_id, and order_id.
 
         Validates: Constraint C3
         """
@@ -1582,22 +2235,23 @@ class InvoiceService:
             _NOT_CUT_OVER,
             read_invoice_list,
         )
+        status_kwargs = {"statuses": statuses} if statuses is not None else {}
         pg = await read_invoice_list(
             tenant_id, status=status, customer_id=customer_id,
-            account_id=account_id, order_id=order_id, cursor=cursor, limit=limit,
+            account_id=account_id, order_id=order_id,
+            qbo_push_state=qbo_push_state, created_from=created_from,
+            created_before=created_before, created_until=created_until,
+            updated_from=updated_from, cursor=cursor, limit=limit,
+            **status_kwargs,
         )
         if pg is not _NOT_CUT_OVER:
             return pg
 
-        must_clauses: List[Dict[str, Any]] = []
-        if status:
-            must_clauses.append({"term": {"status": status}})
-        if customer_id:
-            must_clauses.append({"term": {"customer_id": customer_id}})
-        if account_id:
-            must_clauses.append({"term": {"account_id": account_id}})
-        if order_id:
-            must_clauses.append({"term": {"order_id": order_id}})
+        must_clauses = _invoice_must_clauses(
+            status, customer_id, account_id, order_id, qbo_push_state,
+            created_from, created_before, created_until, updated_from,
+            statuses=statuses,
+        )
 
         base_query: Dict[str, Any] = {
             "query": {
@@ -1614,7 +2268,9 @@ class InvoiceService:
 
         # Cursor-based pagination using search_after
         if cursor:
-            base_query["search_after"] = [cursor, cursor]
+            base_query["search_after"] = await search_after_for_cursor(
+                self._es, INVOICES_CURRENT_INDEX, cursor, base_query["sort"]
+            )
 
         query = inject_tenant_filter(base_query, tenant_id)
 
@@ -1626,11 +2282,9 @@ class InvoiceService:
         items = [hit["_source"] for hit in hits]
 
         # Determine next cursor
-        next_cursor: Optional[str] = None
-        if hits and len(hits) == limit:
-            last_sort = hits[-1].get("sort")
-            if last_sort and len(last_sort) >= 2:
-                next_cursor = hits[-1]["_source"]["invoice_id"]
+        next_cursor = next_cursor_from_hits(
+            hits, limit, id_field="invoice_id"
+        )
 
         return {
             "items": items,
@@ -1931,6 +2585,12 @@ class InvoiceService:
         await self._es.index_document(
             PAYMENTS_CURRENT_INDEX, payment_id, payment_doc
         )
+        # Mirror it to Postgres like any other payment, so the payments table
+        # (and reads under COMMERCE_READ_FROM_POSTGRES) include it (OI-42).
+        from commerce.services.commerce_persistence_bridge import (
+            mirror_payment_create,
+        )
+        await mirror_payment_create(payment_doc)
 
         # Directly update the invoice amounts (invoice is still in draft,
         # so we can't use apply_payment which requires open/partial/overdue)
@@ -1974,6 +2634,12 @@ class InvoiceService:
         }
         await self._es.update_document(
             ACCOUNTS_CURRENT_INDEX, account_id, account_update
+        )
+        # Mirror to Postgres so reads under COMMERCE_READ_FROM_POSTGRES agree.
+        from commerce.services.commerce_persistence_bridge import mirror_account_fields
+        await mirror_account_fields(
+            tenant_id, account_id, {"credit_balance_cents": new_balance},
+            event_type="balance_changed",
         )
 
         logger.info(

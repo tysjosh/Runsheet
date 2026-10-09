@@ -229,6 +229,7 @@ class DelayResponseAgent(AutonomousAgentBase):
                         "job_id": job_id,
                         "reason": "no_alternative_available",
                         "job_details": job,
+                        "tenant_id": tenant_id,
                     })
                     actions.append({
                         "job_id": job_id,
@@ -261,6 +262,7 @@ class DelayResponseAgent(AutonomousAgentBase):
                     "job_id": job_id,
                     "reason": "no_alternative_available",
                     "job_details": job,
+                    "tenant_id": tenant_id,
                 })
                 actions.append({
                     "job_id": job_id,

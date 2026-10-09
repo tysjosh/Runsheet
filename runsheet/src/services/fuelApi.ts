@@ -1,4 +1,5 @@
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import {
   buildQueryString,
   fetchWithTimeout,
@@ -172,6 +173,28 @@ export interface FuelAlert {
   location_name?: string | null;
 }
 
+/** Backend sentinel for "never empties" (no consumption). */
+export const NO_CONSUMPTION_DAYS = 99999;
+
+/**
+ * Days until empty worth showing, or null for a station with no
+ * consumption (the 99999 sentinel, or a rate of 0), which renders "—" (F5).
+ */
+export function displayDaysUntilEmpty(station: {
+  days_until_empty: number;
+  daily_consumption_rate?: number | null;
+}): number | null {
+  const days = station.days_until_empty;
+  if (typeof days !== "number" || !Number.isFinite(days)) return null;
+  if (days >= NO_CONSUMPTION_DAYS) return null;
+  if (
+    typeof station.daily_consumption_rate === "number" &&
+    station.daily_consumption_rate <= 0
+  )
+    return null;
+  return days > 0 ? days : null;
+}
+
 // ─── Metrics Types ───────────────────────────────────────────────────────────
 
 export interface ConsumptionMetric {
@@ -191,7 +214,8 @@ export interface FuelNetworkSummary {
   total_capacity_liters: number;
   total_current_stock_liters: number;
   total_daily_consumption: number;
-  average_days_until_empty: number;
+  /** Average over stations that consume fuel; null when none do (F5). */
+  average_days_until_empty: number | null;
   stations_normal: number;
   stations_low: number;
   stations_critical: number;
@@ -365,11 +389,7 @@ async function fuelRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();
@@ -576,9 +596,28 @@ export interface CostConfig {
 // ─── Fuel Distribution MVP Types ─────────────────────────────────────────────
 
 /** One stage that finished its cycle without doing its job. */
+export interface PipelineDegradationReason {
+  reason_code?: string;
+  /** Readable explanation, e.g. why a loading plan was blocked. */
+  detail?: string;
+  [key: string]: unknown;
+}
+
 export interface PipelineDegradation {
   agent_id: string;
-  reasons: unknown[];
+  reasons: PipelineDegradationReason[];
+}
+
+/** An order the loading stage could not load this run, with the reason. */
+export interface UnplacedOrder {
+  order_id: string | null;
+  station_id: string;
+  product_code?: string | null;
+  liters: number;
+  /** e.g. no_truck_capacity, no_compatible_compartment, dyed_diesel_check_unavailable */
+  reason: string;
+  /** True when only part of the order's volume could not be loaded. */
+  partial?: boolean;
 }
 
 export interface GeneratePlanResponse {
@@ -593,6 +632,11 @@ export interface GeneratePlanResponse {
   status: string;
   degraded?: boolean;
   degradation_reasons?: PipelineDegradation[];
+  /** Orders this run could not load, one entry per order and reason. */
+  unplaced_orders?: UnplacedOrder[];
+  /** Set when `status` is `"failed"`: the stage that raised and why. */
+  failed_agent?: string | null;
+  error_message?: string | null;
 }
 
 export interface ReplanRequest {
@@ -1675,11 +1719,7 @@ export async function deleteDepot(depotId: string): Promise<void> {
     );
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(
-      body.detail || body.message || `HTTP error! status: ${response.status}`,
-      response.status,
-    );
+    throw await apiErrorFromResponse(response);
   }
 }
 
@@ -2457,11 +2497,7 @@ export async function deleteSupplierContract(
     );
   }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    throw new ApiError(
-      body.detail || body.message || `HTTP error! status: ${response.status}`,
-      response.status,
-    );
+    throw await apiErrorFromResponse(response);
   }
 }
 

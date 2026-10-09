@@ -13,12 +13,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_ops
 from commerce.services.customer_service import CustomerService
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -75,12 +77,9 @@ async def require_customers_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     if not settings.commerce_customers_enabled:
@@ -89,12 +88,9 @@ async def require_customers_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "CUSTOMERS_DISABLED",
-                "message": "Commerce customers module is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.CUSTOMERS_DISABLED,
+            "Commerce customers module is not enabled for this tenant",
         )
 
     # Customers are an operations surface — an order needs a customer and a tank,
@@ -138,6 +134,29 @@ class UpdateCustomerRequest(BaseModel):
 def _get_request_id(request: Request) -> str:
     """Extract request_id from request state (set by RequestIDMiddleware)."""
     return getattr(request.state, "request_id", "unknown")
+
+
+async def _revoke_portal_sessions(tenant_id: str, customer_id: str) -> None:
+    """Customer-portal archive hook (OI-06, design §1.7).
+
+    Revokes the sessions of the customer's portal users and leaves their
+    grants active, so un-archiving restores access. Best effort: the service
+    logs its own failures, and the per-request principal check denies an
+    archived customer's users regardless.
+    """
+    from portal.services.portal_access_service import get_portal_access_service
+
+    portal_access = get_portal_access_service()
+    if portal_access is None:
+        return
+    try:
+        await portal_access.revoke_sessions_for_customer(tenant_id, customer_id)
+    except Exception as exc:  # noqa: BLE001 — the archive already succeeded
+        logger.error(
+            "Portal session revoke on archive failed for customer %s: %s",
+            customer_id,
+            type(exc).__name__,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +297,7 @@ async def update_customer(
     # If archiving, use the dedicated archive method that checks open invoices
     if body.status == "archived":
         customer = await service.archive(tenant.tenant_id, customer_id)
+        await _revoke_portal_sessions(tenant.tenant_id, customer_id)
     else:
         # Build kwargs for partial update, only including provided fields
         update_kwargs: Dict[str, Any] = {}

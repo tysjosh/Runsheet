@@ -37,6 +37,16 @@ def _enabled() -> bool:
     return bool(get_settings().commerce_dual_write_postgres)
 
 
+def dual_write_enabled() -> bool:
+    """Public form of :func:`_enabled`: is the relational mirror being written?
+
+    The loading-plan executor's projection check (design K6) uses it to tell a
+    lagging projection (repairable with one mirror write) from a mirror that is
+    switched off while reads are cut over (``projection_mirror_disabled``).
+    """
+    return _enabled()
+
+
 def _payments_authoritative() -> bool:
     """True when payments should be written to Postgres FIRST (authoritative).
 
@@ -337,12 +347,33 @@ async def mirror_invoice_fields(
         )
 
 
+class InvoiceNumberingUnavailable(Exception):
+    """Numbering is configured but the counter could not be read.
+
+    Distinct from "numbering is off". When the persistence layer is dormant or
+    dual-write is disabled, :func:`allocate_invoice_number` returns ``None`` and
+    the caller keeps its legacy unnumbered behaviour — a deliberate posture for
+    an ES-only deployment. But once numbering IS configured, a failure to
+    allocate must not silently degrade to that posture: finalizing an invoice
+    without a number produces a legally defective record, and it does so while
+    reporting success.
+    """
+
+
 async def allocate_invoice_number(tenant_id: str) -> Optional[int]:
     """Allocate the next monotonic invoice number from the Postgres counter.
 
-    Returns the allocated integer, or ``None`` when the persistence layer is
-    dormant / dual-write is off (caller keeps its legacy behavior — today that
-    means ``invoice_number`` stays ``None``, exactly as before).
+    Returns:
+        The allocated integer, or ``None`` when the persistence layer is dormant
+        / dual-write is off (the caller keeps its legacy behavior — today that
+        means ``invoice_number`` stays ``None``).
+
+    Raises:
+        InvoiceNumberingUnavailable: when numbering is configured but the
+            counter could not be allocated. Previously this was logged and
+            ``None`` was returned, which is indistinguishable from "numbering is
+            switched off" — so a database blip finalized an unnumbered invoice
+            and the caller could not tell.
     """
     if not _enabled():
         return None
@@ -352,12 +383,21 @@ async def allocate_invoice_number(tenant_id: str) -> Optional[int]:
     repo = InvoiceRepository()
     try:
         async with session_scope() as session:
-            return await repo.allocate_number(session, tenant_id)
-    except Exception:  # noqa: BLE001
+            allocated = await repo.allocate_number(session, tenant_id)
+    except Exception as exc:  # noqa: BLE001
         logger.exception(
             "Postgres invoice-number allocation failed for tenant %s", tenant_id
         )
-        return None
+        raise InvoiceNumberingUnavailable(
+            f"invoice-number allocation failed for tenant {tenant_id!r}: {exc}"
+        ) from exc
+    if allocated is None:
+        # The repository allocates or raises; a None here would mean the counter
+        # silently produced nothing, which is the same defect by another route.
+        raise InvoiceNumberingUnavailable(
+            f"invoice-number counter returned no number for tenant {tenant_id!r}"
+        )
+    return allocated
 
 
 # ---------------------------------------------------------------------------
@@ -611,16 +651,29 @@ async def read_invoice_find_by_order(tenant_id: str, order_id: str):
         return await InvoiceReadRepository().find_by_order(session, tenant_id, order_id)
 
 
-async def read_invoice_list(tenant_id: str, **kwargs):
+async def read_invoice_list(tenant_id: str, *, statuses=None, **kwargs):
+    """Invoice page from PG; ``statuses`` is an SQL ``IN`` applied with ``status``."""
     if not read_from_postgres():
         return _NOT_CUT_OVER
     from persistence.database import session_scope
     from persistence.read_repositories import InvoiceReadRepository
 
+    if statuses is not None:
+        kwargs["statuses"] = list(statuses)
     async with session_scope() as session:
         return await InvoiceReadRepository().list(session, tenant_id, **kwargs)
 
 
+async def read_invoice_count(tenant_id: str, *, statuses=None, **kwargs):
+    """Count invoices matching the ``read_invoice_list`` filters (data export)."""
+    if not read_from_postgres():
+        return _NOT_CUT_OVER
+    from persistence.database import session_scope
+    from persistence.read_repositories import InvoiceReadRepository
+    if statuses is not None:
+        kwargs["statuses"] = list(statuses)
+    async with session_scope() as session:
+        return await InvoiceReadRepository().count(session, tenant_id, **kwargs)
 async def read_payment_get(tenant_id: str, payment_id: str):
     if not read_from_postgres():
         return _NOT_CUT_OVER
@@ -1064,6 +1117,20 @@ async def mirror_current_state_fields(
     """
     if not _enabled():
         return
+    # Callers often pass a whole partial doc, which can carry ``tenant_id``
+    # (the location ingest does). As a ``**fields`` key it collided with
+    # ``set_fields``'s own ``tenant_id`` parameter: a TypeError that left the
+    # relational row unchanged on every update. The row's tenant never changes
+    # here, and fields naming a different tenant are refused, not written.
+    fields = dict(fields)
+    stamped = fields.pop("tenant_id", None)
+    if stamped is not None and stamped != tenant_id:
+        logger.error(
+            "Postgres dual-write fields refused for %s %s: the fields name a "
+            "different tenant than the row's tenant %s",
+            aggregate_type, doc_id, tenant_id,
+        )
+        return
     from persistence.database import session_scope
     from persistence.repositories import CurrentStateRepository
 
@@ -1105,10 +1172,24 @@ def _hybrid_cut_over(aggregate_type: str) -> bool:
     return HybridReadRepository.is_registered(aggregate_type)
 
 
+def _reject_control_characters(*values) -> None:
+    """Refuse control characters in relational read arguments (N5).
+
+    psycopg rejects NUL in bound text parameters, so a filter value carrying
+    one would surface as a 500. Raises
+    :class:`persistence.document_query.InvalidQueryValueError` (a
+    ``ValueError``), which ``errors.handlers`` maps to 400.
+    """
+    from persistence.document_query import reject_control_characters
+
+    reject_control_characters(list(values))
+
+
 async def read_hybrid_get(aggregate_type: str, tenant_id: str, doc_id: str):
     """Read one hybrid aggregate from Postgres, or _NOT_CUT_OVER when ES-served."""
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, doc_id)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1125,6 +1206,7 @@ async def read_hybrid_get_any(aggregate_type: str, doc_id: str):
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(doc_id)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1138,6 +1220,7 @@ async def read_hybrid_find_one(aggregate_type: str, tenant_id: str, *,
     """First tenant-scoped doc matching term_filters, or _NOT_CUT_OVER off."""
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, term_filters)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1152,6 +1235,7 @@ async def read_hybrid_list(aggregate_type: str, tenant_id: str, *,
     """List a hybrid aggregate from Postgres, or _NOT_CUT_OVER when ES-served."""
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, filters, cursor)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1171,11 +1255,14 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
                              range_lte: str | None = None,
                              range_lt: str | None = None,
                              exists_fields: list | None = None,
+                             unlinked_fields: list | None = None,
                              text_query: str | None = None,
                              text_fields: list | None = None,
                              sort_field: str = "created_at",
                              sort_order: str = "desc",
-                             page: int = 1, size: int = 20):
+                             page: int = 1, size: int = 20,
+                             after: tuple | None = None,
+                             with_total: bool = True):
     """Offset-paginated search of a hybrid aggregate from Postgres.
 
     Returns the ES-equivalent ``{"items", "total", "page", "size"}`` envelope,
@@ -1185,6 +1272,10 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(
+        tenant_id, term_filters, in_filters, bool_filters,
+        range_gte, range_lte, range_lt, text_query,
+    )
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1196,9 +1287,10 @@ async def read_hybrid_search(aggregate_type: str, tenant_id: str, *,
             bool_filters=bool_filters,
             range_field=range_field, range_gte=range_gte, range_lte=range_lte,
             range_lt=range_lt, exists_fields=exists_fields,
+            unlinked_fields=unlinked_fields,
             text_query=text_query, text_fields=text_fields,
             sort_field=sort_field, sort_order=sort_order,
-            page=page, size=size,
+            page=page, size=size, after=after, with_total=with_total,
         )
 
 
@@ -1211,6 +1303,7 @@ async def read_hybrid_search_all_tenants(aggregate_type: str, *,
                                          range_lte: str | None = None,
                                          range_lt: str | None = None,
                                          exists_fields: list | None = None,
+                                         unlinked_fields: list | None = None,
                                          sort_field: str = "created_at",
                                          sort_order: str = "asc",
                                          size: int = 200):
@@ -1223,6 +1316,10 @@ async def read_hybrid_search_all_tenants(aggregate_type: str, *,
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(
+        term_filters, in_filters, bool_filters, range_gte,
+        range_lte, range_lt,
+    )
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1234,6 +1331,7 @@ async def read_hybrid_search_all_tenants(aggregate_type: str, *,
             bool_filters=bool_filters,
             range_field=range_field, range_gte=range_gte, range_lte=range_lte,
             range_lt=range_lt, exists_fields=exists_fields,
+            unlinked_fields=unlinked_fields,
             sort_field=sort_field, sort_order=sort_order, size=size,
         )
 
@@ -1260,6 +1358,10 @@ async def read_hybrid_fetch_for_aggregation(
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(
+        tenant_id, term_filters, in_filters, bool_filters,
+        range_gte, range_lte,
+    )
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 
@@ -1290,6 +1392,7 @@ async def read_hybrid_list_sorted(
     """
     if not _hybrid_cut_over(aggregate_type):
         return _NOT_CUT_OVER
+    _reject_control_characters(tenant_id, term_filters, cursor)
     from persistence.database import session_scope
     from persistence.read_repositories import HybridReadRepository
 

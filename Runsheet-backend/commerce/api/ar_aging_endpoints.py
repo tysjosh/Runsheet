@@ -15,12 +15,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_staff
 from commerce.services.ar_aging_service import ARAgingService
 from commerce.services.commerce_es_mappings import AR_AGING_SNAPSHOTS_INDEX
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -80,12 +82,9 @@ async def require_ar_aging_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     # Receivables aging is a Tier 4 / staff surface: the ERP owns the invoice, so
@@ -118,8 +117,10 @@ async def get_tenant_aging(
 ) -> dict:
     """Return tenant-level AR aging aggregated across all accounts.
 
-    Returns ``{bucket_0_30_cents, bucket_31_60_cents, bucket_61_90_cents,
-    bucket_90_plus_cents, total_open_cents, by_account: [...top 50...]}``
+    Returns ``{bucket_current_cents, bucket_0_30_cents, bucket_31_60_cents,
+    bucket_61_90_cents, bucket_90_plus_cents, total_open_cents,
+    by_account: [...top 50...]}``, aged by days past ``due_date``
+    (``bucket_0_30_cents`` = 1-30 days past due, current = not yet due).
     computed against the current moment via ``utcnow()``.
 
     The ``by_account`` array contains the top 50 accounts sorted by

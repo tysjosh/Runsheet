@@ -93,10 +93,22 @@ def mock_es_client():
 def _build_app(mock_es_client, mock_ff_service):
     """Build a FastAPI app with ops router, mocked ES and feature flag service."""
     test_app = FastAPI()
+    from errors.handlers import register_exception_handlers
+    register_exception_handlers(test_app)
 
     mock_ops_es = MagicMock(spec=OpsElasticsearchService)
     mock_ops_es.client = mock_es_client
 
+    # The ops endpoints call ``es.search_documents(...)`` now instead of
+    # ``es.client.search(...)`` — a raw client call bypasses the
+    # Postgres/Elasticsearch backend switch. Delegate the facade to the same
+    # canned client so tests that reconfigure ``mock_es_client.search``
+    # mid-test keep working: the lambda reads it at call time.
+    mock_ops_es.search_documents = AsyncMock(
+        side_effect=lambda index, query, **kw: mock_es_client.search(
+            index=index, body=query
+        )
+    )
     configure_ops_api(
         ops_es_service=mock_ops_es,
         feature_flag_service=mock_ff_service,
@@ -133,7 +145,7 @@ class TestFeatureFlagDisabledReturns404:
         resp = self.client.request(method, path)
         assert resp.status_code == 404, f"{method} {path} returned {resp.status_code}"
         body = resp.json()
-        assert body["detail"]["error_code"] == "TENANT_DISABLED"
+        assert body["error_code"] == "TENANT_DISABLED"
 
     @pytest.mark.parametrize("method,path", TENANT_SCOPED_ENDPOINTS)
     def test_feature_flag_checked_with_tenant_id(self, method, path, mock_ff_service):
@@ -163,9 +175,7 @@ class TestFeatureFlagEnabledAllowsAccess:
         # but the detail should NOT be TENANT_DISABLED
         if resp.status_code == 404:
             body = resp.json()
-            detail = body.get("detail", "")
-            if isinstance(detail, dict):
-                assert detail.get("error_code") != "TENANT_DISABLED"
+            assert body.get("error_code") != "TENANT_DISABLED"
 
 
 class TestFeatureFlagNotConfigured:

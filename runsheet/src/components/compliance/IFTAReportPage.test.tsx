@@ -8,7 +8,14 @@
  * lock in the null-safe rendering.
  */
 import "@testing-library/jest-dom";
-import { render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 jest.mock("../../services/complianceApi", () => {
   const actual = jest.requireActual("../../services/complianceApi");
@@ -28,8 +35,19 @@ jest.mock("../../services/api", () => ({
   },
 }));
 
+// Export CSV button: stub the download and the session roles.
+jest.mock("../../services/exportApi", () => ({
+  downloadCsvExport: jest.fn(),
+}));
+jest.mock("../../utils/auth", () => ({
+  ...jest.requireActual("../../utils/auth"),
+  getCurrentUserRoles: jest.fn(),
+}));
+
 import type { IFTAReport } from "../../services/complianceApi";
 import { getIFTAReport } from "../../services/complianceApi";
+import { downloadCsvExport } from "../../services/exportApi";
+import { getCurrentUserRoles } from "../../utils/auth";
 import IFTAReportPage from "./IFTAReportPage";
 
 const mockGetReport = getIFTAReport as jest.MockedFunction<
@@ -48,8 +66,18 @@ function reportFixture(overrides: Partial<IFTAReport> = {}): IFTAReport {
   };
 }
 
+const mockDownload = downloadCsvExport as jest.MockedFunction<
+  typeof downloadCsvExport
+>;
+const mockRoles = getCurrentUserRoles as jest.MockedFunction<
+  typeof getCurrentUserRoles
+>;
+
 beforeEach(() => {
   mockGetReport.mockReset();
+  mockDownload.mockReset();
+  mockRoles.mockReset();
+  mockRoles.mockResolvedValue([]);
 });
 
 it("renders without crashing when fleet_mpg is null", async () => {
@@ -126,4 +154,98 @@ it("renders a truck row with null per-truck fleet_mpg without crashing", async (
   // Report-level MPG renders its real value; the null per-truck MPG shows "—".
   expect(screen.getByText("6.20")).toBeInTheDocument();
   expect(screen.getByText("1,200.0")).toBeInTheDocument();
+});
+
+describe("Export CSV", () => {
+  beforeEach(() => {
+    mockGetReport.mockResolvedValue({ data: reportFixture(), request_id: "r" });
+    mockDownload.mockResolvedValue({ filename: "ifta.csv" });
+  });
+
+  it("is hidden for a driver", async () => {
+    mockRoles.mockResolvedValue(["driver"]);
+    render(<IFTAReportPage />);
+    await waitFor(() => expect(mockRoles).toHaveBeenCalled());
+    await act(async () => {});
+    expect(
+      screen.queryByRole("button", { name: /Export CSV/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("exports the currently selected quarter for a dispatcher", async () => {
+    mockRoles.mockResolvedValue(["dispatcher"]);
+    render(<IFTAReportPage />);
+    const button = await screen.findByRole("button", {
+      name: /^Export CSV ?: IFTA report$/,
+    });
+    const select = screen.getByLabelText("Quarter") as HTMLSelectElement;
+    const other = Array.from(select.options).find(
+      (o) => o.value !== select.value,
+    );
+    if (!other) throw new Error("expected more than one quarter option");
+    fireEvent.change(select, { target: { value: other.value } });
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(mockDownload).toHaveBeenCalledWith("ifta", { quarter: other.value });
+  });
+});
+
+describe("IFTAReportPage — adjustment FormDialog (task 3.5)", () => {
+  it("prefills the truck from an incomplete flag and validates inline", async () => {
+    const { createMileageAdjustment } = jest.requireMock(
+      "../../services/complianceApi",
+    ) as { createMileageAdjustment: jest.Mock };
+    createMileageAdjustment.mockResolvedValue({ data: {} });
+    mockGetReport.mockResolvedValue({
+      data: reportFixture({
+        incomplete_trucks: [
+          { truck_id: "TRK-009", reason: "no data" },
+        ] as unknown as IFTAReport["incomplete_trucks"],
+      }),
+      request_id: "r",
+    } as never);
+    render(<IFTAReportPage />);
+    await screen.findByText(/Incomplete Geotab data/);
+    // Title-row action first, the banner's own action second.
+    const buttons = screen.getAllByRole("button", {
+      name: "Record adjustment",
+    });
+    fireEvent.click(buttons[buttons.length - 1]);
+    const dialog = screen.getByRole("dialog", {
+      name: "Record mileage adjustment",
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Record adjustment" }),
+    );
+    expect(
+      await within(dialog).findByText("Miles must be non-zero."),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Enter a two-letter state, e.g. TX."),
+    ).toBeInTheDocument();
+    expect(within(dialog).queryByText("Pick a truck.")).toBeNull();
+    expect(createMileageAdjustment).not.toHaveBeenCalled();
+    fireEvent.change(within(dialog).getByLabelText(/^Jurisdiction/), {
+      target: { value: "tx" },
+    });
+    const miles = within(dialog).getByLabelText(/^Miles/);
+    fireEvent.change(miles, { target: { value: "-12.5" } });
+    fireEvent.blur(miles);
+    fireEvent.change(within(dialog).getByLabelText(/^Reason/), {
+      target: { value: "Geotab gap" },
+    });
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "Record adjustment" }),
+    );
+    await waitFor(() =>
+      expect(createMileageAdjustment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          truck_id: "TRK-009",
+          jurisdiction: "TX",
+          miles: -12.5,
+        }),
+      ),
+    );
+  });
 });

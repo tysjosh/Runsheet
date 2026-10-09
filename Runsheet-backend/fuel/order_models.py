@@ -35,7 +35,7 @@ Validates: Requirements 1.1, 1.1.7, 1.1.8, 1.1.9, 1.1.10, 1.1.11.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -48,6 +48,18 @@ OrderStatus = Literal[
     "placed", "confirmed", "scheduled", "dispatched",
     "in_transit", "delivered", "failed", "cancelled", "on_hold",
 ]
+
+#: Order statuses that are still open work: compartment loading, delivery
+#: prioritization and route planning all read exactly this set. They must
+#: agree, or the route planner can't find stops for orders the loader loaded
+#: (staging N2: ``placed`` orders ended up as ``unresolvable_stop_locations``).
+LOADABLE_ORDER_STATUSES: Tuple[str, ...] = ("placed", "confirmed", "scheduled")
+
+#: Hold reason the intake pipeline stamps on a customer-portal request
+#: (``web_portal``) that no hook held. ``on_hold`` is not loadable, so the
+#: request stays out of planning until a dispatcher confirms it with
+#: ``release-hold`` (customer portal design §4.2, step i3).
+PORTAL_REVIEW_HOLD_REASON: str = "awaiting_dispatcher_confirmation"
 
 CallType = Literal["will_call", "auto_fill", "keep_full", "one_off"]
 
@@ -129,6 +141,8 @@ class DeliveryResult(BaseModel):
     signature_ref: Optional[str] = None
     photo_refs: List[str] = Field(default_factory=list)
     meter_ticket_ref: Optional[str] = None
+    meter_number: Optional[str] = None
+    ticket_number: Optional[str] = None
     bol_id: Optional[str] = None
     bol_ref: Optional[str] = None
     pod_hash: Optional[str] = None
@@ -202,6 +216,10 @@ class FuelOrder(BaseModel):
     # existing same-tenant asset at write time (Req 2.3).
     assigned_asset_id: Optional[str] = None
     assigned_run_id: Optional[str] = None
+    # Owning claim id of the run links above: the loading-plan executor's
+    # attempt id or one MVP dispatch call's claim id. Release clears the links
+    # only for the owner of this id (loading-plan-executor design FREEZE rule 2).
+    assigned_claim_id: Optional[str] = None
     # POD one-time code provisioned at dispatch by ``PODOTPService`` and the
     # instant its validity window is measured from (driver-mobile-app R5.25,
     # R5.28-R5.30). Both nullable: absent means the tenant does not require a
@@ -390,6 +408,8 @@ class Driver(BaseModel):
 
 __all__ = [
     "OrderStatus",
+    "LOADABLE_ORDER_STATUSES",
+    "PORTAL_REVIEW_HOLD_REASON",
     "CallType",
     "IntakeChannelType",
     "DriverStatus",

@@ -19,30 +19,15 @@ logger = logging.getLogger(__name__)
 
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register fuel domain services."""
-    from fuel.services.fuel_es_mappings import setup_fuel_indices
     from fuel.services.fuel_service import FuelService
     from fuel.api.endpoints import configure_fuel_api
 
     es_service = container.es_service
 
     # Set up fuel indices
-    try:
-        logger.info("Setting up fuel monitoring indices...")
-        setup_fuel_indices(es_service.client, es_service=es_service)
-        logger.info("Fuel monitoring indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up fuel monitoring indices: %s", e)
 
     # Set up order intake pipeline indices (fuel_orders_current,
     # fuel_order_events, drivers_current, intake_channels)
-    try:
-        from fuel.services.order_es_mappings import setup_order_intake_indices
-
-        logger.info("Setting up order intake pipeline indices...")
-        setup_order_intake_indices(es_service)
-        logger.info("Order intake pipeline indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up order intake pipeline indices: %s", e)
 
     # Fuel service
     fuel_service = FuelService(es_service)
@@ -142,6 +127,14 @@ async def initialize(app, container: ServiceContainer) -> None:
             )
         except Exception as exc:
             logger.warning("Failed to register dispatcher adapter: %s", exc)
+        try:
+            # Customer-portal delivery requests (OI-06, design §4.2).
+            from fuel.intake.web_portal_adapter import WebPortalIntakeAdapter
+            adapter_registry.register(
+                WebPortalIntakeAdapter(), channel_type="web_portal", schema_version="1.0"
+            )
+        except Exception as exc:
+            logger.warning("Failed to register web_portal adapter: %s", exc)
 
         try:
             from fuel.intake.csv_adapter import CsvIntakeAdapter
@@ -225,6 +218,10 @@ async def initialize(app, container: ServiceContainer) -> None:
         )
         container.order_intake_pipeline = order_intake_pipeline
         logger.info("OrderIntakePipeline registered")
+        # Customer portal /me reads ordering_available from it (OI-06).
+        from portal.api.me_endpoints import configure_portal_me
+
+        configure_portal_me(order_intake_pipeline=order_intake_pipeline)
 
         # Register the VoiceReviewHoldHook so voice orders flagged for human
         # review (hold_reason set by the VoiceIntakeAdapter) are promoted from
@@ -535,6 +532,25 @@ async def initialize(app, container: ServiceContainer) -> None:
         logger.warning(
             "Commerce invoice generation subscriber wiring failed: %s", e
         )
+    # Margin feed order-event subscriber: late-bound for the same reason
+    # (core builds MarginService before the OrderService exists). Core
+    # registers it itself only when order_service already existed, which
+    # sets ``margin_order_subscribers`` and keeps this to one registration.
+    try:
+        if (
+            container.has("order_service")
+            and container.has("margin_service")
+            and not container.has("margin_order_subscribers")
+        ):
+            from commerce.hooks.margin_order_subscriber import (
+                register_margin_order_subscribers,
+            )
+            container.margin_order_subscribers = register_margin_order_subscribers(
+                container.order_service, container.margin_service.hook
+            )
+            logger.info("Margin order-event subscribers registered (late-bound)")
+    except Exception as e:
+        logger.warning("Margin order subscriber wiring failed: %s", e)
 
     # ---------------------------------------------------------------
     # Cross-module reference loaders — depot (Req 10.1)

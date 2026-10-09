@@ -277,8 +277,8 @@ class TestQueryRelevant:
         assert call_args[0][0] == "agent_memory"
         assert call_args[0][1] == "m-1"
         update_body = call_args[0][2]
-        assert update_body["doc"]["access_count"] == 6
-        assert "last_accessed" in update_body["doc"]
+        assert update_body["access_count"] == 6
+        assert "last_accessed" in update_body
 
     async def test_query_relevant_returns_empty_for_no_matches(self):
         service = _make_service()
@@ -343,7 +343,7 @@ class TestDecayStale:
         assert call_args[0][0] == "agent_memory"
         assert call_args[0][1] == "m-1"
         update_body = call_args[0][2]
-        assert update_body["doc"]["confidence_score"] == 0.4  # 0.8 * 0.5
+        assert update_body["confidence_score"] == 0.4  # 0.8 * 0.5
 
     async def test_decay_stale_purges_below_threshold(self):
         hits = [

@@ -108,7 +108,6 @@ async def _run(
     from config.settings import get_settings
     from fuel.intake_channel_repository import IntakeChannelRepository
     from fuel.voice.voice_auth import VoiceApiKeyRepository
-    from fuel.voice.voice_es_mappings import setup_voice_indices
     from services.elasticsearch_service import elasticsearch_service
 
     settings = get_settings()
@@ -129,10 +128,6 @@ async def _run(
 
     # Ensure the voice_api_keys index exists before the reverse-lookup write
     # (idempotent — a no-op if already present).
-    try:
-        setup_voice_indices(es_service)
-    except Exception as exc:  # noqa: BLE001 — non-fatal, provision may still work
-        logger.warning("Could not ensure voice ES indices: %s", exc)
 
     intake_channel_repo = IntakeChannelRepository(
         es_service=es_service,

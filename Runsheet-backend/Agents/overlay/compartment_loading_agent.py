@@ -41,8 +41,9 @@ Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10,
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Final, List, Mapping, Optional, Tuple
+from typing import Any, Dict, Final, List, Mapping, Optional, Sequence, Tuple
 from uuid import uuid4
 
 from Agents.overlay.base_overlay_agent import (
@@ -63,15 +64,23 @@ from Agents.support.compartment_models import (
     CompartmentAssignment,
     DeliveryRequest,
     FeasibilityResult,
+    FleetAllocation,
     LoadingPlan,
+    TruckSpec,
 )
 from Agents.support.compartment_solver import (
+    allocate_across_trucks,
     check_feasibility,
     fuel_density_kg_per_liter,
     legacy_grade_for_product,
-    optimize_loading_plan,
+    output_fuel_grade,
+    planned_liters,
+    replace_stripped,
+    request_key,
+    segregation_key,
 )
 from Agents.support.fuel_distribution_models import (
+    DeliveryPriority,
     DeliveryPriorityList,
     FuelGrade,
     PriorityBucket,
@@ -98,11 +107,11 @@ from fuel.services.compatibility_matrix import (
     check_compatibility,
     load_tenant_compatibility_rules,
 )
+from compliance.services.dyed_diesel_enforcer import DyedDieselCheckUnavailable
 from fuel.services.contract_lift_service import ContractLiftService
-from fuel.customer_tank_models import CustomerTankRepository
+from fuel.customer_tank_models import CustomerTank, CustomerTankRepository
 from fuel.services.fuel_ops_es_mappings import (
     CROSS_CONTAMINATION_EVENTS_INDEX,
-    CUSTOMER_TANKS_INDEX,
 )
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -110,6 +119,7 @@ from fuel.services.fuel_product_catalog import (
     canonicalize_or_warn,
     is_known_product,
 )
+from fuel.order_models import LOADABLE_ORDER_STATUSES
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from services.unit_conversion import GAL_TO_L
 
@@ -121,11 +131,76 @@ logger = logging.getLogger(__name__)
 #: solver and its kg/L densities are litres-denominated.
 GALLONS_TO_LITERS: Final[float] = GAL_TO_L
 
+#: K11 / R8.1: an order whose ``assigned_run_id`` is neither absent, null nor
+#: ``""`` is committed to an applied loading plan and is not loaded again.
+#: R8.6 rule: loadable = loadable statuses minus committed; routable = loadable
+#: statuses (RoutePlanningAgent keeps no committed exclusion, R8.5); committed
+#: draw = committed loadable plus dispatched/in_transit. The status set is the
+#: shared :data:`fuel.order_models.LOADABLE_ORDER_STATUSES` (N2); the committed
+#: clause stays separate.
+COMMITTED_ORDER_FIELD: Final[str] = "assigned_run_id"
+_LOADABLE_ORDER_STATUSES: Final[tuple] = LOADABLE_ORDER_STATUSES
+_IN_FLIGHT_ORDER_STATUSES: Final[tuple] = ("dispatched", "in_transit")
+
+
+def _unlinked_clause(field: str) -> Dict[str, Any]:
+    """K11 document-store clause: ``field`` absent, null or ``""``."""
+    return {"bool": {
+        "should": [
+            {"bool": {"must_not": [{"exists": {"field": field}}]}},
+            {"term": {field: ""}},
+        ],
+        "minimum_should_match": 1,
+    }}
+
 # Default minimum delivery quantity in liters (Req 3.5)
 DEFAULT_MIN_DROP_LITERS = 500.0
 
 # Default uncertainty buffer percentage (Req 3.6)
 DEFAULT_UNCERTAINTY_BUFFER_PCT = 10.0
+
+
+def _assignment_key(a: CompartmentAssignment) -> str:
+    """Run identity of an assignment; matches :func:`request_key` of its request."""
+    return a.order_id or "{}:{}".format(
+        a.station_id,
+        segregation_key(product_code=a.product_code, fuel_grade=a.fuel_grade),
+    )
+
+
+def _unplaced_entry(
+    *,
+    order_id: Optional[str],
+    station_id: str,
+    product_code: Optional[str],
+    liters: float,
+    reason: str,
+    partial: bool = False,
+) -> Dict[str, Any]:
+    """One ``last_unplaced_orders`` entry (OI-39). Ids and litres only."""
+    return {
+        "order_id": order_id,
+        "station_id": station_id,
+        "product_code": product_code,
+        "liters": round(float(liters), 2),
+        "reason": reason,
+        "partial": partial,
+    }
+
+
+@dataclass(frozen=True)
+class _OrderCandidate:
+    """A loadable order before its tank's shared ullage is applied."""
+
+    score: Optional[float]
+    order_id: str
+    #: Set only when the tank's ullage is known; ``None`` means uncapped.
+    tank_id: Optional[str]
+    ullage_liters: Optional[float]
+    requested_liters: float
+    station_id: str
+    fuel_grade: FuelGrade
+    product_code: str
 
 
 class CompartmentLoadingAgent(OverlayAgentBase):
@@ -214,6 +289,14 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             if customer_tank_repo is not None
             else CustomerTankRepository(es_service)
         )
+        # Per-evaluate state, reset at the start of every evaluate (R3.10, K11).
+        self._order_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._all_orders_committed = False
+        self._committed_order_count = 0
+        #: Orders this evaluate() could not load, one entry per order (and
+        #: reason): ``{order_id, station_id, product_code, liters, reason,
+        #: partial}``. Read by FuelDistributionPipeline (OI-39).
+        self.last_unplaced_orders: List[Dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # Post-construction wiring helpers
@@ -238,8 +321,8 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         every proposed compartment assignment involving dyed diesel is
         validated against the compartment's dyed-compatible flag before
         the plan is committed to ``mvp_load_plans``. When the enforcer
-        is ``None`` (legacy path, test environments) the dyed-diesel
-        check is skipped and all assignments pass through unchanged.
+        is ``None`` a plan carrying dyed diesel is blocked (fail closed,
+        OI-02); plans with no dyed diesel are unaffected.
         """
         self._dyed_diesel_enforcer = enforcer
 
@@ -317,16 +400,24 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 
         Steps:
         1. Collect buffered DeliveryPriorityList messages.
-        2. Build delivery requests from priorities (Req 3.1).
-        3. Query available fuel trucks and their compartments (Req 3.1).
-        4. For each truck: run feasibility check (Req 3.3), then
-           optimize loading plan (Req 3.4).
-        5. Persist loading plans to mvp_load_plans (Req 3.9).
-        6. Produce InterventionProposals with loading plan actions.
+        2. Build delivery requests from fuel orders, in priority order and
+           capped at tank ullage (Req 3.1).
+        3. Query available fuel trucks and their compartments once (Req 3.1).
+        4. Allocate the requests across the fleet, each to at most one truck
+           (Req 3.4); report requests no truck could take.
+        5. Per plan: feasibility of that truck's share (Req 3.3),
+           cross-contamination and dyed-diesel enforcement, persist to
+           mvp_load_plans (Req 3.9).
+        6. Produce one InterventionProposal per persisted plan.
 
         Returns:
             List of InterventionProposals with loading plan actions.
         """
+        self._order_snapshots = {}
+        self._all_orders_committed = False
+        self._committed_order_count = 0
+        self.last_unplaced_orders = []
+
         # Step 1: Collect buffered priority lists
         priority_lists = list(self._priority_buffer)
         self._priority_buffer.clear()
@@ -382,6 +473,28 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         delivery_requests = await self._build_delivery_requests_from_orders(
             tenant_id, priority_list
         )
+        if not delivery_requests and self._all_orders_committed:
+            # K11: the steady state after every plan is applied. no_input keeps
+            # it non-error in the pipeline log, and the distinct code tells a
+            # dispatcher "nothing left to load" from a failure.
+            logger.info(
+                "CompartmentLoadingAgent: every loadable order for tenant %s "
+                "is committed to an applied loading plan (%d order(s))",
+                tenant_id,
+                self._committed_order_count,
+            )
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="all_loadable_orders_committed",
+                    kind=DEGRADATION_KIND_NO_INPUT,
+                    detail=(
+                        "every loadable order is already committed to an "
+                        "applied loading plan"
+                    ),
+                    committed_orders=self._committed_order_count,
+                )
+            )
+            return []
         if not delivery_requests:
             # A priority list arrived but none of its entries resolved to a
             # loadable request. Unlike the empty-buffer case above there *was*
@@ -453,64 +566,174 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         # cycle so every truck processed in the same evaluation shares
         # the same commit gate.
         commit_compartment_state = await self._is_active_commit_mode(tenant_id)
-        for truck_id, truck_data in trucks.items():
-            compartments = truck_data["compartments"]
-            max_weight_kg = truck_data.get("max_weight_kg")
-            tare_weight_kg = truck_data.get("tare_weight_kg", 0.0)
-            compartment_states: Dict[str, CompartmentState] = truck_data.get(
-                "compartment_states", {}
-            )
 
-            # Check feasibility with weight constraints (Req 3.3, 3.7)
-            feasibility = check_feasibility(
-                compartments=compartments,
-                requests=delivery_requests,
-                max_weight_kg=max_weight_kg,
-                tare_weight_kg=tare_weight_kg,
-            )
-
-            # Optimize loading plan (Req 3.4)
-            loading_plan = optimize_loading_plan(
-                compartments=compartments,
-                requests=delivery_requests,
+        # Allocate the whole run across the fleet at once (F10). The old loop
+        # ran the solver per truck with the full request list, so every truck
+        # was planned to carry every order and each copy was queued as its own
+        # approval. ``delivery_requests`` is already in priority order.
+        truck_specs = [
+            TruckSpec(
                 truck_id=truck_id,
-                tenant_id=tenant_id,
+                compartments=truck_data["compartments"],
+                max_weight_kg=truck_data.get("max_weight_kg"),
+                tare_weight_kg=truck_data.get("tare_weight_kg") or 0.0,
             )
+            for truck_id, truck_data in trucks.items()
+        ]
+        allocation = allocate_across_trucks(
+            truck_specs,
+            delivery_requests,
+            uncertainty_buffer_pct=DEFAULT_UNCERTAINTY_BUFFER_PCT,
+        )
+        await self._report_unassigned_orders(allocation, tenant_id, run_id)
+        for unserved in allocation.unassigned:
+            self.last_unplaced_orders.append(_unplaced_entry(
+                order_id=unserved.order_id,
+                station_id=unserved.station_id,
+                product_code=unserved.product_code,
+                liters=unserved.planned_liters,
+                reason=unserved.reason,
+            ))
 
-            if loading_plan is None or not loading_plan.assignments:
-                continue
+        # Index of each request by its run identity, first occurrence wins
+        # (priority order).
+        requests_by_key: Dict[str, Tuple[int, DeliveryRequest]] = {}
+        for index, req in enumerate(delivery_requests):
+            requests_by_key.setdefault(request_key(req), (index, req))
 
+        # Phase A — cross-contamination (Task 6.5 / Req 7.2.2, 7.2.3, 7.2.6).
+        # Before any assignment is committed, verify each proposed
+        # compartment/product pairing against the tenant compatibility
+        # matrix. Rejected assignments are stripped from the plan, persisted
+        # as a CrossContaminationViolation, and republished on the SignalBus
+        # so downstream overlays can react.
+        plans: Dict[str, LoadingPlan] = {}
+        stripped_liters: Dict[str, float] = {}
+        stripped_sample: Dict[str, CompartmentAssignment] = {}
+        source_truck: Dict[str, str] = {}
+        for truck_id, loading_plan in allocation.plans.items():
             loading_plan.run_id = run_id
-
-            # Task 6.5 / Req 7.2.2, 7.2.3, 7.2.6: before any assignment
-            # is committed, verify each proposed compartment/product
-            # pairing against the tenant compatibility matrix. Rejected
-            # assignments are stripped from the plan, persisted as a
-            # CrossContaminationViolation, and republished on the
-            # SignalBus so downstream overlays can react.
-            loading_plan = await self._enforce_cross_contamination(
+            loading_plan, stripped = await self._enforce_cross_contamination(
                 loading_plan=loading_plan,
                 truck_id=truck_id,
                 tenant_id=tenant_id,
-                compartment_states=compartment_states,
+                compartment_states=trucks[truck_id].get("compartment_states", {}),
                 compatibility_rules=compatibility_rules,
                 run_id=run_id,
             )
+            plans[truck_id] = loading_plan
+            for a in stripped:
+                key = _assignment_key(a)
+                stripped_liters[key] = stripped_liters.get(key, 0.0) + float(
+                    a.quantity_liters
+                )
+                stripped_sample.setdefault(key, a)
+                source_truck.setdefault(key, truck_id)
 
+        # Phase B — re-place stripped litres in the same run (OI-39).
+        new_reason_entries: List[Dict[str, Any]] = []
+        if stripped_liters:
+            new_reason_entries.extend(
+                await self._replace_stripped_assignments(
+                    plans=plans,
+                    trucks=trucks,
+                    truck_specs=truck_specs,
+                    tenant_id=tenant_id,
+                    run_id=run_id,
+                    requests_by_key=requests_by_key,
+                    stripped_liters=stripped_liters,
+                    stripped_sample=stripped_sample,
+                    source_truck=source_truck,
+                    compatibility_rules=compatibility_rules,
+                )
+            )
+
+        # Phase C — per truck: feasibility, dyed diesel, persist, propose.
+        buffer_mult = 1.0 + DEFAULT_UNCERTAINTY_BUFFER_PCT / 100.0
+        blocked_trucks: List[str] = []
+        blocked_keys: set = set()
+        for truck_id, loading_plan in plans.items():
             if not loading_plan.assignments:
                 # Every assignment was blocked — skip the plan to avoid
                 # writing an empty Loading_Plan to mvp_load_plans.
                 continue
+            truck_data = trucks[truck_id]
+            compartments = truck_data["compartments"]
+
+            # Feasibility of this truck's final share (Req 3.3, 3.7), at the
+            # litres the allocator planned, so the buffer is not applied twice.
+            # It only sets proposal confidence.
+            plan_keys = {_assignment_key(a) for a in loading_plan.assignments}
+            subset = [
+                req.model_copy(update={
+                    "quantity_liters": planned_liters(
+                        req, buffer_mult, buffer_orders=False
+                    ),
+                })
+                for req in delivery_requests
+                if request_key(req) in plan_keys
+            ]
+            feasibility = check_feasibility(
+                compartments=compartments,
+                requests=subset,
+                max_weight_kg=truck_data.get("max_weight_kg"),
+                tare_weight_kg=truck_data.get("tare_weight_kg") or 0.0,
+                uncertainty_buffer_pct=0.0,
+            )
+
+            loading_plan.run_id = run_id
 
             # Task 9.8 / Req 6.3, 6.4: before persisting the plan,
             # validate that any dyed-diesel assignments target
             # dyed-compatible compartments. Rejected assignments are
             # stripped from the plan and their volume is charged to
-            # unserved_demand_liters.
-            loading_plan = await self._enforce_dyed_diesel_compliance(
-                loading_plan=loading_plan,
-                tenant_id=tenant_id,
-            )
+            # unserved_demand_liters. OI-02: if the check cannot run, the
+            # whole plan is withheld (fail closed).
+            try:
+                loading_plan, dyed_stripped = (
+                    await self._enforce_dyed_diesel_compliance(
+                        loading_plan=loading_plan,
+                        tenant_id=tenant_id,
+                    )
+                )
+            except DyedDieselCheckUnavailable as exc:
+                logger.error(
+                    "CompartmentLoadingAgent: loading plan %s for truck %s "
+                    "blocked; dyed-diesel check unavailable (%s, tenant=%s, "
+                    "run_id=%s)",
+                    loading_plan.plan_id,
+                    truck_id,
+                    exc.reason,
+                    tenant_id,
+                    run_id,
+                )
+                blocked_trucks.append(truck_id)
+                for a in loading_plan.assignments:
+                    key = _assignment_key(a)
+                    if key in blocked_keys:
+                        continue
+                    blocked_keys.add(key)
+                    new_reason_entries.append(_unplaced_entry(
+                        order_id=a.order_id,
+                        station_id=a.station_id,
+                        product_code=a.product_code,
+                        liters=sum(
+                            x.quantity_liters
+                            for x in loading_plan.assignments
+                            if _assignment_key(x) == key
+                        ),
+                        reason="dyed_diesel_check_unavailable",
+                    ))
+                continue
+
+            for a in dyed_stripped:
+                new_reason_entries.append(_unplaced_entry(
+                    order_id=a.order_id,
+                    station_id=a.station_id,
+                    product_code=a.product_code,
+                    liters=a.quantity_liters,
+                    reason="dyed_diesel_compartment_incompatible",
+                ))
 
             if not loading_plan.assignments:
                 # Every assignment was blocked by dyed-diesel rules —
@@ -530,6 +753,47 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
             proposals.append(proposal)
 
+        # Per-order report (OI-39): every order this run could not load, with
+        # the reason. no_truck_capacity was signalled by
+        # _report_unassigned_orders above; the reasons added here are signalled
+        # now through the same RiskSignal.
+        self.last_unplaced_orders.extend(new_reason_entries)
+        for entry in new_reason_entries:
+            if not entry["order_id"]:
+                continue
+            await self._fail_order_loading(
+                order_id=entry["order_id"],
+                tenant_id=tenant_id,
+                reason=entry["reason"],
+                details={
+                    "liters": entry["liters"],
+                    "product_code": entry["product_code"],
+                    "run_id": run_id,
+                    "partial": entry["partial"],
+                },
+            )
+
+        if blocked_trucks:
+            self.report_degradation(
+                build_degradation_reason(
+                    reason_code="dyed_diesel_check_unavailable",
+                    kind=DEGRADATION_KIND_PRODUCED_NOTHING,
+                    detail=(
+                        "Dyed-diesel compliance check unavailable: "
+                        f"{len(blocked_trucks)} loading plan(s) blocked "
+                        f"(trucks {', '.join(blocked_trucks)}). Retry when "
+                        "the compliance service is back."
+                    ),
+                    blocked_trucks=list(blocked_trucks),
+                    blocked_orders=sorted(
+                        e["order_id"]
+                        for e in new_reason_entries
+                        if e["reason"] == "dyed_diesel_check_unavailable"
+                        and e["order_id"]
+                    ),
+                )
+            )
+
         logger.info(
             "CompartmentLoadingAgent: produced %d loading plans for tenant %s "
             "(run_id=%s)",
@@ -539,9 +803,8 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         )
 
         # Trucks and demand were both present and the loop produced no plan —
-        # every truck fell out of one of the four ``continue`` branches above
-        # (infeasible, all assignments cross-contamination-blocked, all blocked
-        # by dyed-diesel rules). This is the loading equivalent of the route
+        # no truck had room for any request, or every allocated assignment was
+        # stripped by the cross-contamination or dyed-diesel rules. This is the loading equivalent of the route
         # stage skipping every truck it was handed, and it is the one case here
         # that is unambiguously produced_nothing.
         if not proposals:
@@ -568,6 +831,201 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
 
         return proposals
+
+    async def _report_unassigned_orders(
+        self, allocation: FleetAllocation, tenant_id: str, run_id: str
+    ) -> None:
+        """Report every request no truck had room for in this run.
+
+        Order-backed requests get the same ``_fail_order_loading`` RiskSignal
+        an unresolvable order gets, with ``reason="no_truck_capacity"``, so a
+        dispatcher sees which orders this run left behind. Legacy station
+        demand has no order to fail and is only counted.
+        """
+        if not allocation.unassigned:
+            return
+        logger.warning(
+            "CompartmentLoadingAgent: %d request(s) for tenant %s fit on no "
+            "truck this run (run_id=%s): %s",
+            len(allocation.unassigned),
+            tenant_id,
+            run_id,
+            ", ".join(u.order_key for u in allocation.unassigned),
+        )
+        for unserved in allocation.unassigned:
+            if not unserved.order_id:
+                continue
+            await self._fail_order_loading(
+                order_id=unserved.order_id,
+                tenant_id=tenant_id,
+                reason="no_truck_capacity",
+                details={
+                    "planned_liters": unserved.planned_liters,
+                    "product_code": unserved.product_code,
+                    "run_id": run_id,
+                },
+            )
+
+    async def _replace_stripped_assignments(
+        self,
+        *,
+        plans: Dict[str, LoadingPlan],
+        trucks: Dict[str, Dict[str, Any]],
+        truck_specs: List[TruckSpec],
+        tenant_id: str,
+        run_id: str,
+        requests_by_key: Mapping[str, Tuple[int, DeliveryRequest]],
+        stripped_liters: Mapping[str, float],
+        stripped_sample: Mapping[str, CompartmentAssignment],
+        source_truck: Mapping[str, str],
+        compatibility_rules: Mapping[Tuple[str, str], "RuleType"],
+    ) -> List[Dict[str, Any]]:
+        """Offer cross-contamination strips to other compartments (OI-39).
+
+        Mutates ``plans`` in place: re-placed assignments are merged into
+        their destination truck's plan (a new plan when that truck had none),
+        and the re-placed litres are taken back off the source plan's
+        ``unserved_demand_liters``. Re-placed assignments already passed the
+        compatibility check, so they are not re-checked (no duplicate
+        violation records); they still go through the dyed-diesel check.
+
+        Returns the per-order ``no_compatible_compartment`` entries for
+        litres that fit nowhere.
+        """
+        entries: List[Dict[str, Any]] = []
+        stripped: List[Tuple[int, DeliveryRequest, float]] = []
+        for key, liters in stripped_liters.items():
+            found = requests_by_key.get(key)
+            if found is None:
+                # No request to re-place from (should not happen: every
+                # assignment comes from a request). Report it, don't drop it.
+                sample = stripped_sample[key]
+                entries.append(_unplaced_entry(
+                    order_id=sample.order_id,
+                    station_id=sample.station_id,
+                    product_code=sample.product_code,
+                    liters=liters,
+                    reason="no_compatible_compartment",
+                ))
+                continue
+            index, req = found
+            stripped.append((index, req, liters))
+        stripped.sort(key=lambda item: item[0])
+
+        probe_requests: Dict[str, DeliveryRequest] = {}
+        for _, req, _ in stripped:
+            probe_requests.setdefault(
+                segregation_key(
+                    product_code=req.product_code, fuel_grade=req.fuel_grade.value
+                ),
+                req,
+            )
+
+        def is_allowed(truck_id: str, comp: Compartment, key: str) -> bool:
+            req = probe_requests.get(key)
+            if req is None:
+                return False
+            probe = CompartmentAssignment(
+                compartment_id=comp.compartment_id,
+                station_id=req.station_id,
+                order_id=req.order_id,
+                fuel_grade=output_fuel_grade(req),
+                product_code=req.product_code,
+                quantity_liters=1.0,
+                compartment_capacity_liters=comp.capacity_liters,
+            )
+            decision = self._evaluate_assignment_compatibility(
+                assignment=probe,
+                compartment_states=trucks[truck_id].get("compartment_states", {}),
+                compatibility_rules=compatibility_rules,
+            )
+            return decision is not None and decision["decision"] == DECISION_ALLOWED
+
+        replacement = replace_stripped(
+            truck_specs,
+            {truck_id: list(plan.assignments) for truck_id, plan in plans.items()},
+            [(req, liters) for _, req, liters in stripped],
+            is_allowed,
+        )
+
+        # Take re-placed litres back off each source plan's unserved total.
+        credit: Dict[str, float] = {}
+        replaced_total = 0.0
+        for new_assignments in replacement.placed.values():
+            for a in new_assignments:
+                src = source_truck.get(_assignment_key(a))
+                if src is not None:
+                    credit[src] = credit.get(src, 0.0) + float(a.quantity_liters)
+                replaced_total += float(a.quantity_liters)
+
+        for truck_id in list(plans) + [
+            t for t in replacement.placed if t not in plans
+        ]:
+            new_assignments = replacement.placed.get(truck_id, [])
+            if not new_assignments and truck_id not in credit:
+                continue
+            base = plans.get(truck_id)
+            if base is None:
+                base = LoadingPlan(
+                    truck_id=truck_id,
+                    assignments=[],
+                    total_utilization_pct=0.0,
+                    unserved_demand_liters=0.0,
+                    total_weight_kg=0.0,
+                    tenant_id=trucks[truck_id]["compartments"][0].tenant_id,
+                    run_id=run_id,
+                )
+            if new_assignments:
+                plans[truck_id] = self._rebuild_plan(
+                    base,
+                    list(base.assignments) + list(new_assignments),
+                    unserved_delta=-credit.get(truck_id, 0.0),
+                    capacity_liters=sum(
+                        c.capacity_liters for c in trucks[truck_id]["compartments"]
+                    ),
+                )
+            else:
+                plans[truck_id] = base.model_copy(update={
+                    "unserved_demand_liters": max(
+                        0.0,
+                        round(
+                            float(base.unserved_demand_liters)
+                            - credit.get(truck_id, 0.0),
+                            2,
+                        ),
+                    ),
+                })
+
+        for unserved in replacement.unplaced:
+            entries.append(_unplaced_entry(
+                order_id=unserved.order_id,
+                station_id=unserved.station_id,
+                product_code=unserved.product_code,
+                liters=unserved.planned_liters,
+                reason=unserved.reason,
+            ))
+        for key, shortfall in replacement.partial.items():
+            _, req = requests_by_key[key]
+            entries.append(_unplaced_entry(
+                order_id=req.order_id,
+                station_id=req.station_id,
+                product_code=req.product_code,
+                liters=shortfall,
+                reason="no_compatible_compartment",
+                partial=True,
+            ))
+
+        logger.info(
+            "CompartmentLoadingAgent: re-placed %.0fL of %.0fL stripped by "
+            "cross-contamination rules; %d order(s) not re-placeable "
+            "(tenant=%s, run_id=%s)",
+            replaced_total,
+            sum(stripped_liters.values()),
+            len(entries),
+            tenant_id,
+            run_id,
+        )
+        return entries
 
     # ------------------------------------------------------------------
     # Build delivery requests from priorities (Req 3.1) — legacy path
@@ -620,32 +1078,56 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         tenant_id: str,
         priority_list: DeliveryPriorityList,
     ) -> List[DeliveryRequest]:
-        """Build delivery requests by reading product_code and gallons_requested
-        directly from each Fuel_Order in fuel_orders_current.
+        """Build delivery requests from the tenant's Fuel_Orders, in priority order.
 
         Validates: Requirements 5.3.1, 5.3.2.
 
-        For each priority entry in the DeliveryPriorityList, looks up the
-        corresponding Fuel_Order to read:
-          - ``product_code``: used directly as the fuel_grade for the
-            DeliveryRequest (no FuelGrade.AGO/PMS/ATK/LPG fallback coercion).
-          - ``gallons_requested``: converted to liters for the request.
-          - ``fill_to_full``: when True, fetches the linked customer_tank
-            and computes target_volume = max(0, capacity_gallons -
-            current_level_gallons).
+        * Priorities are matched to orders by ``order_id``, then
+          ``customer_tank_id``, then ``customer_id``. The prioritization agent
+          keys each entry ``customer_tank_id or order_id``, so matching on
+          ``customer_id`` alone (as before) matched nothing for US orders.
+          When the list has CRITICAL/HIGH/MEDIUM entries, only orders that
+          match one of them are loaded.
+        * Requests come back by matched ``priority_score`` descending,
+          unmatched last, then ``order_id``: the fleet allocator gives earlier
+          requests first pick of the trucks.
+        * ``product_code`` is canonicalized and is what every plan, approval
+          and persisted document carries. The legacy ``FuelGrade`` is derived
+          from it only for legacy compartment eligibility.
+        * An order on a known customer tank is capped at the tank's ullage
+          (``hard_cap_liters``); ``fill_to_full`` asks for exactly the ullage.
+          Orders on the same tank share that ullage in priority order, so
+          their caps together never exceed it; an order left with 0 L is
+          skipped. A full tank is skipped. An unknown tank is loaded as
+          requested.
+        * Orders with no resolvable volume fail with ``unresolved_fill_volume``.
 
-        Orders that have neither ``gallons_requested`` nor a resolvable
-        tank level are failed with ``unresolved_fill_volume`` and excluded
-        from the loading plan.
-
-        Falls back to the legacy _build_delivery_requests path when no
-        fuel orders can be resolved (e.g. during the deprecation window
-        when orders are still in the legacy shipment shape).
+        Falls back to the legacy station path only when fuel_orders_current
+        returns no orders at all. When orders exist but none can be loaded
+        the result is empty: the fallback used to invent 5 000 L station
+        demands on top of the real orders.
         """
         # Query fuel orders for this tenant that are in loadable statuses
         fuel_orders = await self._query_fuel_orders(tenant_id)
 
         if not fuel_orders:
+            # K11: no uncommitted order. When committed ones exist, the tenant
+            # has real demand already on applied plans: never invent legacy
+            # station demand on top of it.
+            committed = await self._count_committed_loadable_orders(tenant_id)
+            if committed is None:
+                # Probe failed: fail closed (no invented demand), no flag.
+                return []
+            if committed > 0:
+                self._all_orders_committed = True
+                self._committed_order_count = committed
+                logger.info(
+                    "CompartmentLoadingAgent: no uncommitted fuel order for "
+                    "tenant %s; %d loadable order(s) already committed",
+                    tenant_id,
+                    committed,
+                )
+                return []
             # Fallback to legacy priority-list path during deprecation window
             logger.debug(
                 "CompartmentLoadingAgent: no fuel_orders_current docs found "
@@ -654,20 +1136,24 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
             return self._build_delivery_requests(priority_list)
 
-        # Build a lookup by station_id (customer_id) for matching priorities
-        # to orders. The priority list's station_id corresponds to the order's
-        # customer_id or station reference.
-        priority_station_ids = {
-            p.station_id
+        eligible = [
+            p
             for p in priority_list.priorities
             if p.priority_bucket in (
                 PriorityBucket.CRITICAL,
                 PriorityBucket.HIGH,
                 PriorityBucket.MEDIUM,
             )
-        }
+        ]
+        by_order: Dict[str, DeliveryPriority] = {}
+        by_station: Dict[str, DeliveryPriority] = {}
+        for p in eligible:
+            if p.order_id:
+                by_order.setdefault(p.order_id, p)
+            by_station.setdefault(p.station_id, p)
 
-        requests: List[DeliveryRequest] = []
+        tank_cache: Dict[str, Optional[CustomerTank]] = {}
+        scored: List[_OrderCandidate] = []
 
         for order in fuel_orders:
             order_id = order.get("order_id", "")
@@ -676,12 +1162,20 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             gallons_requested = order.get("gallons_requested")
             fill_to_full = order.get("fill_to_full", False)
             customer_tank_id = order.get("customer_tank_id")
+            if order_id:
+                # R3.10: what the plan was built from, checked at approve time.
+                self._order_snapshots[order_id] = {
+                    "product_code": product_code,
+                    "customer_tank_id": customer_tank_id,
+                    "gallons_requested": gallons_requested,
+                    "fill_to_full": fill_to_full,
+                }
 
-            # Skip orders whose station/customer is not in the priority set
-            if priority_station_ids and station_id not in priority_station_ids:
+            priority = self._match_priority(order, by_order, by_station)
+            if eligible and priority is None:
+                # Not in the CRITICAL/HIGH/MEDIUM set for this run.
                 continue
 
-            # Resolve product_code — read directly, no FuelGrade enum coercion
             if not product_code:
                 logger.warning(
                     "CompartmentLoadingAgent: order %s has no product_code; "
@@ -689,12 +1183,9 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     order_id,
                 )
                 continue
-
-            # Map canonical product_code to FuelGrade for the solver.
-            # This reads product_code directly from the order — no legacy
-            # FuelGrade.AGO/PMS/ATK/LPG fallback coercion on the intake path.
-            fuel_grade = self._resolve_fuel_grade_from_product_code(product_code)
-            if fuel_grade is None:
+            try:
+                canonical_code = canonicalize(product_code)
+            except (UnknownFuelProductError, TypeError):
                 logger.warning(
                     "CompartmentLoadingAgent: order %s has unrecognized "
                     "product_code %r; skipping",
@@ -702,73 +1193,45 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     product_code,
                 )
                 continue
+            # Family only: eligibility for legacy AGO/PMS/ATK/LPG compartments.
+            # DEF belongs to no family; AGO just fills the required field, and
+            # segregation/eligibility key on the product code.
+            fuel_grade = FuelGrade(legacy_grade_for_product(canonical_code) or "AGO")
 
-            # Resolve volume
-            quantity_liters: Optional[float] = None
-
-            if fill_to_full and customer_tank_id:
-                # Fetch the linked customer_tank and compute target_volume
-                target_volume = await self._resolve_fill_to_full_volume(
-                    tenant_id=tenant_id,
-                    customer_tank_id=customer_tank_id,
-                    order_id=order_id,
+            ullage_gal: Optional[float] = None
+            if customer_tank_id:
+                tank = await self._customer_tank_cached(
+                    tenant_id, customer_tank_id, order_id, tank_cache
                 )
-                if target_volume is not None:
-                    quantity_liters = target_volume * GALLONS_TO_LITERS
-                elif gallons_requested is not None and gallons_requested > 0:
-                    # Tank resolution failed but gallons_requested is available
-                    quantity_liters = gallons_requested * GALLONS_TO_LITERS
-                else:
-                    # Neither resolvable tank level nor gallons_requested
-                    logger.error(
-                        "CompartmentLoadingAgent: unresolved_fill_volume for "
-                        "order %s (fill_to_full=true, customer_tank_id=%s) — "
-                        "neither gallons_requested nor resolvable tank level "
-                        "available",
-                        order_id,
-                        customer_tank_id,
+                if tank is not None:
+                    ullage_gal = max(
+                        0.0,
+                        float(tank.capacity_gallons)
+                        - float(tank.current_level_gallons),
                     )
-                    await self._fail_order_loading(
-                        order_id=order_id,
-                        tenant_id=tenant_id,
-                        reason="unresolved_fill_volume",
-                        details={
-                            "customer_tank_id": customer_tank_id,
-                            "fill_to_full": True,
-                        },
-                    )
-                    continue
-            elif fill_to_full and not customer_tank_id:
-                # fill_to_full but no linked tank — use gallons_requested
-                # if available, otherwise fail
-                if gallons_requested is not None and gallons_requested > 0:
-                    quantity_liters = gallons_requested * GALLONS_TO_LITERS
-                else:
-                    logger.error(
-                        "CompartmentLoadingAgent: unresolved_fill_volume for "
-                        "order %s (fill_to_full=true, no customer_tank_id) — "
-                        "gallons_requested not available",
-                        order_id,
-                    )
-                    await self._fail_order_loading(
-                        order_id=order_id,
-                        tenant_id=tenant_id,
-                        reason="unresolved_fill_volume",
-                        details={
-                            "customer_tank_id": None,
-                            "fill_to_full": True,
-                        },
-                    )
-                    continue
+                    if ullage_gal <= 0:
+                        logger.info(
+                            "CompartmentLoadingAgent: customer_tank %s is "
+                            "full (capacity=%.1f, level=%.1f); skipping order %s",
+                            customer_tank_id,
+                            tank.capacity_gallons,
+                            tank.current_level_gallons,
+                            order_id,
+                        )
+                        continue
+
+            if fill_to_full and ullage_gal is not None:
+                requested_liters = ullage_gal * GALLONS_TO_LITERS
             elif gallons_requested is not None and gallons_requested > 0:
-                quantity_liters = gallons_requested * GALLONS_TO_LITERS
+                requested_liters = gallons_requested * GALLONS_TO_LITERS
             else:
-                # No volume information available at all
                 logger.error(
                     "CompartmentLoadingAgent: unresolved_fill_volume for "
-                    "order %s — neither gallons_requested nor fill_to_full "
-                    "with resolvable tank",
+                    "order %s (fill_to_full=%s, customer_tank_id=%s) — "
+                    "neither gallons_requested nor a resolvable tank level",
                     order_id,
+                    fill_to_full,
+                    customer_tank_id,
                 )
                 await self._fail_order_loading(
                     order_id=order_id,
@@ -781,32 +1244,104 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 )
                 continue
 
-            # Use product_code directly — no FuelGrade enum coercion
-            requests.append(
-                DeliveryRequest(
-                    station_id=station_id,
-                    order_id=order_id,
-                    fuel_grade=fuel_grade,
-                    # The order's own product code, canonicalized. Carried
-                    # alongside the coarse grade so the solver can weigh the
-                    # exact product — DEF is 1.09 kg/L but maps to AGO.
-                    product_code=canonicalize_or_warn(product_code),
-                    quantity_liters=round(quantity_liters, 2),
-                    min_drop_liters=DEFAULT_MIN_DROP_LITERS,
-                )
+            scored.append(_OrderCandidate(
+                score=priority.priority_score if priority is not None else None,
+                order_id=order_id,
+                # Only a tank with a known ullage has a budget to share.
+                tank_id=customer_tank_id if ullage_gal is not None else None,
+                ullage_liters=(
+                    ullage_gal * GALLONS_TO_LITERS if ullage_gal is not None else None
+                ),
+                requested_liters=requested_liters,
+                station_id=station_id,
+                fuel_grade=fuel_grade,
+                product_code=canonical_code,
+            ))
+
+        # Priority order, then the tank budget: two orders on one tank (a
+        # duplicate import, a re-order before delivery) share its ullage, and
+        # the higher-priority order draws on it first (review R3).
+        scored.sort(key=lambda c: (c.score is None, -(c.score or 0.0), c.order_id))
+        remaining_liters: Dict[str, float] = {}
+        # K11 committed tank draw: volume already on applied plans or in flight
+        # comes off each known tank's budget first, so it can under-load but
+        # never overfill.
+        ullage_by_tank: Dict[str, float] = {}
+        for c in scored:
+            if c.tank_id is not None and c.ullage_liters is not None:
+                ullage_by_tank.setdefault(c.tank_id, c.ullage_liters)
+        if ullage_by_tank:
+            draw = await self._committed_tank_draw(
+                tenant_id, sorted(ullage_by_tank)
             )
+            for tank_id, drawn in draw.items():
+                if tank_id not in ullage_by_tank:
+                    continue
+                remaining_liters[tank_id] = (
+                    0.0
+                    if drawn is None
+                    else max(0.0, round(ullage_by_tank[tank_id] - drawn, 2))
+                )
+        requests: List[DeliveryRequest] = []
+        for candidate in scored:
+            cap_liters = candidate.requested_liters
+            if candidate.tank_id is not None:
+                left = remaining_liters.setdefault(
+                    candidate.tank_id, round(candidate.ullage_liters, 2)
+                )
+                cap_liters = min(cap_liters, left)
+            cap_liters = round(cap_liters, 2)
+            if cap_liters <= 0:
+                logger.info(
+                    "CompartmentLoadingAgent: order %s resolves to 0 L "
+                    "(customer_tank %s ullage already allocated); skipping",
+                    candidate.order_id,
+                    candidate.tank_id,
+                )
+                continue
+            if candidate.tank_id is not None:
+                remaining_liters[candidate.tank_id] = round(
+                    remaining_liters[candidate.tank_id] - cap_liters, 2
+                )
+            requests.append(DeliveryRequest(
+                station_id=candidate.station_id,
+                order_id=candidate.order_id,
+                fuel_grade=candidate.fuel_grade,
+                # The order's own product code, canonicalized. Carried
+                # alongside the coarse grade so the solver can weigh and
+                # label the exact product — DEF is 1.09 kg/L but maps to AGO.
+                product_code=candidate.product_code,
+                quantity_liters=cap_liters,
+                hard_cap_liters=cap_liters,
+                min_drop_liters=DEFAULT_MIN_DROP_LITERS,
+            ))
 
         if not requests:
-            # If no orders could be resolved, fall back to legacy path
-            logger.debug(
-                "CompartmentLoadingAgent: no delivery requests built from "
-                "fuel_orders_current for tenant %s; falling back to legacy "
-                "priority-list path",
+            logger.info(
+                "CompartmentLoadingAgent: %d fuel order(s) for tenant %s "
+                "yielded no loadable delivery request",
+                len(fuel_orders),
                 tenant_id,
             )
-            return self._build_delivery_requests(priority_list)
-
         return requests
+
+    @staticmethod
+    def _match_priority(
+        order: Mapping[str, Any],
+        by_order: Mapping[str, DeliveryPriority],
+        by_station: Mapping[str, DeliveryPriority],
+    ) -> Optional[DeliveryPriority]:
+        """The priority entry for ``order``: by order id, tank, then customer."""
+        order_id = order.get("order_id")
+        if order_id:
+            if order_id in by_order:
+                return by_order[order_id]
+            if order_id in by_station:
+                return by_station[order_id]
+        for key in (order.get("customer_tank_id"), order.get("customer_id")):
+            if key and key in by_station:
+                return by_station[key]
+        return None
 
     # ------------------------------------------------------------------
     # Query fuel orders from fuel_orders_current (Task 11.3)
@@ -826,8 +1361,11 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 "bool": {
                     "must": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}},
+                        {"terms": {"status": list(_LOADABLE_ORDER_STATUSES)}},
                     ],
+                    # K11 / R8.1: committed orders (linked run id) are not
+                    # loadable; a hand-scheduled order with no run id is (R8.3).
+                    "filter": [_unlinked_clause(COMMITTED_ORDER_FIELD)],
                 },
             },
             "size": 500,
@@ -842,7 +1380,8 @@ class CompartmentLoadingAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search(
                 "fuel_order", tenant_id,
-                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                in_filters={"status": list(_LOADABLE_ORDER_STATUSES)},
+                unlinked_fields=[COMMITTED_ORDER_FIELD],
                 page=1, size=500,
             )
             if pg is not _NOT_CUT_OVER:
@@ -866,65 +1405,190 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
             return []
 
+    async def _read_orders(
+        self,
+        tenant_id: str,
+        statuses: Sequence[str],
+        *,
+        linked: bool,
+        tank_ids: Optional[Sequence[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Tenant-scoped order read by status, optionally linked to a run.
+
+        ``linked=True`` keeps only orders with a non-empty ``assigned_run_id``
+        (K11 committed). Raises on a store error; the callers decide how to
+        fail closed.
+        """
+        in_filters: Dict[str, list] = {"status": list(statuses)}
+        must: List[Dict[str, Any]] = [
+            {"term": {"tenant_id": tenant_id}},
+            {"terms": {"status": list(statuses)}},
+        ]
+        if tank_ids is not None:
+            in_filters["customer_tank_id"] = list(tank_ids)
+            must.append({"terms": {"customer_tank_id": list(tank_ids)}})
+        bool_query: Dict[str, Any] = {"must": must}
+        if linked:
+            bool_query["filter"] = [{"exists": {"field": COMMITTED_ORDER_FIELD}}]
+            bool_query["must_not"] = [{"term": {COMMITTED_ORDER_FIELD: ""}}]
+
+        from commerce.services.commerce_persistence_bridge import (
+            _NOT_CUT_OVER,
+            read_hybrid_search,
+        )
+
+        pg = await read_hybrid_search(
+            "fuel_order", tenant_id,
+            in_filters=in_filters,
+            exists_fields=[COMMITTED_ORDER_FIELD] if linked else None,
+            page=1, size=500,
+        )
+        if pg is not _NOT_CUT_OVER:
+            orders = list(pg.get("items", []) or [])
+        else:
+            resp = await self._es.search_documents(
+                FUEL_ORDERS_CURRENT_INDEX, {"query": {"bool": bool_query}, "size": 500}, 500
+            )
+            orders = [
+                hit["_source"]
+                for hit in resp.get("hits", {}).get("hits", [])
+                if hit.get("_source")
+            ]
+        # Re-check in Python: exists_fields keeps "" on the hybrid path, and
+        # the status set must hold whatever the backend returned.
+        wanted = set(statuses)
+        return [
+            o for o in orders
+            if o.get("status") in wanted
+            and (not linked or o.get(COMMITTED_ORDER_FIELD))
+        ]
+
+    async def _count_committed_loadable_orders(
+        self, tenant_id: str
+    ) -> Optional[int]:
+        """Loadable-status orders already linked to a run (K11), or ``None``
+        when the probe fails (logged WARNING)."""
+        try:
+            committed = await self._read_orders(
+                tenant_id, _LOADABLE_ORDER_STATUSES, linked=True
+            )
+        except Exception as e:
+            logger.warning(
+                "CompartmentLoadingAgent: committed-order probe failed for "
+                "tenant %s (%s); building no delivery request",
+                tenant_id,
+                type(e).__name__,
+            )
+            return None
+        return len(committed)
+
+    async def _committed_tank_draw(
+        self, tenant_id: str, tank_ids: Sequence[str]
+    ) -> Dict[str, Optional[float]]:
+        """Litres already committed to each tank (K11); ``None`` = full draw.
+
+        Counts dispatched/in_transit orders whatever their run id, plus
+        loadable-status orders linked to a run. A ``fill_to_full`` order
+        draws the whole ullage; otherwise ``gallons_requested`` in litres. On
+        a read error every tank is treated as fully drawn (fail closed for
+        overfill).
+        """
+        if not tank_ids:
+            return {}
+        try:
+            in_flight = await self._read_orders(
+                tenant_id, _IN_FLIGHT_ORDER_STATUSES, linked=False,
+                tank_ids=tank_ids,
+            )
+            committed = await self._read_orders(
+                tenant_id, _LOADABLE_ORDER_STATUSES, linked=True,
+                tank_ids=tank_ids,
+            )
+        except Exception as e:
+            logger.warning(
+                "CompartmentLoadingAgent: committed tank-draw read failed for "
+                "tenant %s (%s); treating %d known tank(s) as full",
+                tenant_id,
+                type(e).__name__,
+                len(tank_ids),
+            )
+            return {tank_id: None for tank_id in tank_ids}
+
+        wanted = set(tank_ids)
+        draw: Dict[str, Optional[float]] = {}
+        seen: set = set()
+        for order in [*in_flight, *committed]:
+            tank_id = order.get("customer_tank_id")
+            order_id = order.get("order_id")
+            if tank_id not in wanted or order.get("tenant_id") not in (None, tenant_id):
+                continue
+            if order_id and order_id in seen:
+                continue
+            if order_id:
+                seen.add(order_id)
+            if tank_id in draw and draw[tank_id] is None:
+                continue
+            if order.get("fill_to_full"):
+                draw[tank_id] = None
+                continue
+            try:
+                liters = float(order.get("gallons_requested") or 0.0) * GALLONS_TO_LITERS
+            except (TypeError, ValueError):
+                # Unknown volume on a committed order: assume the full draw.
+                draw[tank_id] = None
+                continue
+            draw[tank_id] = round((draw.get(tank_id) or 0.0) + max(0.0, liters), 2)
+        return draw
+
     # ------------------------------------------------------------------
-    # Fill-to-full volume resolution (Task 11.3 / Req 5.3.2)
+    # Customer tank resolution for ullage caps (Task 11.3 / Req 5.3.2)
     # ------------------------------------------------------------------
 
-    async def _resolve_fill_to_full_volume(
+    async def _customer_tank_cached(
         self,
-        *,
         tenant_id: str,
         customer_tank_id: str,
         order_id: str,
-    ) -> Optional[float]:
-        """Fetch the linked customer_tank and compute target_volume.
+        cache: Dict[str, Optional[CustomerTank]],
+    ) -> Optional[CustomerTank]:
+        """The linked customer tank, read once per evaluate, or ``None``.
 
-        Returns:
-            target_volume in gallons = max(0, capacity_gallons - current_level_gallons),
-            or None if the tank cannot be resolved.
+        ``None`` means the ullage is unknown: the order is then loaded as
+        requested, without a tank cap, and a WARNING says so.
         """
+        if customer_tank_id in cache:
+            return cache[customer_tank_id]
+        tank: Optional[CustomerTank] = None
         try:
             tank = await self._customer_tank_repo.get(
                 tenant_id=tenant_id,
                 customer_tank_id=customer_tank_id,
             )
+            if tank is not None:
+                # Validate the two levels up front so a malformed doc is
+                # "unknown" rather than a crash in the caller.
+                float(tank.capacity_gallons)
+                float(tank.current_level_gallons)
         except Exception as exc:
             logger.warning(
-                "CompartmentLoadingAgent: failed to fetch customer_tank %s "
+                "CompartmentLoadingAgent: failed to read customer_tank %s "
                 "for order %s (tenant=%s): %s",
                 customer_tank_id,
                 order_id,
                 tenant_id,
                 exc,
             )
-            return None
-
+            tank = None
         if tank is None:
             logger.warning(
-                "CompartmentLoadingAgent: customer_tank %s not found for "
-                "order %s (tenant=%s)",
+                "CompartmentLoadingAgent: ullage unknown for customer_tank %s "
+                "(order %s, tenant=%s); loading as requested without a tank cap",
                 customer_tank_id,
                 order_id,
                 tenant_id,
             )
-            return None
-
-        capacity = tank.capacity_gallons
-        current_level = tank.current_level_gallons
-        target_volume = max(0.0, capacity - current_level)
-
-        if target_volume <= 0:
-            logger.info(
-                "CompartmentLoadingAgent: customer_tank %s is already full "
-                "(capacity=%.1f, level=%.1f) for order %s",
-                customer_tank_id,
-                capacity,
-                current_level,
-                order_id,
-            )
-            return None
-
-        return target_volume
+        cache[customer_tank_id] = tank
+        return tank
 
     # ------------------------------------------------------------------
     # Fail loading with unresolved_fill_volume (Task 11.3)
@@ -971,197 +1635,6 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 tenant_id,
                 exc,
             )
-
-    # ------------------------------------------------------------------
-    # Build delivery requests from Fuel_Orders (Task 11.3)
-    # ------------------------------------------------------------------
-
-    async def build_delivery_requests_from_fuel_orders(
-        self, tenant_id: str, orders: List[Dict[str, Any]]
-    ) -> Tuple[List[DeliveryRequest], List[Dict[str, Any]]]:
-        """Build delivery requests directly from Fuel_Order documents.
-
-        Reads ``product_code`` and ``gallons_requested`` directly from
-        each order. For ``fill_to_full = true`` orders, fetches the linked
-        ``customer_tank`` and computes
-        ``target_volume = max(0, capacity_gallons - current_level_gallons)``.
-
-        Fails the loading with ``unresolved_fill_volume`` when neither
-        ``gallons_requested`` nor a resolvable tank level is available.
-
-        Args:
-            tenant_id: Tenant scope.
-            orders: List of Fuel_Order source documents.
-
-        Returns:
-            (requests, failures) where failures is a list of dicts with
-            order_id and reason for orders that could not be loaded.
-        """
-        requests: List[DeliveryRequest] = []
-        failures: List[Dict[str, Any]] = []
-
-        # Batch-fetch customer tanks for fill_to_full orders
-        tank_ids_needed = [
-            o["customer_tank_id"]
-            for o in orders
-            if o.get("fill_to_full") and o.get("customer_tank_id")
-        ]
-        customer_tanks: Dict[str, Dict[str, Any]] = {}
-        if tank_ids_needed:
-            customer_tanks = await self._fetch_customer_tanks_for_loading(
-                tenant_id, tank_ids_needed
-            )
-
-        for order in orders:
-            order_id = order.get("order_id", "unknown")
-            product_code = order.get("product_code")
-            gallons_requested = order.get("gallons_requested")
-            fill_to_full = order.get("fill_to_full", False)
-            customer_tank_id = order.get("customer_tank_id")
-
-            # Resolve fuel grade from product_code directly — no legacy
-            # FuelGrade.AGO/PMS/ATK/LPG fallback coercion on the intake path
-            if not product_code:
-                failures.append({
-                    "order_id": order_id,
-                    "reason": "missing_product_code",
-                })
-                continue
-
-            fuel_grade = self._resolve_fuel_grade_from_product_code(product_code)
-            if fuel_grade is None:
-                failures.append({
-                    "order_id": order_id,
-                    "reason": "unknown_product_code",
-                    "product_code": product_code,
-                })
-                continue
-
-            # Determine volume
-            target_gallons: Optional[float] = None
-
-            if fill_to_full:
-                # Compute target_volume from linked customer_tank
-                if customer_tank_id and customer_tank_id in customer_tanks:
-                    tank = customer_tanks[customer_tank_id]
-                    capacity = tank.get("capacity_gallons")
-                    current_level = tank.get("current_level_gallons")
-                    if capacity is not None and current_level is not None:
-                        try:
-                            target_gallons = max(
-                                0.0,
-                                float(capacity) - float(current_level),
-                            )
-                        except (TypeError, ValueError):
-                            target_gallons = None
-
-                # Fall back to gallons_requested if tank level unavailable
-                if target_gallons is None and gallons_requested:
-                    try:
-                        target_gallons = float(gallons_requested)
-                    except (TypeError, ValueError):
-                        target_gallons = None
-
-                if target_gallons is None:
-                    failures.append({
-                        "order_id": order_id,
-                        "reason": "unresolved_fill_volume",
-                        "detail": (
-                            "fill_to_full=true but neither gallons_requested "
-                            "nor a resolvable tank level is available"
-                        ),
-                    })
-                    continue
-            else:
-                # Use gallons_requested directly
-                if gallons_requested:
-                    try:
-                        target_gallons = float(gallons_requested)
-                    except (TypeError, ValueError):
-                        target_gallons = None
-
-                if target_gallons is None or target_gallons <= 0:
-                    failures.append({
-                        "order_id": order_id,
-                        "reason": "unresolved_fill_volume",
-                        "detail": "no valid gallons_requested",
-                    })
-                    continue
-
-            quantity_liters = round(target_gallons * GALLONS_TO_LITERS, 2)
-
-            requests.append(
-                DeliveryRequest(
-                    station_id=customer_tank_id or order_id,
-                    order_id=order_id,
-                    fuel_grade=fuel_grade,
-                    quantity_liters=quantity_liters,
-                    min_drop_liters=DEFAULT_MIN_DROP_LITERS,
-                )
-            )
-
-        return requests, failures
-
-    async def _fetch_customer_tanks_for_loading(
-        self, tenant_id: str, tank_ids: List[str]
-    ) -> Dict[str, Dict[str, Any]]:
-        """Fetch customer tank docs for fill_to_full volume computation."""
-        if not tank_ids:
-            return {}
-
-        unique_ids = list(set(tank_ids))
-        query = {
-            "query": {
-                "bool": {
-                    "filter": [
-                        {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"tank_id": unique_ids}},
-                    ]
-                }
-            },
-            "size": len(unique_ids),
-        }
-        try:
-            resp = await self._es.search_documents(
-                CUSTOMER_TANKS_INDEX, query, len(unique_ids)
-            )
-            hits = (resp or {}).get("hits", {}).get("hits", [])
-            result: Dict[str, Dict[str, Any]] = {}
-            for hit in hits:
-                source = hit.get("_source", {})
-                tid = source.get("tank_id")
-                if tid:
-                    result[tid] = source
-            return result
-        except Exception as exc:
-            logger.warning(
-                "CompartmentLoadingAgent: customer_tanks fetch failed "
-                "for tenant=%s: %s",
-                tenant_id,
-                exc,
-            )
-            return {}
-
-    def _resolve_fuel_grade_from_product_code(
-        self, product_code: str
-    ) -> Optional[FuelGrade]:
-        """Map a product_code to a FuelGrade enum value using the mapping service.
-
-        Supports both US market product codes (DIESEL_2, GASOLINE_REG, etc.)
-        and FuelGrade enum values (AGO, PMS, ATK, LPG).
-        """
-        if not product_code:
-            return None
-
-        # Try direct FuelGrade enum parsing first
-        try:
-            return FuelGrade(product_code)
-        except ValueError:
-            pass
-
-        # Use the mapping service for US product codes
-        from fuel.services.fuel_product_mapping import fuel_product_mapper
-        return fuel_product_mapper.us_to_fuel_grade(product_code)
 
     # ------------------------------------------------------------------
     # Query trucks and compartments (Req 3.1)
@@ -1406,6 +1879,48 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             )
             return True, []
 
+    async def _drop_committed_trucks(
+        self, tenant_id: str, trucks: Dict[str, Dict[str, Any]]
+    ) -> Dict[str, Dict[str, Any]]:
+        """Leave out trucks holding an applied, not-yet-dispatched plan (OI-18, OQ11).
+
+        A truck is committed while any ``confirmed``/``scheduled`` order has a
+        run link and ``assigned_asset_id`` equal to the truck. Derived from the
+        order links rather than plan status, so a truck frees itself when its
+        plan dispatches or hold → release clears the links; a stale plan can't
+        hold it forever. A failed order read plans nothing (no trucks), as
+        ``_query_trucks`` does on its own read failure: a second plan on a
+        committed truck would give the driver the wrong manifest.
+        """
+        if not trucks:
+            return trucks
+        try:
+            committed_orders = await self._read_orders(
+                tenant_id, ("confirmed", "scheduled"), linked=True
+            )
+        except Exception as e:
+            logger.error(
+                "CompartmentLoadingAgent: committed-truck read failed for "
+                "tenant %s (%s); planning no trucks",
+                tenant_id,
+                e,
+            )
+            return {}
+        committed = {
+            str(o.get("assigned_asset_id"))
+            for o in committed_orders
+            if o.get("assigned_asset_id")
+        } & set(trucks)
+        if committed:
+            logger.info(
+                "CompartmentLoadingAgent: leaving out %d truck(s) with an applied, "
+                "undispatched plan for tenant %s: %s",
+                len(committed),
+                tenant_id,
+                sorted(committed),
+            )
+        return {tid: data for tid, data in trucks.items() if tid not in committed}
+
     async def _query_trucks_with_equipment_check(
         self, tenant_id: str
     ) -> Dict[str, Dict[str, Any]]:
@@ -1431,6 +1946,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             len(trucks),
             tenant_id,
         )
+        trucks = await self._drop_committed_trucks(tenant_id, trucks)
         if not trucks:
             return trucks
 
@@ -1524,13 +2040,31 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         feasibility: FeasibilityResult,
         tenant_id: str,
     ) -> InterventionProposal:
-        """Build an InterventionProposal from a loading plan."""
+        """Build an InterventionProposal from a loading plan.
+
+        ``run_id`` and ``order_ids`` let the approval queue spot two
+        ``apply_loading_plan`` approvals that would dispatch the same order
+        (F10): approving one supersedes the other.
+        """
+        order_ids: List[str] = []
+        for a in loading_plan.assignments:
+            if a.order_id and a.order_id not in order_ids:
+                order_ids.append(a.order_id)
         actions = [
             {
                 "tool_name": "apply_loading_plan",
                 "parameters": {
                     "plan_id": loading_plan.plan_id,
+                    "run_id": loading_plan.run_id,
+                    "order_ids": order_ids,
                     "truck_id": loading_plan.truck_id,
+                    # R3.10: the order fields this plan was built from; the
+                    # executor refuses a plan whose orders changed since.
+                    "order_snapshots": {
+                        oid: self._order_snapshots[oid]
+                        for oid in order_ids
+                        if oid in self._order_snapshots
+                    },
                     "assignments": [
                         a.model_dump(mode="json")
                         for a in loading_plan.assignments
@@ -1893,43 +2427,66 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         *,
         loading_plan: LoadingPlan,
         tenant_id: str,
-    ) -> LoadingPlan:
+    ) -> Tuple[LoadingPlan, List[CompartmentAssignment]]:
         """Reject assignments that load dyed diesel into clear-only compartments.
 
         Validates: Requirements 6.3, 6.4.
 
-        For each assignment in ``loading_plan``, if the product is a
-        dyed-diesel code, calls
+        For each dyed-diesel assignment in ``loading_plan``, calls
         :meth:`DyedDieselEnforcer.validate_load_plan` to verify the
         compartment is dyed-compatible. If validation fails (error code
         ``dyed.compartment_incompatible`` or ``dyed.compartment_not_found``),
         the assignment is stripped from the plan and its volume is charged
         to ``unserved_demand_liters``.
 
-        When no enforcer is configured (``_dyed_diesel_enforcer is None``),
-        all assignments pass through unchanged (graceful degradation).
+        Fail closed (OI-02): when the plan carries dyed diesel and the
+        enforcer is not wired, or :meth:`validate_load_plan` raises, the
+        check could not run, so the plan is not produced as compliant. This
+        raises :class:`DyedDieselCheckUnavailable` and logs at ERROR; the
+        caller withholds the whole plan. A plan with no dyed assignment is
+        returned unchanged whether or not an enforcer is wired.
 
-        Returns the (possibly filtered) LoadingPlan.
+        Returns the (possibly filtered) LoadingPlan and the stripped
+        assignments.
         """
-        enforcer = getattr(self, "_dyed_diesel_enforcer", None)
-        if enforcer is None:
-            return loading_plan
-
         # Import here to avoid circular dependency at module level
-        from compliance.services.dyed_diesel_enforcer import DyedDieselEnforcer
-
-        if not isinstance(enforcer, DyedDieselEnforcer):
-            return loading_plan
+        from compliance.services.dyed_diesel_enforcer import (
+            DyedDieselCheckUnavailable,
+            DyedDieselEnforcer,
+        )
 
         original_assignments = loading_plan.assignments
+        if not any(
+            DyedDieselEnforcer.is_dyed_diesel(a.fuel_grade)
+            for a in original_assignments
+        ):
+            return loading_plan, []
+
+        enforcer = getattr(self, "_dyed_diesel_enforcer", None)
+        if enforcer is None or not isinstance(enforcer, DyedDieselEnforcer):
+            logger.error(
+                "CompartmentLoadingAgent: no DyedDieselEnforcer wired; "
+                "blocking plan %s (truck=%s, tenant=%s) because it carries "
+                "dyed diesel (fail closed, OI-02)",
+                loading_plan.plan_id,
+                loading_plan.truck_id,
+                tenant_id,
+            )
+            raise DyedDieselCheckUnavailable(
+                reason="enforcer_not_wired",
+                tenant_id=tenant_id,
+                plan_id=loading_plan.plan_id,
+                truck_id=loading_plan.truck_id,
+            )
+
         kept_assignments: List[CompartmentAssignment] = []
-        rejected_volume = 0.0
+        stripped: List[CompartmentAssignment] = []
 
         for assignment in original_assignments:
             product_code = assignment.fuel_grade
 
             # Only check dyed-diesel products
-            if not enforcer.is_dyed_diesel(product_code):
+            if not DyedDieselEnforcer.is_dyed_diesel(product_code):
                 kept_assignments.append(assignment)
                 continue
 
@@ -1941,20 +2498,27 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     product_code=product_code,
                 )
             except Exception as exc:
-                # Fail-open: if the enforcer raises, allow the assignment
-                # so a transient ES issue does not block all dyed-diesel
-                # loads. The enforcer itself logs the error.
-                logger.warning(
+                # Fail closed (OI-02): an unverified dyed-diesel load is a
+                # regulatory exposure, so the plan is blocked, not allowed.
+                logger.error(
                     "CompartmentLoadingAgent: dyed diesel validation failed "
-                    "for compartment %s (plan=%s, tenant=%s): %s — "
-                    "allowing assignment (fail-open)",
+                    "for compartment %s (plan=%s, truck=%s, tenant=%s): %s; "
+                    "blocking the plan (fail closed, OI-02)",
                     assignment.compartment_id,
                     loading_plan.plan_id,
+                    loading_plan.truck_id,
                     tenant_id,
-                    exc,
+                    type(exc).__name__,
+                    exc_info=True,
                 )
-                kept_assignments.append(assignment)
-                continue
+                raise DyedDieselCheckUnavailable(
+                    reason="enforcer_error",
+                    tenant_id=tenant_id,
+                    plan_id=loading_plan.plan_id,
+                    truck_id=loading_plan.truck_id,
+                    compartment_id=assignment.compartment_id,
+                    cause=type(exc).__name__,
+                ) from exc
 
             if result.valid:
                 kept_assignments.append(assignment)
@@ -1969,18 +2533,56 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     result.error_code,
                     result.message,
                 )
-                rejected_volume += float(assignment.quantity_liters)
+                stripped.append(assignment)
 
-        if not rejected_volume:
-            return loading_plan
+        if not stripped:
+            return loading_plan, []
 
-        # Recompute plan metrics with the filtered assignments
-        retained_volume = sum(a.quantity_liters for a in kept_assignments)
-        total_capacity = sum(
-            a.compartment_capacity_liters for a in original_assignments
+        rejected_volume = sum(float(a.quantity_liters) for a in stripped)
+        logger.warning(
+            "CompartmentLoadingAgent: stripped %d dyed-diesel assignment(s) "
+            "totalling %.0fL from plan %s (tenant=%s) due to "
+            "compartment incompatibility (Req 6.3/6.4)",
+            len(stripped),
+            rejected_volume,
+            loading_plan.plan_id,
+            tenant_id,
         )
+
+        return (
+            self._rebuild_plan(
+                loading_plan,
+                kept_assignments,
+                unserved_delta=rejected_volume,
+                capacity_liters=sum(
+                    a.compartment_capacity_liters for a in original_assignments
+                ),
+            ),
+            stripped,
+        )
+
+    @staticmethod
+    def _rebuild_plan(
+        plan: LoadingPlan,
+        assignments: List[CompartmentAssignment],
+        *,
+        unserved_delta: float,
+        capacity_liters: float,
+    ) -> LoadingPlan:
+        """Copy ``plan`` with ``assignments`` and recomputed totals.
+
+        Utilization is retained volume over ``capacity_liters``. The
+        enforcement passes pass the summed ``compartment_capacity_liters`` of
+        the plan's assignments before filtering, as they always computed it;
+        the OI-39 merge passes the truck's total compartment capacity, as the
+        allocator does. Weight is re-derived per product. ``unserved_demand_liters`` is the
+        plan's current value plus ``unserved_delta`` (negative when stripped
+        volume was re-placed), clamped at zero.
+        """
+        retained_volume = sum(a.quantity_liters for a in assignments)
+        total_capacity = capacity_liters
         new_utilization = (
-            round((retained_volume / total_capacity) * 100, 2)
+            min(100.0, round((retained_volume / total_capacity) * 100, 2))
             if total_capacity > 0
             else 0.0
         )
@@ -1990,27 +2592,16 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     product_code=a.product_code,
                     fuel_grade=a.fuel_grade,
                 ) * a.quantity_liters
-                for a in kept_assignments
+                for a in assignments
             ),
             2,
         )
-        new_unserved = round(
-            float(loading_plan.unserved_demand_liters) + rejected_volume, 2
+        new_unserved = max(
+            0.0, round(float(plan.unserved_demand_liters) + unserved_delta, 2)
         )
-
-        logger.warning(
-            "CompartmentLoadingAgent: stripped %d dyed-diesel assignment(s) "
-            "totalling %.0fL from plan %s (tenant=%s) due to "
-            "compartment incompatibility (Req 6.3/6.4)",
-            len(original_assignments) - len(kept_assignments),
-            rejected_volume,
-            loading_plan.plan_id,
-            tenant_id,
-        )
-
-        return loading_plan.model_copy(
+        return plan.model_copy(
             update={
-                "assignments": kept_assignments,
+                "assignments": assignments,
                 "total_utilization_pct": new_utilization,
                 "total_weight_kg": new_weight,
                 "unserved_demand_liters": new_unserved,
@@ -2030,7 +2621,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
         compartment_states: Mapping[str, CompartmentState],
         compatibility_rules: Mapping[Tuple[str, str], "RuleType"],
         run_id: str,
-    ) -> LoadingPlan:
+    ) -> Tuple[LoadingPlan, List[CompartmentAssignment]]:
         """Reject any assignment the compatibility matrix blocks or gates.
 
         Validates: Requirements 7.2.2, 7.2.3, 7.2.6.
@@ -2057,15 +2648,20 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                  * Drop the assignment from the plan and charge its
                    volume to ``unserved_demand_liters``.
 
-        The returned :class:`LoadingPlan` is either the original plan
-        (when nothing was rejected) or a fresh :meth:`model_copy` with
-        the filtered assignment list and recomputed totals so the
-        downstream ``_persist_loading_plan`` / ``_build_proposal`` calls
-        never see a rejected assignment.
+        Returns ``(plan, stripped)``: the plan is either the original
+        (when nothing was rejected) or a fresh :meth:`model_copy` with the
+        filtered assignment list and recomputed totals so the downstream
+        ``_persist_loading_plan`` / ``_build_proposal`` calls never see a
+        rejected assignment; ``stripped`` lists the rejected assignments.
+
+        ``evaluate()`` offers the stripped volume to other compartments and
+        trucks in the same run (OI-39, :func:`replace_stripped`) and reports
+        whatever cannot be re-placed per order.
         """
 
         original_assignments = loading_plan.assignments
         kept_assignments: List[CompartmentAssignment] = []
+        stripped: List[CompartmentAssignment] = []
         rejected_count = 0
         rejected_volume = 0.0
 
@@ -2096,6 +2692,7 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                     reason=REASON_CROSS_CONTAMINATION_BLOCKED,
                     extra_context={"unknown_product_code": True},
                 )
+                stripped.append(assignment)
                 rejected_count += 1
                 rejected_volume += float(assignment.quantity_liters)
                 continue
@@ -2118,46 +2715,12 @@ class CompartmentLoadingAgent(OverlayAgentBase):
                 decision=decision,
                 reason=decision_info["reason"] or REASON_CROSS_CONTAMINATION_BLOCKED,
             )
+            stripped.append(assignment)
             rejected_count += 1
             rejected_volume += float(assignment.quantity_liters)
 
         if rejected_count == 0:
-            return loading_plan
-
-        # Build the filtered plan. Utilization and weight are recomputed
-        # against the retained assignments so mvp_load_plans and the
-        # intervention proposal reflect post-rejection reality. The
-        # rejected volume is added to unserved_demand_liters so the
-        # prioritization agent and dispatch KPIs see the blocked
-        # delivery as unmet demand rather than silently disappearing.
-        retained_volume = sum(a.quantity_liters for a in kept_assignments)
-        total_capacity = sum(
-            a.compartment_capacity_liters for a in original_assignments
-        )
-        # Recompute utilization from retained volume / original capacity
-        # so the metric stays proportional to the truck's total tank
-        # space (matching how optimize_loading_plan computes it).
-        new_utilization = (
-            round((retained_volume / total_capacity) * 100, 2)
-            if total_capacity > 0
-            else 0.0
-        )
-        # Fuel density table mirrors compartment_solver.FUEL_DENSITY but
-        # keyed on canonical product codes as well so the weight total
-        # is correct for mixed-catalog assignments.
-        new_weight = round(
-            sum(
-                fuel_density_kg_per_liter(
-                    product_code=a.product_code,
-                    fuel_grade=a.fuel_grade,
-                ) * a.quantity_liters
-                for a in kept_assignments
-            ),
-            2,
-        )
-        new_unserved = round(
-            float(loading_plan.unserved_demand_liters) + rejected_volume, 2
-        )
+            return loading_plan, []
 
         logger.warning(
             "CompartmentLoadingAgent: stripped %d assignment(s) totalling "
@@ -2170,13 +2733,20 @@ class CompartmentLoadingAgent(OverlayAgentBase):
             tenant_id,
         )
 
-        return loading_plan.model_copy(
-            update={
-                "assignments": kept_assignments,
-                "total_utilization_pct": new_utilization,
-                "total_weight_kg": new_weight,
-                "unserved_demand_liters": new_unserved,
-            }
+        # The rejected volume is added to unserved_demand_liters so the
+        # prioritization agent and dispatch KPIs see the blocked delivery as
+        # unmet demand rather than silently disappearing; evaluate() takes
+        # back whatever it re-places.
+        return (
+            self._rebuild_plan(
+                loading_plan,
+                kept_assignments,
+                unserved_delta=rejected_volume,
+                capacity_liters=sum(
+                    a.compartment_capacity_liters for a in original_assignments
+                ),
+            ),
+            stripped,
         )
 
     def _evaluate_assignment_compatibility(

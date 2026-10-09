@@ -1,6 +1,7 @@
 "use client";
 
 import { type Column, Table } from "@/components/ui";
+import { number as fmtNumber } from "../../lib/format";
 import type { CargoItemStatus, SchedulingCargoItem } from "../../types/api";
 import CargoItemActions from "./CargoItemActions";
 
@@ -70,7 +71,7 @@ export default function CargoManifestView({
       key: "weight_kg",
       label: "Weight (kg)",
       className: "text-sm text-gray-700",
-      render: (item) => item.weight_kg.toLocaleString(),
+      render: (item) => fmtNumber(item.weight_kg),
     },
     {
       key: "container_number",

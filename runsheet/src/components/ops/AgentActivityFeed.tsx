@@ -15,6 +15,7 @@
 import { Activity, CheckCircle2, Clock, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useAgentWebSocket } from "../../hooks/useAgentWebSocket";
+import { time } from "../../lib/format";
 import type { ActivityLogEntry } from "../../services/agentApi";
 import { getActivityLog } from "../../services/agentApi";
 
@@ -54,12 +55,7 @@ function getAgentLabel(agentId: string): string {
 
 function formatTimestamp(iso: string): string {
   try {
-    const date = new Date(iso);
-    return date.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
+    return time(iso);
   } catch {
     return iso;
   }

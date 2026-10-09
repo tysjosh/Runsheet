@@ -203,14 +203,46 @@ def asset_utilization(
     return metrics
 
 
-def delay_metrics(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def effective_delay_minutes(
+    job: Dict[str, Any], now: Optional[datetime] = None
+) -> Optional[float]:
+    """Delay of ``job`` in minutes as of ``now`` (F10).
+
+    ``delay_duration_minutes`` is written once when the sweep first flags the
+    job (about 0 minutes) and again on completion, so for a job that is still
+    ``in_progress`` the stored value is stale. Such a job's delay is
+    ``max(stored, now - estimated_arrival)`` in whole minutes. Any other job
+    returns its stored value (None when absent or unparseable).
+    """
+    raw = job.get("delay_duration_minutes")
+    try:
+        stored: Optional[float] = float(raw) if raw is not None else None
+    except (ValueError, TypeError):
+        stored = None
+    if job.get("status") != "in_progress":
+        return stored
+    eta = _parse_iso(job.get("estimated_arrival"))
+    if eta is None:
+        return stored
+    if eta.tzinfo is None:
+        eta = eta.replace(tzinfo=timezone.utc)
+    now = now or datetime.now(timezone.utc)
+    live = max(int((now - eta).total_seconds() // 60), 0)
+    return float(max(stored or 0.0, live))
+
+
+def delay_metrics(
+    jobs: List[Dict[str, Any]], now: Optional[datetime] = None
+) -> Dict[str, Any]:
     """Replicate the delayed-jobs avg + by-job_type terms aggregation.
 
     ``jobs`` MUST already be filtered to ``delayed == True`` (the caller applies
     that filter so the count matches ES ``hits.total``). Averages are over
-    ``delay_duration_minutes``; missing/None values are ignored in the average
-    exactly as the ES ``avg`` metric skips missing fields.
+    :func:`effective_delay_minutes` (live for open jobs); missing/None values
+    are ignored in the average exactly as the ES ``avg`` metric skips missing
+    fields.
     """
+    now = now or datetime.now(timezone.utc)
     total_delayed = len(jobs)
 
     all_delays: List[float] = []
@@ -221,16 +253,11 @@ def delay_metrics(jobs: List[Dict[str, Any]]) -> Dict[str, Any]:
         job_type = job.get("job_type")
         if job_type is not None:
             by_type_count[job_type] = by_type_count.get(job_type, 0) + 1
-        raw = job.get("delay_duration_minutes")
-        if raw is not None:
-            try:
-                val = float(raw)
-            except (ValueError, TypeError):
-                val = None
-            if val is not None:
-                all_delays.append(val)
-                if job_type is not None:
-                    by_type_delays.setdefault(job_type, []).append(val)
+        val = effective_delay_minutes(job, now)
+        if val is not None:
+            all_delays.append(val)
+            if job_type is not None:
+                by_type_delays.setdefault(job_type, []).append(val)
 
     avg_delay_minutes = round(sum(all_delays) / len(all_delays), 2) if all_delays else 0.0
 

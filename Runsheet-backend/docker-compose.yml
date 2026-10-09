@@ -1,8 +1,9 @@
-# Local PostgreSQL for the commerce source-of-truth (persistence/).
+# Local PostgreSQL. The only stateful dependency the backend has.
 #
-# This is the database the persistence layer migrates and dual-writes to during
-# local development and the read-cutover soak. It is intentionally a separate,
-# opt-in service: the app stays ES-only until DATABASE_URL points here.
+# It holds both planes: the relational source-of-truth for commerce/financial
+# models (persistence/) and, since Elasticsearch was removed, the document store
+# too (the ``es_documents`` table). It used to be an opt-in service alongside an
+# Elasticsearch container — that container is gone and this one is required.
 #
 # Usage:
 #   docker compose up -d postgres          # start the container (detached)

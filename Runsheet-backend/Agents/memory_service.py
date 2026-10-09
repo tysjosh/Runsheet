@@ -198,10 +198,8 @@ class MemoryService:
                     self.INDEX,
                     memory["memory_id"],
                     {
-                        "doc": {
-                            "last_accessed": now,
-                            "access_count": memory.get("access_count", 0) + 1,
-                        }
+                        "last_accessed": now,
+                        "access_count": memory.get("access_count", 0) + 1,
                     },
                 )
             except Exception as e:
@@ -264,7 +262,7 @@ class MemoryService:
                     await self._es.update_document(
                         self.INDEX,
                         memory_id,
-                        {"doc": {"confidence_score": new_confidence}},
+                        {"confidence_score": new_confidence},
                     )
                     affected += 1
                 except Exception as e:

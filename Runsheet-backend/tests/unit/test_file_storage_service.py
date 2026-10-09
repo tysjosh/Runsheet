@@ -133,6 +133,49 @@ class TestConstruction:
         FileStorageService(bucket="b", region="us-east-1")
 
 
+class TestBuildFromEnv:
+    """Finding C9: core builds the shared instance from the environment."""
+
+    def test_none_without_bucket(self, monkeypatch):
+        from services.file_storage_service import build_file_storage_service_from_env
+
+        monkeypatch.delenv("FUEL_OPS_S3_BUCKET", raising=False)
+        monkeypatch.setenv("FUEL_OPS_S3_REGION", "us-east-2")
+        assert build_file_storage_service_from_env() is None
+
+    def test_none_without_region(self, monkeypatch):
+        from services.file_storage_service import build_file_storage_service_from_env
+
+        monkeypatch.setenv("FUEL_OPS_S3_BUCKET", "qa-bucket")
+        for key in ("FUEL_OPS_S3_REGION", "AWS_REGION", "AWS_DEFAULT_REGION"):
+            monkeypatch.delenv(key, raising=False)
+        assert build_file_storage_service_from_env() is None
+
+    def test_builds_with_bucket_and_aws_region_fallback(self, monkeypatch):
+        from services.file_storage_service import build_file_storage_service_from_env
+
+        monkeypatch.setenv("FUEL_OPS_S3_BUCKET", "qa-bucket")
+        monkeypatch.delenv("FUEL_OPS_S3_REGION", raising=False)
+        monkeypatch.setenv("AWS_REGION", "us-east-2")
+        fss = build_file_storage_service_from_env()
+        assert isinstance(fss, FileStorageService)
+
+
+class TestTerminalBolCategory:
+    """Terminal BOL raw documents: manual scans and raw EDI (finding C9)."""
+
+    @pytest.mark.parametrize(
+        "content_type", ["image/png", "image/jpeg", "application/pdf", "application/edi-x12", "text/plain"]
+    )
+    def test_put_accepts_scans_and_edi(self, service: FileStorageService, content_type):
+        ref = service.put("tenant-A", "terminal_bol", b"payload", content_type)
+        assert ref.startswith("tenants/tenant-A/terminal_bol/")
+
+    def test_edi_types_stay_scoped_to_terminal_bol(self, service: FileStorageService):
+        with pytest.raises(FileStorageValidationError):
+            service.put("tenant-A", "photo", b"payload", "application/edi-x12")
+
+
 # ---------------------------------------------------------------------------
 # put
 # ---------------------------------------------------------------------------

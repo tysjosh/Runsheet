@@ -60,6 +60,7 @@ def _make_es_mock():
         return_value={"hits": {"hits": [], "total": {"value": 0}}}
     )
     es.update_document = AsyncMock(return_value={"result": "updated"})
+    es.get_document = AsyncMock(return_value=None)  # merged read-back (OI-31)
     return es
 
 
@@ -661,9 +662,11 @@ class TestJobServiceWebSocketIntegration:
         ws_mgr.broadcast = AsyncMock()
         svc._ws_manager = ws_mgr
 
-        await svc._broadcast_job_update("job_created", {"job_id": "JOB_600"})
+        job = {"job_id": "JOB_600", "tenant_id": "tenant_1"}
+        await svc._broadcast_job_update("job_created", job)
 
-        ws_mgr.broadcast.assert_awaited_once_with("job_created", {"job_id": "JOB_600"})
+        # The manager refuses a tenantless broadcast, so tenant_id is passed (D2).
+        ws_mgr.broadcast.assert_awaited_once_with("job_created", job, tenant_id="tenant_1")
 
     @pytest.mark.asyncio
     async def test_broadcast_without_ws_manager_does_not_crash(self):

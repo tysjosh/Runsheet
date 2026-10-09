@@ -22,6 +22,16 @@ def _make_agent_mock():
 @pytest.fixture(autouse=True)
 def _mock_external():
     """Mock all external modules that bootstrap/agents.py imports."""
+    # ``Agents.tools`` is replaced by a MagicMock, which is NOT a package — so every
+    # submodule ``bootstrap/agents.py`` imports has to be listed here too, or
+    # ``from Agents.tools.X import Y`` fails with "is not a package".
+    #
+    # ``commerce_read_tools`` was missing, and the test passed anyway because some
+    # earlier test in the suite happened to import it first, leaving it in
+    # ``sys.modules`` where the mock could not hide it. Deleting unrelated test files
+    # changed the collection order and the test started failing — it fails on its own
+    # at any commit, including before this migration. Listed now so it does not
+    # depend on what ran before it.
     modules_to_mock = [
         "services.elasticsearch_service",
         "Agents.tools",
@@ -29,11 +39,13 @@ def _mock_external():
         "Agents.tools.ops_feature_guard",
         "Agents.tools.ops_search_tools",
         "Agents.tools.ops_report_tools",
+        "Agents.tools.commerce_read_tools",
         "strands",
         "strands.models",
         "strands.models.litellm",
     ]
     saved = {}
+    preloaded = set(sys.modules)
     for name in modules_to_mock:
         saved[name] = sys.modules.get(name)
         sys.modules[name] = MagicMock()
@@ -47,6 +59,22 @@ def _mock_external():
             sys.modules[name] = orig
     sys.modules.pop("bootstrap.agents", None)
 
+    # Restoring the mocked entries is not enough. Any module FIRST imported while
+    # they were mocked bound the mocks at import time and stays cached with them:
+    # ``patch("Agents.mainagent.configure_orchestrator")`` imports
+    # ``Agents.mainagent`` here, so ``mainagent.Agent`` became ``mock.Agent`` and
+    # every later test that built a real ``LogisticsAgent`` failed with "object
+    # MagicMock can't be used in 'await' expression". Evict such modules so the
+    # next importer gets a clean copy.
+    for name in set(sys.modules) - preloaded:
+        module = sys.modules.get(name)
+        if module is None or isinstance(module, MagicMock):
+            continue
+        # Snapshot the namespace: an isinstance() check on a lazy proxy can
+        # import and add attributes mid-iteration (flaky teardown error).
+        if any(isinstance(value, MagicMock) for value in list(vars(module).values())):
+            sys.modules.pop(name, None)
+
 
 @pytest.fixture
 def container():
@@ -55,6 +83,12 @@ def container():
         redis_url="redis://localhost:6379",
         google_cloud_project="test-project-123456",
         google_cloud_location="us-central1",
+        # The agent model is resolved from settings now, not from a hardcoded
+        # model id plus os.environ. A MagicMock attribute would compose into a
+        # nonsense provider prefix, so state these explicitly.
+        agent_llm_provider="gemini",
+        agent_llm_model="gemini-2.5-flash",
+        gemini_api_key="test-gemini-key",
     )
     c.es_service = MagicMock()
     c.ops_feature_flags = MagicMock()
@@ -82,6 +116,7 @@ class TestAgentsBootstrap:
     async def test_registers_agent_services(self, mock_app, container):
         """Verify all agent services are registered in the container."""
         mock_redis = MagicMock()
+        approval_queue_cls = MagicMock(return_value=MagicMock())
 
         patches = [
             patch("redis.asyncio.from_url", return_value=mock_redis),
@@ -91,7 +126,7 @@ class TestAgentsBootstrap:
             patch("Agents.business_validator.BusinessValidator", return_value=MagicMock()),
             patch("Agents.activity_log_service.ActivityLogService", return_value=MagicMock()),
             patch("Agents.autonomy_config_service.AutonomyConfigService", return_value=MagicMock()),
-            patch("Agents.approval_queue_service.ApprovalQueueService", return_value=MagicMock()),
+            patch("Agents.approval_queue_service.ApprovalQueueService", approval_queue_cls),
             patch("Agents.confirmation_protocol.ConfirmationProtocol", return_value=MagicMock()),
             patch("Agents.memory_service.MemoryService", return_value=MagicMock()),
             patch("Agents.feedback_service.FeedbackService", return_value=MagicMock()),
@@ -107,7 +142,6 @@ class TestAgentsBootstrap:
             patch("Agents.autonomous.FuelManagementAgent", return_value=_make_agent_mock()),
             patch("Agents.autonomous.SLAGuardianAgent", return_value=_make_agent_mock()),
             patch("Agents.mainagent.configure_orchestrator"),
-            patch("Agents.agent_es_mappings.setup_agent_indices"),
         ]
 
         for p in patches:
@@ -130,6 +164,23 @@ class TestAgentsBootstrap:
             assert container.has("agent_orchestrator")
             assert container.has("redis_client")
             assert container.has("plan_dispatch_service")
+            # loading-plan-executor K1: the executor is registered on the
+            # protocol and shares the dispatch service's per-tenant lock.
+            from persistence.plan_execution_lock import PLAN_EXECUTION_LOCK
+            assert container.has("loading_plan_executor")
+            executor = container.loading_plan_executor
+            container.confirmation_protocol.set_loading_plan_executor.assert_called_once_with(
+                executor
+            )
+            assert executor._plan_lock is PLAN_EXECUTION_LOCK
+            assert container.plan_dispatch_service._plan_lock is PLAN_EXECUTION_LOCK
+            assert executor._ff is container.ops_feature_flags
+            # F7: the approval queue records rejections through the same
+            # FeedbackService the container exposes.
+            assert (
+                approval_queue_cls.call_args.kwargs["feedback_service"]
+                is container.feedback_service
+            )
         finally:
             for p in patches:
                 p.stop()
@@ -163,3 +214,104 @@ class TestAgentsBootstrap:
         # Cleanup
         agents_mod._autonomous_agents = []
         agents_mod._agent_redis_client = None
+
+    @pytest.mark.asyncio
+    async def test_reuses_the_core_file_storage_service(
+        self, mock_app, container, monkeypatch
+    ):
+        """Finding C9: core builds FileStorageService before compliance boots;
+        the agents bootstrap must reuse it rather than build a second one."""
+        monkeypatch.setenv("FUEL_OPS_S3_BUCKET", "qa-bucket")
+        monkeypatch.setenv("FUEL_OPS_S3_REGION", "us-east-2")
+        core_fss = MagicMock(name="core_file_storage_service")
+        container.file_storage_service = core_fss
+        fss_ctor = MagicMock(side_effect=AssertionError("second FileStorageService built"))
+
+        patches = [
+            patch("redis.asyncio.from_url", return_value=MagicMock()),
+            patch("services.file_storage_service.FileStorageService", fss_ctor),
+            patch("Agents.agent_ws_manager.AgentActivityWSManager", return_value=MagicMock()),
+            patch("Agents.agent_ws_manager.bind_container"),
+            patch("Agents.risk_registry.RiskRegistry", return_value=MagicMock()),
+            patch("Agents.business_validator.BusinessValidator", return_value=MagicMock()),
+            patch("Agents.activity_log_service.ActivityLogService", return_value=MagicMock()),
+            patch("Agents.autonomy_config_service.AutonomyConfigService", return_value=MagicMock()),
+            patch("Agents.approval_queue_service.ApprovalQueueService", return_value=MagicMock()),
+            patch("Agents.confirmation_protocol.ConfirmationProtocol", return_value=MagicMock()),
+            patch("Agents.memory_service.MemoryService", return_value=MagicMock()),
+            patch("Agents.feedback_service.FeedbackService", return_value=MagicMock()),
+            patch("agent_endpoints.configure_agent_endpoints"),
+            patch("Agents.specialists.FleetAgent", return_value=MagicMock()),
+            patch("Agents.specialists.SchedulingAgent", return_value=MagicMock()),
+            patch("Agents.specialists.FuelAgent", return_value=MagicMock()),
+            patch("Agents.specialists.OpsIntelligenceAgent", return_value=MagicMock()),
+            patch("Agents.specialists.ReportingAgent", return_value=MagicMock()),
+            patch("Agents.execution_planner.ExecutionPlanner", return_value=MagicMock()),
+            patch("Agents.orchestrator.AgentOrchestrator", return_value=MagicMock()),
+            patch("Agents.autonomous.DelayResponseAgent", return_value=_make_agent_mock()),
+            patch("Agents.autonomous.FuelManagementAgent", return_value=_make_agent_mock()),
+            patch("Agents.autonomous.SLAGuardianAgent", return_value=_make_agent_mock()),
+            patch("Agents.mainagent.configure_orchestrator"),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            sys.modules.pop("bootstrap.agents", None)
+            from bootstrap.agents import initialize
+            await initialize(mock_app, container)
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert container.file_storage_service is core_fss
+        fss_ctor.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wires_dyed_diesel_enforcer_into_compartment_agent(
+        self, mock_app, container
+    ):
+        """OI-02: compliance boots before agents, so its wiring never found the
+        agent. bootstrap/agents.py registers the agent and injects the
+        enforcer itself."""
+        enforcer = MagicMock(name="dyed_diesel_enforcer")
+        container.dyed_diesel_enforcer = enforcer
+
+        patches = [
+            patch("redis.asyncio.from_url", return_value=MagicMock()),
+            patch("Agents.agent_ws_manager.AgentActivityWSManager", return_value=MagicMock()),
+            patch("Agents.agent_ws_manager.bind_container"),
+            patch("Agents.risk_registry.RiskRegistry", return_value=MagicMock()),
+            patch("Agents.business_validator.BusinessValidator", return_value=MagicMock()),
+            patch("Agents.activity_log_service.ActivityLogService", return_value=MagicMock()),
+            patch("Agents.autonomy_config_service.AutonomyConfigService", return_value=MagicMock()),
+            patch("Agents.approval_queue_service.ApprovalQueueService", return_value=MagicMock()),
+            patch("Agents.confirmation_protocol.ConfirmationProtocol", return_value=MagicMock()),
+            patch("Agents.memory_service.MemoryService", return_value=MagicMock()),
+            patch("Agents.feedback_service.FeedbackService", return_value=MagicMock()),
+            patch("agent_endpoints.configure_agent_endpoints"),
+            patch("Agents.specialists.FleetAgent", return_value=MagicMock()),
+            patch("Agents.specialists.SchedulingAgent", return_value=MagicMock()),
+            patch("Agents.specialists.FuelAgent", return_value=MagicMock()),
+            patch("Agents.specialists.OpsIntelligenceAgent", return_value=MagicMock()),
+            patch("Agents.specialists.ReportingAgent", return_value=MagicMock()),
+            patch("Agents.execution_planner.ExecutionPlanner", return_value=MagicMock()),
+            patch("Agents.orchestrator.AgentOrchestrator", return_value=MagicMock()),
+            patch("Agents.autonomous.DelayResponseAgent", return_value=_make_agent_mock()),
+            patch("Agents.autonomous.FuelManagementAgent", return_value=_make_agent_mock()),
+            patch("Agents.autonomous.SLAGuardianAgent", return_value=_make_agent_mock()),
+            patch("Agents.mainagent.configure_orchestrator"),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            sys.modules.pop("bootstrap.agents", None)
+            from bootstrap.agents import initialize
+            await initialize(mock_app, container)
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert container.has("compartment_loading_agent")
+        agent = container.compartment_loading_agent
+        assert type(agent).__name__ == "CompartmentLoadingAgent"
+        assert agent._dyed_diesel_enforcer is enforcer

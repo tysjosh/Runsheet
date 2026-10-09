@@ -88,5 +88,4 @@ async def get_communication_metrics(
         logger.error("Failed to get communication metrics: %s", e)
         raise internal_error(
             message="Failed to get communication metrics",
-            details={"error": str(e)},
-        )
+        ) from e

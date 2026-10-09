@@ -15,13 +15,14 @@ Requirements:
 - 21.1-21.3: Ops-specific rate limiting for webhooks, API, and metrics
 """
 
+import logging
 import os
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional, List, Tuple
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -96,15 +97,6 @@ class Settings(BaseSettings):
         description="Deployment environment (development, staging, production)"
     )
     
-    # Elasticsearch Configuration
-    elastic_endpoint: str = Field(
-        ...,
-        description="Elasticsearch endpoint URL"
-    )
-    elastic_api_key: str = Field(
-        ...,
-        description="Elasticsearch API key for authentication"
-    )
     
     # Google Cloud / Gemini Configuration
     google_cloud_project: str = Field(
@@ -122,6 +114,42 @@ class Settings(BaseSettings):
     google_application_credentials: Optional[str] = Field(
         default=None,
         description="Path to Google Cloud service account credentials file"
+    )
+
+    # ── Agent LLM routing ─────────────────────────────────────────────
+    #
+    # The provider is explicit because LiteLLM routes on the model-id prefix
+    # and the two providers authenticate differently: "gemini/" is Google AI
+    # Studio (API key) and "vertex_ai/" is Google Cloud (ADC). The model id
+    # used to be a literal in three modules, so a fully populated GCP config
+    # still produced 401s against AI Studio. See Agents/model_provider.py.
+    agent_llm_provider: str = Field(
+        default="gemini",
+        description=(
+            "LLM provider for the agent stack: 'gemini' (Google AI Studio, "
+            "authenticates with GEMINI_API_KEY) or 'vertex_ai' (Google Cloud, "
+            "authenticates with Application Default Credentials)"
+        ),
+    )
+    agent_llm_model: str = Field(
+        default="gemini-2.5-flash",
+        description="Model name (without provider prefix) the agents run on",
+    )
+
+    # ── Overlay agent default mode ────────────────────────────────────
+    #
+    # Mode a tenant gets when it has no ``overlay_ff:overlay.{agent_id}``
+    # value. Kept at "disabled" so this setting's introduction changes no
+    # behaviour, but it is now a one-line switch instead of an unreachable
+    # default buried in _get_mode. "shadow" runs the full decision logic and
+    # writes proposals to the shadow index without touching live state, which
+    # is the intended way to observe an overlay before activating it.
+    overlay_default_mode: str = Field(
+        default="disabled",
+        description=(
+            "Overlay mode for tenants with no per-tenant flag: 'disabled', "
+            "'shadow', 'active_gated' or 'active_auto'"
+        ),
     )
     
     # ── PostgreSQL source-of-truth (persistence/) ─────────────────────
@@ -216,18 +244,26 @@ class Settings(BaseSettings):
         le=60.0,
         description="OutboxRelay idle poll interval in seconds.",
     )
+    # ``DOCUMENT_STORE_BACKEND`` is gone. It chose between Elasticsearch and
+    # Postgres for ElasticsearchService's document operations; there is only one
+    # backend now, so a switch would only ever select a path that does not exist.
+    # Rolling back is no longer a flag — it means restoring the cluster from
+    # ``es-full-backup`` and reverting the Phase 5/6 commits.
     retired_es_indices_raw: str = Field(
         default="",
         alias="RETIRED_ES_INDICES",
         description=(
-            "Comma-separated (or JSON array) list of Elasticsearch indices "
-            "retired (migrated to the Postgres source-of-truth and DROPPED in "
-            "migration Phase 6). Writes to these indices (direct "
+            "Comma-separated (or JSON array) list of document indices retired in "
+            "favour of a relational source-of-truth. Writes to them (direct "
             "index/update/delete AND outbox-relay projection) are silently "
-            "skipped so a dropped index is not recreated with dynamic "
-            "mappings. Reversible: remove an index from this list (and rebuild "
-            "it via persistence.rebuild_from_postgres) to resume projecting. "
-            "Read it via the ``retired_es_indices`` property."
+            "skipped, so nothing accumulates document rows that no read path "
+            "consults. Named for Elasticsearch because that is what it originally "
+            "kept indices from being recreated in; it still earns its keep against "
+            "the Postgres document store, where the cost is redundant rows in "
+            "es_documents rather than a dynamically-mapped index. Reversible: "
+            "remove an index from this list (and rebuild it via "
+            "persistence.rebuild_document_store) to resume projecting. Read it "
+            "via the ``retired_es_indices`` property."
         ),
     )
 
@@ -264,11 +300,93 @@ class Settings(BaseSettings):
         le=1000,
         description="Maximum AI chat requests per minute per IP"
     )
+    trusted_proxy_hops: Optional[int] = Field(
+        default=None,
+        ge=0,
+        le=5,
+        description=(
+            "Env TRUSTED_PROXY_HOPS. Proxies in front of the app that append the "
+            "caller to X-Forwarded-For; the client IP is the Nth entry from the "
+            "right (staging finding F5). Unset = 0 in development/test (no proxy, "
+            "every entry is client-supplied) and 1 in staging/production (one "
+            "AWS ALB). Set 2 if CloudFront is put in front of the ALB."
+        ),
+    )
+
+    # Sign-in / password-reset throttle (staging finding F5). Redis-backed fixed
+    # windows shared by every replica; see auth/signin_throttle.py.
+    auth_signin_throttle_enabled: bool = Field(
+        default=True,
+        description=(
+            "Throttle POST /auth/signin, /auth/driver/session and "
+            "/auth/user/password/reset/token per client IP and per email. Needs "
+            "redis_url; without it (or when Redis errors) attempts are allowed."
+        ),
+    )
+    signin_ip_max_attempts: int = Field(
+        default=20,
+        ge=1,
+        le=10000,
+        description="Sign-in attempts (all outcomes) per client IP per window.",
+    )
+    signin_ip_window_seconds: int = Field(
+        default=60,
+        ge=1,
+        le=86400,
+        description="Window for signin_ip_max_attempts, in seconds.",
+    )
+    signin_email_max_failures: int = Field(
+        default=10,
+        ge=1,
+        le=10000,
+        description=(
+            "Failed sign-ins per email before that email is blocked until the "
+            "window (opened by the first failure) expires. A success resets it."
+        ),
+    )
+    signin_email_window_seconds: int = Field(
+        default=900,
+        ge=1,
+        le=86400,
+        description="Window for signin_email_max_failures, in seconds.",
+    )
+    password_reset_ip_max_requests: int = Field(
+        default=10,
+        ge=1,
+        le=10000,
+        description="Password-reset token requests per client IP per window.",
+    )
+    password_reset_ip_window_seconds: int = Field(
+        default=900,
+        ge=1,
+        le=86400,
+        description="Window for password_reset_ip_max_requests, in seconds.",
+    )
+    password_reset_email_max_requests: int = Field(
+        default=5,
+        ge=1,
+        le=10000,
+        description="Password-reset token requests per email per window.",
+    )
+    password_reset_email_window_seconds: int = Field(
+        default=3600,
+        ge=1,
+        le=86400,
+        description="Window for password_reset_email_max_requests, in seconds.",
+    )
     
     # Observability Configuration
     log_level: str = Field(
         default="INFO",
         description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)"
+    )
+    http_client_log_level: str = Field(
+        default="WARNING",
+        description=(
+            "Level for the httpx, httpcore and LiteLLM loggers. Their INFO lines "
+            "carry request URLs (Gemini puts the API key in ?key=), so keep "
+            "WARNING outside debugging. Secrets are redacted at any level."
+        ),
     )
     otel_endpoint: Optional[str] = Field(
         default=None,
@@ -342,6 +460,40 @@ class Settings(BaseSettings):
         ge=60,
         description="Access-token / session lifetime in seconds (Req 2.7).",
     )
+    signin_failure_floor_ms: int = Field(
+        default=1000,
+        ge=0,
+        description=(
+            "Env SIGNIN_FAILURE_FLOOR_MS. Every failed sign-in (web "
+            "/auth/signin and driver POST /auth/driver/session) takes at "
+            "least this long, so response time doesn't reveal whether an "
+            "email has an account (OI-12). Throttled 429s and successes are "
+            "not padded. 0 disables."
+        ),
+    )
+    ws_session_recheck_seconds: float = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Env WS_SESSION_RECHECK_SECONDS. How often an open WebSocket asks "
+            "the SuperTokens core whether its session handle is still alive; "
+            "a signed-out or revoked session is closed with 4001 (OI-11). "
+            "0 disables the re-check."
+        ),
+    )
+    session_check_database: bool = Field(
+        default=True,
+        description=(
+            "Env SESSION_CHECK_DATABASE. When True, every protected REST "
+            "request and WebSocket handshake asks the SuperTokens core whether "
+            "the session is still alive (access-token blacklisting), so "
+            "sign-out and revocation take effect immediately (staging finding "
+            "F3). Costs one core round trip per protected request (REST "
+            "verifications are memoized per request). False falls back to "
+            "stateless JWT checks, where a revoked access token keeps working "
+            "until it expires (~1 h)."
+        ),
+    )
     password_min_length: int = Field(
         default=8,
         ge=8,
@@ -392,6 +544,21 @@ class Settings(BaseSettings):
         """True when a custom SMTP relay is fully configured for auth email."""
         return bool(self.smtp_host.strip() and self.smtp_from_email.strip())
 
+    @property
+    def is_local_environment(self) -> bool:
+        """True for development and test, the environments that skip HSTS and
+        keep the API docs served (staging findings F6, F7)."""
+        return self.environment in (Environment.DEVELOPMENT, Environment.TEST)
+
+    @property
+    def effective_trusted_proxy_hops(self) -> int:
+        """``trusted_proxy_hops`` when set, else 0 locally and 1 behind the ALB
+        (F5). 0 behind the ALB would key every client on the ALB node's IP, one
+        shared bucket that a single noisy client could exhaust for everyone."""
+        if self.trusted_proxy_hops is not None:
+            return self.trusted_proxy_hops
+        return 0 if self.is_local_environment else 1
+
     # API-key authentication
     #
     # Comma-separated list of valid API keys for routes that declare the
@@ -424,6 +591,16 @@ class Settings(BaseSettings):
             "When True, bootstrap/core.py calls data_seeder.seed_baseline_data "
             "at startup. Seeded docs are stamped with tenant_id='demo' so they "
             "cannot leak into real tenant queries. Default False."
+        ),
+    )
+    # POST /api/data/cleanup wipes every tenant's shared indices and reseeds
+    # demo data (OI-08). Off by default; set only on a local dev stack. Never
+    # set it on staging or production.
+    allow_data_cleanup: bool = Field(
+        default=False,
+        description=(
+            "When True (and not production), platform_admin may call "
+            "POST /api/data/cleanup. Local dev only. Default False."
         ),
     )
 
@@ -500,6 +677,12 @@ class Settings(BaseSettings):
         ge=1,
         le=10000,
         description="Ops API rate limit per minute per user"
+    )
+    export_rate_limit: int = Field(
+        default=5,
+        ge=1,
+        le=1000,
+        description="CSV exports per minute per user, per export route"
     )
     ops_metrics_rate_limit: int = Field(
         default=20,
@@ -644,6 +827,49 @@ class Settings(BaseSettings):
         ),
     )
 
+    # ── Customer portal (OI-06) ──────────────────────────────────────
+    #
+    # The portal is effective only when commerce_backbone_enabled is also
+    # on (it needs CustomerService); see portal.scope.portal_enabled. The
+    # validator below logs a WARN for the inert combination, never raises.
+    customer_portal_enabled: bool = Field(
+        default=False,
+        description=(
+            "Master flag for the customer portal (/api/portal/* and the "
+            "portal-user admin routes). Effective only together with "
+            "commerce_backbone_enabled. When off those routes return 404 "
+            "PORTAL_DISABLED. Default: False."
+        ),
+    )
+    portal_read_rate_limit: int = Field(
+        default=120, ge=1,
+        description="Portal read requests per minute per portal user (shared bucket)",
+    )
+    portal_order_rate_limit: int = Field(
+        default=10, ge=1,
+        description="Portal order submissions per minute per portal user",
+    )
+    portal_order_cancel_rate_limit: int = Field(
+        default=10, ge=1,
+        description="Portal order cancellations per minute per portal user",
+    )
+    portal_payment_rate_limit: int = Field(
+        default=5, ge=1,
+        description="Portal payment creations per minute per portal user",
+    )
+    portal_max_users_per_customer: int = Field(
+        default=10, ge=1,
+        description="Maximum active portal users per commerce customer",
+    )
+    portal_principal_cache_seconds: int = Field(
+        default=60, ge=1,
+        description="TTL of the in-process portal principal (grant/customer) check cache",
+    )
+    portal_stale_reading_days: int = Field(
+        default=7, ge=1,
+        description="Days after which a tank reading is shown as stale in the portal",
+    )
+
     commerce_customers_enabled: bool = Field(
         default=False,
         description=(
@@ -679,6 +905,18 @@ class Settings(BaseSettings):
             "transitions to delivered. When off, no canonical invoices are "
             "created. Default: False (off in production, override to True "
             "in development)."
+        ),
+    )
+
+    commerce_margin_feed_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sub-flag enabling the cost / margin (COGS) feed: margin records "
+            "on estimates, deliveries and invoice lines, the admin-only "
+            "/api/commerce/margin API and the margin-driven RevenueGuard. "
+            "Also requires COMMERCE_BACKBONE_ENABLED and an active "
+            "persistence layer. When off, every margin route returns 404 and "
+            "no margin record is written. Default: False."
         ),
     )
 
@@ -770,25 +1008,6 @@ class Settings(BaseSettings):
         extra="ignore"
     )
     
-    @field_validator("elastic_endpoint")
-    @classmethod
-    def validate_elastic_endpoint(cls, v: str) -> str:
-        """Validate that elastic_endpoint is not empty and is a valid URL format."""
-        if not v or not v.strip():
-            raise ValueError("elastic_endpoint cannot be empty")
-        v = v.strip()
-        if not (v.startswith("http://") or v.startswith("https://")):
-            raise ValueError("elastic_endpoint must be a valid HTTP/HTTPS URL")
-        return v
-    
-    @field_validator("elastic_api_key")
-    @classmethod
-    def validate_elastic_api_key(cls, v: str) -> str:
-        """Validate that elastic_api_key is not empty."""
-        if not v or not v.strip():
-            raise ValueError("elastic_api_key cannot be empty")
-        return v.strip()
-    
     @field_validator("google_cloud_project")
     @classmethod
     def validate_google_cloud_project(cls, v: str) -> str:
@@ -798,14 +1017,65 @@ class Settings(BaseSettings):
         v = v.strip()
         return v
     
-    @field_validator("log_level")
+    @field_validator("overlay_default_mode")
     @classmethod
-    def validate_log_level(cls, v: str) -> str:
-        """Validate that log_level is a valid logging level."""
+    def validate_overlay_default_mode(cls, v: str) -> str:
+        """Reject a mode the overlay agents cannot interpret.
+
+        An unrecognised value would reach ``monitor_cycle``, fail the
+        ``== "disabled"`` check, and be treated as a commit path — activating
+        every overlay agent because of a typo.
+        """
+        v = (v or "").strip().lower()
+        valid = {"disabled", "shadow", "active_gated", "active_auto"}
+        if v not in valid:
+            raise ValueError(
+                f"overlay_default_mode must be one of: {', '.join(sorted(valid))}"
+            )
+        return v
+
+    @field_validator("agent_llm_provider")
+    @classmethod
+    def validate_agent_llm_provider(cls, v: str) -> str:
+        """Reject an unknown provider rather than building an unroutable model id.
+
+        A typo here would otherwise reach LiteLLM as a model-id prefix it does
+        not recognise, and surface as a per-request routing error.
+        """
+        v = (v or "").strip().lower()
+        if v not in {"gemini", "vertex_ai"}:
+            raise ValueError(
+                "agent_llm_provider must be 'gemini' or 'vertex_ai'"
+            )
+        return v
+
+    @field_validator("agent_llm_model")
+    @classmethod
+    def validate_agent_llm_model(cls, v: str) -> str:
+        """The model name must not carry a provider prefix.
+
+        ``AGENT_LLM_MODEL=gemini/gemini-2.5-flash`` would compose to
+        ``gemini/gemini/gemini-2.5-flash``. The prefix comes from
+        ``agent_llm_provider``, which is the whole point of splitting them.
+        """
+        v = (v or "").strip()
+        if not v:
+            raise ValueError("agent_llm_model cannot be empty")
+        if "/" in v:
+            raise ValueError(
+                "agent_llm_model must not include a provider prefix "
+                f"(got {v!r}); set agent_llm_provider instead"
+            )
+        return v
+
+    @field_validator("log_level", "http_client_log_level")
+    @classmethod
+    def validate_log_level(cls, v: str, info: ValidationInfo) -> str:
+        """Validate that log_level / http_client_log_level is a valid logging level."""
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         v = v.strip().upper()
         if v not in valid_levels:
-            raise ValueError(f"log_level must be one of: {', '.join(valid_levels)}")
+            raise ValueError(f"{info.field_name} must be one of: {', '.join(valid_levels)}")
         return v
     
     @field_validator("session_store_type")
@@ -875,6 +1145,8 @@ class Settings(BaseSettings):
                 pass
         return [part.strip() for part in raw.split(",") if part.strip()]
 
+
+
     @model_validator(mode="after")
     def validate_session_store_config(self) -> "Settings":
         """Validate that the appropriate session store URL/table is provided."""
@@ -917,6 +1189,83 @@ class Settings(BaseSettings):
                     f"{self.environment.value} environment: "
                     f"{', '.join(missing_supertokens)}"
                 )
+
+            # The Postgres source-of-truth is NOT optional outside development.
+            #
+            # ``database_url`` is Optional because an ES-only deployment was the
+            # pre-migration posture, and the persistence layer degrades to it
+            # silently: ``is_persistence_enabled()`` returns False and every
+            # caller takes the legacy path. That is a defensible default on a
+            # laptop and indefensible in production, because three correctness
+            # guarantees exist only in Postgres:
+            #
+            #   * invoice numbering — ``allocate_invoice_number`` returns None
+            #     when dormant, and the invoice is finalized with NO number.
+            #   * idempotency keys — the ES index cannot prevent two concurrent
+            #     requests with the same key from both being processed.
+            #   * credit limits — the ``SELECT ... FOR UPDATE`` row lock behind
+            #     the credit check has no ES equivalent, so concurrent orders
+            #     can exceed a limit.
+            #
+            # None of those failures raises. Requiring the URL here converts a
+            # silent, per-request correctness loss into a startup error naming
+            # exactly what is missing.
+            if not self.database_url:
+                raise ValueError(
+                    "database_url is required in a "
+                    f"{self.environment.value} environment: without it the "
+                    "persistence layer is dormant, invoices finalize with no "
+                    "invoice_number, idempotency keys lose their uniqueness "
+                    "guarantee, and credit checks lose their row lock — all "
+                    "silently. Set the async SQLAlchemy URL, e.g. "
+                    "postgresql+psycopg://user:pass@host:5432/runsheet"
+                )
+
+            # Having the URL is not sufficient: invoice numbering is gated on
+            # BOTH database_url and commerce_dual_write_postgres
+            # (``commerce_persistence_bridge._enabled``). A deployment with
+            # commerce enabled but dual-write off still finalizes unnumbered
+            # invoices, so refuse that combination rather than discover it in
+            # the accounting export.
+            if self.commerce_backbone_enabled and not self.commerce_dual_write_postgres:
+                raise ValueError(
+                    "commerce_dual_write_postgres must be True in a "
+                    f"{self.environment.value} environment when "
+                    "commerce_backbone_enabled is True: invoice numbering, "
+                    "payment de-duplication and the credit-check row lock are "
+                    "all gated on it, and each degrades silently when it is off"
+                )
+            # The agent stack has no credential unless one is configured, and
+            # the failure mode was invisible: every call site passed
+            # ``os.environ.get("GEMINI_API_KEY", "")``, so an unset variable
+            # became an EMPTY key rather than an error. The model constructed
+            # fine, boot succeeded, and each agent request failed on
+            # authentication instead — the specialists, the orchestrator's
+            # intent classification and the conversational surface all of them.
+            #
+            # GOOGLE_CLOUD_PROJECT is not a substitute and looked like one: the
+            # hardcoded ``gemini/`` model-id prefix routes to Google AI Studio,
+            # which authenticates by API key, so a fully populated GCP config
+            # still 401s. Choosing Vertex is now explicit
+            # (AGENT_LLM_PROVIDER=vertex_ai) and checked against the setting it
+            # actually needs. See Agents/model_provider.py.
+            if self.agent_llm_provider == "gemini" and not self.gemini_api_key:
+                raise ValueError(
+                    "gemini_api_key is required in a "
+                    f"{self.environment.value} environment when "
+                    "agent_llm_provider is 'gemini': the agents authenticate to "
+                    "Google AI Studio by API key, and an unset value silently "
+                    "becomes an empty key that fails on every request. Set "
+                    "GEMINI_API_KEY, or set AGENT_LLM_PROVIDER=vertex_ai to "
+                    "authenticate to Google Cloud with Application Default "
+                    "Credentials instead."
+                )
+            if self.agent_llm_provider == "vertex_ai" and not self.google_cloud_project:
+                raise ValueError(
+                    "google_cloud_project is required in a "
+                    f"{self.environment.value} environment when "
+                    "agent_llm_provider is 'vertex_ai'"
+                )
             # Validate CORS: reject any localhost origins in production
             if self.environment == Environment.PRODUCTION:
                 for origin in self.cors_origins:
@@ -927,6 +1276,34 @@ class Settings(BaseSettings):
                         )
         
         return self
+
+    @model_validator(mode="after")
+    def warn_portal_without_backbone(self) -> "Settings":
+        """WARN (never raise) when the portal flag is on but the backbone is off.
+
+        The portal needs CustomerService, which exists only with the commerce
+        backbone, so ``portal.scope.portal_enabled`` keeps it off. Logging
+        instead of raising lets a misconfigured environment still boot.
+        """
+        if self.customer_portal_enabled and not self.commerce_backbone_enabled:
+            logging.getLogger(__name__).warning(
+                "customer_portal_enabled without commerce_backbone_enabled; "
+                "portal stays off"
+            )
+        return self
+
+
+def api_docs_kwargs(settings: Settings) -> dict:
+    """``FastAPI(...)`` kwargs for the OpenAPI schema, Swagger UI and ReDoc.
+
+    Served only in development and test (staging finding F7: the full schema
+    and both doc UIs were public on staging). Elsewhere all three URLs are
+    ``None``, so the routes are not mounted. ``app.openapi()`` still works
+    for in-process tooling such as ``scripts/check_api_types.py``.
+    """
+    if settings.is_local_environment:
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
 
 
 class ConfigurationError(Exception):

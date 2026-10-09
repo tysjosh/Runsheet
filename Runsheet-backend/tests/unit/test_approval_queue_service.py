@@ -67,25 +67,32 @@ def _make_service(
         }
     )
 
-    # Raw client for optimistic concurrency
+    # The service used ``client.get`` + ``client.update`` with ``if_seq_no`` for
+    # optimistic concurrency; both bypass the document-store backend switch, so
+    # after the cutover the read would have gone to Elasticsearch and the write to
+    # Postgres — the worst possible split for a concurrency guard. It now uses
+    # ``get_document`` + ``atomic_update``, and the guard is stated in the terms it
+    # actually protects: the status must still be what the caller read.
+    #
+    # Backed by a real in-memory document so ``atomic_update`` behaves like the
+    # facade does: the transform sees the CURRENT stored state, which is what lets
+    # the concurrency tests below simulate a race by mutating it.
+    es_service.stored_document = dict(get_response) if get_response else {}
+
+    async def _get_document(index, doc_id):
+        return dict(es_service.stored_document) if es_service.stored_document else None
+
+    async def _atomic_update(index, doc_id, transform, *, upsert=None, **kwargs):
+        current = dict(es_service.stored_document)
+        updated = transform(current)
+        if updated is None:
+            return (dict(es_service.stored_document), False)
+        es_service.stored_document = dict(updated)
+        return (dict(updated), True)
+
+    es_service.get_document = AsyncMock(side_effect=_get_document)
+    es_service.atomic_update = AsyncMock(side_effect=_atomic_update)
     es_service.client = MagicMock()
-    if get_response:
-        es_service.client.get = MagicMock(
-            return_value={
-                "_source": get_response,
-                "_seq_no": 1,
-                "_primary_term": 1,
-            }
-        )
-    else:
-        es_service.client.get = MagicMock(
-            return_value={
-                "_source": {},
-                "_seq_no": 1,
-                "_primary_term": 1,
-            }
-        )
-    es_service.client.update = MagicMock(return_value={"result": "updated"})
 
     if ws_manager is None:
         ws_manager = MagicMock()
@@ -242,11 +249,11 @@ class TestApprove:
         service = _make_service(get_response=entry)
         await service.approve("action-1", "reviewer-1")
 
-        # Should use client.update with if_seq_no and if_primary_term
-        service._es.client.update.assert_called()
-        call_kwargs = service._es.client.update.call_args[1]
-        assert call_kwargs["if_seq_no"] == 1
-        assert call_kwargs["if_primary_term"] == 1
+        # The concurrency guard is now stated in the terms it protects: the
+        # status must still be what the caller read. Asserting ``if_seq_no`` was
+        # asserting the mechanism; this asserts the invariant.
+        service._es.atomic_update.assert_called()
+        assert service._es.stored_document["status"] == "approved"
 
     async def test_approve_broadcasts_approval_approved(self):
         entry = self._pending_entry()
@@ -267,11 +274,14 @@ class TestApprove:
             await service.approve("action-1", "reviewer-1")
 
     async def test_approve_rejects_expired_entry(self):
+        """N7: an already-expired entry is ApprovalExpiredError (409), not 400."""
+        from Agents.approval_queue_service import ApprovalExpiredError
+
         entry = self._pending_entry()
         entry["status"] = "expired"
         service = _make_service(get_response=entry)
 
-        with pytest.raises(ValueError, match="expected 'pending'"):
+        with pytest.raises(ApprovalExpiredError):
             await service.approve("action-1", "reviewer-1")
 
     async def test_approve_executes_mutation_when_protocol_wired(self):
@@ -387,9 +397,125 @@ class TestReject:
         service = _make_service(get_response=entry)
         await service.reject("action-1", "reviewer-1")
 
-        call_kwargs = service._es.client.update.call_args[1]
-        assert call_kwargs["if_seq_no"] == 1
-        assert call_kwargs["if_primary_term"] == 1
+        service._es.atomic_update.assert_called()
+        assert service._es.stored_document["status"] == "rejected"
+
+
+# ---------------------------------------------------------------------------
+# Tests: rejection feedback and approval audit (F7)
+# ---------------------------------------------------------------------------
+
+
+def _feedback_docs(es_service) -> list:
+    """Docs the real FeedbackService wrote through the fake store."""
+    return [
+        c.args[2] for c in es_service.index_document.call_args_list
+        if c.args[0] == "agent_feedback"
+    ]
+
+
+class TestRejectionFeedbackAndApprovalAudit:
+    """Staging F7: a reject stored no feedback and an approve wrote no audit."""
+
+    def _service_with_feedback(self, entry, **kwargs):
+        from Agents.feedback_service import FeedbackService
+
+        service = _make_service(get_response=entry, **kwargs)
+        service._feedback = FeedbackService(es_service=service._es)
+        return service
+
+    async def test_reject_records_rejection_feedback(self):
+        entry = TestReject()._pending_entry()
+        service = self._service_with_feedback(entry)
+
+        await service.reject("action-1", "reviewer-1", reason="Wrong rider")
+
+        docs = _feedback_docs(service._es)
+        assert len(docs) == 1
+        doc = docs[0]
+        assert doc["feedback_type"] == "rejection"
+        assert doc["agent_id"] == "ai_agent"
+        assert doc["action_type"] == "reassign_rider"
+        assert doc["original_proposal"]["action_id"] == "action-1"
+        assert doc["original_proposal"]["tool_name"] == "reassign_rider"
+        assert doc["original_proposal"]["parameters"] == entry["parameters"]
+        assert doc["original_proposal"]["risk_level"] == "high"
+        assert doc["original_proposal"]["impact_summary"] == entry["impact_summary"]
+        assert doc["context"]["rejection_reason"] == "Wrong rider"
+        assert doc["user_action"] == {}
+        assert doc["user_id"] == "reviewer-1"
+        assert doc["tenant_id"] == "t1"
+
+    async def test_feedback_failure_does_not_fail_reject(self):
+        entry = TestReject()._pending_entry()
+        service = _make_service(get_response=entry)
+        service._feedback = MagicMock()
+        service._feedback.record_rejection = AsyncMock(side_effect=RuntimeError("store down"))
+
+        result = await service.reject("action-1", "reviewer-1", reason="x")
+
+        assert result["status"] == "rejected"
+        service._feedback.record_rejection.assert_awaited_once()
+
+    async def test_approve_writes_approval_approved_activity_entry(self):
+        entry = TestApprove()._pending_entry()
+        protocol = MagicMock()
+        protocol._execute_mutation = AsyncMock(return_value="ok")
+        service = self._service_with_feedback(entry, confirmation_protocol=protocol)
+
+        await service.approve("action-1", "reviewer-1")
+
+        logged = [c.args[0] for c in service._activity_log.log.call_args_list]
+        approved = [e for e in logged if e["action_type"] == "approval_approved"]
+        assert len(approved) == 1
+        log_entry = approved[0]
+        assert log_entry["outcome"] == "approved"
+        assert log_entry["user_id"] == "reviewer-1"
+        assert log_entry["tenant_id"] == "t1"
+        assert log_entry["agent_id"] == "ai_agent"
+        assert log_entry["tool_name"] == "cancel_job"
+        assert log_entry["details"] == {
+            "action_id": "action-1",
+            "executed": True,
+            "execution_success": True,
+        }
+
+    async def test_approve_without_protocol_audits_not_executed(self):
+        entry = TestApprove()._pending_entry()
+        service = _make_service(get_response=entry)
+
+        await service.approve("action-1", "reviewer-1")
+
+        log_entry = service._activity_log.log.call_args[0][0]
+        assert log_entry["action_type"] == "approval_approved"
+        assert log_entry["details"]["executed"] is False
+        assert log_entry["details"]["execution_success"] is None
+
+    async def test_approve_audit_failure_does_not_fail_approve(self):
+        entry = TestApprove()._pending_entry()
+        activity_log = MagicMock()
+        activity_log.log = AsyncMock(side_effect=RuntimeError("log down"))
+        service = _make_service(get_response=entry, activity_log=activity_log)
+
+        result = await service.approve("action-1", "reviewer-1")
+
+        assert result["status"] == "approved"
+
+    async def test_approve_writes_no_feedback(self):
+        entry = TestApprove()._pending_entry()
+        service = self._service_with_feedback(entry)
+
+        await service.approve("action-1", "reviewer-1")
+
+        assert _feedback_docs(service._es) == []
+
+    def test_constructor_accepts_feedback_service(self):
+        feedback = object()
+        service = ApprovalQueueService(
+            es_service=MagicMock(), ws_manager=None,
+            activity_log_service=None, feedback_service=feedback,
+        )
+        assert service._feedback is feedback
 
 
 # ---------------------------------------------------------------------------
@@ -416,27 +542,69 @@ class TestExpireStale:
             }
         }
 
+    def _service(self, hits):
+        """A service whose ``atomic_update`` acts on the hits' stored documents.
+
+        ``expire_stale`` writes through ``_update_with_concurrency`` guarded on
+        ``pending`` (loading-plan-executor K7), so each hit needs a stored copy.
+        """
+        service = _make_service(search_hits=hits)
+        docs = {h["_source"]["action_id"]: dict(h["_source"]) for h in hits}
+        service.docs = docs
+
+        async def _atomic_update(index, doc_id, transform, **kwargs):
+            current = dict(docs[doc_id])
+            updated = transform(current)
+            if updated is None:
+                return (current, False)
+            docs[doc_id] = dict(updated)
+            return (dict(updated), True)
+
+        service._es.atomic_update = AsyncMock(side_effect=_atomic_update)
+        return service
+
     async def test_expire_stale_returns_count(self):
         hits = [self._expired_hit("a-1"), self._expired_hit("a-2")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         count = await service.expire_stale()
 
         assert count == 2
 
     async def test_expire_stale_updates_status_to_expired(self):
         hits = [self._expired_hit("a-1")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         await service.expire_stale()
 
-        service._es.update_document.assert_called_once()
-        call_args = service._es.update_document.call_args
+        # The write is the guarded CAS, never a bare update_document (K7).
+        service._es.update_document.assert_not_called()
+        service._es.atomic_update.assert_called_once()
+        call_args = service._es.atomic_update.call_args
         assert call_args[0][0] == "agent_approval_queue"
         assert call_args[0][1] == "a-1"
-        assert call_args[0][2]["status"] == "expired"
+        assert service.docs["a-1"]["status"] == "expired"
+
+    async def test_expire_stale_skips_an_entry_that_moved(self):
+        """The sweeper never turns an approved entry into expired (K7)."""
+        hits = [self._expired_hit("a-1"), self._expired_hit("a-2")]
+        service = self._service(hits)
+        service.docs["a-1"]["status"] = "approved"  # approved after the search
+
+        count = await service.expire_stale()
+
+        assert count == 1
+        assert service.docs["a-1"]["status"] == "approved"
+        expired = [
+            c[0][1]["action_id"]
+            for c in service._ws.broadcast_approval_event.call_args_list
+            if c[0][0] == "approval_expired"
+        ]
+        assert expired == ["a-2"]
+        logged = [c[0][0]["details"]["action_id"] for c in service._activity_log.log.call_args_list]
+        assert logged == ["a-2"]
 
     async def test_expire_stale_broadcasts_approval_expired(self):
         hits = [self._expired_hit("a-1")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         await service.expire_stale()
 
         calls = service._ws.broadcast_approval_event.call_args_list
@@ -445,7 +613,7 @@ class TestExpireStale:
 
     async def test_expire_stale_logs_to_activity_log(self):
         hits = [self._expired_hit("a-1")]
-        service = _make_service(search_hits=hits)
+        service = self._service(hits)
         await service.expire_stale()
 
         service._activity_log.log.assert_called_once()
@@ -476,11 +644,16 @@ class TestExpireStale:
     async def test_expire_stale_continues_on_individual_failure(self):
         """If one entry fails to expire, others should still be processed."""
         hits = [self._expired_hit("a-1"), self._expired_hit("a-2")]
-        service = _make_service(search_hits=hits)
-        # First call fails, second succeeds
-        service._es.update_document = AsyncMock(
-            side_effect=[Exception("ES error"), {"result": "updated"}]
-        )
+        service = self._service(hits)
+        # First write fails, second succeeds
+        succeed = service._es.atomic_update.side_effect
+
+        async def _first_fails(index, doc_id, transform, **kwargs):
+            if doc_id == "a-1":
+                raise Exception("ES error")
+            return await succeed(index, doc_id, transform, **kwargs)
+
+        service._es.atomic_update = AsyncMock(side_effect=_first_fails)
         count = await service.expire_stale()
 
         assert count == 1
@@ -557,6 +730,30 @@ class TestListPending:
         assert result["items"] == []
         assert result["total"] == 0
 
+    async def test_list_pending_include_unresolved_status_clause(self):
+        """K7: unresolved entries and approved loading plans are listed on request."""
+        service = _make_service(search_hits=[])
+        await service.list_pending("t1", page=2, size=5, include_unresolved=True)
+
+        query = service._es.search_documents.call_args[0][1]
+        must_clauses = query["query"]["bool"]["must"]
+        assert {"term": {"tenant_id": "t1"}} in must_clauses
+        assert {"term": {"status": "pending"}} not in must_clauses
+        assert {
+            "bool": {
+                "should": [
+                    {"terms": {"status": ["pending", "incomplete", "failed"]}},
+                    {"bool": {"filter": [
+                        {"term": {"status": "approved"}},
+                        {"term": {"tool_name": "apply_loading_plan"}},
+                    ]}},
+                ],
+                "minimum_should_match": 1,
+            }
+        } in must_clauses
+        assert query["sort"] == [{"proposed_at": {"order": "desc"}}]
+        assert query["from"] == 5 and query["size"] == 5
+
 
 # ---------------------------------------------------------------------------
 # Tests: _generate_impact_summary
@@ -620,6 +817,32 @@ class TestGenerateImpactSummary:
 
         assert "some_unknown_tool" in summary
 
+    def test_apply_loading_plan_summary_names_the_truck(self):
+        """Loading approvals used to read "Execute apply_loading_plan with
+        parameters: {...}" — the whole assignment dump."""
+        service = _make_service()
+        request = _make_request(
+            tool_name="apply_loading_plan",
+            parameters={
+                "plan_id": "plan-1",
+                "truck_id": "TRK-7",
+                "assignments": [
+                    {"compartment_id": "c1", "station_id": "s1", "order_id": "o1",
+                     "quantity_liters": 3000.4},
+                    # A split load: same order across two compartments.
+                    {"compartment_id": "c2", "station_id": "s1", "order_id": "o1",
+                     "quantity_liters": 1000},
+                    {"compartment_id": "c3", "station_id": "s2", "order_id": "o2",
+                     "quantity_liters": 2500},
+                ],
+                "total_utilization_pct": 83.6,
+            },
+        )
+        summary = service._generate_impact_summary(request)
+
+        assert summary == "Load truck TRK-7: 2 order(s), 6500 L, 84% utilization"
+        assert "parameters" not in summary
+
 
 # ---------------------------------------------------------------------------
 # Tests: WebSocket broadcasting
@@ -668,8 +891,21 @@ class TestConcurrencyControl:
             "tenant_id": "t1",
         }
         service = _make_service(get_response=entry)
-        service._es.client.update = MagicMock(
-            side_effect=Exception("version_conflict_engine_exception")
+
+        # Simulate the actual race rather than a synthetic ES error: another
+        # reviewer approves between this caller's read and its write, so the
+        # status the caller checked is no longer the stored one. Under the old
+        # mechanism this showed up as a sequence-number mismatch; the guard now
+        # names the condition, and the test can express it directly.
+        original_get = service._es.get_document.side_effect
+
+        async def _read_then_someone_else_approves(index, doc_id):
+            document = await original_get(index, doc_id)
+            service._es.stored_document["status"] = "approved"
+            return document
+
+        service._es.get_document = AsyncMock(
+            side_effect=_read_then_someone_else_approves
         )
 
         with pytest.raises(RuntimeError, match="Concurrent modification"):
@@ -685,9 +921,161 @@ class TestConcurrencyControl:
             "tenant_id": "t1",
         }
         service = _make_service(get_response=entry)
-        service._es.client.update = MagicMock(
+        service._es.atomic_update = AsyncMock(
             side_effect=Exception("connection_timeout")
         )
 
         with pytest.raises(Exception, match="connection_timeout"):
             await service.approve("action-1", "reviewer-1")
+
+
+# ---------------------------------------------------------------------------
+# N7: decisions after expiry_time are refused
+# ---------------------------------------------------------------------------
+
+
+class TestDecisionAfterExpiryN7:
+    """approve/reject past ``expiry_time`` expire the entry and raise.
+
+    The lazy path must leave the same trail as the sweep (``approval_expired``
+    broadcast and activity entry), because F12's re-proposal keys off them.
+    """
+
+    def _entry(self, *, minutes_from_now: float, status: str = "pending"):
+        return {
+            "action_id": "action-1",
+            "action_type": "mutation",
+            "tool_name": "cancel_job",
+            "parameters": {"job_id": "JOB_1"},
+            "risk_level": "high",
+            "proposed_by": "ai_agent",
+            "proposed_at": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "reviewed_by": None,
+            "reviewed_at": None,
+            "expiry_time": (
+                datetime.now(timezone.utc) + timedelta(minutes=minutes_from_now)
+            ).isoformat(),
+            "impact_summary": "Cancel job JOB_1",
+            "tenant_id": "t1",
+        }
+
+    @staticmethod
+    def _events(service):
+        return [c[0][0] for c in service._ws.broadcast_approval_event.call_args_list]
+
+    @staticmethod
+    def _activity_types(service):
+        return [c[0][0]["action_type"] for c in service._activity_log.log.call_args_list]
+
+    async def test_approve_after_expiry_expires_and_never_executes(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        entry = self._entry(minutes_from_now=-1)
+        protocol = MagicMock()
+        protocol._execute_mutation = AsyncMock(return_value="done")
+        service = _make_service(get_response=entry, confirmation_protocol=protocol)
+
+        with pytest.raises(ApprovalExpiredError) as info:
+            await service.approve("action-1", "reviewer-1", tenant_id="t1")
+
+        assert info.value.action_id == "action-1"
+        assert info.value.expiry_time == entry["expiry_time"]
+        assert service._es.stored_document["status"] == "expired"
+        assert self._events(service) == ["approval_expired"]
+        assert self._activity_types(service) == ["approval_expired"]
+        protocol._execute_mutation.assert_not_called()
+
+    async def test_reject_after_expiry_expires_and_records_no_feedback(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        entry = self._entry(minutes_from_now=-1)
+        service = _make_service(get_response=entry)
+        service._feedback = MagicMock()
+        service._feedback.record_rejection = AsyncMock()
+
+        with pytest.raises(ApprovalExpiredError):
+            await service.reject("action-1", "reviewer-1", reason="late", tenant_id="t1")
+
+        assert service._es.stored_document["status"] == "expired"
+        assert "rejection_reason" not in service._es.stored_document
+        assert self._events(service) == ["approval_expired"]
+        assert self._activity_types(service) == ["approval_expired"]
+        service._feedback.record_rejection.assert_not_called()
+
+    async def test_lazy_expiry_matches_the_sweep_side_effects(self):
+        """Same broadcast payload status and activity entry shape as expire_stale."""
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        lazy = _make_service(get_response=self._entry(minutes_from_now=-1))
+        with pytest.raises(ApprovalExpiredError):
+            await lazy.approve("action-1", "reviewer-1")
+
+        sweep_hit = {"_source": self._entry(minutes_from_now=-1)}
+        sweep = TestExpireStale()._service([sweep_hit])
+        assert await sweep.expire_stale() == 1
+
+        lazy_log = lazy._activity_log.log.call_args[0][0]
+        sweep_log = sweep._activity_log.log.call_args[0][0]
+        assert lazy_log == sweep_log
+        lazy_event = lazy._ws.broadcast_approval_event.call_args[0]
+        sweep_event = sweep._ws.broadcast_approval_event.call_args[0]
+        assert lazy_event[0] == sweep_event[0] == "approval_expired"
+        assert lazy_event[1]["status"] == sweep_event[1]["status"] == "expired"
+
+    async def test_future_expiry_still_approves_and_rejects(self):
+        approve_svc = _make_service(get_response=self._entry(minutes_from_now=5))
+        assert (await approve_svc.approve("action-1", "reviewer-1"))["status"] == "approved"
+
+        reject_svc = _make_service(get_response=self._entry(minutes_from_now=5))
+        assert (await reject_svc.reject("action-1", "reviewer-1"))["status"] == "rejected"
+
+    async def test_already_expired_status_refuses_reject(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        service = _make_service(
+            get_response=self._entry(minutes_from_now=5, status="expired")
+        )
+
+        with pytest.raises(ApprovalExpiredError):
+            await service.reject("action-1", "reviewer-1")
+        # Nothing new written or announced for an entry already expired.
+        service._es.atomic_update.assert_not_called()
+        assert self._events(service) == []
+
+    async def test_losing_the_race_to_the_sweep_still_reports_expired(self):
+        from Agents.approval_queue_service import ApprovalExpiredError
+
+        service = _make_service(get_response=self._entry(minutes_from_now=-1))
+        original_get = service._es.get_document.side_effect
+        reads = {"n": 0}
+
+        async def _sweep_expires_after_first_read(index, doc_id):
+            document = await original_get(index, doc_id)
+            reads["n"] += 1
+            if reads["n"] == 1:
+                service._es.stored_document["status"] = "expired"
+            return document
+
+        service._es.get_document = AsyncMock(
+            side_effect=_sweep_expires_after_first_read
+        )
+
+        with pytest.raises(ApprovalExpiredError):
+            await service.approve("action-1", "reviewer-1")
+        # The sweep owned the transition; this call adds no second trail.
+        assert self._events(service) == []
+        assert self._activity_types(service) == []
+
+    async def test_unparseable_expiry_is_not_expired(self, caplog):
+        import logging
+
+        entry = self._entry(minutes_from_now=5)
+        entry["expiry_time"] = "not-a-time"
+        service = _make_service(get_response=entry)
+
+        with caplog.at_level(logging.WARNING, logger="Agents.approval_queue_service"):
+            result = await service.approve("action-1", "reviewer-1")
+
+        assert result["status"] == "approved"
+        assert any("unparseable expiry_time" in r.getMessage() for r in caplog.records)

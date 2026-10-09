@@ -1,25 +1,52 @@
 "use client";
 
+/**
+ * Billing → Payments (UI revamp task 3.4): no nested header, one toolbar
+ * (invoice id search, a Filters popover with the account, refresh), and a
+ * DataTable whose pager walks the API cursor.
+ */
+import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
-  Badge,
-  Button,
-  EmptyState,
-  FilterBar,
-  PageHeader,
+  type Column,
+  DataTable,
+  Field,
+  FilterPopover,
+  IconButton,
   SearchableSelect,
   type SearchableSelectOption,
-  Table,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
-import type {
-  CursorPaginatedResponse,
-  Payment,
-} from "../../services/commerceApi";
+import { calendarDate, money } from "../../lib/format";
 import {
   getAccounts,
   getPayments,
+  type Payment,
   type PaymentFilters,
 } from "../../services/commerceApi";
+import { PageTitle } from "../ui/PageHeader";
+import { PaymentStatusBadge } from "./billingStatus";
+import { useCursorPages } from "./useCursorPages";
+
+const PAGE_SIZE = 20;
+
+const METHOD_LABELS: Record<string, string> = {
+  card: "Card",
+  ach: "ACH",
+  wire: "Wire",
+  check: "Check",
+  credit_balance: "Credit balance",
+  other: "Other",
+};
+
+const SOURCE_LABELS: Record<string, string> = {
+  stripe: "Stripe",
+  qbo: "QuickBooks",
+  manual: "Manual",
+  account_credit: "Account credit",
+  void_cascade: "Void cascade",
+};
 
 /**
  * AccountFilterSelect — searchable account selector backed by /commerce/accounts.
@@ -93,254 +120,174 @@ export default function PaymentsListPage() {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [hasMore, setHasMore] = useState(false);
   const [invoiceFilter, setInvoiceFilter] = useState<string>("");
   const [accountFilter, setAccountFilter] = useState<string>("");
+  const [reload, setReload] = useState(0);
+  const pages = useCursorPages(`${invoiceFilter}|${accountFilter}`);
+  const { page, cursor, received } = pages;
 
-  const fetchPayments = useCallback(
-    async (nextCursor?: string | null) => {
-      setLoading(true);
-      setError(null);
-      try {
-        const filters: PaymentFilters = { limit: 20 };
-        if (invoiceFilter) filters.invoice_id = invoiceFilter;
-        if (accountFilter) filters.account_id = accountFilter;
-        if (nextCursor) filters.cursor = nextCursor;
-
-        const response: CursorPaginatedResponse<Payment> =
-          await getPayments(filters);
-        setPayments(response.data);
-        setCursor(response.cursor);
-        setHasMore(response.has_more);
-      } catch (err) {
-        setError(
-          err instanceof Error ? err.message : "Failed to load payments",
-        );
-      } finally {
-        setLoading(false);
-      }
-    },
-    [invoiceFilter, accountFilter],
-  );
+  const fetchPayments = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const filters: PaymentFilters = { limit: PAGE_SIZE };
+      if (invoiceFilter.trim()) filters.invoice_id = invoiceFilter.trim();
+      if (accountFilter) filters.account_id = accountFilter;
+      if (cursor) filters.cursor = cursor;
+      const response = await getPayments(filters);
+      setPayments(response.data ?? []);
+      received(page, response);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load payments");
+    } finally {
+      setLoading(false);
+    }
+    // `reload` forces a refetch from the Refresh button.
+  }, [invoiceFilter, accountFilter, cursor, page, received, reload]);
 
   useEffect(() => {
     fetchPayments();
   }, [fetchPayments]);
 
-  const formatCents = (cents: number) =>
-    `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2 })}`;
+  const embedded = usePageChrome({});
 
-  const formatDate = (dateString: string) => {
-    try {
-      return new Date(dateString).toLocaleDateString(undefined, {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
-    } catch {
-      return dateString;
-    }
-  };
-
-  const getStatusVariant = (
-    status: string,
-  ): "success" | "error" | "default" => {
-    if (status === "applied") return "success";
-    if (status === "reversed") return "error";
-    return "default";
-  };
-
-  const getMethodLabel = (method: string): string => {
-    const labels: Record<string, string> = {
-      card: "Card",
-      ach: "ACH",
-      wire: "Wire",
-      check: "Check",
-      credit_balance: "Credit Balance",
-      other: "Other",
-    };
-    return labels[method] || method;
-  };
-
-  const getSourceLabel = (source: string): string => {
-    const labels: Record<string, string> = {
-      stripe: "Stripe",
-      qbo: "QuickBooks",
-      manual: "Manual",
-      account_credit: "Account Credit",
-      void_cascade: "Void Cascade",
-    };
-    return labels[source] || source;
-  };
+  const columns: Column<Payment>[] = [
+    {
+      key: "received_at",
+      header: "Received",
+      width: 150,
+      className: "text-slate-700",
+      cell: (p) => calendarDate(p.received_at),
+    },
+    {
+      key: "amount_cents",
+      header: "Amount",
+      align: "right",
+      width: 130,
+      className: "tabular-nums font-semibold text-text",
+      cell: (p) => money(p.amount_cents / 100),
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 120,
+      cell: (p) => <PaymentStatusBadge status={p.status} />,
+    },
+    {
+      key: "method",
+      header: "Method",
+      width: 120,
+      className: "text-slate-700",
+      cell: (p) => METHOD_LABELS[p.method] ?? p.method,
+    },
+    {
+      key: "source",
+      header: "Source",
+      width: 130,
+      className: "text-slate-700",
+      cell: (p) => SOURCE_LABELS[p.source] ?? p.source,
+    },
+    {
+      key: "invoice_id",
+      header: "Invoice",
+      truncate: true,
+      title: (p) => p.invoice_id,
+      className: "font-mono text-xs text-slate-700",
+      cell: (p) => p.invoice_id,
+    },
+    {
+      key: "reference",
+      header: "Reference",
+      truncate: true,
+      title: (p) => p.reference ?? undefined,
+      className: "text-slate-700",
+      cell: (p) => p.reference || "—",
+    },
+  ];
 
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Payments"
-        subtitle="View and manage all payment transactions across accounts."
-      />
-
-      <FilterBar
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Payments
+          </PageTitle>
+        </div>
+      )}
+      <Toolbar
+        label="Payments"
+        search={
+          <input
+            type="search"
+            value={invoiceFilter}
+            onChange={(e) => setInvoiceFilter(e.target.value)}
+            placeholder="Invoice ID"
+            aria-label="Invoice ID"
+            className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+          />
+        }
         filters={
-          <>
-            <div className="min-w-[220px]">
-              <label
-                htmlFor="payments-account-filter"
-                className="block text-xs text-gray-600 mb-1"
-              >
-                Account
-              </label>
+          <FilterPopover
+            count={accountFilter ? 1 : 0}
+            label="Payment filters"
+            onClear={() => setAccountFilter("")}
+          >
+            <Field label="Account" id="payments-account-filter">
               <AccountFilterSelect
                 id="payments-account-filter"
                 value={accountFilter || null}
                 onChange={(value) => setAccountFilter(value)}
               />
-            </div>
-            <div>
-              <label
-                htmlFor="payments-invoice-filter"
-                className="block text-xs text-gray-600 mb-1"
-              >
-                Invoice ID
-              </label>
-              <input
-                id="payments-invoice-filter"
-                type="text"
-                aria-label="Invoice ID"
-                value={invoiceFilter}
-                onChange={(e) => setInvoiceFilter(e.target.value)}
-                placeholder="inv_..."
-                className="px-4 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none min-w-[200px]"
+            </Field>
+          </FilterPopover>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
               />
-            </div>
-          </>
+            }
+          />
         }
       />
-
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
-
-      {/* Loading state */}
-      {loading && (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading payments...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      )}
-
-      {/* Payments table */}
-      {!loading &&
-        !error &&
-        (payments.length === 0 ? (
-          <EmptyState
-            icon={<span className="text-4xl">💳</span>}
-            title="No payments found"
-            description="No payment transactions have been recorded yet."
-          />
-        ) : (
-          <>
-            <Table
-              columns={[
-                {
-                  key: "payment_id",
-                  label: "Payment ID",
-                  render: (payment) => (
-                    <span className="font-mono text-xs">
-                      {payment.payment_id.slice(0, 8)}...
-                    </span>
-                  ),
-                },
-                {
-                  key: "invoice_id",
-                  label: "Invoice",
-                  render: (payment) => (
-                    <span className="font-mono text-xs">
-                      {payment.invoice_id.slice(0, 12)}...
-                    </span>
-                  ),
-                },
-                {
-                  key: "amount_cents",
-                  label: "Amount",
-                  render: (payment) => (
-                    <span className="font-semibold">
-                      {formatCents(payment.amount_cents)}
-                    </span>
-                  ),
-                },
-                {
-                  key: "method",
-                  label: "Method",
-                  render: (payment) => (
-                    <Badge variant="neutral">
-                      {getMethodLabel(payment.method)}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "source",
-                  label: "Source",
-                  render: (payment) => (
-                    <span className="text-sm text-gray-600">
-                      {getSourceLabel(payment.source)}
-                    </span>
-                  ),
-                },
-                {
-                  key: "status",
-                  label: "Status",
-                  render: (payment) => (
-                    <Badge variant={getStatusVariant(payment.status)}>
-                      {payment.status}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "received_at",
-                  label: "Received",
-                  render: (payment) => (
-                    <span className="text-sm">
-                      {formatDate(payment.received_at)}
-                    </span>
-                  ),
-                },
-                {
-                  key: "reference",
-                  label: "Reference",
-                  render: (payment) => (
-                    <span className="text-sm text-gray-600">
-                      {payment.reference || "—"}
-                    </span>
-                  ),
-                },
-              ]}
-              data={payments}
-              keyExtractor={(payment) => payment.payment_id}
-            />
-
-            <div className="flex justify-between items-center mt-4">
-              <div className="text-sm text-gray-600">
-                Showing {payments.length} payment
-                {payments.length !== 1 ? "s" : ""}
-              </div>
-              <Button
-                variant="secondary"
-                disabled={!hasMore}
-                onClick={() => fetchPayments(cursor)}
-              >
-                Load More
-              </Button>
+      {/* Rows have no controls, so the scroll region itself takes focus for
+          keyboard scrolling (axe scrollable-region-focusable). */}
+      <section
+        aria-label="Payments list"
+        // biome-ignore lint/a11y/noNoninteractiveTabindex: a scrollable region must be keyboard-focusable
+        tabIndex={0}
+        className="min-h-0 flex-1 overflow-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-focus"
+      >
+        <DataTable<Payment>
+          ariaLabel="Payments"
+          columns={columns}
+          data={loading || error ? [] : payments}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchPayments } : null}
+          getRowId={(p) => p.payment_id}
+          pagination={
+            pages.totalPages > 1
+              ? {
+                  page: pages.page,
+                  totalPages: pages.totalPages,
+                  onPageChange: pages.goTo,
+                }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No payments found</p>
+              <p className="mt-1 text-xs">
+                No payment transactions match these filters.
+              </p>
             </div>
-          </>
-        ))}
+          }
+        />
+      </section>
     </div>
   );
 }

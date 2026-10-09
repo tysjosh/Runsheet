@@ -1,4 +1,5 @@
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import {
   buildQueryString,
   fetchWithTimeout,
@@ -129,7 +130,13 @@ export interface CreditOverridePayload {
   expires_at: string;
 }
 
+/**
+ * Aging by days past due_date (F12). `bucket_current_cents` is not yet due;
+ * `bucket_0_30_cents` is 1–30 days past due (key kept for compatibility).
+ * Optional/null on responses from before the change.
+ */
 export interface AgingBuckets {
+  bucket_current_cents?: number | null;
   bucket_0_30_cents: number;
   bucket_31_60_cents: number;
   bucket_61_90_cents: number;
@@ -328,6 +335,7 @@ export interface TenantAgingResponse extends AgingBuckets {
     account_id: string;
     display_name: string;
     total_open_cents: number;
+    bucket_current_cents?: number | null;
     bucket_0_30_cents: number;
     bucket_31_60_cents: number;
     bucket_61_90_cents: number;
@@ -340,6 +348,8 @@ export interface AgingSnapshot {
   tenant_id: string;
   snapshot_date: string;
   total_open_cents: number;
+  /** null for snapshots written before due_date aging (shown as "—"). */
+  bucket_current_cents?: number | null;
   bucket_0_30_cents: number;
   bucket_31_60_cents: number;
   bucket_61_90_cents: number;
@@ -414,11 +424,7 @@ async function commerceRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();

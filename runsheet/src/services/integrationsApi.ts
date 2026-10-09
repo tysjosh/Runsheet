@@ -25,6 +25,7 @@
  */
 
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import { buildQueryString, fetchWithTimeout } from "./utils";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
@@ -196,32 +197,6 @@ export interface StripePublicConfigResponse {
 
 // ─── HTTP Helpers ────────────────────────────────────────────────────────────
 
-/**
- * Extract a human-readable error message from a FastAPI error envelope.
- *
- * FastAPI returns ``{detail: string}`` for most errors, and the
- * integrations router returns ``{detail: {error_code, message, ...}}``
- * structured error bodies. This helper normalizes both shapes so the
- * UI can render a single error string.
- */
-function extractErrorMessage(body: unknown, fallback: string): string {
-  if (body && typeof body === "object") {
-    const detail = (body as { detail?: unknown }).detail;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") {
-      const { message, error_code } = detail as {
-        message?: unknown;
-        error_code?: unknown;
-      };
-      if (typeof message === "string" && message.trim()) return message;
-      if (typeof error_code === "string" && error_code.trim()) {
-        return `API error: ${error_code}`;
-      }
-    }
-  }
-  return fallback;
-}
-
 async function integrationsRequest<T>(
   endpoint: string,
   options?: RequestInit,
@@ -242,16 +217,7 @@ async function integrationsRequest<T>(
     });
 
     if (!response.ok) {
-      let body: unknown = {};
-      try {
-        body = await response.json();
-      } catch {
-        // Non-JSON error body — ignore and fall through to default message.
-      }
-      throw new ApiError(
-        extractErrorMessage(body, `HTTP error! status: ${response.status}`),
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     // 204 No Content has no body — return undefined as T.

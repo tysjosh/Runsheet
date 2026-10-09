@@ -16,13 +16,15 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
 from config.settings import get_settings
 from commerce.api._authz import require_commerce_staff
 from commerce.services.price_book_service import PriceBookService
 from commerce.services.pricing_engine import PricingEngine, PricingError
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import TenantContext, get_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -101,12 +103,9 @@ async def require_pricing_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "COMMERCE_DISABLED",
-                "message": "Commerce backbone is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.COMMERCE_DISABLED,
+            "Commerce backbone is not enabled for this tenant",
         )
 
     if not settings.commerce_pricing_engine_enabled:
@@ -115,12 +114,9 @@ async def require_pricing_enabled(
             "for tenant_id=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=404,
-            detail={
-                "error_code": "PRICING_DISABLED",
-                "message": "Commerce pricing engine is not enabled for this tenant",
-            },
+        raise AppException(
+            ErrorCode.PRICING_DISABLED,
+            "Commerce pricing engine is not enabled for this tenant",
         )
 
     # Price books are a Tier 4 / staff surface: the ERP prices. Applied after the
@@ -436,12 +432,10 @@ async def resolve_pricing(
         try:
             moment = datetime.fromisoformat(body.moment.replace("Z", "+00:00"))
         except (ValueError, TypeError):
-            raise HTTPException(
+            raise AppException(
+                ErrorCode.INVALID_MOMENT,
+                f"moment must be a valid ISO 8601 datetime, got: {body.moment}",
                 status_code=422,
-                detail={
-                    "error_code": "INVALID_MOMENT",
-                    "message": f"moment must be a valid ISO 8601 datetime, got: {body.moment}",
-                },
             )
 
     # Fetch the account to pass to the resolver
@@ -485,13 +479,16 @@ async def resolve_pricing(
             "request_id": _get_request_id(request),
         }
     except PricingError as exc:
-        raise HTTPException(
+        # Same wire code as before, now at the top level of the envelope.
+        try:
+            code = ErrorCode(exc.code)
+        except ValueError:
+            code = ErrorCode.VALIDATION_ERROR
+        raise AppException(
+            code,
+            exc.message,
             status_code=422,
-            detail={
-                "error_code": exc.code,
-                "message": exc.message,
-                "details": exc.details,
-            },
+            details=exc.details,
         )
 
 

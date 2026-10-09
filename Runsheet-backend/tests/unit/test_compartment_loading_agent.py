@@ -90,6 +90,22 @@ def _make_compartment_hit(
     }
 
 
+def _compartments_only(*compartment_hits):
+    """ES mock that returns ``compartment_hits`` for truck_compartments only.
+
+    fuel_orders_current comes back empty, so the agent takes the legacy
+    priority-list path. (A single ``return_value`` used to hand compartment
+    docs back as fuel orders too; that only worked because an order list with
+    no loadable order silently fell back to the legacy path, which F10 removed.)
+    """
+    async def _search(index, query=None, size=None):
+        if index == "truck_compartments":
+            return {"hits": {"hits": list(compartment_hits)}}
+        return {"hits": {"hits": []}}
+
+    return AsyncMock(side_effect=_search)
+
+
 def _make_deps():
     """Create mocked dependencies for the CompartmentLoadingAgent."""
     signal_bus = MagicMock()
@@ -226,24 +242,18 @@ class TestEvaluate:
         agent._priority_buffer.append(_make_priority_list())
 
         # Return compartments for a truck
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        _make_compartment_hit(
-                            compartment_id="comp-1",
-                            truck_id="truck-1",
-                            capacity_liters=10000.0,
-                        ),
-                        _make_compartment_hit(
-                            compartment_id="comp-2",
-                            truck_id="truck-1",
-                            capacity_liters=8000.0,
-                            position_index=1,
-                        ),
-                    ]
-                }
-            }
+        deps["es_service"].search_documents = _compartments_only(
+            _make_compartment_hit(
+                compartment_id="comp-1",
+                truck_id="truck-1",
+                capacity_liters=10000.0,
+            ),
+            _make_compartment_hit(
+                compartment_id="comp-2",
+                truck_id="truck-1",
+                capacity_liters=8000.0,
+                position_index=1,
+            ),
         )
 
         result = await agent.evaluate([])
@@ -257,18 +267,12 @@ class TestEvaluate:
         agent, deps = _make_agent()
         agent._priority_buffer.append(_make_priority_list())
 
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        _make_compartment_hit(
-                            compartment_id="comp-1",
-                            truck_id="truck-1",
-                            capacity_liters=10000.0,
-                        ),
-                    ]
-                }
-            }
+        deps["es_service"].search_documents = _compartments_only(
+            _make_compartment_hit(
+                compartment_id="comp-1",
+                truck_id="truck-1",
+                capacity_liters=10000.0,
+            ),
         )
 
         await agent.evaluate([])
@@ -284,18 +288,12 @@ class TestEvaluate:
         agent, deps = _make_agent()
         agent._priority_buffer.append(_make_priority_list())
 
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        _make_compartment_hit(
-                            compartment_id="comp-1",
-                            truck_id="truck-1",
-                            capacity_liters=10000.0,
-                        ),
-                    ]
-                }
-            }
+        deps["es_service"].search_documents = _compartments_only(
+            _make_compartment_hit(
+                compartment_id="comp-1",
+                truck_id="truck-1",
+                capacity_liters=10000.0,
+            ),
         )
 
         result = await agent.evaluate([])
@@ -1163,18 +1161,12 @@ class TestShadowModeGate:
         agent._compartment_state_repo = repo
 
         agent._priority_buffer.append(_make_priority_list())
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        _make_compartment_hit(
-                            compartment_id="comp-1",
-                            truck_id="truck-1",
-                            capacity_liters=10_000.0,
-                        ),
-                    ]
-                }
-            }
+        deps["es_service"].search_documents = _compartments_only(
+            _make_compartment_hit(
+                compartment_id="comp-1",
+                truck_id="truck-1",
+                capacity_liters=10_000.0,
+            ),
         )
 
         proposals = await agent.evaluate([])
@@ -1203,18 +1195,12 @@ class TestShadowModeGate:
         agent._compartment_state_repo = repo
 
         agent._priority_buffer.append(_make_priority_list())
-        deps["es_service"].search_documents = AsyncMock(
-            return_value={
-                "hits": {
-                    "hits": [
-                        _make_compartment_hit(
-                            compartment_id="comp-1",
-                            truck_id="truck-1",
-                            capacity_liters=10_000.0,
-                        ),
-                    ]
-                }
-            }
+        deps["es_service"].search_documents = _compartments_only(
+            _make_compartment_hit(
+                compartment_id="comp-1",
+                truck_id="truck-1",
+                capacity_liters=10_000.0,
+            ),
         )
 
         await agent.evaluate([])
@@ -1370,9 +1356,9 @@ class TestBuildDeliveryRequestsFromOrders:
         requests = await agent._build_delivery_requests_from_orders(
             "tenant-1", priority_list
         )
-        # The failed order falls back to legacy path (priority list)
-        # since no orders could be resolved from fuel_orders_current
-        assert len(requests) == 1  # legacy fallback
+        # F10: a real order exists, so no legacy station demand is invented
+        # for it (this used to fall back to a 5 000 L priority-list request).
+        assert requests == []
 
         # A RiskSignal was published for the unresolved order
         deps["signal_bus"].publish.assert_called_once()
@@ -1449,10 +1435,9 @@ class TestBuildDeliveryRequestsFromOrders:
         requests = await agent._build_delivery_requests_from_orders(
             "tenant-1", priority_list
         )
-        # Falls back to legacy path since no orders could be resolved
-        # (legacy path produces requests from priority list)
-        assert len(requests) == 1
-        assert requests[0].fuel_grade == FuelGrade.AGO  # from priority list
+        # F10: the order is skipped and, because fuel_orders_current did
+        # return an order, no legacy priority-list demand replaces it.
+        assert requests == []
 
     @pytest.mark.asyncio
     async def test_falls_back_to_legacy_when_no_fuel_orders(self):
@@ -1502,8 +1487,9 @@ class TestBuildDeliveryRequestsFromOrders:
         requests = await agent._build_delivery_requests_from_orders(
             "tenant-1", priority_list
         )
-        # Falls back to legacy since no orders resolved
-        # But a RiskSignal was published for the failed order
+        # No request, and no legacy fallback either (F10); a RiskSignal was
+        # published for the failed order.
+        assert requests == []
         deps["signal_bus"].publish.assert_called_once()
         signal = deps["signal_bus"].publish.call_args[0][0]
         assert signal.context["reason"] == "unresolved_fill_volume"

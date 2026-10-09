@@ -312,6 +312,10 @@ class WeatherAlertIngester(AutonomousAgentBase):
                 if not alert_id:
                     continue
                 detections.append(alert_id)
+                # Detections are bare alert ids, so the base class can't tell
+                # whose they are. Without this the monitoring_cycle entry was
+                # written with tenant_id None and dropped from the live feed.
+                self._note_tenant_activity(tenant_id, detections=1)
 
                 try:
                     alert_model = self._build_weather_alert(
@@ -329,6 +333,7 @@ class WeatherAlertIngester(AutonomousAgentBase):
 
                 action = await self._ingest_alert(alert_model)
                 actions.append(action)
+                self._note_tenant_activity(tenant_id, actions=1)
 
         return detections, actions
 

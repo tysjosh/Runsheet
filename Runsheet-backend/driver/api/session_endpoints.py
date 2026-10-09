@@ -54,6 +54,8 @@ from supertokens_python.recipe.session.exceptions import (
     TryRefreshTokenError,
 )
 
+from auth import signin_timing
+from auth.signin_throttle import get_signin_throttle
 from auth.supertokens_init import (
     _lookup_auth_user_claims,
     configured_session_lifetime_seconds,
@@ -63,8 +65,10 @@ from errors.exceptions import (
     insufficient_role,
     internal_error,
     session_expired,
+    too_many_attempts,
     unauthorized,
 )
+from middleware.rate_limiter import get_client_ip
 
 logger = logging.getLogger(__name__)
 
@@ -111,14 +115,15 @@ def configure_session_endpoints(
     _driver_repository = None
 
 
-async def lookup_auth_user_claims(email: str) -> Dict[str, Any]:
-    """Read the server-set session claims for ``email`` from ``auth_users``.
+async def lookup_auth_user_claims(st_user_id: str) -> Dict[str, Any]:
+    """Read the server-set session claims bound to ``st_user_id``.
 
     Thin wrapper over the same read the ``create_new_session`` override
     performs (``auth/supertokens_init.py``), so sign-in and session creation
     cannot disagree about a user's ``tenant_id`` / ``roles`` / ``driver_id``.
+    Keyed on the SuperTokens user id, not the submitted email (F1).
     """
-    return await _lookup_auth_user_claims(email)
+    return await _lookup_auth_user_claims(st_user_id)
 
 
 def _get_driver_repository() -> Any:
@@ -295,32 +300,50 @@ def _session_response(
 @router.post("/session", response_model=DriverSessionResponse)
 async def create_driver_session(
     body: DriverSignInRequest,
+    request: Request,
     response: Response,
 ) -> DriverSessionResponse:
     """Sign a driver in and return both Mobile_Session tokens.
 
-    Four outcomes, in order: bad credential → 401 ``UNAUTHORIZED``; no
-    ``driver`` role → 403 ``INSUFFICIENT_ROLE``; no ``drivers_current`` record
-    → 403 ``DRIVER_RECORD_NOT_PROVISIONED``; success → both tokens in the body
-    **and** in the ``st-*`` headers.
+    Five outcomes, in order: too many attempts → 429 ``RATE_LIMITED`` with
+    ``Retry-After`` (staging finding F5); bad credential → 401 ``UNAUTHORIZED``;
+    no ``driver`` role → 403 ``INSUFFICIENT_ROLE``; no ``drivers_current``
+    record → 403 ``DRIVER_RECORD_NOT_PROVISIONED``; success → both tokens in
+    the body **and** in the ``st-*`` headers.
 
     Validates: Requirements 1.1, 1.15, 15.10
     """
+    # 0. F5 throttle. The recipe-level sign_in below bypasses the SDK APIs
+    #    override, so this route checks the same per-IP / per-email buckets as
+    #    /auth/signin itself.
+    throttle = get_signin_throttle()
+    retry = await throttle.check_sign_in(get_client_ip(request), body.email)
+    if retry is not None:
+        raise too_many_attempts(retry)
+
     # 1. Verify the credential through the EmailPassword recipe.
+    started = signin_timing.now()
     result = await emailpassword_sign_in(
         _SUPERTOKENS_TENANT_ID, body.email, body.password
     )
     if not isinstance(result, SignInOkResult):
+        await throttle.record_sign_in_failure(body.email)
         # Uniform rejection: never distinguish "unknown email" from "wrong
-        # password", and never echo the submitted credential.
+        # password" (in the body, or in the response time via the timing
+        # floor, OI-12), and never echo the submitted credential.
+        await signin_timing.pad_to_floor(started)
         raise unauthorized(
             message="Invalid credentials",
             details={"reason": "credential_verification_failed"},
         )
+    # The credential was correct, so its failure count resets even if the
+    # role or provisioning checks below refuse the session.
+    await throttle.clear_sign_in_failures(body.email)
 
-    # 2. Resolve the server-set claims from auth_users — the same read the
-    #    create_new_session override performs.
-    claims = await lookup_auth_user_claims(body.email)
+    # 2. Resolve the server-set claims from the auth_users row bound to the
+    #    signed-in SuperTokens user — the same read the create_new_session
+    #    override performs. Never keyed on the submitted email (F1).
+    claims = await lookup_auth_user_claims(result.user.id)
     roles = [r for r in (claims.get("roles") or []) if isinstance(r, str)]
     if _DRIVER_ROLE not in roles:
         # R15.14: echo only the required role, never the caller's held roles.

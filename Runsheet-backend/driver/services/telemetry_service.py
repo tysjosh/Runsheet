@@ -520,6 +520,19 @@ class DriverTelemetryService:
                 DRIVER_PRESENCE_INDEX, doc_id, merge
             )
         except Exception as exc:
+            from persistence.document_store import is_document_not_found
+
+            if not is_document_not_found(exc):
+                # Only a missing record is recreated; replacing on any error
+                # would drop fields like status and connected_at (OI-31).
+                logger.error(
+                    "Failed to refresh presence for tenant=%s driver=%s: %s "
+                    "— the breadcrumb track is persisted regardless",
+                    tenant_id,
+                    driver_id,
+                    exc,
+                )
+                return {"updated": False, "sample_timestamp": None}
             logger.warning(
                 "Presence location merge failed for tenant=%s driver=%s; "
                 "recreating the record: %s",

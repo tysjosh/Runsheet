@@ -45,6 +45,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from commerce.services.commerce_persistence_bridge import (
+    mirror_current_state_delete,
+    mirror_current_state_fields,
+    mirror_current_state_upsert,
+)
 from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
@@ -141,6 +146,21 @@ class CustomerTank(BaseModel):
         description="Tank identifier in source_system; unique within a tenant/source.",
     )
     customer_id: str = Field(..., min_length=1, description="Owning customer_id.")
+    display_name: Optional[str] = Field(
+        None,
+        max_length=80,
+        description=(
+            "Customer-facing tank name set by staff (portal PE2), e.g. "
+            "\"Farm off-road\". The customer portal shows it as the tank title."
+        ),
+    )
+    service_address: Optional[str] = Field(
+        None,
+        max_length=200,
+        description=(
+            "Customer-facing service address line for the tank (portal PE2)."
+        ),
+    )
     last_refill_order_id: Optional[str] = Field(
         None,
         description=(
@@ -348,6 +368,7 @@ class CustomerTankRepository:
     trivially testable with a recording mock. The only interface the
     repository relies on is:
 
+        * ``await es.create_document(index, doc_id, document)`` → bool
         * ``await es.index_document(index, doc_id, document)``
         * ``await es.get_document(index, doc_id)`` — may raise / return None
         * ``await es.search_documents(index, query, size)``
@@ -442,7 +463,26 @@ class CustomerTankRepository:
         model = CustomerTank(**payload)
 
         doc = model.model_dump(mode="json", exclude_none=False)
-        await self._es.index_document(self._index, model.customer_tank_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace a tank another tenant owns (L1). Refused before the mirror
+        # write so the relational row can't be overwritten either.
+        created = await self._es.create_document(
+            self._index, model.customer_tank_id, doc
+        )
+        if not created:
+            from errors.exceptions import already_exists
+
+            raise already_exists(
+                "A customer tank with this id already exists",
+                details={"customer_tank_id": model.customer_tank_id},
+            )
+        # Postgres source of truth. ``customer_tanks`` used to exist only in
+        # Elasticsearch, so recreating the cluster destroyed calibrated
+        # k-factors and ATG level history outright. Best-effort during the
+        # dual-write soak; ES stays authoritative until read cutover.
+        await mirror_current_state_upsert(
+            "customer_tank", doc, doc_id=model.customer_tank_id
+        )
 
         return model
 
@@ -639,6 +679,12 @@ class CustomerTankRepository:
         # Persist only the delta — ES _update merges into the live doc.
         partial = validated.model_dump(mode="json", include=set(clean_patch.keys()) | {"updated_at"})
         await self._es.update_document(self._index, customer_tank_id, partial)
+        # Mirror the same delta into Postgres. Sending the delta rather than the
+        # merged document keeps the two stores converging on the same result even
+        # if a concurrent writer touched a field this patch does not name.
+        await mirror_current_state_fields(
+            "customer_tank", tenant_id, customer_tank_id, partial
+        )
 
         return validated
 
@@ -670,7 +716,12 @@ class CustomerTankRepository:
                 owning_tenant_id=owner,
             )
 
-        return bool(await self._es.delete_document(self._index, customer_tank_id))
+        deleted = bool(await self._es.delete_document(self._index, customer_tank_id))
+        if deleted:
+            await mirror_current_state_delete(
+                "customer_tank", tenant_id, customer_tank_id
+            )
+        return deleted
 
     # ------------------------------------------------------------------
     # Internals

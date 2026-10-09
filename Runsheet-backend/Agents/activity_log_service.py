@@ -17,6 +17,7 @@ Requirements: 1.8, 8.1, 8.2, 8.3, 8.6, 8.7
 import uuid
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +122,12 @@ class ActivityLogService:
         return await self.log(entry)
 
     async def log_monitoring_cycle(
-        self, agent_id: str, detection_count: int, action_count: int, duration_ms: float
+        self,
+        agent_id: str,
+        detection_count: int,
+        action_count: int,
+        duration_ms: float,
+        tenant_id: Optional[str] = None,
     ) -> str:
         """Log an autonomous agent monitoring cycle.
 
@@ -130,6 +136,8 @@ class ActivityLogService:
             detection_count: Number of conditions detected this cycle.
             action_count: Number of actions taken this cycle.
             duration_ms: Cycle duration in milliseconds.
+            tenant_id: Tenant the detections/actions belong to, or ``None``
+                for a cycle not attributable to one tenant.
 
         Returns:
             The generated log_id.
@@ -142,7 +150,7 @@ class ActivityLogService:
             "risk_level": None,
             "outcome": "success",
             "duration_ms": duration_ms,
-            "tenant_id": None,
+            "tenant_id": tenant_id,
             "user_id": None,
             "session_id": None,
             "details": {

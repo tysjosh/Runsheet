@@ -8,7 +8,7 @@ aggregated summaries used by the inventory service and API endpoints.
 from enum import Enum
 from typing import Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +87,16 @@ class CreateInventoryItem(BaseModel):
     compatible_assets: Optional[List[str]] = Field(
         default=None, description="Asset types this part is compatible with"
     )
+
+    @model_validator(mode="after")
+    def _quantity_within_capacity(self) -> "CreateInventoryItem":
+        # B3: an item can't start above what its location can hold.
+        if self.quantity > self.max_capacity:
+            raise ValueError(
+                f"quantity ({self.quantity}) cannot exceed max_capacity "
+                f"({self.max_capacity})"
+            )
+        return self
 
 
 class UpdateInventoryItem(BaseModel):

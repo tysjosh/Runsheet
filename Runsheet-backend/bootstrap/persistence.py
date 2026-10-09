@@ -1,15 +1,19 @@
 """Bootstrap for the PostgreSQL source-of-truth persistence layer.
 
 Starts the :class:`persistence.outbox_relay.OutboxRelay` as a background task
-that continuously drains transactional-outbox events into Elasticsearch, so the
-ES projection stays eventually-consistent with the Postgres source-of-truth.
+that continuously drains transactional-outbox events into the document store, so
+the document projection stays eventually-consistent with the relational
+source-of-truth.
+
+Both are PostgreSQL now — the typed tables and the ``es_documents`` table — so the
+relay copies from one part of the database to another. Redundant for any aggregate
+whose reads have moved to the relational path, and still load-bearing for the rest.
 
 The whole module is a no-op when the persistence layer is dormant
-(``settings.database_url`` unset) or when ``outbox_relay_enabled`` is False —
-so the default ES-only deployment is completely unaffected.
+(``settings.database_url`` unset) or when ``outbox_relay_enabled`` is False.
 
-The relay is registered AFTER ``core`` (which builds the ES service) so the
-projection target exists, and is cancelled on shutdown.
+The relay is registered AFTER ``core`` (which builds the document-store facade) so
+the projection target exists, and is cancelled on shutdown.
 """
 
 from __future__ import annotations
@@ -68,8 +72,8 @@ async def initialize(app, container: ServiceContainer) -> None:
         _relay.run_forever(poll_interval_seconds=poll_interval)
     )
     logger.info(
-        "Outbox relay started (poll interval %.1fs) — projecting Postgres "
-        "outbox events into Elasticsearch",
+        "Outbox relay started (poll interval %.1fs) — projecting relational "
+        "outbox events into the PostgreSQL document store (es_documents)",
         poll_interval,
     )
 

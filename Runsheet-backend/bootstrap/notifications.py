@@ -93,12 +93,26 @@ def _create_dispatchers(environment=None, es_service=None):
             StubWhatsAppDispatcher,
         )
 
-    # --- Email (SendGrid) ---
+    # --- Email (SMTP relay, e.g. Mailtrap; SendGrid API as an alternative) ---
+    from notifications.services.smtp_email_dispatcher import smtp_email_configured
+
     _sendgrid_vars = all([
         os.environ.get("SENDGRID_API_KEY"),
         os.environ.get("SENDGRID_FROM_EMAIL"),
     ])
-    if _sendgrid_vars:
+    if smtp_email_configured():
+        try:
+            from notifications.services.smtp_email_dispatcher import (
+                SmtpEmailDispatcher,
+            )
+            dispatchers.append(SmtpEmailDispatcher())
+            logger.info("Registered REAL SMTP email dispatcher")
+        except ValueError as exc:
+            _fallback_or_raise(
+                f"SMTP email dispatcher unavailable: {exc}",
+                StubEmailDispatcher,
+            )
+    elif _sendgrid_vars:
         try:
             from notifications.services.sendgrid_email_dispatcher import (
                 SendGridEmailDispatcher,
@@ -111,7 +125,11 @@ def _create_dispatchers(environment=None, es_service=None):
                 StubEmailDispatcher,
             )
     else:
-        _fallback_or_raise("SendGrid env vars not set", StubEmailDispatcher)
+        _fallback_or_raise(
+            "Email env vars not set (SMTP_HOST + SMTP_FROM_EMAIL + SMTP_PASSWORD, "
+            "or SENDGRID_API_KEY + SENDGRID_FROM_EMAIL)",
+            StubEmailDispatcher,
+        )
 
     # --- Push (driver mobile app) ---
     # This is the one construction site for the push provider; every other
@@ -137,10 +155,6 @@ def _create_dispatchers(environment=None, es_service=None):
 
 async def initialize(app, container: ServiceContainer) -> None:
     """Create and register notification domain services."""
-    from notifications.services.notification_es_mappings import (
-        setup_notification_indices,
-    )
-    from notifications.services.audit_es_mappings import setup_audit_indices
     from notifications.services.notification_service import NotificationService
     from notifications.services.audit_timeline_service import AuditTimelineService
     from notifications.services.communication_metrics_service import CommunicationMetricsService
@@ -155,20 +169,8 @@ async def initialize(app, container: ServiceContainer) -> None:
     es_service = container.es_service
 
     # Set up notification ES indices
-    try:
-        logger.info("Setting up notification indices...")
-        setup_notification_indices(es_service)
-        logger.info("Notification indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up notification indices: %s", e)
 
     # Set up audit timeline indices
-    try:
-        logger.info("Setting up audit timeline indices...")
-        setup_audit_indices(es_service)
-        logger.info("Audit timeline indices ready")
-    except Exception as e:
-        logger.warning("Failed to set up audit timeline indices: %s", e)
 
     # Notification WebSocket manager
     ws_manager = NotificationWSManager()

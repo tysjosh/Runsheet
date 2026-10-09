@@ -112,9 +112,8 @@ block a merge and which are informational.
 | `integration-tests` | `tests/integration/` | 120 s | Feature flags, tenant flows, WebSocket lifecycle. Runs after `backend-tests`. |
 | `endpoint-registry` | Registry freshness check | — | Regenerates `docs/endpoint-registry.md` and diffs. Runs after `backend-tests`. |
 | `git-hygiene` | No test files tracked, ADR index, `main.py` line limit | — | Blocks if `.coverage`, `.hypothesis/`, `__pycache__/`, or `*.pyc` are in the git index. |
-| `secret-scan` | Secret detection on changed files | — | Runs `scripts/check-secrets.sh`. |
 
-All six jobs are required gates — a failure in any job blocks the PR.
+All five jobs are required gates — a failure in any job blocks the PR.
 
 ### Optional / Local-Only
 

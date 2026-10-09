@@ -82,17 +82,14 @@ from commerce.api.ar_aging_endpoints import (
     router as commerce_ar_aging_router,
     configure_ar_aging_api,
 )
-from commerce.api.price_protection_endpoints import (
-    router as commerce_price_protection_router,
-)
-from commerce.api.pricing_endpoints import (
-    router as commerce_pricing_rules_router,
-)
+from commerce.api.price_protection_endpoints import router as commerce_price_protection_router
+from commerce.api.pricing_endpoints import router as commerce_pricing_rules_router
+from commerce.api.margin_endpoints import router as commerce_margin_router
 from Agents.support.mvp_endpoints import router as mvp_fuel_router
-from fuel.api.fuel_ops_endpoints import (
-    router as fuel_ops_router,
-    mvp_router as fuel_ops_mvp_router,
-)
+from portal.api import routers as portal_routers
+from portal.audit import PortalAuditMiddleware
+from fuel.api.fuel_ops_endpoints import router as fuel_ops_router, mvp_router as fuel_ops_mvp_router
+from fuel.api.dispatch_board_endpoints import router as dispatch_board_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -110,7 +107,18 @@ async def lifespan(app: FastAPI):
     await shutdown_all(app, container)
 
 
-app = FastAPI(title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan)
+from config.settings import api_docs_kwargs as _api_docs_kwargs
+from config.settings import get_settings as _get_auth_settings
+
+# Loaded before the app is created because the docs URLs depend on it; the
+# auth wiring below uses the same object.
+_auth_settings = _get_auth_settings()
+
+# /docs, /redoc and /openapi.json only in development and test (F7).
+app = FastAPI(
+    title="Runsheet Logistics API", version="1.0.0", lifespan=lifespan,
+    **_api_docs_kwargs(_auth_settings),
+)
 
 # Register structured error handlers (AppException → proper JSON, not 500)
 register_exception_handlers(app)
@@ -127,14 +135,13 @@ register_exception_handlers(app)
 # auth gate returns. Under auth_provider="legacy" (the default, incl. tests)
 # the gate self-gates to a no-op, preserving the pre-migration per-handler
 # auth so the existing suite and legacy clients are unaffected (Req 9.2).
+# ``_auth_settings`` is loaded above, before ``app = FastAPI(...)``.
 # ---------------------------------------------------------------------------
-from config.settings import get_settings as _get_auth_settings
 from middleware.auth_enforcement import (
     provider_enforces as _provider_enforces,
     register_auth_enforcement as _register_auth_enforcement,
 )
 
-_auth_settings = _get_auth_settings()
 if _provider_enforces(getattr(_auth_settings, "auth_provider", "legacy")):
     # Initialize the SDK before registering enforcement so the fail-closed
     # check in register_auth_enforcement passes (Req 6.7). A missing managed
@@ -143,29 +150,33 @@ if _provider_enforces(getattr(_auth_settings, "auth_provider", "legacy")):
 
     _init_supertokens(_auth_settings)
 
+# Customer-portal audit (OI-06, §8.1): innermost, inside the auth gate and RequestID.
+app.add_middleware(PortalAuditMiddleware)
+
 # Always register the gate; it is a no-op under "legacy" and activates when the
 # Migration_Controller flag flips, without re-wiring (Req 9.1).
 _register_auth_enforcement(app, _auth_settings)
 
-# CORS must be added before the app starts (cannot be added in lifespan/bootstrap)
+# RequestID, rate limiting and security headers, for the same reason as the auth gate
+# above: add_middleware is refused once the app has started, so bootstrap/middleware.py
+# raised on every boot and installed none of them. See that module for the detail.
+from bootstrap.middleware import register_at_import as _register_middleware
+
+_register_middleware(app, _auth_settings)
+
+# CORS must be added before the app starts (cannot be added in lifespan/bootstrap).
+# Origins are parsed by config/cors.py, shared with the WebSocket Origin check.
 from fastapi.middleware.cors import CORSMiddleware
-import json as _json
-_cors_raw = os.environ.get(
-    "CORS_ORIGINS", '["http://localhost:3000", "http://127.0.0.1:3000"]'
-)
-try:
-    _cors_origins = _json.loads(_cors_raw)
-except Exception as e:  # noqa: BLE001
-    logger.warning(f"Failed to parse CORS_ORIGINS: {e}, using defaults")
-    _cors_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+from config.cors import get_cors_origins as _get_cors_origins
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_origins,
+    allow_origins=_get_cors_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=[
         "Accept", "Accept-Language", "Content-Language", "Content-Type",
         "Authorization", "X-Request-ID", "X-Requested-With", "X-Idempotency-Key",
+        "Idempotency-Key",  # portal payments (OI-06)
         # SuperTokens SDK headers so the frontend session/anti-CSRF flow passes
         # CORS preflight (Req 2.5, 8.4): anti-csrf token + recipe/FDI routing +
         # the cookie-vs-header session transport mode selector.
@@ -173,7 +184,7 @@ app.add_middleware(
     ],
     expose_headers=[
         "X-Request-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining",
-        "X-RateLimit-Reset", "X-Idempotent-Replayed",
+        "X-RateLimit-Reset", "X-Idempotent-Replayed", "Retry-After", "Content-Disposition",
         # SuperTokens issues the new session via these response headers; the
         # browser SDK must be able to read them across origins (Req 2.3, 8.4).
         # st-access-token / st-refresh-token carry the session in header-based
@@ -204,8 +215,8 @@ for _router in (
     driver_ops_router,
     stripe_router, stripe_webhook_router,
     mvp_fuel_router,
-    fuel_ops_router,
-    fuel_ops_mvp_router,
+    fuel_ops_router, fuel_ops_mvp_router,
+    dispatch_board_router,  # /api/fuel/board: 404 until the tenant's flag is on
     auth_admin_router,
     auth_account_router,
     # GET /api/auth/public-config — unauthenticated by an explicit
@@ -215,6 +226,7 @@ for _router in (
     auth_public_config_router,
     voice_submission_router,  # Dinee voice Surface A (gated by self-check above)
     voice_read_driver_router,  # Dinee voice Surface B read/driver endpoints
+    *portal_routers,  # customer portal (OI-06): always mounted, flag 404s per request
 ):
     app.include_router(_router)
 
@@ -239,6 +251,8 @@ try:
         # return 404". They now honour it like the rest.
         app.include_router(commerce_price_protection_router)
         app.include_router(commerce_pricing_rules_router)
+        # Margin feed (admin only; 404 while commerce_margin_feed_enabled is off).
+        app.include_router(commerce_margin_router)
 except Exception:
     # Settings may not load cleanly at import time in test environments;
     # the router will be registered during lifespan if needed.

@@ -26,7 +26,7 @@ Validates: Requirements 6.1.1, 6.1.2, 6.1.3, 6.1.5.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -237,6 +237,26 @@ def _build_alias_index() -> Dict[str, str]:
 _ALIAS_INDEX: Dict[str, str] = _build_alias_index()
 
 
+def _build_aliases_by_canonical() -> Dict[str, frozenset[str]]:
+    """Invert :data:`_ALIAS_INDEX`: canonical code -> every stored spelling.
+
+    Each key of the alias index (the canonical code itself and every alias)
+    is included in its catalog form and its lower-case form, because manually
+    uploaded rows may carry either. Used for store-side ``terms`` filters that
+    cannot call :func:`canonicalize` (margin-feed rack reader).
+    """
+
+    grouped: Dict[str, set[str]] = {}
+    for spelling, canonical in _ALIAS_INDEX.items():
+        bucket = grouped.setdefault(canonical, set())
+        bucket.add(spelling)
+        bucket.add(spelling.lower())
+    return {canonical: frozenset(spellings) for canonical, spellings in grouped.items()}
+
+
+_ALIASES_BY_CANONICAL: Dict[str, frozenset[str]] = _build_aliases_by_canonical()
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -281,6 +301,50 @@ def canonicalize(code_or_alias: str) -> str:
         return _ALIAS_INDEX[normalized]
     except KeyError as exc:
         raise UnknownFuelProductError(code_or_alias) from exc
+
+
+def aliases_for(canonical: str) -> frozenset[str]:
+    """Return every spelling that :func:`canonicalize` maps to ``canonical``.
+
+    The set holds the canonical code and each catalog alias, in catalog form
+    and lower-case form (for example ``DIESEL_2`` gives ``{"DIESEL_2",
+    "diesel_2", "AGO", "ago"}``). Built once at import time.
+
+    Raises:
+        UnknownFuelProductError: if ``canonical`` is not a known code or alias.
+        TypeError: if ``canonical`` is not a string.
+    """
+
+    return _ALIASES_BY_CANONICAL[canonicalize(canonical)]
+
+
+_CATEGORIES: frozenset[str] = frozenset(get_args(FuelCategory))
+
+
+def resolve_product_filter(value: str) -> List[str]:
+    """Resolve a list-filter value to the catalog codes it selects.
+
+    * A canonical code or alias (``DIESEL_2``, ``AGO``, case-insensitive)
+      resolves to ``[code]`` via :func:`canonicalize`.
+    * A :data:`FuelCategory` name (``diesel``, ``gasoline``) resolves to every
+      catalog code in that category, in catalog order.
+
+    Used by the depot and station list filters so a caller can filter by
+    product family (findings F12/S6, decision D6).
+
+    Raises:
+        UnknownFuelProductError: (a ``ValueError``) for anything else, which
+            the endpoints map to 422 ``VALIDATION_ERROR``.
+    """
+
+    try:
+        return [canonicalize(value)]
+    except (UnknownFuelProductError, TypeError):
+        pass
+    category = value.strip().lower() if isinstance(value, str) else ""
+    if category in _CATEGORIES:
+        return [p.product_code for p in FUEL_PRODUCT_CATALOG if p.category == category]
+    raise UnknownFuelProductError(value)
 
 
 def get_products_for_region(region_code: str) -> List[FuelProduct]:
@@ -389,9 +453,11 @@ __all__ = [
     "FuelProduct",
     "FUEL_PRODUCT_CATALOG",
     "UnknownFuelProductError",
+    "aliases_for",
     "canonicalize",
     "canonicalize_or_warn",
     "get_products_for_region",
     "get_product",
     "is_known_product",
+    "resolve_product_filter",
 ]

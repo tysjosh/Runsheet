@@ -26,15 +26,18 @@
 import { useQuery } from '@tanstack/react-query';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useMemo, useRef, useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { ScrollView, View } from 'react-native';
 
+import { ChoiceOption } from '@/components/ChoiceOption';
 import { PermissionBanner } from '@/components/PermissionBanner';
+import { StatusBadge } from '@/components/StatusBadge';
 import { SignaturePad, type SignatureCapture } from '@/components/SignaturePad';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Text } from '@/components/ui/text';
+import { productName } from '@/lib/format';
 import { requestGeotag } from '@/lib/geotag';
 import {
   queuePodCapture,
@@ -45,6 +48,7 @@ import {
 import { queryKeys } from '@/lib/query-keys';
 import { formatGallons, VOLUME_UNIT_LABEL } from '@/lib/units';
 import { loadWorkDetail } from '@/lib/work-api';
+import { plannedGallons } from '@/lib/work-view';
 
 /** Which artifact the camera is currently capturing. */
 type CameraTarget = 'photo' | 'meter_ticket';
@@ -90,6 +94,18 @@ export default function ProofOfDeliveryScreen() {
 
   const order = detail.data;
   const numericGallons = Number(gallons);
+  const planned = order ? plannedGallons(order) : null;
+
+  // R13.6 — a full delivery needs no typing: the field starts at the planned
+  // gallons (whole), once, and stays editable.
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (prefilled.current || planned === null) {
+      return;
+    }
+    prefilled.current = true;
+    setGallons((current) => (current === '' ? String(planned) : current));
+  }, [planned]);
 
   const canSubmit = useMemo(() => {
     if (!orderId || !recipientName.trim()) {
@@ -256,10 +272,8 @@ export default function ProofOfDeliveryScreen() {
         contentContainerClassName="gap-6 p-5 pb-12"
         keyboardShouldPersistTaps="handled"
       >
+        {/* The stack header carries the title (UI revamp task 4.2). */}
         <View className="gap-1">
-          <Text className="text-2xl font-bold">
-            {refused ? 'Record a refusal' : 'Proof of delivery'}
-          </Text>
           <Text className="text-muted-foreground">
             {refused
               ? 'A refusal needs a reason code. Signature, photos and gallons are optional.'
@@ -267,7 +281,7 @@ export default function ProofOfDeliveryScreen() {
           </Text>
           {order && (
             <Text className="text-sm text-muted-foreground">
-              {order.customer_name} · {order.product_grade} ·{' '}
+              {order.customer_name} · {productName(order.product_grade)} ·{' '}
               {formatGallons(order.ordered_gallons)} ordered
             </Text>
           )}
@@ -278,6 +292,7 @@ export default function ProofOfDeliveryScreen() {
         <View className="gap-2">
           <Text className="font-medium">Recipient name</Text>
           <Input
+            aria-label="Recipient name"
             value={recipientName}
             onChangeText={setRecipientName}
             placeholder="Customer or site representative"
@@ -307,25 +322,21 @@ export default function ProofOfDeliveryScreen() {
               </CardDescription>
             </CardHeader>
             <CardContent className="gap-2">
-              {REFUSAL_REASONS.map((option) => {
-                const active = option.value === refusalReason;
-                return (
-                  <Pressable
+              <View
+                accessibilityRole="radiogroup"
+                accessibilityLabel="Refusal reason"
+                className="gap-2"
+              >
+                {REFUSAL_REASONS.map((option) => (
+                  <ChoiceOption
                     key={option.value}
-                    accessibilityRole="radio"
-                    accessibilityState={{ selected: active }}
+                    label={option.label}
+                    checked={option.value === refusalReason}
                     disabled={submitting}
                     onPress={() => setRefusalReason(option.value)}
-                    className={
-                      active
-                        ? 'rounded-xl border-2 border-primary p-3'
-                        : 'rounded-xl border border-input p-3'
-                    }
-                  >
-                    <Text>{option.label}</Text>
-                  </Pressable>
-                );
-              })}
+                  />
+                ))}
+              </View>
               <Input
                 value={refusalNote}
                 onChangeText={setRefusalNote}
@@ -340,10 +351,18 @@ export default function ProofOfDeliveryScreen() {
             <Text className="font-medium">
               Actual gallons delivered ({VOLUME_UNIT_LABEL})
             </Text>
+            {planned !== null && (
+              <Text className="text-sm text-muted-foreground">
+                Prefilled with the planned {formatGallons(planned)}. Change it if
+                the meter reads differently.
+              </Text>
+            )}
             <Input
+              testID="pod-gallons"
+              aria-label={`Actual gallons delivered (${VOLUME_UNIT_LABEL})`}
               value={gallons}
               onChangeText={setGallons}
-              placeholder="0.0"
+              placeholder="0"
               keyboardType="decimal-pad"
               editable={!submitting}
             />
@@ -368,49 +387,54 @@ export default function ProofOfDeliveryScreen() {
             </Button>
           </View>
         ) : (
-          <View className="gap-4">
-            <View className="gap-2">
-              <Text className="font-medium">
-                Delivery photos ({photos.length})
-              </Text>
-              <Button
-                variant={photos.length > 0 ? 'outline' : 'default'}
-                disabled={submitting}
-                onPress={() => void openCamera('photo')}
-              >
-                <Text>
-                  {photos.length > 0 ? 'Add another photo' : 'Capture delivery photo'}
-                </Text>
-              </Button>
-              {photos.length > 0 && (
+          // Photo and meter ticket side by side, 56 pt (design.md §8).
+          <View className="gap-3">
+            <View className="flex-row gap-3">
+              <View className="flex-1 gap-2">
                 <Button
-                  variant="outline"
-                  size="sm"
+                  size="default"
+                  className="px-2"
+                  variant={photos.length > 0 ? 'outline' : 'default'}
                   disabled={submitting}
-                  onPress={() => setPhotos((current) => current.slice(0, -1))}
+                  testID="pod-capture-photo"
+                  onPress={() => void openCamera('photo')}
                 >
-                  <Text>Remove the last photo</Text>
+                  <Text>{photos.length > 0 ? 'Add photo' : 'Delivery photo'}</Text>
                 </Button>
-              )}
+                <Text className="text-center text-sm text-muted-foreground">
+                  {photos.length === 1 ? '1 photo' : `${photos.length} photos`}
+                </Text>
+              </View>
+              <View className="flex-1 gap-2">
+                <Button
+                  size="default"
+                  className="px-2"
+                  variant={meterTicket ? 'outline' : 'default'}
+                  disabled={submitting}
+                  testID="pod-capture-ticket"
+                  onPress={() => void openCamera('meter_ticket')}
+                >
+                  <Text>{meterTicket ? 'Retake ticket' : 'Meter ticket'}</Text>
+                </Button>
+                {meterTicket ? (
+                  <StatusBadge status="ok" label="Ticket captured" className="self-center" />
+                ) : (
+                  <Text className="text-center text-sm text-muted-foreground">
+                    Not captured
+                  </Text>
+                )}
+              </View>
             </View>
-
-            <View className="gap-2">
-              <Text className="font-medium">Meter ticket</Text>
+            {photos.length > 0 && (
               <Button
-                variant={meterTicket ? 'outline' : 'default'}
+                variant="outline"
+                size="sm"
                 disabled={submitting}
-                onPress={() => void openCamera('meter_ticket')}
+                onPress={() => setPhotos((current) => current.slice(0, -1))}
               >
-                <Text>
-                  {meterTicket ? 'Retake meter ticket' : 'Capture meter ticket'}
-                </Text>
+                <Text>Remove the last photo</Text>
               </Button>
-              {meterTicket && (
-                <Text className="text-sm text-green-700">
-                  Meter ticket captured
-                </Text>
-              )}
-            </View>
+            )}
           </View>
         )}
 
@@ -425,9 +449,7 @@ export default function ProofOfDeliveryScreen() {
               disabled={submitting}
               confirmLabel={signature ? 'Replace signature' : 'Use signature'}
             />
-            {signature && (
-              <Text className="text-sm text-green-700">Signature captured</Text>
-            )}
+            {signature && <StatusBadge status="ok" label="Signature captured" />}
           </>
         )}
 

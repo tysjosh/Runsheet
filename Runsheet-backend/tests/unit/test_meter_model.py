@@ -202,6 +202,28 @@ class TestMeterSchemaHygiene:
             MeterRegistration(**_meter_payload(status="inactive"))
 
 
+class TestCalibrationDateOrder:
+    """Finding C7: a calibration cannot expire before it was performed."""
+
+    def test_expiry_before_calibration_rejected(self):
+        with pytest.raises(ValidationError, match="calibration_expiry_date must be on or after"):
+            MeterRegistration(
+                **_meter_payload(
+                    calibration_date=date(2026, 6, 1),
+                    calibration_expiry_date=date(2026, 5, 31),
+                )
+            )
+
+    def test_equal_dates_accepted(self):
+        meter = MeterRegistration(
+            **_meter_payload(
+                calibration_date=date(2026, 6, 1),
+                calibration_expiry_date=date(2026, 6, 1),
+            )
+        )
+        assert meter.calibration_expiry_date == meter.calibration_date
+
+
 # ===========================================================================
 # MeterAuditEntry Tests
 # ===========================================================================

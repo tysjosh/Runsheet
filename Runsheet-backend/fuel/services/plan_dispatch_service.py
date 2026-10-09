@@ -16,6 +16,35 @@ canonical FuelOrder lifecycle.  A plan is not considered dispatched until:
 
 The operation is idempotent.  Retrying an already-dispatched plan neither
 duplicates status events nor execution records.
+
+Serialization and ownership (loading-plan-executor design K5 and FREEZE
+rules 1-2).  Everything from the first order claim through the plan write runs
+under the tenant's :data:`~persistence.plan_execution_lock.PLAN_EXECUTION_LOCK`,
+the same lock the loading-plan executor holds, so the two never claim the same
+orders concurrently.  Each call claims its orders with one ``claim_id``; on any
+failure it releases exactly the links that ``claim_id`` wrote and that have not
+reached ``dispatched``, whatever a concurrent driver assignment or edit did to
+the order meanwhile.  Orders that were already linked to this run (executor
+applied) are never released.
+
+Residuals:
+
+* A guarded-transition refusal inside the order loop (a concurrent cancel or
+  driver assignment of order *k* between its claim and its transition) raises
+  409 ``order_changed_concurrently`` after orders *1..k-1* were dispatched, as
+  any mid-loop failure does.  Orders *k..n* are released back to unlinked.
+  Closing that window needs a transaction across orders (backlog).
+* A pod kill or task cancellation after the claims and before the order loop
+  finishes leaves this call's claims in place.  ``asyncio.CancelledError`` is a
+  ``BaseException``, so the ``except Exception`` release does not run; awaiting
+  store calls while being cancelled is unreliable.  A dispatch retry heals it
+  unless an order's driver changed meanwhile: every claim then returns
+  ``already_linked`` and the loop runs.  A ``reject_plan`` of that plan strands
+  the links; hold → release clears the links (OI-18).
+* Dispatch-claim double fault: a claim commits and then raises (the
+  acknowledgement is lost), and the release that follows raises too.  The
+  order stays linked to this run while the plan is still rejectable, the same
+  stranded-links state as above; hold → release clears it (OI-18).
 """
 
 from __future__ import annotations
@@ -23,11 +52,21 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence
+from uuid import uuid4
 
 from errors.codes import ErrorCode
 from errors.exceptions import AppException
+from fuel.order_repository import (
+    OrderChangedConcurrentlyError,
+    OrderWriteDiscardedError,
+    _link,
+)
 from fuel.order_state_machine import assert_window_present_for_transition
 from fuel.services.order_id_generator import mint_event_id
+from persistence.plan_execution_lock import (
+    PLAN_EXECUTION_LOCK,
+    PlanExecutionLockTimeout,
+)
 from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
@@ -38,6 +77,13 @@ MVP_PLAN_EXECUTIONS_INDEX = "mvp_plan_executions"
 
 _DISPATCHABLE_STATUSES = {"confirmed", "scheduled"}
 _ACTIVE_STATUSES = {"dispatched", "in_transit"}
+
+#: 409 message per ``AssignmentClaim.reason`` (design K5, pass-4 NIT 3).
+_CLAIM_REFUSAL_MESSAGES = {
+    "order_committed_elsewhere": "An order in the plan is committed to another run",
+    "order_changed_since_plan": "An order in the plan changed since it was loaded; reload and retry",
+    "order_not_found": "The plan references orders that no longer exist",
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +125,7 @@ class FuelPlanDispatchService:
         execution_service: Any,
         driver_ws_manager: Optional[Any] = None,
         clock=utcnow,
+        plan_lock: Any = PLAN_EXECUTION_LOCK,
     ) -> None:
         required = {
             "es_service": es_service,
@@ -100,6 +147,7 @@ class FuelPlanDispatchService:
         self._execution_service = execution_service
         self._driver_ws_manager = driver_ws_manager
         self._clock = clock
+        self._plan_lock = plan_lock
 
     async def dispatch(
         self,
@@ -107,8 +155,19 @@ class FuelPlanDispatchService:
         tenant_id: str,
         plan_doc: Mapping[str, Any],
         actor_user_id: str,
+        driver_id: Optional[str] = None,
+        notify: bool = True,
     ) -> PlanDispatchResult:
-        """Validate, link, transition, and notify one loading plan."""
+        """Validate, link, transition, and notify one loading plan.
+
+        ``driver_id`` (dispatch-board K7.4): when given, that driver is read
+        in the tenant and must be ``active`` instead of being resolved from
+        the truck's ``assigned_truck_id``. ``notify=False`` skips only the
+        realtime ``send_assignment`` call; the caller sends the same payload
+        from the returned :class:`PlanDispatchResult` (freeze rule 8).
+        Existing callers pass neither and behave as before.
+        """
+        explicit_driver_id = driver_id
         plan_id = str(plan_doc.get("plan_id") or "").strip()
         truck_id = str(plan_doc.get("truck_id") or "").strip()
         if not plan_id or not truck_id:
@@ -128,10 +187,26 @@ class FuelPlanDispatchService:
                 truck_id=truck_id,
             )
 
-        driver = await self._resolve_driver(tenant_id, truck_id)
+        if explicit_driver_id is not None:
+            driver = await self._resolve_explicit_driver(
+                tenant_id, explicit_driver_id, truck_id
+            )
+        else:
+            driver = await self._resolve_driver(tenant_id, truck_id)
         driver_id = str(driver.get("driver_id") or "")
         run_id = self._run_id(plan_doc, routes, plan_id)
         orders = await self._resolve_orders(tenant_id, plan_doc, routes)
+
+        # ``placed`` orders are refused (owner decision OI-16): name every one
+        # so the dispatcher can confirm them, instead of the first order's
+        # generic "not ready for dispatch".
+        placed = sorted(
+            str(order.get("order_id") or "")
+            for order in orders
+            if order.get("status") == "placed"
+        )
+        if placed:
+            raise self._orders_not_confirmed(plan_id, placed)
 
         # Fail before the first write.  Elasticsearch cannot transact across
         # all of these projections, so complete preflight validation is what
@@ -146,89 +221,199 @@ class FuelPlanDispatchService:
                 run_id=run_id,
             )
 
-        execution_ids: List[str] = []
-        route_ids: List[str] = []
-        now = self._clock().isoformat()
+        # Route identity is a deterministic refusal, so it comes before any
+        # claim (K5 preflight step 2).
         for route in routes:
-            route_id = str(route.get("route_id") or "").strip()
-            if not route_id:
+            if not str(route.get("route_id") or "").strip():
                 raise self._conflict(
                     "A route in this plan has no route_id",
                     reason="route_identity_incomplete",
                     plan_id=plan_id,
                 )
-            route_ids.append(route_id)
-            await self._es.update_document(
-                MVP_ROUTES_INDEX,
-                route_id,
-                {
-                    "run_id": run_id,
-                    "status": "dispatched",
-                    "updated_at": now,
-                },
-            )
-            execution = await self._ensure_execution(
-                tenant_id=tenant_id,
-                plan_id=plan_id,
-                route=route,
-            )
-            execution_ids.append(str(execution["execution_id"]))
 
+        execution_ids: List[str] = []
+        route_ids: List[str] = []
+        now = self._clock().isoformat()
         newly_dispatched = 0
         already_dispatched = 0
         order_ids: List[str] = []
-        for order in orders:
-            order_id = str(order["order_id"])
-            order_ids.append(order_id)
-            if order.get("status") in _ACTIVE_STATUSES:
-                already_dispatched += 1
-                continue
+        claim_id = uuid4().hex
+        lock_held = False
+        try:
+            async with self._plan_lock.hold(tenant_id):
+                lock_held = True
+                # Orders this call linked and has not dispatched yet.
+                fresh: List[str] = []
+                try:
+                    # Claim every order (K5 preflight step 3).  The preflight
+                    # above may have read a stale projection; the claim reads
+                    # the authoritative document under its row lock.
+                    for order in orders:
+                        if order.get("status") in _ACTIVE_STATUSES:
+                            continue
+                        order_id = str(order["order_id"])
+                        try:
+                            claim = await self._order_repository.claim_assignment(
+                                tenant_id,
+                                order_id,
+                                run_id=run_id,
+                                asset_id=truck_id,
+                                expected_status=order["status"],
+                                claim_id=claim_id,
+                            )
+                        except Exception:
+                            # Ambiguous: the claim may have committed before
+                            # the error reached us. Releasing by ownership is
+                            # a no-op if it never landed.
+                            fresh.append(order_id)
+                            raise
+                        if claim.outcome == "refused":
+                            reason = claim.reason or "order_committed_elsewhere"
+                            logger.warning(
+                                "dispatch: claim refused for order=%s plan=%s "
+                                "run=%s reason=%s",
+                                order_id,
+                                plan_id,
+                                run_id,
+                                reason,
+                            )
+                            raise self._conflict(
+                                _CLAIM_REFUSAL_MESSAGES.get(
+                                    reason,
+                                    _CLAIM_REFUSAL_MESSAGES["order_committed_elsewhere"],
+                                ),
+                                reason=reason,
+                                order_id=order_id,
+                            )
+                        if claim.outcome == "linked":
+                            fresh.append(order_id)
+                        # The authoritative document from here on; re-check it
+                        # (pass-5 finding 2).
+                        order.clear()
+                        order.update(claim.order)
+                        self._validate_order(
+                            order,
+                            tenant_id=tenant_id,
+                            driver_id=driver_id,
+                            truck_id=truck_id,
+                            run_id=run_id,
+                        )
 
-            # Assignment travels on the in-memory document into the canonical
-            # transition write.  The dispatched subscriber therefore sees the
-            # driver id, while the order and status land in one current-state
-            # upsert rather than two racing writes.
-            order["assigned_driver_id"] = driver_id
-            order["assigned_asset_id"] = truck_id
-            order["assigned_run_id"] = run_id
-            await self._append_assignment_event(
-                tenant_id=tenant_id,
-                order=order,
-                actor_user_id=actor_user_id,
-                driver_id=driver_id,
-                truck_id=truck_id,
-                run_id=run_id,
+                    for route in routes:
+                        route_id = str(route.get("route_id") or "").strip()
+                        route_ids.append(route_id)
+                        await self._es.update_document(
+                            MVP_ROUTES_INDEX,
+                            route_id,
+                            {
+                                "run_id": run_id,
+                                "status": "dispatched",
+                                "updated_at": now,
+                            },
+                        )
+                        execution = await self._ensure_execution(
+                            tenant_id=tenant_id,
+                            plan_id=plan_id,
+                            route=route,
+                        )
+                        execution_ids.append(str(execution["execution_id"]))
+
+                    for order in orders:
+                        order_id = str(order["order_id"])
+                        order_ids.append(order_id)
+                        if order.get("status") in _ACTIVE_STATUSES:
+                            already_dispatched += 1
+                            continue
+
+                        # The driver travels on the in-memory document into
+                        # the canonical transition write, next to the links
+                        # the claim already put there.  The dispatched
+                        # subscriber therefore sees the driver id.
+                        order["assigned_driver_id"] = driver_id
+                        await self._append_assignment_event(
+                            tenant_id=tenant_id,
+                            order=order,
+                            actor_user_id=actor_user_id,
+                            driver_id=driver_id,
+                            truck_id=truck_id,
+                            run_id=run_id,
+                            plan_id=plan_id,
+                        )
+
+                        try:
+                            if order.get("status") == "confirmed":
+                                await self._order_service.apply_status_transition(
+                                    order=order,
+                                    new_status="scheduled",
+                                    reason="dispatcher_plan_approved",
+                                    actor_user_id=actor_user_id,
+                                    guard_stored_state=True,
+                                )
+                            await self._order_service.apply_status_transition(
+                                order=order,
+                                new_status="dispatched",
+                                reason="dispatcher_plan_approved",
+                                actor_user_id=actor_user_id,
+                                guard_stored_state=True,
+                            )
+                        except (OrderChangedConcurrentlyError, OrderWriteDiscardedError):
+                            logger.warning(
+                                "dispatch: order=%s changed while plan=%s was "
+                                "being dispatched",
+                                order_id,
+                                plan_id,
+                            )
+                            raise self._conflict(
+                                "An order in the plan changed while it was being dispatched",
+                                reason="order_changed_concurrently",
+                                order_id=order_id,
+                            ) from None
+                        if order_id in fresh:
+                            fresh.remove(order_id)
+                        newly_dispatched += 1
+
+                    await self._es.update_document(
+                        MVP_LOAD_PLANS_INDEX,
+                        plan_id,
+                        {
+                            "run_id": run_id,
+                            "status": "dispatched",
+                            "approved_by": actor_user_id,
+                            "approved_at": now,
+                            "updated_at": now,
+                        },
+                    )
+                except Exception:
+                    # Release by ownership (FREEZE rule 2): only links this
+                    # call's claim wrote and that never reached dispatched.
+                    for order_id in fresh:
+                        try:
+                            await self._order_repository.release_assignment(
+                                tenant_id,
+                                order_id,
+                                run_id=run_id,
+                                asset_id=truck_id,
+                                claim_id=claim_id,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "dispatch: releasing claim on %s failed "
+                                "(plan=%s run=%s)",
+                                order_id,
+                                plan_id,
+                                run_id,
+                            )
+                    raise
+        except PlanExecutionLockTimeout:
+            if lock_held:
+                raise
+            raise self._conflict(
+                "Another plan is being applied or dispatched for this tenant; retry",
+                reason="plan_execution_busy",
                 plan_id=plan_id,
-            )
+            ) from None
 
-            if order.get("status") == "confirmed":
-                await self._order_service.apply_status_transition(
-                    order=order,
-                    new_status="scheduled",
-                    reason="dispatcher_plan_approved",
-                    actor_user_id=actor_user_id,
-                )
-            await self._order_service.apply_status_transition(
-                order=order,
-                new_status="dispatched",
-                reason="dispatcher_plan_approved",
-                actor_user_id=actor_user_id,
-            )
-            newly_dispatched += 1
-
-        await self._es.update_document(
-            MVP_LOAD_PLANS_INDEX,
-            plan_id,
-            {
-                "run_id": run_id,
-                "status": "dispatched",
-                "approved_by": actor_user_id,
-                "approved_at": now,
-                "updated_at": now,
-            },
-        )
-
-        if self._driver_ws_manager is not None:
+        if notify and self._driver_ws_manager is not None:
             try:
                 await self._driver_ws_manager.send_assignment(
                     driver_id,
@@ -317,6 +502,34 @@ class FuelPlanDispatchService:
             )
         return drivers[0]
 
+    async def _resolve_explicit_driver(
+        self, tenant_id: str, driver_id: str, truck_id: str
+    ) -> Dict[str, Any]:
+        """Read the named driver in the tenant; it must be ``active`` (K7.4).
+
+        A foreign-tenant id reads as missing, so it gets the same refusal as
+        an inactive driver and reveals nothing about the other tenant.
+        """
+        driver: Dict[str, Any] = {}
+        if str(driver_id or "").strip():
+            found = await self._driver_repository.get(tenant_id, driver_id)
+            driver = self._as_dict(found) if found is not None else {}
+        if (
+            not driver
+            or driver.get("tenant_id", tenant_id) != tenant_id
+            or driver.get("status") != "active"
+        ):
+            raise AppException(
+                error_code=ErrorCode.DRIVER_UNAVAILABLE,
+                message="The driver chosen for this plan is not available",
+                status_code=409,
+                details={
+                    "reason": "board_driver_unavailable",
+                    "truck_id": truck_id,
+                },
+            )
+        return driver
+
     async def _resolve_orders(
         self,
         tenant_id: str,
@@ -371,6 +584,8 @@ class FuelPlanDispatchService:
             # is unsafe to auto-dispatch; the operator must regenerate the plan
             # so it carries exact order ids.
             selected_by_id: Dict[str, Dict[str, Any]] = {}
+            # Stops whose only matching orders are ``placed`` (OI-16).
+            placed_ids: set = set()
             for station_id in sorted(station_ids):
                 candidates = [
                     order
@@ -395,6 +610,23 @@ class FuelPlanDispatchService:
                     )
                 if candidates:
                     selected_by_id[str(candidates[0]["order_id"])] = candidates[0]
+                else:
+                    placed_ids.update(
+                        str(order.get("order_id"))
+                        for order in all_orders
+                        if order.get("status") == "placed"
+                        and order.get("order_id")
+                        and station_id
+                        in {
+                            str(order.get("order_id") or ""),
+                            str(order.get("customer_tank_id") or ""),
+                            str(order.get("customer_id") or ""),
+                        }
+                    )
+            if placed_ids:
+                raise self._orders_not_confirmed(
+                    str(plan_doc.get("plan_id") or ""), sorted(placed_ids)
+                )
             selected = [selected_by_id[key] for key in sorted(selected_by_id)]
 
         if not selected:
@@ -444,6 +676,17 @@ class FuelPlanDispatchService:
                 assigned_driver_id=existing_driver,
                 assigned_asset_id=existing_asset,
                 assigned_run_id=existing_run,
+            )
+        if status in _DISPATCHABLE_STATUSES and (
+            _link(existing_run) not in (None, run_id)
+            or _link(existing_asset) not in (None, truck_id)
+        ):
+            # K5 preflight step 1: committed to another run or truck (for
+            # example by the loading-plan executor for another plan).
+            raise self._conflict(
+                _CLAIM_REFUSAL_MESSAGES["order_committed_elsewhere"],
+                reason="order_committed_elsewhere",
+                order_id=order_id,
             )
         if status in _DISPATCHABLE_STATUSES and existing_driver not in (
             None,
@@ -560,6 +803,24 @@ class FuelPlanDispatchService:
             message=message,
             status_code=409,
             details=details,
+        )
+
+    #: Order ids named in the message; ``details.order_ids`` has all of them.
+    _MAX_IDS_IN_MESSAGE = 10
+
+    @classmethod
+    def _orders_not_confirmed(cls, plan_id: str, order_ids: List[str]) -> AppException:
+        """409 ``ORDERS_NOT_CONFIRMED`` naming the ``placed`` orders (OI-16)."""
+        shown = order_ids[: cls._MAX_IDS_IN_MESSAGE]
+        more = len(order_ids) - len(shown)
+        message = "Confirm these orders before dispatching: " + ", ".join(shown)
+        if more:
+            message += f" and {more} more"
+        return AppException(
+            error_code=ErrorCode.ORDERS_NOT_CONFIRMED,
+            message=message,
+            status_code=409,
+            details={"order_ids": list(order_ids), "plan_id": plan_id},
         )
 
 

@@ -2,8 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EntityLink } from "@/components/ui";
+import { Badge, Button, EntityLink, LoadErrorState } from "@/components/ui";
+import { calendarDate as fmtDate } from "../../lib/format";
+import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import { type DepotReadResponse, getDepot } from "../../services/fuelApi";
+import { PageTitle } from "../ui/PageHeader";
 
 interface DepotDetailPageProps {
   depotId: string;
@@ -18,18 +21,16 @@ export default function DepotDetailPage({
   const router = useRouter();
   const [data, setData] = useState<DepotReadResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadFailure, setLoadFailure] = useState<LoadFailure | null>(null);
 
   const fetchDepot = useCallback(async () => {
     setLoading(true);
-    setError(null);
+    setLoadFailure(null);
     try {
       const res = await getDepot(depotId, { expand: ["assets"] });
       setData(res);
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load depot details",
-      );
+      setLoadFailure(classifyLoadError(err, "Failed to load depot details"));
     } finally {
       setLoading(false);
     }
@@ -45,8 +46,7 @@ export default function DepotDetailPage({
     return "default";
   };
 
-  const formatDate = (s?: string | null) =>
-    s ? new Date(s).toLocaleDateString() : "—";
+  const formatDate = (s?: string | null) => (s ? fmtDate(s) : "—");
 
   if (loading) {
     return (
@@ -57,13 +57,17 @@ export default function DepotDetailPage({
     );
   }
 
-  if (error) {
+  if (loadFailure) {
     return (
-      <div role="alert" className="p-6">
-        <div className="bg-error-light border border-error-light text-error-dark p-4 rounded">
-          {error}
-        </div>
-      </div>
+      <LoadErrorState
+        failure={loadFailure}
+        entityLabel="Depot"
+        entityId={depotId}
+        onBack={() => (onBack ? onBack() : router.back())}
+        homeHref="/dashboard/settings?tab=company"
+        homeLabel="Go to Setup"
+        onRetry={fetchDepot}
+      />
     );
   }
 
@@ -84,7 +88,7 @@ export default function DepotDetailPage({
         </div>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{depot.name}</h1>
+            <PageTitle className="text-2xl font-bold">{depot.name}</PageTitle>
             {depot.is_default && <Badge variant="info">Default</Badge>}
           </div>
           <Badge variant={statusVariant(depot.status)}>{depot.status}</Badge>

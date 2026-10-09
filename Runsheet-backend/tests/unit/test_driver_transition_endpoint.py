@@ -102,14 +102,19 @@ class FakeOrderRepository:
             return None
         return dict(self._order)
 
+    async def get_current(self, tenant_id: str, order_id: str):
+        # The transition endpoint reads the stored document (P1-5).
+        return await self.get(tenant_id, order_id)
+
     async def append_event(self, tenant_id: str, event: dict) -> None:
         self.events.append(event)
 
     async def upsert_with_last_event_timestamp(
-        self, tenant_id: str, order: dict
-    ) -> bool:
+        self, tenant_id: str, order: dict, **guard
+    ):
         self.upserts.append(dict(order))
-        return True
+        # The guarded form (OI-41, dispatch-board K8.6) returns the stored document.
+        return dict(order) if guard else True
 
 
 class FakeQualificationService:

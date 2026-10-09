@@ -6,8 +6,13 @@ currently-bound tenant (set via ``set_current_tenant``). These tests bind
 the ContextVar, call each tool through its underlying coroutine, and
 assert the captured ES body carries the tenant filter in the top-level
 ``bool.filter`` clause. For tools that go through ``semantic_search``
-(``search_orders`` / ``search_support_tickets``) we assert the mock was
+(``search_support_tickets`` / ``search_inventory``) we assert the mock was
 called with ``tenant_id="tenant-a"`` as the first positional arg.
+
+``search_orders`` is not covered here: the ``search_tools`` implementation of
+that name was removed (it queried an index that does not exist), and the
+surviving ``Agents.tools.order_tools.search_orders`` has its own tenant-scope
+regression test in ``test_order_tools_tenant_scope.py``.
 
 Also verifies the loud-fail behaviour: calling an ES-reading tool with no
 tenant bound raises ``RuntimeError`` so a forgotten scope surfaces as a
@@ -38,7 +43,6 @@ from Agents.tools._tenant_context import (  # noqa: E402
 from Agents.tools.search_tools import (  # noqa: E402
     search_fleet_data,
     search_inventory,
-    search_orders,
     search_support_tickets,
 )
 from Agents.tools.summary_tools import (  # noqa: E402
@@ -186,19 +190,6 @@ async def test_get_all_locations_scopes_query() -> None:
 # ---------------------------------------------------------------------------
 # Tools that go through ``semantic_search``
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_search_orders_calls_semantic_search_with_tenant() -> None:
-    with patch("Agents.tools.search_tools.elasticsearch_service") as mock_es, \
-            set_current_tenant(TENANT_A):
-        mock_es.semantic_search = AsyncMock(return_value=[])
-        await search_orders(query="network gear")
-
-    # First positional arg must be the tenant id.
-    args = mock_es.semantic_search.call_args.args
-    assert args, mock_es.semantic_search.call_args
-    assert args[0] == TENANT_A, f"semantic_search first arg should be tenant_id: {args}"
 
 
 @pytest.mark.asyncio

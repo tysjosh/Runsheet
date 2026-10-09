@@ -24,6 +24,10 @@ from errors.exceptions import conflict, resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
+from services.keyset_pagination import (
+    next_cursor_from_hits,
+    search_after_for_cursor,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -388,7 +392,9 @@ class CustomerService:
 
         # Cursor-based pagination using search_after
         if cursor:
-            base_query["search_after"] = [cursor, cursor]
+            base_query["search_after"] = await search_after_for_cursor(
+                self._es, CUSTOMERS_CURRENT_INDEX, cursor, base_query["sort"]
+            )
 
         query = inject_tenant_filter(base_query, tenant_id)
 
@@ -408,11 +414,9 @@ class CustomerService:
                 item["account_count"] = account_counts.get(item["customer_id"], 0)
 
         # Determine next cursor
-        next_cursor: Optional[str] = None
-        if hits and len(hits) == limit:
-            last_sort = hits[-1].get("sort")
-            if last_sort and len(last_sort) >= 2:
-                next_cursor = hits[-1]["_source"]["customer_id"]
+        next_cursor = next_cursor_from_hits(
+            hits, limit, id_field="customer_id"
+        )
 
         return {
             "items": items,

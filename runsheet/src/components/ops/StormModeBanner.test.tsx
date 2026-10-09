@@ -183,7 +183,7 @@ describe("StormModeBanner", () => {
     // Full details link present
     expect(screen.getByRole("link", { name: /full details/i })).toHaveAttribute(
       "href",
-      "/admin/weather-alerts",
+      "/dashboard/settings?tab=weather-alerts",
     );
   });
 

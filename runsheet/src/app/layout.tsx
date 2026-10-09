@@ -1,5 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
+import { isIndexableSite, SITE_URL } from "@/config/site";
+import AudienceGuard from "../components/AudienceGuard";
 import { SuperTokensProvider } from "../components/SuperTokensProvider";
 import "./globals.css";
 
@@ -14,9 +16,9 @@ const inter = Inter({
 
 // `metadataBase` resolves Open Graph / canonical URLs, which must be absolute.
 // Without it Next emits a build warning and social crawlers receive relative
-// paths they cannot fetch. Set NEXT_PUBLIC_SITE_URL in the production
-// environment; the localhost fallback only keeps dev and CI quiet.
-const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000";
+// paths they cannot fetch. `SITE_URL` now comes from `config/site.ts`, which also
+// owns the indexability decision used by `robots` below and by robots.txt and
+// sitemap.xml — one source of truth for all three.
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
@@ -30,8 +32,12 @@ export const metadata: Metadata = {
     default: "Runsheet — Autonomous Fuel Distribution Operations",
     template: "%s · Runsheet",
   },
+  // Ordered to match the landing page's three pillars: runout prevention,
+  // load/route planning, then compliance enforcement. Dyed-diesel and driver
+  // qualification were added because they are a primary search intent for this
+  // buyer and were missing from the snippet entirely.
   description:
-    "Runsheet forecasts tank runout, prioritizes deliveries, builds compliant multi-compartment load plans and optimizes routes for US regional fuel distributors — with net-gallon accuracy and a human-in-the-loop agent layer.",
+    "Runsheet forecasts tank runout from degree-day normalized consumption, builds compliant multi-compartment load plans, and enforces dyed-diesel and DOT driver qualification rules for US regional fuel distributors — with net-gallon accuracy and a human-in-the-loop agent layer.",
   applicationName: "Runsheet",
   keywords: [
     "fuel distribution software",
@@ -41,6 +47,8 @@ export const metadata: Metadata = {
     "IFTA reporting",
     "net gallons",
     "multi-compartment load planning",
+    "dyed diesel compliance",
+    "driver qualification files",
   ],
   openGraph: {
     type: "website",
@@ -48,7 +56,7 @@ export const metadata: Metadata = {
     url: SITE_URL,
     title: "Runsheet — Autonomous Fuel Distribution Operations",
     description:
-      "Runout forecasting, compliant load planning and route optimization for US regional fuel distributors. Human-in-the-loop agents, net-gallon accuracy.",
+      "Runout forecasting, compliant multi-compartment load planning, and dyed-diesel enforcement for US regional fuel distributors. Human-in-the-loop agents, net-gallon accuracy.",
   },
   twitter: {
     card: "summary_large_image",
@@ -56,9 +64,14 @@ export const metadata: Metadata = {
     description:
       "Runout forecasting, compliant load planning and route optimization for US regional fuel distributors.",
   },
+  // Emits `<meta name="robots" content="noindex, nofollow">` on staging,
+  // localhost and previews. This is separate from robots.txt on purpose: a
+  // crawler that reached a page via an inbound link may never fetch robots.txt,
+  // and the meta tag is what removes an already-indexed page. Both are gated on
+  // the same `isIndexableSite()` so they cannot disagree.
   robots: {
-    index: true,
-    follow: true,
+    index: isIndexableSite(),
+    follow: isIndexableSite(),
   },
   // `apple` is deliberately absent: `src/app/apple-icon.tsx` generates a
   // 180x180 PNG and Next wires it automatically. Declaring it here as the SVG
@@ -77,7 +90,9 @@ export default function RootLayout({
   return (
     <html lang="en" className={inter.variable}>
       <body className="antialiased">
-        <SuperTokensProvider>{children}</SuperTokensProvider>
+        <SuperTokensProvider>
+          <AudienceGuard>{children}</AudienceGuard>
+        </SuperTokensProvider>
       </body>
     </html>
   );

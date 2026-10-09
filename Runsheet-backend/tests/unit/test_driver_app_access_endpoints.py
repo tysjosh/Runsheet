@@ -428,6 +428,44 @@ def test_grant_rejects_driver_already_linked_to_another_email():
     assert admin.create_calls == []
 
 
+@pytest.mark.parametrize("seed_row", [False, True])
+def test_grant_refuses_supertokens_user_not_bound_to_auth_users(seed_row):
+    """A pre-registered SuperTokens user is never adopted (staging finding F1).
+
+    Someone signed up ``d@example.com`` before the admin granted access. The
+    ``auth_users`` row is absent or unbound (``st_user_id`` NULL), so the
+    grant returns the same indistinguishable 409 as the cross-tenant guard,
+    the foreign user gets no role or metadata, and no row is committed.
+    """
+    repo = FakeDriverRepository()
+    repo.seed(_make_driver())
+    db = FakeAuthUsersDB()
+    if seed_row:
+        db.seed(
+            email="d@example.com",
+            tenant_id="tenant-A",
+            roles=[],
+            has_pii_access=False,
+            driver_id=None,
+            st_user_id=None,
+        )
+    before = copy.deepcopy(db.rows)
+    admin = FakeSuperTokensAdmin()
+    admin.seed_user("d@example.com", "st-attacker", [])
+    client, _, db, admin, _ = _build_client(repo=repo, db=db, admin=admin)
+
+    resp = client.post(
+        "/api/ops/drivers/drv-001/app-access", json={"email": "d@example.com"}
+    )
+
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["error_code"] == "APP_ACCESS_ALREADY_LINKED"
+    assert admin.roles["st-attacker"] == []
+    assert "st-attacker" not in admin.metadata
+    assert admin.create_calls == []
+    assert db.rows == before
+
+
 def test_failed_grant_leaves_no_link_and_removes_the_driver_role():
     """A mid-grant failure rolls back and compensates (Req 1.18)."""
     repo = FakeDriverRepository()

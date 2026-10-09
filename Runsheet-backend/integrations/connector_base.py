@@ -673,7 +673,16 @@ class IntegrationInstanceRepository:
         model = IntegrationInstance(**payload)
 
         doc = model.model_dump(mode="json", exclude_none=False)
-        await self._es.index_document(self._index, model.instance_id, doc)
+        # Create-if-absent: ids are global in the store, so an upsert here would
+        # replace an integration another tenant owns (L1).
+        created = await self._es.create_document(self._index, model.instance_id, doc)
+        if not created:
+            from errors.exceptions import already_exists
+
+            raise already_exists(
+                "An integration with this id already exists",
+                details={"instance_id": model.instance_id},
+            )
 
         return model
 

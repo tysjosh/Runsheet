@@ -17,6 +17,8 @@ export interface EmptyStateProps {
     onClick: () => void;
   };
   className?: string;
+  /** `touch`: a 44 px action button for phone-sized targets (R14.19). Additive (3.11). */
+  size?: "default" | "touch";
 }
 
 export const EmptyState: React.FC<EmptyStateProps> = ({
@@ -25,6 +27,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
   description,
   action,
   className = "",
+  size = "default",
 }) => {
   const renderedIcon = React.isValidElement<{ className?: string }>(icon)
     ? React.cloneElement(icon, {
@@ -45,7 +48,11 @@ export const EmptyState: React.FC<EmptyStateProps> = ({
       )}
       {action && (
         <div className="mt-6">
-          <Button variant="primary" onClick={action.onClick}>
+          <Button
+            variant="primary"
+            onClick={action.onClick}
+            className={size === "touch" ? "min-h-11 px-4" : ""}
+          >
             {action.label}
           </Button>
         </div>

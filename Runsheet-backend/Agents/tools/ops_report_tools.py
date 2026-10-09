@@ -5,7 +5,6 @@ Produces tenant-scoped markdown reports for order SLA violations, order failure
 root causes, and driver productivity from the fuel-order Elasticsearch indices.
 """
 
-import inspect
 import json
 import logging
 import time
@@ -17,6 +16,7 @@ from strands import tool
 from ops.middleware.pii_masker import PIIMasker
 from ops.middleware.tenant_guard import inject_tenant_filter
 
+from ._tenant_context import resolve_tool_tenant
 from .ops_feature_guard import check_ops_feature_flag
 
 logger = logging.getLogger(__name__)
@@ -45,15 +45,17 @@ def _get_es():
 
 
 async def _search(es, index: str, body: dict) -> dict:
-    """Run an Elasticsearch search against sync or async clients."""
-    response = es.client.search(
-        index=index,
-        body=body,
-        request_timeout=ES_SEARCH_TIMEOUT_SECONDS,
+    """Run a search through the service facade.
+
+    Reaching ``es.client.search(...)`` directly bypassed the document-store
+    backend switch, so this read would have kept going to Elasticsearch after the
+    document plane moved to Postgres. ``search_documents`` is already async and
+    returns the same response shape, so the sync/awaitable dance the raw client
+    needed is gone too.
+    """
+    return await es.search_documents(
+        index, body, request_timeout=ES_SEARCH_TIMEOUT_SECONDS
     )
-    if inspect.isawaitable(response):
-        response = await response
-    return response
 
 
 def _log_tool_call(tool_name: str, params: dict, tenant_id: str, user_id: str = "ai_agent"):
@@ -97,7 +99,7 @@ def _report_header(report_name: str, start_date: str, end_date: str, tenant_id: 
 async def generate_sla_report(
     start_date: str,
     end_date: str,
-    tenant_id: str,
+    tenant_id: Optional[str] = None,
 ) -> str:
     """
     Generate an SLA violations report for fuel orders in a time range.
@@ -106,6 +108,8 @@ async def generate_sla_report(
     cancelled. Results are scoped to the requesting tenant.
     """
     start_time = time.time()
+    # The bound tenant wins over a model-supplied tenant_id.
+    tenant_id = resolve_tool_tenant(tenant_id)
     params = {"start_date": start_date, "end_date": end_date}
     _log_tool_call("generate_sla_report", params, tenant_id)
 
@@ -215,7 +219,7 @@ async def generate_sla_report(
 async def generate_failure_report(
     start_date: str,
     end_date: str,
-    tenant_id: str,
+    tenant_id: Optional[str] = None,
     intake_channel: Optional[str] = None,
 ) -> str:
     """
@@ -224,6 +228,8 @@ async def generate_failure_report(
     Groups failed fuel orders by root cause and includes sample affected orders.
     """
     start_time = time.time()
+    # The bound tenant wins over a model-supplied tenant_id.
+    tenant_id = resolve_tool_tenant(tenant_id)
     params = {"start_date": start_date, "end_date": end_date, "intake_channel": intake_channel}
     _log_tool_call("generate_failure_report", params, tenant_id)
 
@@ -347,7 +353,7 @@ async def generate_failure_report(
 async def generate_driver_productivity_report(
     start_date: str,
     end_date: str,
-    tenant_id: str,
+    tenant_id: Optional[str] = None,
 ) -> str:
     """
     Generate a driver productivity report for a specified time range.
@@ -356,6 +362,8 @@ async def generate_driver_productivity_report(
     order count, and current driver status.
     """
     start_time = time.time()
+    # The bound tenant wins over a model-supplied tenant_id.
+    tenant_id = resolve_tool_tenant(tenant_id)
     params = {"start_date": start_date, "end_date": end_date}
     _log_tool_call("generate_driver_productivity_report", params, tenant_id)
 

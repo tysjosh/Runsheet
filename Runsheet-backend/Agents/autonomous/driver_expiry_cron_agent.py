@@ -116,6 +116,7 @@ class DriverExpiryCronAgent(AutonomousAgentBase):
                 alerts = await svc.check_expiry_alerts(tenant_id)
                 if alerts:
                     detections.extend(alerts)
+                    self._note_tenant_activity(tenant_id, detections=len(alerts))
                     self.logger.info(
                         "Tenant %s: %d expiry alert(s) generated",
                         tenant_id,
@@ -126,6 +127,7 @@ class DriverExpiryCronAgent(AutonomousAgentBase):
                 suspensions = await svc.auto_suspend_expired_drivers(tenant_id)
                 if suspensions:
                     actions.extend(suspensions)
+                    self._note_tenant_activity(tenant_id, actions=len(suspensions))
                     self.logger.info(
                         "Tenant %s: %d driver(s) auto-suspended",
                         tenant_id,
@@ -136,6 +138,7 @@ class DriverExpiryCronAgent(AutonomousAgentBase):
                 overdue = await svc.check_drug_test_overdue(tenant_id)
                 if overdue:
                     detections.extend(overdue)
+                    self._note_tenant_activity(tenant_id, detections=len(overdue))
                     self.logger.info(
                         "Tenant %s: %d driver(s) with overdue drug tests",
                         tenant_id,

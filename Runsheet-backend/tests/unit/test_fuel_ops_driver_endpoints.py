@@ -393,6 +393,71 @@ class TestAdminGatedWrites:
 # ---------------------------------------------------------------------------
 
 
+class _GlobalIdES:
+    """Minimal document store keyed by doc id alone, like the real store key."""
+
+    def __init__(self) -> None:
+        self.docs: Dict[str, Dict[str, Any]] = {}
+
+    async def index_document(self, index: str, doc_id: str, document: Dict[str, Any]):
+        self.docs[doc_id] = dict(document)
+        return {"result": "created"}
+
+    async def create_document(self, index: str, doc_id: str, document: Dict[str, Any]) -> bool:
+        if doc_id in self.docs:
+            return False
+        self.docs[doc_id] = dict(document)
+        return True
+
+
+class TestCreateIfAbsent:
+    """POST /api/ops/drivers with a taken id → 409, never an overwrite (B9, S7).
+
+    Runs the real ``DriverRepository`` so the repository's write is exercised,
+    not the fake's.
+    """
+
+    _BODY = {"driver_id": "drv-dup", "driver_name": "First", "status": "active"}
+
+    def _app(self, es: _GlobalIdES, tenant_id: str):
+        from fuel.driver_repository import DriverRepository
+
+        return _build_app(
+            tenant_id=tenant_id, roles=["admin"], repo=DriverRepository(es)
+        )
+
+    def test_duplicate_id_in_same_tenant_is_409(self):
+        es = _GlobalIdES()
+        _, client, _ = self._app(es, "tenant-A")
+        assert client.post("/api/ops/drivers", json=self._BODY).status_code == 201
+        before = dict(es.docs["drv-dup"])
+
+        resp = client.post(
+            "/api/ops/drivers", json=dict(self._BODY, driver_name="Second")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert es.docs["drv-dup"] == before
+
+    def test_other_tenant_cannot_take_over_an_existing_id(self):
+        es = _GlobalIdES()
+        _, client_a, _ = self._app(es, "tenant-A")
+        assert client_a.post("/api/ops/drivers", json=self._BODY).status_code == 201
+        before = dict(es.docs["drv-dup"])
+
+        _, client_b, _ = self._app(es, "tenant-B")
+        resp = client_b.post(
+            "/api/ops/drivers", json=dict(self._BODY, driver_name="Takeover")
+        )
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["error_code"] == "RESOURCE_ALREADY_EXISTS"
+        assert "tenant-A" not in resp.text
+        assert es.docs["drv-dup"] == before
+        assert es.docs["drv-dup"]["tenant_id"] == "tenant-A"
+
+
 class TestQualificationWarnings:
     """medical_card_expiry within 30 days → "medical_card_expiring_soon",
     expired → "medical_card_expired"."""
@@ -862,3 +927,102 @@ class TestCounterIncrementAtomicity:
             delta_completed=0,
         )
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Tests — assigned_truck_id must resolve to a truck in the tenant (B15)
+# ---------------------------------------------------------------------------
+
+
+class TestAssignedTruckMustResolve:
+    """POST/PATCH /api/ops/drivers refuse an ``assigned_truck_id`` that isn't a
+    truck in the caller's tenant with 422 ``VALIDATION_ERROR``."""
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        import fuel.api.driver_endpoints as driver_endpoints
+
+        repo = FakeDriverRepository()
+        repo.seed_driver(_make_driver(driver_id="drv-001", tenant_id="tenant-A"))
+        _, client, _ = _build_app(roles=["admin"], repo=repo)
+        # monkeypatch restores the module global, so the resolver can't leak.
+        monkeypatch.setattr(
+            driver_endpoints,
+            "_ref_resolver",
+            _make_asset_resolver({"truck-1": "tenant-A", "truck-b": "tenant-B"}),
+        )
+        return client, repo
+
+    _BODY = {"driver_id": "drv-new", "driver_name": "New Driver", "status": "active"}
+
+    @pytest.mark.parametrize("truck_id", ["truck-nope", "truck-b"])
+    def test_create_with_unknown_or_other_tenant_truck_is_422(self, client, truck_id):
+        client, repo = client
+        resp = client.post(
+            "/api/ops/drivers", json={**self._BODY, "assigned_truck_id": truck_id}
+        )
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error_code"] == "VALIDATION_ERROR"
+        assert detail["details"] == {"assigned_truck_id": truck_id}
+        assert "tenant-B" not in resp.text
+        assert repo._drivers.get("tenant-A::drv-new") is None
+
+    def test_create_with_known_truck_is_201(self, client):
+        client, _ = client
+        resp = client.post(
+            "/api/ops/drivers", json={**self._BODY, "assigned_truck_id": "truck-1"}
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["assigned_truck_id"] == "truck-1"
+
+    def test_create_without_truck_is_201(self, client):
+        client, _ = client
+        assert client.post("/api/ops/drivers", json=self._BODY).status_code == 201
+
+    def test_patch_with_unknown_truck_is_422_and_unchanged(self, client):
+        client, repo = client
+        resp = client.patch(
+            "/api/ops/drivers/drv-001", json={"assigned_truck_id": "truck-nope"}
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["details"] == {"assigned_truck_id": "truck-nope"}
+        assert repo._drivers["tenant-A::drv-001"].assigned_truck_id == "truck-1"
+
+    def test_patch_with_known_truck_is_200(self, client):
+        client, repo = client
+        repo.seed_driver(
+            _make_driver(driver_id="drv-001", tenant_id="tenant-A").model_copy(
+                update={"assigned_truck_id": None}
+            )
+        )
+        resp = client.patch(
+            "/api/ops/drivers/drv-001", json={"assigned_truck_id": "truck-1"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["assigned_truck_id"] == "truck-1"
+
+    def test_patch_clearing_the_truck_is_allowed(self, client):
+        client, _ = client
+        resp = client.patch(
+            "/api/ops/drivers/drv-001", json={"assigned_truck_id": None}
+        )
+        assert resp.status_code == 200, resp.text
+
+    def test_registered_types_failure_fails_closed(self, client, monkeypatch):
+        """OI-30: a broken ``registered_types()`` no longer skips the check."""
+        import fuel.api.driver_endpoints as driver_endpoints
+
+        client, repo = client
+        resolver = driver_endpoints._ref_resolver
+
+        def _boom():
+            raise RuntimeError("registry unavailable")
+
+        monkeypatch.setattr(resolver, "registered_types", _boom)
+        resp = client.post(
+            "/api/ops/drivers", json={**self._BODY, "assigned_truck_id": "truck-nope"}
+        )
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["details"] == {"assigned_truck_id": "truck-nope"}
+        assert repo._drivers.get("tenant-A::drv-new") is None

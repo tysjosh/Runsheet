@@ -171,12 +171,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Mapping, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from errors.codes import ErrorCode
 from errors.exceptions import (
+    AppException,
     depot_not_found,
     driver_not_found,
+    internal_error,
     supplier_contract_not_found,
     terminal_not_found,
     validation_error,
@@ -226,6 +229,7 @@ from fuel.customer_tank_models import (
 from fuel.depot_models import (
     CrossTenantAccessError as DepotCrossTenantAccessError,
     Depot,
+    DepotDeleteIncompleteError,
     DepotRepository,
     DepotStatus,
 )
@@ -239,12 +243,14 @@ from fuel.services.delivery_destination_service import (
     DeliveryDestinationFilters,
     DeliveryDestinationService,
 )
+from fuel.services.customer_ref import validate_customer_ref
 from fuel.services.fuel_planning_ws_manager import FuelPlanningWSManager
 from fuel.services.fuel_product_catalog import (
     FuelProduct,
     UnknownFuelProductError,
     canonicalize,
     get_products_for_region,
+    resolve_product_filter,
 )
 from fuel.services.prioritization_helpers import (
     PriorityCluster,
@@ -309,14 +315,49 @@ from services.pod_hash_chain import (
     canonicalize_pod,
     compute_pod_hash,
 )
+from services.date_range import DateRange, doc_range_clause, parse_date_range
+from middleware.rate_limiter import limiter
+from services.csv_export import (
+    EXPORT_RATE_LIMIT,
+    ExportColumn,
+    KeysetPage,
+    KeysetSource,
+    export_guard,
+    export_rate_key,
+    stream_csv_export,
+)
 from services.reconciliation_service import (
     ReconciliationRecord,
     ReconciliationService,
 )
+from services.ref_loaders import ASSETS_INDEX
 from services.ref_resolver import get_ref_resolver
 from services.unit_conversion import GAL_TO_L
 
 logger = logging.getLogger(__name__)
+
+
+def _ops_error(
+    status_code: int,
+    error_code: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> AppException:
+    """Build a fuel-ops error in the standard envelope (finding F11, D5).
+
+    These routes raised ``HTTPException`` with a ``detail`` dict, which nests the code
+    under ``detail`` and carries no ``request_id``. The status and the
+    lowercase ``error_code`` string of every site are kept, so a client that
+    branches on the code still works; only the envelope changes, to the
+    top-level ``error_code`` / ``message`` / ``details`` / ``request_id``
+    shape ``errors/handlers.py`` renders.
+    """
+    return AppException(
+        error_code=error_code,
+        message=message,
+        status_code=status_code,
+        details=details,
+    )
 
 # ---------------------------------------------------------------------------
 # Module-level service references, wired via configure_fuel_ops_endpoints()
@@ -704,6 +745,21 @@ def _get_depot_repository() -> DepotRepository:
     return _depot_repository
 
 
+def _resolve_product_filter_or_422(value: Optional[str]) -> Optional[List[str]]:
+    """Resolve a ``fuel_type`` list filter, or 422 on an unknown value (F12/S6)."""
+    if not value:
+        return None
+    try:
+        return resolve_product_filter(value)
+    except ValueError:
+        raise AppException(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message="Unknown fuel product, alias or category",
+            status_code=422,
+            details={"fuel_type": value},
+        ) from None
+
+
 def _get_terminal_repository() -> TerminalRepository:
     if _terminal_repository is None:
         raise RuntimeError(
@@ -800,16 +856,12 @@ def _get_sourcing_recommender() -> SourcingRecommender:
     """
 
     if _sourcing_recommender is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "sourcing_recommender_unavailable",
-                "message": (
-                    "Sourcing recommender is not configured. Finish the "
-                    "bootstrap wire-up (see bootstrap/agents.py) before "
-                    "calling /api/fuel/sourcing/recommendations."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "sourcing_recommender_unavailable",
+            "Sourcing recommender is not configured. Finish the "
+            "bootstrap wire-up (see bootstrap/agents.py) before "
+            "calling /api/fuel/sourcing/recommendations.",
         )
     return _sourcing_recommender
 
@@ -926,7 +978,7 @@ async def list_delivery_destinations(
         filters = DeliveryDestinationFilters(**raw_filters)
     except ValueError as exc:
         # Pydantic raises ValueError/ValidationError for unknown literals.
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     try:
         destinations = await service.list(
@@ -935,13 +987,13 @@ async def list_delivery_destinations(
         )
     except ValueError as exc:
         # Empty tenant_id would raise; guarded upstream but re-raised as 400.
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception(
             "fuel_ops.destinations: unexpected error for tenant=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     logger.debug(
         "fuel_ops.destinations: tenant=%s type=%s product=%s zip=%s returned=%d",
@@ -1092,7 +1144,7 @@ async def list_rack_prices(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     # Handle both dict and ObjectApiResponse
     hits_outer = resp.get("hits", {}) if hasattr(resp, 'get') else {}
@@ -1191,6 +1243,9 @@ class CustomerTankCreateRequest(BaseModel):
     source_system: Optional[str] = Field(default=None, min_length=1)
     external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: str = Field(..., min_length=1)
+    #: Portal PE2: customer-facing name and service address.
+    display_name: Optional[str] = Field(default=None, max_length=80)
+    service_address: Optional[str] = Field(default=None, max_length=200)
     customer_type: CustomerType
     fuel_type: FuelType
     fuel_product_code: str = Field(..., min_length=1)
@@ -1228,6 +1283,9 @@ class CustomerTankUpdateRequest(BaseModel):
     source_system: Optional[str] = Field(default=None, min_length=1)
     external_tank_id: Optional[str] = Field(default=None, min_length=1)
     customer_id: Optional[str] = Field(default=None, min_length=1)
+    #: Portal PE2: customer-facing name and service address.
+    display_name: Optional[str] = Field(default=None, max_length=80)
+    service_address: Optional[str] = Field(default=None, max_length=200)
     customer_type: Optional[CustomerType] = None
     fuel_type: Optional[FuelType] = None
     fuel_product_code: Optional[str] = Field(default=None, min_length=1)
@@ -1321,23 +1379,11 @@ async def _validate_customer_ref(tenant_id: str, customer_id: Optional[str]) -> 
 
     Enforces that the tank's ``customer_id`` references an existing commerce
     customer in the same tenant at write time (cross-module-entity-linkage
-    Req 7.1). Validation is delegated to the shared ``RefResolver`` and is only
-    enforced when a ``customer`` loader is registered, so a partially-wired
-    environment (e.g. a focused unit test that injects no resolver) stays
-    additive/backward-compatible rather than rejecting every write. Raises
-    ``validation_error`` (HTTP 400, ``details.reason = customer_not_found``)
-    when the reference is non-existent or cross-tenant.
+    Req 7.1). The rule lives in :func:`fuel.services.customer_ref.validate_customer_ref`,
+    which the CSV tank importer shares; this wrapper supplies the module's
+    resolver.
     """
-    if not customer_id:
-        return
-    resolver = _get_ref_resolver()
-    try:
-        registered = "customer" in resolver.registered_types()
-    except Exception:  # noqa: BLE001 - defensive; never block a write on this
-        registered = False
-    if not registered:
-        return
-    await resolver.validate_ref(tenant_id, "customer", customer_id, required=True)
+    await validate_customer_ref(_get_ref_resolver(), tenant_id, customer_id)
 
 
 # ---------------------------------------------------------------------------
@@ -1345,71 +1391,52 @@ async def _validate_customer_ref(tenant_id: str, customer_id: Optional[str]) -> 
 # ---------------------------------------------------------------------------
 
 
-def _translate_cross_tenant_error(exc: CrossTenantAccessError) -> HTTPException:
+def _translate_cross_tenant_error(exc: CrossTenantAccessError) -> AppException:
     """Map :class:`CrossTenantAccessError` to an HTTP 403 without leaking
     the owning tenant's identity back to the caller."""
 
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error_code": "cross_tenant_access_denied",
-            "message": "Customer tank belongs to a different tenant.",
-            "customer_tank_id": exc.customer_tank_id,
-        },
+    return _ops_error(
+        status.HTTP_403_FORBIDDEN,
+        "cross_tenant_access_denied",
+        "Customer tank belongs to a different tenant.",
+        {"customer_tank_id": exc.customer_tank_id},
     )
 
 
-def _translate_validation_error(exc: Exception) -> HTTPException:
+def _translate_validation_error(exc: Exception) -> AppException:
     """Map Pydantic validation or catalog errors to a 422 with structured detail.
 
-    Sanitizes Pydantic's ``ValidationError.errors()`` output by dropping
-    the ``ctx`` and ``url`` fields and converting any residual non-JSON
-    primitives (e.g. nested :class:`Exception` instances inside ``ctx``,
-    :class:`datetime` values inside ``input``) to strings. This is
-    important because FastAPI's default JSON encoder raises
-    :class:`TypeError` when it encounters a non-serializable object,
-    which would otherwise mask the 422 as a 500 to the caller.
+    For a ``ValidationError`` only the field errors are returned
+    (``type``, ``loc``, ``msg``). Pydantic's ``input`` (and ``str(exc)``,
+    which embeds it) is dropped: on a PATCH the model validates the stored
+    document merged with the patch, so ``input`` echoed the whole stored
+    record back to the caller (finding F11). ``ctx`` (a raw Exception) and
+    ``url`` (Pydantic's docs) were already dropped. ``loc`` tuples become
+    lists so the payload always serializes.
     """
-
-    def _to_jsonable(value: Any) -> Any:
-        """Best-effort conversion of Pydantic error values to JSON-safe types."""
-        if value is None or isinstance(value, (bool, int, float, str)):
-            return value
-        if isinstance(value, (list, tuple)):
-            return [_to_jsonable(item) for item in value]
-        if isinstance(value, dict):
-            return {str(k): _to_jsonable(v) for k, v in value.items()}
-        # datetime, Exception, and other opaque objects fall through here —
-        # str() produces a safe, readable representation so the 422 payload
-        # always renders.
-        return str(value)
 
     message = str(exc)
     details: Any
     if isinstance(exc, ValidationError):
-        details = []
-        for err in exc.errors():
-            clean = {}
-            for key, value in err.items():
-                if key in ("ctx", "url"):
-                    # ``ctx`` nests a raw Exception which isn't JSON-safe;
-                    # ``url`` points to Pydantic's own docs and doesn't
-                    # help callers.
-                    continue
-                if isinstance(value, tuple):
-                    clean[key] = [_to_jsonable(item) for item in value]
-                else:
-                    clean[key] = _to_jsonable(value)
-            details.append(clean)
+        message = "Validation failed"
+        details = [
+            {
+                "type": err.get("type"),
+                "loc": [
+                    part if isinstance(part, (int, str)) else str(part)
+                    for part in err.get("loc", ())
+                ],
+                "msg": err.get("msg"),
+            }
+            for err in exc.errors()
+        ]
     else:
         details = message
-    return HTTPException(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-        detail={
-            "error_code": "validation_error",
-            "message": message,
-            "errors": details,
-        },
+    return _ops_error(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        "validation_error",
+        message,
+        {"errors": details},
     )
 
 
@@ -1467,7 +1494,7 @@ async def list_customer_tanks(
             size=page * size + 1,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     total = len(window)
     start = (page - 1) * size
@@ -1540,15 +1567,14 @@ async def get_customer_tank(
     try:
         tank = await repo.get(tenant.tenant_id, customer_tank_id)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if tank is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "customer_tank_not_found",
-                "customer_tank_id": customer_tank_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "customer_tank_not_found",
+            "Customer tank not found",
+            {"customer_tank_id": customer_tank_id},
         )
 
     requested = _parse_customer_tank_expand(expand)
@@ -1603,13 +1629,11 @@ async def create_customer_tank(
         # repository is defensive and so are we.
         raise _translate_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
@@ -1657,12 +1681,11 @@ async def update_customer_tank(
         # accident.
         existing = await repo.get(tenant.tenant_id, customer_tank_id)
         if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "error_code": "customer_tank_not_found",
-                    "customer_tank_id": customer_tank_id,
-                },
+            raise _ops_error(
+                status.HTTP_404_NOT_FOUND,
+                "customer_tank_not_found",
+                "Customer tank not found",
+                {"customer_tank_id": customer_tank_id},
             )
         return existing
 
@@ -1680,24 +1703,21 @@ async def update_customer_tank(
     except CrossTenantAccessError as exc:
         raise _translate_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
 
     if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "customer_tank_not_found",
-                "customer_tank_id": customer_tank_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "customer_tank_not_found",
+            "Customer tank not found",
+            {"customer_tank_id": customer_tank_id},
         )
     logger.info(
         "fuel_ops.customer_tanks.update: tenant=%s tank=%s fields=%s",
@@ -1824,7 +1844,7 @@ class DepotReadResponse(BaseModel):
 
 def _translate_depot_cross_tenant_error(
     exc: DepotCrossTenantAccessError,
-) -> HTTPException:
+) -> AppException:
     """Map :class:`fuel.depot_models.CrossTenantAccessError` to HTTP 403.
 
     We deliberately do not echo the owning tenant back to the caller — the
@@ -1833,13 +1853,11 @@ def _translate_depot_cross_tenant_error(
     tenant metadata.
     """
 
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error_code": "cross_tenant_access_denied",
-            "message": "Depot belongs to a different tenant.",
-            "depot_id": exc.depot_id,
-        },
+    return _ops_error(
+        status.HTTP_403_FORBIDDEN,
+        "cross_tenant_access_denied",
+        "Depot belongs to a different tenant.",
+        {"depot_id": exc.depot_id},
     )
 
 
@@ -1861,9 +1879,10 @@ async def list_depots(
         default=None,
         description=(
             "Filter by supported fuel product. Accepts the canonical "
-            "product_code (e.g. DIESEL_2) or a legacy alias (e.g. AGO); "
-            "aliases are resolved via the fuel product catalog before the "
-            "ES query is issued."
+            "product_code (e.g. DIESEL_2), a legacy alias (e.g. AGO) or a "
+            "category name (e.g. diesel, gasoline), resolved via the fuel "
+            "product catalog; a depot supporting any resolved code matches. "
+            "Anything else is 422."
         ),
     ),
     page: int = Query(1, ge=1, description="Page number, 1-indexed."),
@@ -1880,6 +1899,7 @@ async def list_depots(
     """
 
     repo = _get_depot_repository()
+    fuel_codes = _resolve_product_filter_or_422(fuel_type)
 
     # Fetch a slightly larger window so we can paginate deterministically
     # without an extra round-trip — ``size`` is capped at 500 so
@@ -1888,11 +1908,11 @@ async def list_depots(
         window = await repo.list_for_tenant(
             tenant_id=tenant.tenant_id,
             status=status_filter,
-            fuel_type=fuel_type,
+            fuel_type=fuel_codes,
             size=page * size + 1,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     total = len(window)
     start = (page - 1) * size
@@ -1931,7 +1951,7 @@ async def _enumerate_depot_assets(
 ) -> List[DepotAssetSummary]:
     """Return the tenant's assets whose ``assigned_depot_id`` is ``depot_id``.
 
-    Queries the ``assets`` alias (→ ``trucks`` index) tenant-scoped two ways for
+    Queries the ``trucks`` index (``ASSETS_INDEX``) tenant-scoped two ways for
     defense-in-depth: the ES query filters on ``tenant_id`` *and* every returned
     source is re-validated against the caller's ``tenant_id`` before it is
     summarised, so a mis-labelled document can never leak across tenants
@@ -1954,7 +1974,7 @@ async def _enumerate_depot_assets(
         "size": size,
     }
     try:
-        resp = await es.search_documents("assets", query, size)
+        resp = await es.search_documents(ASSETS_INDEX, query, size)
     except Exception as exc:  # noqa: BLE001 — never 500 the depot read
         logger.warning(
             "fuel_ops.depots.get: asset enumeration failed for depot=%s "
@@ -2093,13 +2113,11 @@ async def create_depot(
         # repository is defensive and so are we.
         raise _translate_depot_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
@@ -2147,12 +2165,11 @@ async def update_depot(
         # consistent response when they accidentally send {}.
         existing = await repo.get(tenant.tenant_id, depot_id)
         if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "error_code": "depot_not_found",
-                    "depot_id": depot_id,
-                },
+            raise _ops_error(
+                status.HTTP_404_NOT_FOUND,
+                "depot_not_found",
+                "Depot not found",
+                {"depot_id": depot_id},
             )
         return existing
 
@@ -2165,24 +2182,21 @@ async def update_depot(
     except DepotCrossTenantAccessError as exc:
         raise _translate_depot_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
 
     if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "depot_not_found",
-                "depot_id": depot_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "depot_not_found",
+            "Depot not found",
+            {"depot_id": depot_id},
         )
     logger.info(
         "fuel_ops.depots.update: tenant=%s depot=%s fields=%s",
@@ -2214,6 +2228,11 @@ async def delete_depot(
     * Not-found → HTTP 404 with structured ``depot_not_found`` detail.
     * Cross-tenant → HTTP 403 with structured
       ``cross_tenant_access_denied`` detail.
+    * Still readable after the delete → HTTP 500 (never a false 204).
+
+    A hard delete from every store. When the tenant's default depot was the
+    deleted one, the default is cleared so the start-position resolver stops
+    pointing at it (N6).
 
     Validates: Requirement 2.2.2.
     """
@@ -2224,23 +2243,53 @@ async def delete_depot(
         deleted = await repo.delete(tenant.tenant_id, depot_id)
     except DepotCrossTenantAccessError as exc:
         raise _translate_depot_cross_tenant_error(exc)
+    except DepotDeleteIncompleteError:
+        raise internal_error(
+            message="Depot delete did not complete",
+            details={"depot_id": depot_id},
+        )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "depot_not_found",
-                "depot_id": depot_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "depot_not_found",
+            "Depot not found",
+            {"depot_id": depot_id},
         )
+    await _clear_default_depot_if(tenant.tenant_id, depot_id)
     logger.info(
         "fuel_ops.depots.delete: tenant=%s depot=%s",
         tenant.tenant_id,
         depot_id,
     )
     return None
+
+
+async def _clear_default_depot_if(tenant_id: str, depot_id: str) -> None:
+    """Clear ``tenant_settings.default_depot_id`` when it names ``depot_id``.
+
+    Best-effort: the depot is already gone, and with a dangling default the
+    resolver falls through to ``no_depot_configured``, so a settings failure
+    is logged and the delete still answers 204.
+    """
+    from ops.middleware.tenant_guard import get_tenant_settings_service
+
+    svc = get_tenant_settings_service()
+    if svc is None:
+        return
+    try:
+        if await svc.get_default_depot_id(tenant_id) == depot_id:
+            await svc.set_default_depot_id(tenant_id, None)
+    except Exception as exc:  # noqa: BLE001 — best-effort, see docstring
+        logger.warning(
+            "fuel_ops.depots.delete: could not clear default depot for "
+            "tenant=%s depot=%s: %s",
+            tenant_id,
+            depot_id,
+            exc,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2402,12 +2451,10 @@ async def list_compartment_trucks(
             "fuel_ops.compartment_trucks.list: lookup failed for tenant=%s",
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "compartment_trucks_lookup_failed",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "compartment_trucks_lookup_failed",
+            "Compartment trucks lookup failed",
         )
 
     aggs = resp.get("aggregations", {}) if hasattr(resp, "get") else {}
@@ -2461,12 +2508,10 @@ async def list_truck_compartments(
     """
 
     if not truck_id or not truck_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_truck_id",
-                "message": "truck_id must be a non-empty string.",
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_truck_id",
+            "truck_id must be a non-empty string.",
         )
 
     es = _get_es()
@@ -2495,12 +2540,10 @@ async def list_truck_compartments(
             truck_id_clean,
             tenant.tenant_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "truck_compartments_lookup_failed",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "truck_compartments_lookup_failed",
+            "Truck compartments lookup failed",
         )
 
     items: List[TruckCompartmentStateItem] = []
@@ -2684,12 +2727,10 @@ async def record_cleaning_event(
     file_storage = _file_storage_service
 
     if not compartment_id or not compartment_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_compartment_id",
-                "message": "compartment_id must be a non-empty string.",
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_compartment_id",
+            "compartment_id must be a non-empty string.",
         )
 
     # Pre-flight: compartment must exist and belong to the tenant so we
@@ -2699,15 +2740,14 @@ async def record_cleaning_event(
             tenant.tenant_id, compartment_id.strip()
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if state is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "compartment_not_found",
-                "compartment_id": compartment_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "compartment_not_found",
+            "Compartment not found",
+            {"compartment_id": compartment_id},
         )
 
     # Validate evidence_refs against the tenant via FileStorageService
@@ -2732,22 +2772,18 @@ async def record_cleaning_event(
                     ref,
                     exc,
                 )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail={
-                        "error_code": "cross_tenant_file_ref",
-                        "message": "Evidence ref belongs to a different tenant.",
-                        "field": f"evidence_refs[{idx}]",
-                    },
+                raise _ops_error(
+                    status.HTTP_403_FORBIDDEN,
+                    "cross_tenant_file_ref",
+                    "Evidence ref belongs to a different tenant.",
+                    {"field": f"evidence_refs[{idx}]"},
                 )
             except ValueError as exc:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail={
-                        "error_code": "invalid_file_ref",
-                        "message": str(exc),
-                        "field": f"evidence_refs[{idx}]",
-                    },
+                raise _ops_error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "invalid_file_ref",
+                    str(exc),
+                    {"field": f"evidence_refs[{idx}]"},
                 )
 
     # Validate the optional canonical driver reference (Req 8.2). When a
@@ -2786,12 +2822,11 @@ async def record_cleaning_event(
         # Another caller deleted the compartment between our pre-flight
         # lookup and the service call. Translate to 404 so the client
         # observes the same mode as the pre-flight case.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "compartment_not_found",
-                "compartment_id": compartment_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "compartment_not_found",
+            "Compartment not found",
+            {"compartment_id": compartment_id},
         )
     except CrossTenantCompartmentAccessError as exc:
         logger.warning(
@@ -2799,13 +2834,11 @@ async def record_cleaning_event(
             tenant.tenant_id,
             compartment_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error_code": "cross_tenant_access_denied",
-                "message": "Compartment belongs to a different tenant.",
-                "compartment_id": exc.compartment_doc_id,
-            },
+        raise _ops_error(
+            status.HTTP_403_FORBIDDEN,
+            "cross_tenant_access_denied",
+            "Compartment belongs to a different tenant.",
+            {"compartment_id": exc.compartment_doc_id},
         )
     except PermissionError as exc:
         # The service layer re-validates evidence_refs when a file
@@ -2819,12 +2852,10 @@ async def record_cleaning_event(
             compartment_id,
             exc,
         )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error_code": "cross_tenant_file_ref",
-                "message": "Evidence ref belongs to a different tenant.",
-            },
+        raise _ops_error(
+            status.HTTP_403_FORBIDDEN,
+            "cross_tenant_file_ref",
+            "Evidence ref belongs to a different tenant.",
         )
     except CompartmentStateConflictError as exc:
         logger.warning(
@@ -2833,13 +2864,11 @@ async def record_cleaning_event(
             compartment_id,
             exc.attempts,
         )
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "compartment_state_conflict",
-                "message": "Concurrent modification detected; retry the request.",
-                "compartment_id": compartment_id,
-            },
+        raise _ops_error(
+            status.HTTP_409_CONFLICT,
+            "compartment_state_conflict",
+            "Concurrent modification detected; retry the request.",
+            {"compartment_id": compartment_id},
         )
     except CleaningEventPersistenceError as exc:
         logger.error(
@@ -2849,15 +2878,13 @@ async def record_cleaning_event(
             compartment_id,
             exc.cleaning_event_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "cleaning_event_persistence_error",
-                "message": (
-                    "Cleaning event persisted but the compartment state "
-                    "reset failed; retry the reset using the returned "
-                    "cleaning_event_id."
-                ),
+        raise _ops_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "cleaning_event_persistence_error",
+            "Cleaning event persisted but the compartment state "
+            "reset failed; retry the reset using the returned "
+            "cleaning_event_id.",
+            {
                 "cleaning_event_id": exc.cleaning_event_id,
                 "compartment_id": compartment_id,
             },
@@ -3040,24 +3067,20 @@ async def check_compartment_load_eligibility(
     """
 
     if not compartment_id or not compartment_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_compartment_id",
-                "message": "compartment_id must be a non-empty string.",
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_compartment_id",
+            "compartment_id must be a non-empty string.",
         )
 
     if not product_code or not product_code.strip():
         # FastAPI's ``min_length=1`` catches the empty-string case at
         # validation time, but a whitespace-only value slips through so
         # we re-assert here for a consistent error shape.
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_product_code",
-                "message": "product_code must be a non-empty string.",
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_product_code",
+            "product_code must be a non-empty string.",
         )
 
     compartment_state_repo = _get_compartment_state_repository()
@@ -3070,15 +3093,14 @@ async def check_compartment_load_eligibility(
             tenant.tenant_id, compartment_id.strip()
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if state is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "compartment_not_found",
-                "compartment_id": compartment_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "compartment_not_found",
+            "Compartment not found",
+            {"compartment_id": compartment_id},
         )
 
     # Merge tenant overrides on top of the default matrix. The helper
@@ -3101,13 +3123,11 @@ async def check_compartment_load_eligibility(
         # Unknown product code: surface a 422 so clients can show the
         # caller which product_code was rejected rather than a generic
         # 400.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": str(exc),
-                "product_code": product_code,
-            },
+        raise _ops_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "unknown_product_code",
+            str(exc),
+            {"product_code": product_code},
         )
     except (TypeError, ValueError) as exc:
         raise _translate_validation_error(exc)
@@ -3123,13 +3143,11 @@ async def check_compartment_load_eligibility(
         # Practically unreachable: check_compatibility already canonicalized
         # the same code without raising. Guarded so a future engine change
         # doesn't hide the catalog error.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": str(exc),
-                "product_code": product_code,
-            },
+        raise _ops_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "unknown_product_code",
+            str(exc),
+            {"product_code": product_code},
         )
 
     state_view = LoadEligibilityCompartmentState(
@@ -3365,7 +3383,7 @@ async def list_priority_clusters(
             min_samples=min_samples,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     items = [_cluster_to_item(cluster) for cluster in clusters]
 
@@ -3539,22 +3557,19 @@ async def get_replan_diff(
             "fuel_ops.replans.diff: ES search failed for event=%s",
             event_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error_code": "replan_events_unavailable",
-                "message": "Replan events store is unavailable.",
-            },
+        raise _ops_error(
+            status.HTTP_502_BAD_GATEWAY,
+            "replan_events_unavailable",
+            "Replan events store is unavailable.",
         ) from exc
 
     hits = (resp or {}).get("hits", {}).get("hits", [])
     if not hits:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "replan_event_not_found",
-                "event_id": event_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "replan_event_not_found",
+            "Replan event not found",
+            {"event_id": event_id},
         )
     source = hits[0].get("_source") or {}
 
@@ -3562,12 +3577,11 @@ async def get_replan_diff(
     # tenant_id, but a corrupt or misconfigured mapping could still leak
     # a cross-tenant row; masking as 404 here keeps existence opaque.
     if source.get("tenant_id") != tenant.tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "replan_event_not_found",
-                "event_id": event_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "replan_event_not_found",
+            "Replan event not found",
+            {"event_id": event_id},
         )
 
     diff_payload = source.get("replan_diff")
@@ -3575,17 +3589,13 @@ async def get_replan_diff(
         # Escalated replans, or events indexed before Task 4.10 shipped,
         # won't carry a structured diff. Surface a distinct 404 so the FE
         # can differentiate "event missing" from "no diff for this event".
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "replan_diff_not_available",
-                "event_id": event_id,
-                "message": (
-                    "This replan event has no structured diff. It was "
-                    "either escalated without a feasible replan or "
-                    "predates the structured diff rollout."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "replan_diff_not_available",
+            "This replan event has no structured diff. It was "
+            "either escalated without a feasible replan or "
+            "predates the structured diff rollout.",
+            {"event_id": event_id},
         )
 
     try:
@@ -3600,12 +3610,11 @@ async def get_replan_diff(
             event_id,
             exc,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "replan_diff_corrupt",
-                "event_id": event_id,
-            },
+        raise _ops_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "replan_diff_corrupt",
+            "Replan diff corrupt",
+            {"event_id": event_id},
         ) from exc
 
     return ReplanDiffResponse(
@@ -3741,7 +3750,7 @@ async def list_priorities(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     hits = resp.get("hits", {}).get("hits", []) if resp else []
     total_block = resp.get("hits", {}).get("total", {}) if resp else {}
@@ -3869,7 +3878,7 @@ async def list_combinable_groups(
             size=page * size + 1,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     total_window = len(window)
     start = (page - 1) * size
@@ -3945,6 +3954,76 @@ class ReconciliationListResponse(BaseModel):
     has_next: bool
 
 
+def _reconciliation_must_clauses(
+    tenant_id: str,
+    order_id: Optional[str],
+    plan_id: Optional[str],
+    pod_id: Optional[str],
+    date_range: Optional[DateRange] = None,
+) -> List[Dict[str, Any]]:
+    """Must-clauses shared by the reconciliation list and its CSV export."""
+    must_clauses: List[Dict[str, Any]] = [
+        {"term": {"tenant_id": tenant_id}}
+    ]
+    if order_id and order_id.strip():
+        must_clauses.append({"term": {"order_id": order_id.strip()}})
+    if plan_id and plan_id.strip():
+        must_clauses.append({"term": {"plan_id": plan_id.strip()}})
+    if pod_id and pod_id.strip():
+        must_clauses.append({"term": {"pod_id": pod_id.strip()}})
+    if date_range is not None:
+        # ``generated_at`` is stored by ``model_dump(mode="json")``, which
+        # writes a UTC datetime with a ``Z`` suffix; the store compares as
+        # text, so the bounds use the same form.
+        clause = doc_range_clause("generated_at", date_range, z_suffix=True)
+        if clause is not None:
+            must_clauses.append(clause)
+    return must_clauses
+
+
+def _validated_reconciliation_rows(
+    hits: List[Any], tenant_id: str
+) -> List[ReconciliationRecord]:
+    """Tenant re-check, persistence-field strip and validation drop."""
+    validated_rows: List[ReconciliationRecord] = []
+    for hit in hits:
+        source = hit.get("_source") if hasattr(hit, 'get') else None
+        if not source:
+            continue
+        # Defense-in-depth: drop any row whose tenant_id does not match
+        # the caller. The ES ``term`` clause should already exclude
+        # them but a mis-labelled document must never leak.
+        if source.get("tenant_id") != tenant_id:
+            logger.warning(
+                "fuel_ops.reconciliation: dropping row with mismatched "
+                "tenant_id %s (expected %s)",
+                source.get("tenant_id"),
+                tenant_id,
+            )
+            continue
+        # Strip persistence-only fields that are not part of the model.
+        # ``_id``/``_source`` wrapping is already consumed above; here
+        # we drop the ``mvp_reconciliation`` mapping's ``created_at`` /
+        # ``updated_at`` / ``payment_status`` surrogates so the model's
+        # ``extra="forbid"`` does not trip. They are not part of the
+        # ReconciliationRecord contract.
+        doc = {k: v for k, v in source.items() if k not in (
+            "created_at",
+            "updated_at",
+            "payment_status",
+        )}
+        try:
+            validated_rows.append(ReconciliationRecord(**doc))
+        except ValidationError as exc:
+            logger.warning(
+                "fuel_ops.reconciliation: dropping row that failed "
+                "model validation (reconciliation_id=%s): %s",
+                source.get("reconciliation_id"),
+                exc,
+            )
+    return validated_rows
+
+
 @mvp_router.get("/reconciliation", response_model=ReconciliationListResponse)
 async def list_reconciliation_records(
     request: Request,
@@ -3978,6 +4057,20 @@ async def list_reconciliation_records(
         ge=1,
         le=500,
         description="Page size (1–500). Defaults to 50.",
+    ),
+    start_date: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only records generated at or after this YYYY-MM-DD or ISO-8601 "
+            "datetime (UTC when no offset is given)."
+        ),
+    ),
+    end_date: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only records generated on or before this date (a YYYY-MM-DD "
+            "value includes the whole day) or ISO-8601 datetime."
+        ),
     ),
 ) -> Dict[str, Any]:
     """Return paginated :class:`ReconciliationRecord` rows for the tenant.
@@ -4015,18 +4108,16 @@ async def list_reconciliation_records(
 
     Validates: Requirements 4.4.4, 4.4.5.
     """
+    # Invoiced amounts and variances: admin + dispatcher only, the same
+    # roles as the CSV export below (OI-19).
+    require_role(tenant, "admin", "dispatcher")
 
+    date_range = parse_date_range(start_date, end_date)
     es = _get_es()
 
-    must_clauses: List[Dict[str, Any]] = [
-        {"term": {"tenant_id": tenant.tenant_id}}
-    ]
-    if order_id and order_id.strip():
-        must_clauses.append({"term": {"order_id": order_id.strip()}})
-    if plan_id and plan_id.strip():
-        must_clauses.append({"term": {"plan_id": plan_id.strip()}})
-    if pod_id and pod_id.strip():
-        must_clauses.append({"term": {"pod_id": pod_id.strip()}})
+    must_clauses = _reconciliation_must_clauses(
+        tenant.tenant_id, order_id, plan_id, pod_id, date_range
+    )
 
     # When ``min_variance_pct`` is supplied we need to scan enough rows
     # to find ``page * size`` matches after the post-hoc filter. A
@@ -4053,7 +4144,7 @@ async def list_reconciliation_records(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     # Handle both dict and ObjectApiResponse
     hits_outer = resp.get("hits", {}) if hasattr(resp, 'get') else {}
@@ -4069,42 +4160,7 @@ async def list_reconciliation_records(
         except (TypeError, ValueError):
             es_total = 0
 
-    validated_rows: List[ReconciliationRecord] = []
-    for hit in hits:
-        source = hit.get("_source") if hasattr(hit, 'get') else None
-        if not source:
-            continue
-        # Defense-in-depth: drop any row whose tenant_id does not match
-        # the caller. The ES ``term`` clause should already exclude
-        # them but a mis-labelled document must never leak.
-        if source.get("tenant_id") != tenant.tenant_id:
-            logger.warning(
-                "fuel_ops.reconciliation: dropping row with mismatched "
-                "tenant_id %s (expected %s)",
-                source.get("tenant_id"),
-                tenant.tenant_id,
-            )
-            continue
-        # Strip persistence-only fields that are not part of the model.
-        # ``_id``/``_source`` wrapping is already consumed above; here
-        # we drop the ``mvp_reconciliation`` mapping's ``created_at`` /
-        # ``updated_at`` / ``payment_status`` surrogates so the model's
-        # ``extra="forbid"`` does not trip. They are not part of the
-        # ReconciliationRecord contract.
-        doc = {k: v for k, v in source.items() if k not in (
-            "created_at",
-            "updated_at",
-            "payment_status",
-        )}
-        try:
-            validated_rows.append(ReconciliationRecord(**doc))
-        except ValidationError as exc:
-            logger.warning(
-                "fuel_ops.reconciliation: dropping row that failed "
-                "model validation (reconciliation_id=%s): %s",
-                source.get("reconciliation_id"),
-                exc,
-            )
+    validated_rows = _validated_reconciliation_rows(hits, tenant.tenant_id)
 
     # Apply the min_variance_pct filter after model validation so we can
     # reason about the three variance percentages as floats in a single
@@ -4194,6 +4250,119 @@ async def list_reconciliation_records(
     # math would disagree due to integer division rounding.
     response["has_next"] = has_next
     return response
+
+
+# ---------------------------------------------------------------------------
+# GET /api/fuel/mvp/reconciliation/export (data-export §3.4)
+# ---------------------------------------------------------------------------
+
+_RECONCILIATION_EXPORT_COLUMNS = [
+    ExportColumn(name, (lambda n: lambda r: r.get(n))(name))
+    for name in (
+        "generated_at", "reconciliation_id", "order_id", "plan_id", "pod_id",
+        "customer_id", "assigned_asset_id", "assigned_driver_id",
+        "ordered_gallons", "loaded_gallons", "delivered_gallons",
+        "invoiced_gallons", "variance_load_vs_order_pct",
+        "variance_delivered_vs_loaded_pct",
+        "variance_invoiced_vs_delivered_pct", "invoice_id",
+        "canonical_invoice_id", "qbo_invoice_id", "alert_flags",
+    )
+]
+
+
+def _reconciliation_export_query(
+    tenant_id: str,
+    order_id: Optional[str],
+    plan_id: Optional[str],
+    pod_id: Optional[str],
+    min_variance_pct: Optional[float],
+    date_range: DateRange,
+) -> Dict[str, Any]:
+    """The list's query with ``min_variance_pct`` pushed down.
+
+    Equivalent to the list's post-hoc filter: the model constrains all three
+    variances to ``>= 0``, and a missing/``null`` invoiced variance fails the
+    numeric range (SQL NULL), just as the list skips ``None``.
+    """
+    bool_query: Dict[str, Any] = {
+        "must": _reconciliation_must_clauses(
+            tenant_id, order_id, plan_id, pod_id, date_range
+        )
+    }
+    if min_variance_pct is not None:
+        threshold = abs(float(min_variance_pct))
+        bool_query["should"] = [
+            {"range": {field: {"gte": threshold}}}
+            for field in (
+                "variance_load_vs_order_pct",
+                "variance_delivered_vs_loaded_pct",
+                "variance_invoiced_vs_delivered_pct",
+            )
+        ]
+        bool_query["minimum_should_match"] = 1
+    return {"query": {"bool": bool_query}}
+
+
+def _reconciliation_export_fetch(es: Any, tenant_id: str, base_query: Dict[str, Any]):
+    """KeysetFetch over ``mvp_reconciliation`` with a 2-key sort on every call."""
+    from services.keyset_pagination import raw_keyset_info
+
+    async def fetch(after, page_size, with_total):
+        query = dict(base_query)
+        query["sort"] = [
+            {"generated_at": {"order": "desc"}},
+            {"reconciliation_id": {"order": "asc"}},
+        ]
+        query["from"] = 0
+        query["size"] = page_size
+        if after is not None:
+            query["search_after"] = [after[0], after[1]]
+        resp = await es.search_documents(MVP_RECONCILIATION_INDEX, query, page_size)
+        raw_count, last_key = raw_keyset_info(resp, keyset=True)
+        hits_outer = resp.get("hits", {}) if hasattr(resp, "get") else {}
+        hits = hits_outer.get("hits", []) or []
+        total_block = hits_outer.get("total", {}) or {}
+        total = int(total_block.get("value", 0) or 0) if hasattr(total_block, "get") else int(total_block or 0)
+        rows = [
+            r.model_dump(mode="json")
+            for r in _validated_reconciliation_rows(hits, tenant_id)
+        ]
+        return KeysetPage(rows=rows, raw_count=raw_count, total=total, last_key=last_key)
+
+    return fetch
+
+
+@mvp_router.get("/reconciliation/export", response_model=None)
+@limiter.limit(EXPORT_RATE_LIMIT, key_func=export_rate_key)
+async def export_reconciliation_records(
+    request: Request,
+    tenant: TenantContext = Depends(
+        export_guard("admin", "dispatcher", base=get_tenant_context)
+    ),
+    order_id: Optional[str] = Query(default=None),
+    plan_id: Optional[str] = Query(default=None),
+    pod_id: Optional[str] = Query(default=None),
+    min_variance_pct: Optional[float] = Query(default=None, ge=0.0),
+    start_date: Optional[str] = Query(default=None),
+    end_date: Optional[str] = Query(default=None),
+):
+    """CSV reconciliation register matching the list filters (admin, dispatcher)."""
+    date_range = parse_date_range(start_date, end_date)
+    base_query = _reconciliation_export_query(
+        tenant.tenant_id, order_id, plan_id, pod_id, min_variance_pct, date_range
+    )
+    source = KeysetSource(
+        _reconciliation_export_fetch(_get_es(), tenant.tenant_id, base_query)
+    )
+    filters = {
+        "order_id": order_id, "plan_id": plan_id, "pod_id": pod_id,
+        "min_variance_pct": min_variance_pct,
+        "start_date": start_date, "end_date": end_date,
+    }
+    return await stream_csv_export(
+        request=request, tenant=tenant, export_type="reconciliation",
+        columns=_RECONCILIATION_EXPORT_COLUMNS, source=source, filters=filters,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -4309,16 +4478,12 @@ class EmergencyStopResponse(BaseModel):
 
 def _get_confirmation_protocol() -> ConfirmationProtocol:
     if _confirmation_protocol is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "confirmation_protocol_unavailable",
-                "message": (
-                    "ConfirmationProtocol is not wired into the fuel-ops "
-                    "endpoints module; emergency-stop insertions cannot be "
-                    "routed."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "confirmation_protocol_unavailable",
+            "ConfirmationProtocol is not wired into the fuel-ops "
+            "endpoints module; emergency-stop insertions cannot be "
+            "routed.",
         )
     return _confirmation_protocol
 
@@ -4351,29 +4516,26 @@ async def _load_route(tenant_id: str, route_id: str) -> Dict[str, Any]:
             route_id,
             tenant_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     hits = resp.get("hits", {}).get("hits", [])
     if not hits:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "route_not_found",
-                "route_id": route_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "route_not_found",
+            "Route not found",
+            {"route_id": route_id},
         )
     source = hits[0].get("_source", {}) or {}
     # Double-check tenant isolation: even though the ES filter should
     # guarantee this, we revalidate because downstream callers depend
     # on the invariant.
     if source.get("tenant_id") and source["tenant_id"] != tenant_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={
-                "error_code": "cross_tenant_access_denied",
-                "message": "Route belongs to a different tenant.",
-                "route_id": route_id,
-            },
+        raise _ops_error(
+            status.HTTP_403_FORBIDDEN,
+            "cross_tenant_access_denied",
+            "Route belongs to a different tenant.",
+            {"route_id": route_id},
         )
     return source
 
@@ -4394,27 +4556,22 @@ async def _resolve_destination_coordinates(
     """
 
     if bool(station_id) == bool(customer_tank_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "destination_required",
-                "message": (
-                    "Provide exactly one of station_id or customer_tank_id "
-                    "on the emergency-stop body."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "destination_required",
+            "Provide exactly one of station_id or customer_tank_id "
+            "on the emergency-stop body.",
         )
 
     if customer_tank_id:
         repo = _get_customer_tank_repository()
         tank = await repo.get(tenant_id, customer_tank_id)
         if tank is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "error_code": "customer_tank_not_found",
-                    "customer_tank_id": customer_tank_id,
-                },
+            raise _ops_error(
+                status.HTTP_404_NOT_FOUND,
+                "customer_tank_not_found",
+                "Customer tank not found",
+                {"customer_tank_id": customer_tank_id},
             )
         return {"lat": float(tank.location_lat), "lon": float(tank.location_lon)}
 
@@ -4439,15 +4596,14 @@ async def _resolve_destination_coordinates(
             "fuel_ops.emergency_stop: ES lookup failed for station=%s",
             station_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
     hits = resp.get("hits", {}).get("hits", [])
     if not hits:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "station_not_found",
-                "station_id": station_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "station_not_found",
+            "Station not found",
+            {"station_id": station_id},
         )
     source = hits[0].get("_source", {}) or {}
     lat = source.get("latitude")
@@ -4459,13 +4615,11 @@ async def _resolve_destination_coordinates(
         lat = loc.get("lat")
         lon = loc.get("lon")
     if lat is None or lon is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "station_missing_coordinates",
-                "message": "fuel_stations record has no lat/lon; cannot insert.",
-                "station_id": station_id,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "station_missing_coordinates",
+            "fuel_stations record has no lat/lon; cannot insert.",
+            {"station_id": station_id},
         )
     return {"lat": float(lat), "lon": float(lon)}
 
@@ -4517,7 +4671,7 @@ async def _compute_remaining_capacity_by_grade(
             truck_id,
             tenant_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     per_compartment: Dict[str, Dict[str, Any]] = {}
     for hit in resp.get("hits", {}).get("hits", []):
@@ -4734,13 +4888,11 @@ async def insert_route_emergency_stop(
     try:
         canonical_grade = canonicalize(body.fuel_grade)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
 
     # ---- Load the active route from ES ----
@@ -4749,12 +4901,11 @@ async def insert_route_emergency_stop(
     plan_id = route_source.get("plan_id") or None
     run_id = route_source.get("run_id", "")
     if not truck_id:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "route_missing_truck_id",
-                "route_id": route_id,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "route_missing_truck_id",
+            "Route missing truck id",
+            {"route_id": route_id},
         )
 
     # ---- Resolve emergency stop coordinates ----
@@ -4797,23 +4948,18 @@ async def insert_route_emergency_stop(
         insertion = insert_emergency_stop(solver_route, emergency_dict)
     except InfeasibleInsertion as exc:
         # Req 2.4.4: structured reason codes on HTTP 409.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": exc.reason,
-                "message": f"Emergency stop insertion infeasible: {exc.reason}",
-                "reason": exc.reason,
-                "details": dict(exc.details or {}),
-            },
+        raise _ops_error(
+            status.HTTP_409_CONFLICT,
+            exc.reason,
+            f"Emergency stop insertion infeasible: {exc.reason}",
+            {"reason": exc.reason, "details": dict(exc.details or {})},
         )
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "invalid_route_shape",
-                "message": str(exc),
-                "route_id": route_id,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_route_shape",
+            str(exc),
+            {"route_id": route_id},
         )
 
     # ---- Compute Replan_Diff between original and patched routes ----
@@ -4897,7 +5043,7 @@ async def insert_route_emergency_stop(
             route_id,
             tenant.tenant_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     approval_id = mutation_result.approval_id
     risk_level = mutation_result.risk_level or ("high" if high_risk else "medium")
@@ -4973,7 +5119,7 @@ async def insert_route_emergency_stop(
             tenant.tenant_id,
             event_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     # ---- Broadcast WebSocket event (Req 2.4.6) ----
     if _fuel_planning_ws_manager is not None:
@@ -5361,7 +5507,7 @@ async def list_terminals(
         # match the depot-list behavior.
         window = []
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if operator:
         needle = operator.strip().lower()
@@ -5425,13 +5571,11 @@ async def create_terminal(
     except TerminalCrossTenantAccessError as exc:
         raise _translate_terminal_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
@@ -5489,12 +5633,11 @@ async def update_terminal(
     if not patch:
         existing = await repo.get(tenant.tenant_id, terminal_id)
         if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "error_code": "terminal_not_found",
-                    "terminal_id": terminal_id,
-                },
+            raise _ops_error(
+                status.HTTP_404_NOT_FOUND,
+                "terminal_not_found",
+                "Terminal not found",
+                {"terminal_id": terminal_id},
             )
         return existing
 
@@ -5507,24 +5650,21 @@ async def update_terminal(
     except TerminalCrossTenantAccessError as exc:
         raise _translate_terminal_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
 
     if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "terminal_not_found",
-                "terminal_id": terminal_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "terminal_not_found",
+            "Terminal not found",
+            {"terminal_id": terminal_id},
         )
 
     logger.info(
@@ -5564,15 +5704,14 @@ async def delete_terminal(
     except TerminalCrossTenantAccessError as exc:
         raise _translate_terminal_cross_tenant_error(exc)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "terminal_not_found",
-                "terminal_id": terminal_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "terminal_not_found",
+            "Terminal not found",
+            {"terminal_id": terminal_id},
         )
     logger.info(
         "fuel_ops.terminals.delete: tenant=%s terminal=%s",
@@ -5678,23 +5817,19 @@ async def propose_load_at_terminal(
     try:
         canonical_product = canonicalize(body.product_code)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
 
     if canonical_product not in terminal.supported_products:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "product_not_supported",
-                "message": (
-                    "Terminal does not load the requested product."
-                ),
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "product_not_supported",
+            "Terminal does not load the requested product.",
+            {
                 "terminal_id": terminal_id,
                 "product_code": canonical_product,
                 "supported_products": list(terminal.supported_products),
@@ -5707,20 +5842,16 @@ async def propose_load_at_terminal(
 
     if not terminal.is_open_at(as_of):
         next_window = _compute_next_open_window(terminal, as_of)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "terminal_closed",
-                "message": (
-                    "Terminal is closed at the requested time."
-                ),
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "terminal_closed",
+            "Terminal is closed at the requested time.",
+            {
                 "terminal_id": terminal_id,
                 "as_of": as_of.isoformat(),
-                "next_open_window": (
-                    next_window.model_dump(mode="json")
-                    if next_window is not None
-                    else None
-                ),
+                "next_open_window": next_window.model_dump(mode="json")
+                if next_window is not None
+                else None,
             },
         )
 
@@ -5937,7 +6068,7 @@ class TerminalWaitSummaryResponse(BaseModel):
 
 def _translate_terminal_cross_tenant_error(
     exc: TerminalCrossTenantAccessError,
-) -> HTTPException:
+) -> AppException:
     """Map :class:`fuel.terminal_models.CrossTenantAccessError` to HTTP 403.
 
     We surface a generic ``cross_tenant_access_denied`` reason code so
@@ -5946,14 +6077,11 @@ def _translate_terminal_cross_tenant_error(
     tells them that.
     """
 
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error_code": "cross_tenant_access_denied",
-            "message": "Entity belongs to a different tenant.",
-            "entity_type": exc.entity_type,
-            "entity_id": exc.entity_id,
-        },
+    return _ops_error(
+        status.HTTP_403_FORBIDDEN,
+        "cross_tenant_access_denied",
+        "Entity belongs to a different tenant.",
+        {"entity_type": exc.entity_type, "entity_id": exc.entity_id},
     )
 
 
@@ -5973,12 +6101,11 @@ async def _ensure_terminal_owned(
     repo = _get_terminal_repository()
     terminal = await repo.get(tenant_id, terminal_id)
     if terminal is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "terminal_not_found",
-                "terminal_id": terminal_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "terminal_not_found",
+            "Terminal not found",
+            {"terminal_id": terminal_id},
         )
     return terminal
 
@@ -6304,7 +6431,7 @@ async def submit_terminal_wait_report(
             tenant.tenant_id,
             terminal_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     # Invalidate the cached rolling average so the next summary read
     # picks up this observation immediately. Fire-and-forget — a Redis
@@ -6415,7 +6542,7 @@ async def get_terminal_wait_summary(
             tenant.tenant_id,
             terminal_id,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     # Write-through cache on the compute path so the next read is O(1).
     # The cached payload is the raw aggregation (no warning booleans)
@@ -6512,12 +6639,10 @@ def _parse_sourcing_as_of(raw: Optional[str]) -> datetime:
         # ``fromisoformat`` accepts ``...Z`` terminators in Py3.11+.
         candidate = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "invalid_as_of",
-                "message": f"as_of must be an ISO-8601 timestamp: {exc}",
-            },
+        raise _ops_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "invalid_as_of",
+            f"as_of must be an ISO-8601 timestamp: {exc}",
         )
     if candidate.tzinfo is None:
         candidate = candidate.replace(tzinfo=timezone.utc)
@@ -6636,31 +6761,25 @@ async def get_sourcing_recommendations(
             terminal_ids=restrict_to,
         )
     except InvalidBrandedPreferenceError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "invalid_branded_preference",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "invalid_branded_preference",
+            str(exc),
         )
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "unknown_product_code",
-                "product_code": product_code,
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "unknown_product_code",
+            str(exc),
+            {"product_code": product_code},
         )
     except ValueError as exc:
         # The recommender validates ranges defensively; surface the
         # underlying message so developers see which constraint tripped.
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "error_code": "invalid_sourcing_request",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "invalid_sourcing_request",
+            str(exc),
         )
     except Exception as exc:
         logger.exception(
@@ -6669,7 +6788,7 @@ async def get_sourcing_recommendations(
             product_code,
             exc,
         )
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise internal_error()
 
     # Persist for audit (Req 8.5.4). Failures here must not prevent
     # returning the ranking to the caller — the persistence path is
@@ -6874,7 +6993,7 @@ class SupplierContractListResponse(BaseModel):
 
 def _translate_supplier_contract_cross_tenant_error(
     exc: TerminalCrossTenantAccessError,
-) -> HTTPException:
+) -> AppException:
     """Map :class:`fuel.terminal_models.CrossTenantAccessError` to HTTP 403.
 
     The owning tenant is deliberately not echoed back to the caller —
@@ -6883,13 +7002,11 @@ def _translate_supplier_contract_cross_tenant_error(
     tenant metadata.
     """
 
-    return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={
-            "error_code": "cross_tenant_access_denied",
-            "message": "Supplier contract belongs to a different tenant.",
-            "contract_id": exc.entity_id,
-        },
+    return _ops_error(
+        status.HTTP_403_FORBIDDEN,
+        "cross_tenant_access_denied",
+        "Supplier contract belongs to a different tenant.",
+        {"contract_id": exc.entity_id},
     )
 
 
@@ -6973,16 +7090,14 @@ async def list_supplier_contracts(
             size=page * size + 1,
         )
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     total = len(window)
     start = (page - 1) * size
@@ -7040,15 +7155,14 @@ async def get_supplier_contract(
     try:
         contract = await repo.get(tenant.tenant_id, contract_id)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if contract is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "supplier_contract_not_found",
-                "contract_id": contract_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "supplier_contract_not_found",
+            "Supplier contract not found",
+            {"contract_id": contract_id},
         )
     return await _build_contract_response(contract)
 
@@ -7094,13 +7208,11 @@ async def create_supplier_contract(
         # guards against cross-tenant payloads regardless.
         raise _translate_supplier_contract_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
@@ -7152,12 +7264,11 @@ async def update_supplier_contract(
         # consistent response shape when they accidentally send {}.
         existing = await repo.get(tenant.tenant_id, contract_id)
         if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail={
-                    "error_code": "supplier_contract_not_found",
-                    "contract_id": contract_id,
-                },
+            raise _ops_error(
+                status.HTTP_404_NOT_FOUND,
+                "supplier_contract_not_found",
+                "Supplier contract not found",
+                {"contract_id": contract_id},
             )
         return await _build_contract_response(existing)
 
@@ -7170,24 +7281,21 @@ async def update_supplier_contract(
     except TerminalCrossTenantAccessError as exc:
         raise _translate_supplier_contract_cross_tenant_error(exc)
     except UnknownFuelProductError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "unknown_product_code",
-                "message": "Unknown fuel product code.",
-                "fuel_product_code": exc.code_or_alias,
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "unknown_product_code",
+            "Unknown fuel product code.",
+            {"fuel_product_code": exc.code_or_alias},
         )
     except (ValidationError, ValueError, TypeError) as exc:
         raise _translate_validation_error(exc)
 
     if updated is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "supplier_contract_not_found",
-                "contract_id": contract_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "supplier_contract_not_found",
+            "Supplier contract not found",
+            {"contract_id": contract_id},
         )
 
     logger.info(
@@ -7239,15 +7347,14 @@ async def delete_supplier_contract(
     except TerminalCrossTenantAccessError as exc:
         raise _translate_supplier_contract_cross_tenant_error(exc)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        raise _ops_error(400, "validation_error", str(exc))
 
     if not deleted:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "supplier_contract_not_found",
-                "contract_id": contract_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "supplier_contract_not_found",
+            "Supplier contract not found",
+            {"contract_id": contract_id},
         )
 
     logger.info(
@@ -7602,12 +7709,10 @@ async def _fetch_pod_by_id(
             pod_id,
             tenant_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error_code": "pod_store_unavailable",
-                "message": "Proof-of-delivery store is unavailable.",
-            },
+        raise _ops_error(
+            status.HTTP_502_BAD_GATEWAY,
+            "pod_store_unavailable",
+            "Proof-of-delivery store is unavailable.",
         ) from exc
 
     hits = (resp or {}).get("hits", {}).get("hits", [])
@@ -7683,12 +7788,11 @@ async def get_pod_hash_proof(
     es = _get_es()
     pod_doc = await _fetch_pod_by_id(es, tenant.tenant_id, pod_id)
     if pod_doc is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "pod_not_found",
-                "pod_id": pod_id,
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "pod_not_found",
+            "Pod not found",
+            {"pod_id": pod_id},
         )
 
     stored_hash = pod_doc.get("pod_hash")
@@ -7697,17 +7801,13 @@ async def get_pod_hash_proof(
         # Pre-8.10 rows don't carry a hash. Surface a distinct 409 so the
         # caller can differentiate "POD missing" from "POD exists but
         # predates the hash-chain rollout" and trigger a backfill.
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "pod_hash_unavailable",
-                "pod_id": pod_id,
-                "message": (
-                    "This POD record has no stored pod_hash. It was "
-                    "persisted before the hash-chain rollout and needs "
-                    "to be backfilled."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_409_CONFLICT,
+            "pod_hash_unavailable",
+            "This POD record has no stored pod_hash. It was "
+            "persisted before the hash-chain rollout and needs "
+            "to be backfilled.",
+            {"pod_id": pod_id},
         )
 
     # Rebuild the canonical payload the same way the writer did so the
@@ -7725,13 +7825,11 @@ async def get_pod_hash_proof(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "error_code": "pod_canonicalization_failed",
-                "pod_id": pod_id,
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            "pod_canonicalization_failed",
+            "POD canonicalization failed",
+            {"pod_id": pod_id},
         )
 
     canonical_payload = _hash_chain_json.loads(canonical_bytes.decode("utf-8"))
@@ -7770,58 +7868,42 @@ async def _resolve_pod_ids_for_verify(
     # Explicit list mode ---------------------------------------------------
     if body.pod_ids is not None:
         if body.from_pod_id or body.to_pod_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "invalid_selector",
-                    "message": (
-                        "Provide either ``pod_ids`` or "
-                        "``from_pod_id``/``to_pod_id``, not both."
-                    ),
-                },
+            raise _ops_error(
+                status.HTTP_400_BAD_REQUEST,
+                "invalid_selector",
+                "Provide either ``pod_ids`` or "
+                "``from_pod_id``/``to_pod_id``, not both.",
             )
         if not body.pod_ids:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "empty_pod_ids",
-                    "message": "pod_ids must contain at least one pod_id.",
-                },
+            raise _ops_error(
+                status.HTTP_400_BAD_REQUEST,
+                "empty_pod_ids",
+                "pod_ids must contain at least one pod_id.",
             )
         if len(body.pod_ids) > HASH_CHAIN_MAX_LIMIT:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "pod_ids_exceeds_limit",
-                    "message": (
-                        f"pod_ids length {len(body.pod_ids)} exceeds the "
-                        f"per-request cap of {HASH_CHAIN_MAX_LIMIT}."
-                    ),
-                },
+            raise _ops_error(
+                status.HTTP_400_BAD_REQUEST,
+                "pod_ids_exceeds_limit",
+                f"pod_ids length {len(body.pod_ids)} exceeds the "
+                f"per-request cap of {HASH_CHAIN_MAX_LIMIT}.",
             )
         # Strip whitespace and drop empties without re-ordering.
         cleaned = [pid.strip() for pid in body.pod_ids if pid and pid.strip()]
         if not cleaned:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={
-                    "error_code": "empty_pod_ids",
-                    "message": "pod_ids contains no usable identifiers.",
-                },
+            raise _ops_error(
+                status.HTTP_400_BAD_REQUEST,
+                "empty_pod_ids",
+                "pod_ids contains no usable identifiers.",
             )
         return cleaned
 
     # Range mode -----------------------------------------------------------
     if not (body.from_pod_id and body.to_pod_id):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error_code": "missing_selector",
-                "message": (
-                    "Provide either ``pod_ids`` or both ``from_pod_id`` "
-                    "and ``to_pod_id``."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "missing_selector",
+            "Provide either ``pod_ids`` or both ``from_pod_id`` "
+            "and ``to_pod_id``.",
         )
 
     limit = body.limit or HASH_CHAIN_DEFAULT_LIMIT
@@ -7830,31 +7912,23 @@ async def _resolve_pod_ids_for_verify(
     end_doc = await _fetch_pod_by_id(es, tenant_id, body.to_pod_id)
     if start_doc is None or end_doc is None:
         missing = body.from_pod_id if start_doc is None else body.to_pod_id
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "pod_not_found",
-                "pod_id": missing,
-                "message": (
-                    "Range anchor POD was not found for this tenant. "
-                    "Check that the pod_id exists and belongs to the "
-                    "authenticated tenant."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "pod_not_found",
+            "Range anchor POD was not found for this tenant. "
+            "Check that the pod_id exists and belongs to the "
+            "authenticated tenant.",
+            {"pod_id": missing},
         )
 
     start_ts = start_doc.get("timestamp") or start_doc.get("delivered_at")
     end_ts = end_doc.get("timestamp") or end_doc.get("delivered_at")
     if not start_ts or not end_ts:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail={
-                "error_code": "pod_timestamp_unavailable",
-                "message": (
-                    "Range anchor POD is missing a timestamp; cannot "
-                    "resolve the verification window."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_409_CONFLICT,
+            "pod_timestamp_unavailable",
+            "Range anchor POD is missing a timestamp; cannot "
+            "resolve the verification window.",
         )
 
     # Normalize the range so callers can pass either order.
@@ -7882,12 +7956,10 @@ async def _resolve_pod_ids_for_verify(
             body.from_pod_id,
             body.to_pod_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error_code": "pod_store_unavailable",
-                "message": "Proof-of-delivery store is unavailable.",
-            },
+        raise _ops_error(
+            status.HTTP_502_BAD_GATEWAY,
+            "pod_store_unavailable",
+            "Proof-of-delivery store is unavailable.",
         ) from exc
 
     hits = (resp or {}).get("hits", {}).get("hits", [])
@@ -7900,14 +7972,10 @@ async def _resolve_pod_ids_for_verify(
         if pod_id:
             ordered_ids.append(pod_id)
     if not ordered_ids:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "hash_chain_range_empty",
-                "message": (
-                    "No PODs were found in the requested timestamp range."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "hash_chain_range_empty",
+            "No PODs were found in the requested timestamp range.",
         )
     return ordered_ids
 
@@ -8162,12 +8230,10 @@ async def _fetch_bol_for_pod(
             pod_id,
             tenant_id,
         )
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "error_code": "bol_store_unavailable",
-                "message": "Bill-of-lading store is unavailable.",
-            },
+        raise _ops_error(
+            status.HTTP_502_BAD_GATEWAY,
+            "bol_store_unavailable",
+            "Bill-of-lading store is unavailable.",
         ) from exc
 
     hits = (resp or {}).get("hits", {}).get("hits", [])
@@ -8210,25 +8276,23 @@ async def get_pod_bol(
     Validates: Requirements 4.3.4, 4.3.5.
     """
     if not pod_id or not pod_id.strip():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail={"error_code": "invalid_pod_id", "pod_id": pod_id},
+        raise _ops_error(
+            status.HTTP_400_BAD_REQUEST,
+            "invalid_pod_id",
+            "Invalid pod id",
+            {"pod_id": pod_id},
         )
 
     es = _get_es()
     bol_doc = await _fetch_bol_for_pod(es, tenant.tenant_id, pod_id)
     if bol_doc is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={
-                "error_code": "bol_not_found",
-                "pod_id": pod_id,
-                "message": (
-                    "No BOL record exists for this POD. The POD may not "
-                    "exist, the tenant may not own it, or "
-                    "overlay.bol_generation was disabled at finalization."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_404_NOT_FOUND,
+            "bol_not_found",
+            "No BOL record exists for this POD. The POD may not "
+            "exist, the tenant may not own it, or "
+            "overlay.bol_generation was disabled at finalization.",
+            {"pod_id": pod_id},
         )
 
     bol_id = str(bol_doc.get("bol_id") or "")
@@ -8256,15 +8320,11 @@ async def get_pod_bol(
                 tenant.tenant_id,
                 pod_id,
             )
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail={
-                    "error_code": "file_storage_unavailable",
-                    "message": (
-                        "File storage service is not configured. "
-                        "BOL download URLs cannot be issued."
-                    ),
-                },
+            raise _ops_error(
+                status.HTTP_503_SERVICE_UNAVAILABLE,
+                "file_storage_unavailable",
+                "File storage service is not configured. "
+                "BOL download URLs cannot be issued.",
             )
         try:
             presigned = file_storage.presign_get(
@@ -8285,20 +8345,20 @@ async def get_pod_bol(
                 bol_id,
                 exc,
             )
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail={
-                    "error_code": "bol_file_ref_corrupt",
-                    "pod_id": pod_id,
-                    "bol_id": bol_id,
-                },
+            raise _ops_error(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "bol_file_ref_corrupt",
+                "Bol file ref corrupt",
+                {"pod_id": pod_id, "bol_id": bol_id},
             )
         except ValueError as exc:
             # Malformed TTL / tenant_id on server side — should not happen
             # with the constants above, but surface cleanly if it does.
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail={"error_code": "invalid_presign_request", "reason": str(exc)},
+            raise _ops_error(
+                status.HTTP_400_BAD_REQUEST,
+                "invalid_presign_request",
+                "Invalid presign request",
+                {"reason": str(exc)},
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception(
@@ -8307,13 +8367,11 @@ async def get_pod_bol(
                 pod_id,
                 exc,
             )
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail={
-                    "error_code": "presign_failed",
-                    "pod_id": pod_id,
-                    "message": "Failed to issue presigned download URL.",
-                },
+            raise _ops_error(
+                status.HTTP_502_BAD_GATEWAY,
+                "presign_failed",
+                "Failed to issue presigned download URL.",
+                {"pod_id": pod_id},
             )
         download_url = presigned.get("download_url") if isinstance(presigned, dict) else None
         expires_at = presigned.get("expires_at") if isinstance(presigned, dict) else None
@@ -8474,16 +8532,12 @@ def _get_storm_mode_evaluator() -> StormModeEvaluator:
     state.
     """
     if _storm_mode_evaluator is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "storm_mode_evaluator_unavailable",
-                "message": (
-                    "Storm_Mode evaluator is not configured. Finish the "
-                    "bootstrap wire-up (see bootstrap/agents.py) before "
-                    "calling /api/fuel/storm-mode/status."
-                ),
-            },
+        raise _ops_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "storm_mode_evaluator_unavailable",
+            "Storm_Mode evaluator is not configured. Finish the "
+            "bootstrap wire-up (see bootstrap/agents.py) before "
+            "calling /api/fuel/storm-mode/status.",
         )
     return _storm_mode_evaluator
 
@@ -8933,12 +8987,10 @@ async def submit_storm_mode_override(
             override.override_id,
             override.action,
         )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "storm_mode_override_persistence_failed",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "storm_mode_override_persistence_failed",
+            "Storm mode override could not be saved",
         )
 
     logger.info(
@@ -9135,12 +9187,10 @@ async def upload_storm_road_restriction(
             restriction.severity,
             restriction.source,
         )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "storm_road_restriction_persistence_failed",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "storm_road_restriction_persistence_failed",
+            "Storm road restriction could not be saved",
         )
 
     logger.info(
@@ -9256,12 +9306,10 @@ async def list_storm_road_restrictions(
             tenant.tenant_id,
             exc,
         )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={
-                "error_code": "storm_road_restriction_search_failed",
-                "message": str(exc),
-            },
+        raise _ops_error(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "storm_road_restriction_search_failed",
+            "Storm road restrictions could not be loaded",
         )
 
     hits = (resp or {}).get("hits", {}).get("hits", []) or []

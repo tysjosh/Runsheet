@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { dateTime, time } from "../../lib/format";
 import { apiService } from "../../services/api";
 import {
   getCargo,
@@ -61,7 +62,10 @@ import type {
 } from "../../types/api";
 import LoadingSpinner from "../LoadingSpinner";
 import { entityHref } from "../ui/EntityLink";
+import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
 import CargoManifestEditor from "./CargoManifestEditor";
+import DriverActivitySection from "./DriverActivitySection";
 import JobActionButtons from "./JobActionButtons";
 
 // ─── Cross-Module Linkage Helpers (cross-module-entity-linkage Req 3.3, 13.1) ─
@@ -106,14 +110,30 @@ interface JobDetailPageProps {
 
 function formatDateTime(dateStr?: string): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return dateTime(dateStr);
+}
+
+/**
+ * Format the live ETA from ``GET /scheduling/jobs/{id}/eta``.
+ *
+ * Returns ``null`` when there is no live ETA (no numeric ``eta_minutes``), so
+ * the caller hides the row instead of printing "undefined min" (R-2). The
+ * arrival time is appended only when it parses as a date.
+ */
+export function formatLiveEta(
+  eta: {
+    eta_minutes?: number | null;
+    estimated_arrival?: string | null;
+  } | null,
+): string | null {
+  const minutes = eta?.eta_minutes;
+  if (typeof minutes !== "number" || !Number.isFinite(minutes)) return null;
+  const arrival = eta?.estimated_arrival
+    ? new Date(eta.estimated_arrival)
+    : null;
+  return arrival && !Number.isNaN(arrival.getTime())
+    ? `${minutes} min (${time(arrival)})`
+    : `${minutes} min`;
 }
 
 function formatJobType(jobType: string): string {
@@ -474,9 +494,10 @@ export default function JobDetailPage({
   const [error, setError] = useState("");
   const [transitionError, setTransitionError] = useState("");
   const [eta, setEta] = useState<{
-    eta_minutes: number;
-    estimated_arrival: string;
+    eta_minutes?: number | null;
+    estimated_arrival?: string | null;
   } | null>(null);
+  const liveEta = formatLiveEta(eta);
   const [showReassign, setShowReassign] = useState(false);
   const [reassignAssetId, setReassignAssetId] = useState("");
   const [reassigning, setReassigning] = useState(false);
@@ -605,11 +626,12 @@ export default function JobDetailPage({
           // Re-fetch failed — use the transition response as fallback
         }
       } catch (err) {
-        setTransitionError(
+        const msg =
           err instanceof Error
             ? err.message
-            : "Failed to transition job status",
-        );
+            : "Failed to transition job status";
+        setTransitionError(msg);
+        notify({ type: "error", message: `Job ${id}: ${msg}` });
       }
     },
     [onTransition, jobId, applyJobResponse],
@@ -667,9 +689,16 @@ export default function JobDetailPage({
         </div>
         <div className="flex-1 flex items-center justify-center">
           <div className="text-center">
-            <AlertTriangle className="w-10 h-10 text-error mx-auto mb-3" />
-            <p className="text-sm text-error mb-4">
-              {error || "Job not found"}
+            <AlertTriangle
+              aria-hidden="true"
+              className="w-10 h-10 text-error mx-auto mb-3"
+            />
+            {/* One heading even when the job can't be shown (R2.5). */}
+            <PageTitle className="mb-1 text-base font-semibold text-slate-900">
+              Job not found
+            </PageTitle>
+            <p className="text-sm text-red-800 mb-4">
+              {error || `We couldn't find job "${jobId}".`}
             </p>
             <button
               onClick={loadData}
@@ -700,9 +729,9 @@ export default function JobDetailPage({
             </button>
             <div>
               <div className="flex items-center gap-3">
-                <h1 className="text-2xl font-semibold text-primary">
+                <PageTitle className="text-2xl font-semibold text-primary">
                   {job.job_id}
-                </h1>
+                </PageTitle>
                 <span
                   className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(job.status, job.delayed)}`}
                 >
@@ -879,11 +908,11 @@ export default function JobDetailPage({
                 label="Estimated Arrival"
                 value={formatDateTime(job.estimated_arrival)}
               />
-              {eta && (
+              {liveEta && (
                 <DetailField
                   icon={<Clock className="w-4 h-4" />}
                   label="Live ETA"
-                  value={`${eta.eta_minutes} min (${new Date(eta.estimated_arrival).toLocaleTimeString()})`}
+                  value={liveEta}
                 />
               )}
               <DetailField
@@ -949,14 +978,14 @@ export default function JobDetailPage({
                 label="Order"
                 link={links.order}
                 fallbackId={job.order_id}
-                href={(id) => `/orders/${encodeURIComponent(id)}`}
+                href={(id) => `/dashboard/orders/${encodeURIComponent(id)}`}
               />
               <LinkedRefField
                 icon={<User className="w-4 h-4" />}
                 label="Customer"
                 link={links.customer}
                 fallbackId={job.customer_id}
-                href={(id) => `/commerce/customers/${encodeURIComponent(id)}`}
+                href={(id) => `/dashboard/customers/${encodeURIComponent(id)}`}
               />
               <LinkedRefField
                 icon={<Truck className="w-4 h-4" />}
@@ -986,6 +1015,9 @@ export default function JobDetailPage({
               <EventTimeline events={job.events ?? []} />
             </div>
           </div>
+
+          {/* Driver Activity (G1): the job's driver messages and exceptions */}
+          <DriverActivitySection jobId={job.job_id} />
 
           {/* Cargo Manifest Card */}
           {(job.job_type === "cargo_transport" || cargo.length > 0) && (

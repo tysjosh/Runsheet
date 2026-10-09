@@ -10,13 +10,21 @@ Validates:
 """
 
 import logging
-from typing import Callable
+from typing import Callable, Optional
 
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
+
+#: HSTS value sent outside local environments (staging finding F6). One year,
+#: covering subdomains. ``preload`` is deliberately not set.
+HSTS_VALUE = "max-age=31536000; includeSubDomains"
+
+#: Defaults for the two headers added for F6.
+DEFAULT_REFERRER_POLICY = "strict-origin-when-cross-origin"
+DEFAULT_PERMISSIONS_POLICY = "camera=(), microphone=(), geolocation=()"
 
 
 # Default Content-Security-Policy directives
@@ -64,6 +72,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     - Content-Security-Policy
       Restricts the sources from which content can be loaded, protecting against XSS and
       data injection attacks
+
+    - Referrer-Policy and Permissions-Policy (staging finding F6)
+
+    - Strict-Transport-Security, only when ``strict_transport_security`` is set
+      (outside development/test; see ``bootstrap/middleware.py``)
     
     Validates:
     - Requirement 14.5: THE Backend_Service SHALL add security headers
@@ -77,6 +90,9 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         x_frame_options: str = "DENY",
         content_security_policy: str = None,
         csp_directives: dict[str, str] = None,
+        strict_transport_security: Optional[str] = None,
+        referrer_policy: str = DEFAULT_REFERRER_POLICY,
+        permissions_policy: str = DEFAULT_PERMISSIONS_POLICY,
     ):
         """
         Initialize the security headers middleware.
@@ -87,10 +103,17 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             x_frame_options: Value for X-Frame-Options header (default: "DENY")
             content_security_policy: Full CSP header string (overrides csp_directives if provided)
             csp_directives: Dictionary of CSP directives to build the CSP header
+            strict_transport_security: HSTS header value; ``None`` (default)
+                means the header is not sent
+            referrer_policy: Value for the Referrer-Policy header
+            permissions_policy: Value for the Permissions-Policy header
         """
         super().__init__(app)
         self.x_content_type_options = x_content_type_options
         self.x_frame_options = x_frame_options
+        self.strict_transport_security = strict_transport_security
+        self.referrer_policy = referrer_policy
+        self.permissions_policy = permissions_policy
         
         # Build CSP header from directives or use provided string
         if content_security_policy:
@@ -133,6 +156,15 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         
         # Content-Security-Policy: Restricts content sources
         response.headers["Content-Security-Policy"] = self.content_security_policy
+
+        response.headers["Referrer-Policy"] = self.referrer_policy
+        response.headers["Permissions-Policy"] = self.permissions_policy
+
+        # Strict-Transport-Security: configured only outside local environments
+        if self.strict_transport_security:
+            response.headers["Strict-Transport-Security"] = (
+                self.strict_transport_security
+            )
         
         return response
 
@@ -143,6 +175,7 @@ def setup_security_headers(
     x_frame_options: str = "DENY",
     content_security_policy: str = None,
     csp_directives: dict[str, str] = None,
+    strict_transport_security: Optional[str] = None,
 ) -> None:
     """
     Configure security headers middleware for a FastAPI application.
@@ -160,6 +193,7 @@ def setup_security_headers(
         x_frame_options: Value for X-Frame-Options header (default: "DENY")
         content_security_policy: Full CSP header string (overrides csp_directives if provided)
         csp_directives: Dictionary of CSP directives to build the CSP header
+        strict_transport_security: HSTS header value; ``None`` means not sent
     """
     app.add_middleware(
         SecurityHeadersMiddleware,
@@ -167,9 +201,11 @@ def setup_security_headers(
         x_frame_options=x_frame_options,
         content_security_policy=content_security_policy,
         csp_directives=csp_directives,
+        strict_transport_security=strict_transport_security,
     )
     
     logger.info(
         f"Security headers configured: X-Content-Type-Options={x_content_type_options}, "
-        f"X-Frame-Options={x_frame_options}"
+        f"X-Frame-Options={x_frame_options}, "
+        f"HSTS={'on' if strict_transport_security else 'off'}"
     )

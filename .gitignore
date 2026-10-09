@@ -24,6 +24,8 @@ develop-eggs/
 downloads/
 eggs/
 lib/
+# The web app keeps shared TS helpers in src/lib (format, identity).
+!runsheet/src/lib/
 lib64/
 parts/
 sdist/
@@ -119,7 +121,18 @@ runsheet/.env.local
 # =============================================================================
 # Kiro
 # =============================================================================
-.kiro/
+# Everything under .kiro/ stays local, except the data-export, customer-portal and
+# margin-feed specs, which are committed with their implementation so reviewers
+# can read the design they follow.
+# A .kiro/ below the root (e.g. Runsheet-backend/.kiro/) is always local. The
+# pattern skips the root so the data-export negation below still works.
+/*/**/.kiro/
+.kiro/*
+!.kiro/specs/
+.kiro/specs/*
+!.kiro/specs/data-export/
+!.kiro/specs/customer-portal/
+!.kiro/specs/margin-feed/
 
 # =============================================================================
 # IDE / Editor
@@ -216,3 +229,18 @@ ipython_config.py
 # =============================================================================
 Runsheet-backend/scripts/_tmp_*
 Runsheet-backend/_tmp_*
+
+# Soak-run output (scripts/soak_personas.py): local run artefacts, never committed.
+soak-out/
+# Local redis-server snapshot (written to the server's working dir).
+dump.rdb
+
+# Elasticsearch exports (scripts/es_only_backup.py). These are raw tenant
+# documents — customer names, addresses, tank readings, driver records — so they
+# must never reach the repository. The pattern is deliberately broad: the
+# migration takes whole-cluster exports under several directory names.
+es-backup/
+es-full-backup/
+**/es-backup/
+**/es-full-backup/
+*.ndjson

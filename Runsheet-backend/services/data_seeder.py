@@ -16,14 +16,19 @@ class DataSeeder:
         self.es_service = elasticsearch_service
     
     async def clear_all_data(self):
-        """Clear all existing data from indices"""
+        """Clear all existing data from the demo indices.
+
+        Went through ``client.delete_by_query`` — the last raw-client write outside
+        the migration tooling. The store's ``delete_by_query`` takes the same query
+        and, unlike the Elasticsearch version, has no page limit: a partially
+        applied delete is worse than a slow one.
+        """
         indices = ["trucks", "locations", "inventory", "support_tickets", "analytics_events"]
+        store = self.es_service._pg_store()
         for index in indices:
             try:
-                # Delete all documents in the index
-                query = {"query": {"match_all": {}}}
-                self.es_service.client.delete_by_query(index=index, body=query, refresh=True)
-                logger.info(f"🗑️ Cleared data from {index}")
+                deleted = await store.delete_by_query(index, {"match_all": {}})
+                logger.info("🗑️ Cleared %d document(s) from %s", deleted, index)
             except Exception as e:
                 logger.warning(f"Could not clear {index}: {e}")
     
@@ -171,10 +176,25 @@ class DataSeeder:
                 index_name = "support_tickets"  # Support data goes to support_tickets index
             
             # Upsert documents (update existing, insert new)
-            await self.es_service.bulk_index_documents(index_name, documents)
-            
-            logger.info(f"✅ Successfully upserted {len(documents)} {data_type} documents")
-            return {"status": "success", "recordCount": len(documents)}
+            outcome = await self.es_service.bulk_index_documents(index_name, documents)
+            # The store refuses rows per document (e.g. an id another tenant
+            # owns) and reports them here; don't count those as uploaded.
+            failed = 0
+            errors: list = []
+            if isinstance(outcome, dict) and isinstance(outcome.get("failed"), int):
+                failed = outcome["failed"]
+                errors = list(outcome.get("errors") or [])[:20]
+            uploaded = len(documents) - failed
+            logger.info(
+                f"✅ Upserted {uploaded} of {len(documents)} {data_type} documents"
+                + (f" ({failed} refused)" if failed else "")
+            )
+            return {
+                "status": "success" if not failed else "partial",
+                "recordCount": uploaded,
+                "failed": failed,
+                "errors": errors,
+            }
             
         except Exception:
             logger.exception("Batch upsert failed")

@@ -38,7 +38,7 @@ from compliance.services.terminal_bol_edi_parser import (
     EDIParserRegistry,
     EDIParseError,
 )
-from errors.exceptions import validation_error
+from errors.exceptions import resource_not_found, validation_error
 from ops.middleware.tenant_guard import inject_tenant_filter
 from services.elasticsearch_service import ElasticsearchService
 from services.time_utils import utcnow
@@ -397,7 +397,7 @@ class TerminalBOLIngestionService:
             try:
                 raw_document_ref = self._file_storage_service.put(
                     tenant_id=tenant_id,
-                    category="terminal_bols",
+                    category="terminal_bol",
                     content_bytes=edi_payload,
                     content_type="application/edi-x12",
                 )
@@ -485,7 +485,7 @@ class TerminalBOLIngestionService:
             try:
                 raw_document_ref = self._file_storage_service.put(
                     tenant_id=tenant_id,
-                    category="terminal_bols",
+                    category="terminal_bol",
                     content_bytes=file_bytes,
                     content_type=content_type,
                 )
@@ -564,7 +564,8 @@ class TerminalBOLIngestionService:
             ``status="ingested"`` and ``needs_operator_confirmation=False``.
 
         Raises:
-            ValueError: If the BOL is not found or not in
+            AppException: ``resource_not_found`` (404) if the BOL is not
+                found; ``validation_error`` if it is not in
                 pending_confirmation status.
 
         Validates: Requirement 10.2
@@ -578,7 +579,7 @@ class TerminalBOLIngestionService:
         hits = result.get("hits", {}).get("hits", [])
 
         if not hits:
-            raise validation_error(
+            raise resource_not_found(
                 f"BOL {bol_id} not found for tenant {tenant_id}",
                 details={"bol_id": bol_id, "tenant_id": tenant_id},
             )
@@ -686,7 +687,7 @@ class TerminalBOLIngestionService:
 
         # 5. Persist the update
         await self._es.update_document(
-            TERMINAL_BOLS_INDEX, bol_id, {"doc": update_doc}
+            TERMINAL_BOLS_INDEX, bol_id, update_doc
         )
 
         # 6. Reconstruct the updated BOL for return
@@ -759,8 +760,9 @@ class TerminalBOLIngestionService:
                 compatibility in tests).
 
         Raises:
-            AppException (validation_error): If the BOL is not found, or if
-                the BOL is not in a linkable status (must be ``ingested``).
+            AppException: ``resource_not_found`` (404) if the BOL is not
+                found; ``validation_error`` if it is not in a linkable status
+                (must be ``ingested``).
 
         Validates: Requirement 10.5
         """
@@ -777,7 +779,7 @@ class TerminalBOLIngestionService:
         hits = result.get("hits", {}).get("hits", [])
 
         if not hits:
-            raise validation_error(
+            raise resource_not_found(
                 f"BOL '{bol_id}' not found",
                 details={
                     "bol_id": bol_id,
@@ -810,7 +812,7 @@ class TerminalBOLIngestionService:
         }
 
         await self._es.update_document(
-            TERMINAL_BOLS_INDEX, bol_id, {"doc": update_doc}
+            TERMINAL_BOLS_INDEX, bol_id, update_doc
         )
 
         logger.info(

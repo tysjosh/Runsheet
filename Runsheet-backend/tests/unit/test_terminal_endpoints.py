@@ -67,6 +67,15 @@ class _FakeESService:
     ) -> None:
         self.docs[doc_id] = dict(document)
 
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
+
     # -------- search_documents -------------------------------------------
     async def search_documents(
         self, index: str, query: Dict[str, Any], size: int
@@ -395,7 +404,7 @@ class TestGetTerminal:
         client = TestClient(app)
         resp = client.get("/api/fuel/terminals/does-not-exist")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_returns_404_for_cross_tenant(self):
         """Cross-tenant gets are 404 (not 403) to avoid leaking existence."""
@@ -406,7 +415,7 @@ class TestGetTerminal:
 
         resp = client.get("/api/fuel/terminals/term_001")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -462,7 +471,7 @@ class TestUpdateTerminal:
             json={"status": "inactive"},
         )
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_returns_403_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -475,7 +484,7 @@ class TestUpdateTerminal:
         )
         assert resp.status_code == 403
         body = resp.json()
-        assert body["detail"]["error_code"] == "cross_tenant_access_denied"
+        assert body["error_code"] == "cross_tenant_access_denied"
 
     def test_empty_patch_returns_current_model(self):
         app, es = _build_app()
@@ -508,7 +517,7 @@ class TestDeleteTerminal:
         client = TestClient(app)
         resp = client.delete("/api/fuel/terminals/does-not-exist")
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_returns_403_for_cross_tenant(self):
         app, es = _build_app(tenant_id="tenant-1")
@@ -567,12 +576,12 @@ class TestProposedLoad:
             },
         )
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "terminal_closed"
-        assert detail["terminal_id"] == "term_001"
+        assert detail["details"]["terminal_id"] == "term_001"
         # as_of is echoed verbatim so the caller can reconcile.
-        assert detail["as_of"].startswith("2025-03-15T14:00:00")
-        window = detail["next_open_window"]
+        assert detail["details"]["as_of"].startswith("2025-03-15T14:00:00")
+        window = detail["details"]["next_open_window"]
         assert window is not None
         assert window["day_of_week"] == "mon"
         assert window["open_local"] == "06:00"
@@ -601,7 +610,7 @@ class TestProposedLoad:
             },
         )
         assert resp.status_code == 400
-        window = resp.json()["detail"]["next_open_window"]
+        window = resp.json()["details"]["next_open_window"]
         assert window["day_of_week"] == "tue"
         assert window["starts_at_utc"].startswith("2025-03-11T10:00:00")
 
@@ -619,11 +628,11 @@ class TestProposedLoad:
             },
         )
         assert resp.status_code == 400
-        detail = resp.json()["detail"]
+        detail = resp.json()
         assert detail["error_code"] == "product_not_supported"
-        assert detail["terminal_id"] == "term_001"
-        assert detail["product_code"] == "PROPANE"
-        assert "DIESEL_2" in detail["supported_products"]
+        assert detail["details"]["terminal_id"] == "term_001"
+        assert detail["details"]["product_code"] == "PROPANE"
+        assert "DIESEL_2" in detail["details"]["supported_products"]
 
     def test_product_alias_canonicalized_before_membership_check(self):
         """Submitting ``AGO`` against a terminal that stores ``DIESEL_2``
@@ -658,7 +667,7 @@ class TestProposedLoad:
             },
         )
         assert resp.status_code == 400
-        assert resp.json()["detail"]["error_code"] == "unknown_product_code"
+        assert resp.json()["error_code"] == "unknown_product_code"
 
     def test_missing_terminal_returns_404(self):
         app, _ = _build_app()
@@ -669,7 +678,7 @@ class TestProposedLoad:
             json={"product_code": "DIESEL_2", "volume_gallons": 1000.0},
         )
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_as_of_defaults_to_now(self):
         """Omitting ``as_of`` evaluates against the current wall-clock;
@@ -791,7 +800,7 @@ class TestDeactivateTerminal:
         resp = client.post("/api/fuel/terminals/does-not-exist/deactivate")
 
         assert resp.status_code == 404
-        assert resp.json()["detail"]["error_code"] == "terminal_not_found"
+        assert resp.json()["error_code"] == "terminal_not_found"
 
     def test_returns_404_for_cross_tenant(self):
         # A cross-tenant id is indistinguishable from "missing" on the read

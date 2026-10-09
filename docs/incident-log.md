@@ -19,11 +19,21 @@ This document records credential exposure incidents discovered during the platfo
 
 | Credential | File | Status | Rotation Deadline | Responsible Party |
 |------------|------|--------|-------------------|-------------------|
-| `ELASTIC_API_KEY` (Elasticsearch Cloud API key) | `Runsheet-backend/.env.development` | **Pending rotation** | Within 24 hours of discovery | DevOps / Infrastructure team |
-| `ELASTIC_ENDPOINT` (Elasticsearch Cloud endpoint URL) | `Runsheet-backend/.env.development` | Informational — not a secret, but reveals infrastructure | N/A | — |
+| `ELASTIC_API_KEY` (Elasticsearch Cloud API key) | `Runsheet-backend/.env.development` | **Moot — the setting, the cluster and the dependency are all gone** (see note below). Still rotate/revoke it in any Elastic account it belongs to | — | DevOps / Infrastructure team |
+| `ELASTIC_ENDPOINT` (Elasticsearch Cloud endpoint URL) | `Runsheet-backend/.env.development` | Removed. Informational when it existed — not a secret, but revealed infrastructure | N/A | — |
 | `JWT_SECRET` (JWT signing secret) | `Runsheet-backend/.env.development` | **Pending rotation** | Within 24 hours of discovery | Backend team |
 | `DINEE_WEBHOOK_SECRET` (Webhook HMAC secret) | `Runsheet-backend/.env.development` | **Pending rotation** | Within 24 hours of discovery | Backend team |
 | `NEXT_PUBLIC_GOOGLE_MAPS_API_KEY` (Google Maps API key) | `runsheet/.env.local` | **Pending rotation** | Within 24 hours of discovery | Frontend team |
+
+> **Note on the Elasticsearch credential.** `ELASTIC_API_KEY` and
+> `ELASTIC_ENDPOINT` no longer exist anywhere in the codebase: the Elasticsearch →
+> Postgres migration removed the settings, the client, the `elasticsearch`
+> dependency and the cluster itself
+> ([docs/elasticsearch-to-postgres-migration.md](elasticsearch-to-postgres-migration.md)).
+> Nothing reads the leaked value, so it cannot be used against this application.
+> That is **not** the same as the key being safe — if it authenticates to an Elastic
+> deployment that still exists, revoke it there. The four other credentials in the
+> table are unaffected by any of this and their rotation status is unchanged.
 
 ### Remediation Steps
 

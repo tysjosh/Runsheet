@@ -40,6 +40,7 @@ from Agents.support.fuel_distribution_models import (
     TankForecast,
 )
 from Agents.support.mvp_es_mappings import MVP_TANK_FORECASTS_INDEX
+from fuel.order_models import LOADABLE_ORDER_STATUSES
 from fuel.services.fuel_ops_es_mappings import CUSTOMER_TANKS_INDEX
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 
@@ -91,6 +92,21 @@ def _bucket_from_score(score: float) -> PriorityBucket:
         return PriorityBucket.MEDIUM
     else:
         return PriorityBucket.LOW
+
+
+def _canonical_product_code(product_code: Optional[str]) -> Optional[str]:
+    """Canonical US code for an order's product, or ``None`` if unknown."""
+    from fuel.services.fuel_product_catalog import (
+        UnknownFuelProductError,
+        canonicalize,
+    )
+
+    if not product_code:
+        return None
+    try:
+        return canonicalize(product_code)
+    except (UnknownFuelProductError, TypeError):
+        return None
 
 
 class DeliveryPrioritizationAgent(OverlayAgentBase):
@@ -191,7 +207,8 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         2. For each tenant, fetch orders with status in
            {placed, confirmed, scheduled}.
         3. Score each order based on call_type.
-        4. Publish a DeliveryPriorityList on the SignalBus.
+        4. Persist the DeliveryPriorityList to ``mvp_delivery_priorities``
+           (failures are logged, never raised) and publish it on the SignalBus.
         5. Return InterventionProposals.
 
         ``OverlayAgentBase.monitor_cycle`` groups buffered signals by tenant and
@@ -231,6 +248,20 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
         for tenant_id in tenant_ids:
             priority_list = await self._prioritize_tenant(tenant_id)
             if priority_list and priority_list.priorities:
+                # Persist before publishing so /priorities can serve the list
+                # the loading stage is about to act on.
+                try:
+                    await self._persist_priority_list(priority_list)
+                except Exception as exc:  # noqa: BLE001 — never block the run
+                    logger.error(
+                        "DeliveryPrioritizationAgent: failed to persist priority "
+                        "list %s (tenant=%s run=%s): %s",
+                        priority_list.priority_list_id,
+                        tenant_id,
+                        priority_list.run_id,
+                        exc,
+                        exc_info=True,
+                    )
                 await self._signal_bus.publish(priority_list)
                 proposal = self._build_proposal(priority_list, tenant_id)
                 proposals.append(proposal)
@@ -283,7 +314,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             "query": {
                 "bool": {
                     "filter": [
-                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}}
+                        {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}}
                     ]
                 }
             },
@@ -302,7 +333,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search_all_tenants(
                 "fuel_order",
-                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                in_filters={"status": list(LOADABLE_ORDER_STATUSES)},
                 size=10_000,
             )
             if pg is not _NOT_CUT_OVER:
@@ -371,7 +402,10 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
 
         # Score each order
         now = datetime.now(timezone.utc)
-        run_id = str(uuid4())
+        # The pipeline stamps its run id on every stage, so /priorities?run_id=
+        # finds this list under the same run as the load and route plans. A
+        # fresh id is only for runs outside the pipeline.
+        run_id = getattr(self, "_current_run_id", None) or str(uuid4())
         priorities: List[DeliveryPriority] = []
 
         for order in orders:
@@ -398,7 +432,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
                 "bool": {
                     "filter": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"status": ["placed", "confirmed", "scheduled"]}},
+                        {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}},
                     ]
                 }
             },
@@ -413,7 +447,7 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search(
                 "fuel_order", tenant_id,
-                in_filters={"status": ["placed", "confirmed", "scheduled"]},
+                in_filters={"status": list(LOADABLE_ORDER_STATUSES)},
                 page=1, size=1000,
             )
             if pg is not _NOT_CUT_OVER:
@@ -591,6 +625,8 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             priority_score=round(score, 4),
             priority_bucket=bucket,
             reasons=reasons,
+            order_id=order.get("order_id"),
+            product_code=_canonical_product_code(order.get("product_code")),
         )
 
     def _score_forecast_based(
@@ -750,8 +786,10 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
             priority=1,
             actions=[
                 {
-                    "tool": "publish_priority_list",
-                    "params": {
+                    # Non-mutating: OverlayAgentBase publishes it but never
+                    # queues an approval for it (NON_MUTATING_OVERLAY_TOOLS).
+                    "tool_name": "publish_priority_list",
+                    "parameters": {
                         "priority_list_id": priority_list.priority_list_id,
                         "order_count": len(priority_list.priorities),
                         "run_id": priority_list.run_id,
@@ -763,22 +801,32 @@ class DeliveryPrioritizationAgent(OverlayAgentBase):
     async def _persist_priority_list(
         self, priority_list: DeliveryPriorityList
     ) -> None:
-        """Persist priority list to ES (legacy compat stub).
+        """Persist a priority list to ``mvp_delivery_priorities``.
 
-        The new fuel-order-based agent publishes to the SignalBus
-        rather than persisting directly. This method is retained for
-        backward compatibility with tests that call it directly.
+        Called by :meth:`evaluate` for every list it publishes, so
+        ``/api/fuel/mvp/priorities`` and ``/priority-clusters`` can read a
+        run's ranking back. ``timestamp`` is stamped because both endpoints
+        sort by it. Raises on a store failure; ``evaluate`` logs and carries on.
         """
         from fuel.services.fuel_product_catalog import canonicalize_or_warn
 
+        now_iso = datetime.now(timezone.utc).isoformat()
         doc = {
             "priority_list_id": priority_list.priority_list_id,
             "tenant_id": priority_list.tenant_id,
             "run_id": priority_list.run_id,
+            "timestamp": now_iso,
+            "created_at": now_iso,
             "priorities": [
                 {
-                    **p.model_dump(),
-                    "fuel_grade": canonicalize_or_warn(p.fuel_grade.value),
+                    # JSON mode: the document store writes jsonb, so enums
+                    # must already be their values.
+                    **p.model_dump(mode="json"),
+                    # The order's own product, not its legacy family
+                    # (HEATING_OIL used to persist as DIESEL_2 via AGO).
+                    "fuel_grade": (
+                        p.product_code or canonicalize_or_warn(p.fuel_grade.value)
+                    ),
                 }
                 for p in priority_list.priorities
             ],

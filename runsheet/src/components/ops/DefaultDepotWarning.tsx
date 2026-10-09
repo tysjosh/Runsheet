@@ -24,7 +24,17 @@ import { listDepots } from "../../services/fuelApi";
 
 type State = "checking" | "ok" | "no_depots" | "no_default" | "error";
 
-export default function DefaultDepotWarning() {
+export interface DefaultDepotWarningProps {
+  /**
+   * `chip`: a compact link for a title row's counts (UI revamp §6 rule 4),
+   * the full message in its tooltip and accessible name.
+   */
+  variant?: "banner" | "chip";
+}
+
+export default function DefaultDepotWarning({
+  variant = "banner",
+}: DefaultDepotWarningProps = {}) {
   const [state, setState] = useState<State>("checking");
 
   useEffect(() => {
@@ -54,6 +64,19 @@ export default function DefaultDepotWarning() {
       ? "No active depot is configured. Route planning will skip until a depot is added and set as the default."
       : "No default depot is set. Route planning will skip for trucks without telemetry until you mark a depot as default.";
 
+  if (variant === "chip") {
+    return (
+      <a
+        href="/dashboard/settings?tab=company"
+        title={message}
+        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2 text-xs font-semibold text-amber-800 hover:bg-amber-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+      >
+        <AlertTriangle aria-hidden="true" className="h-3.5 w-3.5" />
+        {state === "no_depots" ? "No depot set up" : "No default depot"}
+        <span className="sr-only">. {message} Configure in Settings.</span>
+      </a>
+    );
+  }
   return (
     <div
       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-warning-light bg-warning-light px-4 py-2.5"
@@ -65,7 +88,7 @@ export default function DefaultDepotWarning() {
       </span>
       <span className="text-sm text-warning-dark opacity-90">{message}</span>
       <a
-        href="/dashboard/setup"
+        href="/dashboard/settings?tab=company"
         className="ml-auto text-xs font-medium text-warning-dark underline hover:opacity-80"
       >
         Configure in Setup → Depots

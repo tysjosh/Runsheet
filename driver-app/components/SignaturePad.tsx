@@ -184,6 +184,7 @@ export function SignaturePad({
         className="overflow-hidden rounded-xl border-2 border-input bg-background"
         style={{ height }}
         pointerEvents={disabled ? 'none' : 'auto'}
+        testID="signature-canvas"
       >
         <SignatureView
           ref={padRef}

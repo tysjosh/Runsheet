@@ -16,6 +16,8 @@ Endpoints registered:
 * ``/ws/driver``             — DriverWSManager (per-driver channel)
 * ``/ws/plan-execution``     — PlanExecutionWSManager (Req 3.6, 3.9)
 * ``/ws/fuel-planning``      — FuelPlanningWSManager (Req 1.6.4)
+* ``/ws/commerce/invoices``  — CommerceInvoiceWSManager
+* ``/ws/dispatch-board``     — DispatchBoardWSManager (dispatch-board K10)
 
 Auth helpers (:func:`_authenticate_tenant` / :func:`_authenticate_driver`)
 authenticate the WebSocket handshake against a **SuperTokens session** and
@@ -33,6 +35,15 @@ do neither (Req 7.5). Missing, malformed, expired, or incomplete credentials are
 rejected for every environment with the existing ``4001 Authentication
 required`` close code (Req 7.2, 14.2).
 
+Before any credential is read, a handshake whose ``Origin`` is present and is
+neither in ``CORS_ORIGINS`` nor same-origin with ``Host`` is rejected the same
+way (Cross-Site WebSocket Hijacking, staging finding F2). See
+:func:`_handshake_origin_allowed`.
+
+An open socket re-checks its session handle every ``WS_SESSION_RECHECK_SECONDS``
+and is closed with ``4001 Session ended`` after sign-out or revoke (OI-11). See
+:func:`_watch_session`.
+
 The session-token value is **never** written to application logs: log lines emit
 only ``tenant_id`` and the endpoint path, never the credential (Req 7.4, 7.5).
 
@@ -46,6 +57,8 @@ Validates: Requirements 7.1, 7.2, 7.3, 7.4, 7.5
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 from datetime import datetime
@@ -166,12 +179,21 @@ async def _default_ws_verify(
         get_session_without_request_response,
     )
 
+    from ops.middleware.tenant_guard import session_check_database_enabled
+
     try:
+        # anti_csrf_check stays False: a browser cannot set an ``anti-csrf``
+        # header on a WebSocket handshake, so requiring it would break the
+        # cookie transport. The Origin allow-list in _resolve_ws_claims is the
+        # cross-site (CSWSH) control instead (F2).
         session = await get_session_without_request_response(
             access_token,
             anti_csrf_token,
             anti_csrf_check=False,
             session_required=False,
+            # Ask the core whether the session is still alive so a signed-out
+            # or revoked session cannot open a socket (F3).
+            check_database=session_check_database_enabled(),
         )
     except Exception as exc:  # noqa: BLE001 — any verification failure → reject
         # Never log the credential value (Req 7.4); log only the failure reason.
@@ -182,18 +204,126 @@ async def _default_ws_verify(
     return dict(session.get_access_token_payload() or {})
 
 
+def _handshake_origin_allowed(websocket: WebSocket) -> bool:
+    """Return whether the handshake's ``Origin`` may open a socket (F2).
+
+    Cross-Site WebSocket Hijacking guard. Browsers attach the session cookie to
+    a cross-site WebSocket handshake and CORS does not apply to WebSockets, so
+    without this a page on any origin could open a socket as the signed-in user
+    (staging finding F2). Allowed:
+
+    * **No Origin header** — native clients that send none. A credential is
+      still required by the caller.
+    * **An origin in ``CORS_ORIGINS``** — exact match after trimming a trailing
+      ``/``, the same list (via :mod:`config.cors`) the REST ``CORSMiddleware``
+      uses. A ``"*"`` entry is NOT honoured here.
+    * **Same-origin** — the Origin's ``host[:port]`` equals the handshake
+      ``Host`` header. React Native's WebSocket sends the target URL as the
+      default Origin (``wss://api…`` → ``https://api…``), so the driver app's
+      ``/ws/driver`` socket depends on this. A cross-site page cannot make a
+      browser send a forged ``Host``, and a non-browser client could set any
+      Origin anyway, so this does not weaken the guard.
+
+    Everything else, including the literal ``null`` origin, is rejected.
+    """
+    origin = (websocket.headers.get("origin") or "").strip()
+    if not origin:
+        return True
+
+    from config.cors import get_cors_origins
+
+    allowed = {o.rstrip("/") for o in get_cors_origins() if isinstance(o, str)}
+    if origin.rstrip("/") in allowed:
+        return True
+
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    host = (websocket.headers.get("host") or "").strip().lower()
+    return (
+        parts.scheme in ("http", "https")
+        and bool(parts.netloc)
+        and parts.netloc.lower() == host
+    )
+
+
+def _audit_ws_customer_refusal(websocket: WebSocket, claims: Dict[str, Any]) -> None:
+    """WARN ``portal_audit`` line for a refused customer WS handshake."""
+    import logging as _logging
+
+    from portal.audit import emit_portal_audit
+    from portal.scope import collapse_path
+
+    try:
+        path = websocket.url.path
+    except Exception:  # noqa: BLE001 — log context only
+        path = ""
+    tenant_id = claims.get("tenant_id")
+    customer_id = claims.get("customer_id")
+    user_id = claims.get("sub")
+    emit_portal_audit(
+        level=_logging.WARNING,
+        tenant_id=tenant_id if isinstance(tenant_id, str) else None,
+        actor_user_id=user_id if isinstance(user_id, str) else None,
+        customer_id=customer_id if isinstance(customer_id, str) else None,
+        action="central_deny",
+        target_ids={},
+        outcome="forbidden_route",
+        request_id=None,
+        channel="websocket",
+        path_template=collapse_path(path),
+    )
+
+
 async def _resolve_ws_claims(websocket: WebSocket) -> Optional[Dict[str, Any]]:
     """Resolve verified SuperTokens session claims for a WS handshake.
 
-    Always verifies a SuperTokens session only: the credential is read in the
+    First rejects a cross-origin handshake (:func:`_handshake_origin_allowed`,
+    F2) before reading or verifying any credential, so every route — all of
+    them authenticate through here — closes it with ``4001`` before accept
+    (HTTP 403 on a real server), exactly like an unauthenticated handshake.
+
+    Then verifies a SuperTokens session only: the credential is read in the
     order ``Authorization: Bearer`` header → ``sAccessToken`` cookie →
     short-lived ``token`` query parameter (Req 7.5, 14.1). Returns the verified
     claims mapping, or ``None`` when
     the connection cannot be associated with a verified session (Req 7.1, 7.2).
     """
+    if not _handshake_origin_allowed(websocket):
+        try:
+            path = websocket.url.path
+        except Exception:  # noqa: BLE001 — log context only
+            path = "?"
+        _logger().warning(
+            "WebSocket handshake rejected: origin not allowed (path=%s origin=%r)",
+            path,
+            (websocket.headers.get("origin") or "").strip(),
+        )
+        return None
     verifier = _ws_session_verifier or _default_ws_verify
     access_token, anti_csrf = _extract_session_credential(websocket)
-    return await verifier(access_token, anti_csrf)
+    claims = await verifier(access_token, anti_csrf)
+    if claims:
+        # E3 (OI-06, design §2.2): a customer-portal session may not open any
+        # WebSocket. Every caller closes with 4001 on None.
+        from portal.scope import is_customer_claims
+
+        if is_customer_claims(claims):
+            _audit_ws_customer_refusal(websocket, claims)
+            return None
+        # Remember the session handle so _ws_loop can re-check that the
+        # session is still alive after sign-out or revoke (OI-11).
+        handle = claims.get("sessionHandle")
+        try:
+            websocket.state.ws_session_handle = (
+                handle if isinstance(handle, str) and handle else None
+            )
+        except Exception:  # noqa: BLE001 — a fake socket without state
+            pass
+    return claims
 
 
 async def _authenticate_tenant(websocket: WebSocket) -> Optional[str]:
@@ -225,6 +355,128 @@ async def _authenticate_driver(websocket: WebSocket) -> Optional[Tuple[str, str]
     return (tenant_id, driver_id) if (tenant_id and driver_id) else None
 
 
+#: Roles that may open the board socket (dispatch-board K10.1, exact match).
+DISPATCH_BOARD_ROLES = ("admin", "dispatcher")
+
+
+async def _authenticate_dispatcher(
+    websocket: WebSocket,
+) -> Optional[Tuple[str, str, list]]:
+    """Authenticate the handshake and return ``(tenant_id, user_id, roles)``.
+
+    ``user_id`` is the SuperTokens ``sub`` claim. Returns ``None`` when ``sub``
+    or ``tenant_id`` is missing or empty, or when the roles include neither
+    ``admin`` nor ``dispatcher`` (exact match), so the caller closes with
+    ``4001``. Unlike the other sockets this one checks roles, because it
+    carries draft content (dispatch-board K10.1).
+    """
+    claims = await _resolve_ws_claims(websocket)
+    if not claims:
+        return None
+    tenant_id = claims.get("tenant_id") or ""
+    user_id = claims.get("sub") or ""
+    roles = claims.get("roles") or []
+    if not isinstance(roles, (list, tuple)):
+        return None
+    roles = [r for r in roles if isinstance(r, str)]
+    if not (isinstance(tenant_id, str) and tenant_id and isinstance(user_id, str) and user_id):
+        return None
+    if not any(r in DISPATCH_BOARD_ROLES for r in roles):
+        return None
+    return tenant_id, user_id, roles
+
+
+# ---------------------------------------------------------------------------
+# Session revalidation for long-lived sockets (OI-11)
+# ---------------------------------------------------------------------------
+#
+# The handshake verifies the session once. A socket opened before sign-out or
+# revoke would otherwise stay open for as long as the client keeps it. Every
+# ``WS_SESSION_RECHECK_SECONDS`` the loop asks whether the session handle from
+# the handshake is still alive and closes the socket with ``4001 Session
+# ended`` when it isn't. The check is by session handle, not access token, so
+# an access-token refresh never closes a healthy socket.
+
+# Alive-check seam: ``async (session_handle) -> Optional[bool]``. ``True`` is
+# alive, ``False`` is ended, ``None`` is unknown (the socket stays open).
+WSSessionAliveCheck = Callable[[str], Awaitable[Optional[bool]]]
+
+_ws_session_alive_check: Optional[WSSessionAliveCheck] = None
+
+
+def configure_ws_session_alive_check(check: Optional[WSSessionAliveCheck]) -> None:
+    """Install the session alive-check used by the WS revalidation task.
+
+    Passing ``None`` resets to the default SDK-backed check. Tests use this
+    seam to drive revalidation without a live managed core.
+    """
+    global _ws_session_alive_check
+    _ws_session_alive_check = check
+
+
+async def _default_ws_session_alive(session_handle: str) -> Optional[bool]:
+    """Ask the SuperTokens core whether *session_handle* is still alive.
+
+    Returns ``None`` on any error: a core blip must not disconnect every
+    client, so a transient failure keeps the socket open (logged at WARNING).
+    """
+    try:
+        from supertokens_python.recipe.session.asyncio import (
+            get_session_information,
+        )
+
+        return await get_session_information(session_handle) is not None
+    except Exception as exc:  # noqa: BLE001 — unknown, keep the socket open
+        _logger().warning("WebSocket session re-check failed: %s", exc)
+        return None
+
+
+def _session_recheck_seconds() -> float:
+    """``settings.ws_session_recheck_seconds`` (0 disables), default 60."""
+    try:
+        from config.settings import get_settings
+
+        value = getattr(get_settings(), "ws_session_recheck_seconds", 60)
+    except Exception:  # noqa: BLE001 — settings unavailable, keep the default
+        return 60.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 60.0
+    return float(value)
+
+
+async def _watch_session(websocket, session_handle, interval, endpoint, tenant_id):
+    """Close *websocket* with 4001 once its session is no longer alive."""
+    check = _ws_session_alive_check or _default_ws_session_alive
+    while True:
+        await asyncio.sleep(interval)
+        alive = await check(session_handle)
+        if alive is False:
+            _logger().info(
+                "WebSocket session ended; closing %s (tenant_id=%s)",
+                endpoint, tenant_id,
+            )
+            with contextlib.suppress(Exception):
+                await websocket.close(code=4001, reason="Session ended")
+            return
+
+
+def _start_session_watch(websocket, endpoint, tenant_id) -> Optional[asyncio.Task]:
+    """Start the revalidation task, or return ``None`` when there is no
+    session handle or the interval is 0."""
+    try:
+        handle = getattr(websocket.state, "ws_session_handle", None)
+    except Exception:  # noqa: BLE001 — a fake socket without state
+        handle = None
+    if not isinstance(handle, str) or not handle:
+        return None
+    interval = _session_recheck_seconds()
+    if interval <= 0:
+        return None
+    return asyncio.create_task(
+        _watch_session(websocket, handle, interval, endpoint, tenant_id)
+    )
+
+
 # ---------------------------------------------------------------------------
 # Shared loop + JSON echo handler
 # ---------------------------------------------------------------------------
@@ -232,9 +484,14 @@ async def _authenticate_driver(websocket: WebSocket) -> Optional[Tuple[str, str]
 
 async def _ws_loop(websocket, mgr, endpoint, tenant_id, handler=None,
                    check_connected=False):
-    """Shared WebSocket receive loop with disconnect + error handling."""
+    """Shared WebSocket receive loop with disconnect + error handling.
+
+    Runs the session revalidation task (OI-11) alongside the receive loop and
+    cancels it when the loop ends.
+    """
     if check_connected and websocket not in mgr._clients:
         return
+    watcher = _start_session_watch(websocket, endpoint, tenant_id)
     try:
         while True:
             raw = await websocket.receive_text()
@@ -259,6 +516,10 @@ async def _ws_loop(websocket, mgr, endpoint, tenant_id, handler=None,
                 "Failed to close WebSocket on %s: %s", endpoint, close_err
             )
     finally:
+        if watcher is not None:
+            watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watcher
         await mgr.disconnect(websocket)
 
 
@@ -429,3 +690,48 @@ def register_websocket_routes(app: FastAPI) -> None:
         ep = "/ws/commerce/invoices"
         handler = lambda ws, raw: _json_echo_handler(ws, raw, ep, tenant_id)
         await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler)
+
+    @app.websocket("/ws/dispatch-board")
+    async def dispatch_board_websocket(websocket: WebSocket):
+        """Dispatch Board lane events and presence (dispatch-board K10).
+
+        ``?service_date=YYYY-MM-DD``. Admin or dispatcher only; the board flag
+        is read after authentication and ``disabled`` (also unset or
+        unreadable) closes with ``4001`` like a failed authentication.
+        """
+        auth = await _authenticate_dispatcher(websocket)
+        if not auth:
+            return await _reject(websocket)
+        tenant_id, user_id, _roles = auth
+        container = _container(websocket.app)
+        mgr = getattr(container, "dispatch_board_ws_manager", None)
+        flags = getattr(container, "ops_feature_flags", None)
+        if mgr is None or flags is None:
+            return await _reject(websocket)
+        try:
+            mode = await flags.get_overlay_state("dispatch_board", tenant_id)
+        except Exception as exc:  # noqa: BLE001 — unreadable flag → closed
+            _logger().warning("Dispatch board socket flag read failed: %s", type(exc).__name__)
+            mode = "disabled"
+        if mode not in ("shadow", "active_gated", "active_auto"):
+            return await _reject(websocket)
+        from datetime import date as _date
+
+        raw_date = websocket.query_params.get("service_date", "") or ""
+        try:
+            service_date = _date.fromisoformat(raw_date).isoformat()
+        except ValueError:
+            return await websocket.close(code=1008, reason="Invalid service_date")
+        board = getattr(container, "dispatch_board_service", None)
+        name = "Another dispatcher"
+        if board is not None:
+            try:
+                name = await board.resolve_actor_name(tenant_id, user_id)
+            except Exception as exc:  # noqa: BLE001 — presence name only
+                _logger().debug("Dispatch board socket name lookup failed: %s", type(exc).__name__)
+        await mgr.connect_board(
+            websocket, tenant_id=tenant_id, user_id=user_id, service_date=service_date, name=name
+        )
+        ep = "/ws/dispatch-board"
+        handler = lambda ws, raw: mgr.handle_client_message(ws, raw)
+        await _ws_loop(websocket, mgr, ep, tenant_id, handler=handler, check_connected=True)

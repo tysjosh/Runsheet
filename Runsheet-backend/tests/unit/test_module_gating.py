@@ -151,7 +151,7 @@ def test_all_commerce_routers_appear_inside_the_flag_block() -> None:
     )
 
 
-def test_compliance_module_registers_all_eight_endpoint_modules() -> None:
+def test_compliance_module_registers_all_nine_endpoint_modules() -> None:
     """Pin the compliance surface so a router cannot be quietly dropped."""
     for module in (
         "tax_endpoints",
@@ -162,6 +162,7 @@ def test_compliance_module_registers_all_eight_endpoint_modules() -> None:
         "asset_certification_endpoints",
         "meter_endpoints",
         "asset_compliance_endpoints",
+        "driver_records_endpoints",
     ):
         assert module in _COMPLIANCE_SRC, (
             f"compliance.api.{module} is not registered by "

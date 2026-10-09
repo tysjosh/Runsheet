@@ -1,6 +1,6 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { colors } from "@/styles/design-tokens";
+import { COLOR, SEMANTIC } from "@/styles/tokens";
 
 interface ReportViewerProps {
   content: string;
@@ -83,14 +83,14 @@ export default function ReportViewer({ content, onClose }: ReportViewerProps) {
           <title>Logistics Report</title>
           <style>
             :root {
-              --report-color-primary: ${colors.primary.DEFAULT};
-              --report-color-text: ${colors.gray[800]};
-              --report-color-muted: ${colors.gray[500]};
-              --report-color-heading-muted: ${colors.gray[600]};
-              --report-color-border: ${colors.gray[200]};
-              --report-color-border-strong: ${colors.gray[300]};
-              --report-color-surface-subtle: ${colors.gray[100]};
-              --report-color-surface-muted: ${colors.gray[50]};
+              --report-color-primary: ${SEMANTIC.primary};
+              --report-color-text: ${COLOR.slate[800]};
+              --report-color-muted: ${COLOR.slate[500]};
+              --report-color-heading-muted: ${COLOR.slate[600]};
+              --report-color-border: ${COLOR.slate[200]};
+              --report-color-border-strong: ${COLOR.slate[300]};
+              --report-color-surface-subtle: ${COLOR.slate[100]};
+              --report-color-surface-muted: ${COLOR.slate[50]};
             }
             body {
               font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

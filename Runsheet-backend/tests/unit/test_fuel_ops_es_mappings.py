@@ -13,34 +13,7 @@ from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 
-from fuel.services.fuel_ops_es_mappings import (
-    ATG_READINGS_INDEX,
-    BILL_OF_LADING_INDEX,
-    COMPARTMENT_CLEANING_EVENTS_INDEX,
-    CROSS_CONTAMINATION_EVENTS_INDEX,
-    CUSTOMER_TANKS_INDEX,
-    CUSTOMER_TANKS_MAPPING,
-    DEPOTS_INDEX,
-    DEPOTS_MAPPING,
-    FUEL_OPS_INDEX_MAPPINGS,
-    INTEGRATION_INSTANCES_INDEX,
-    INTEGRATION_SYNC_RUNS_INDEX,
-    METER_TICKET_OCR_RESULTS_INDEX,
-    MVP_COMBINABLE_GROUPS_INDEX,
-    MVP_RECONCILIATION_INDEX,
-    RACK_PRICES_INDEX,
-    SOURCING_RECOMMENDATIONS_INDEX,
-    STORM_MODE_OVERRIDES_INDEX,
-    STORM_ROAD_RESTRICTIONS_INDEX,
-    SUPPLIER_CONTRACTS_INDEX,
-    TENANT_CREDENTIALS_INDEX,
-    TERMINAL_WAIT_REPORTS_INDEX,
-    TERMINALS_INDEX,
-    TRUCK_TELEMETRY_INDEX,
-    WEATHER_ALERTS_INDEX,
-    WEATHER_OBSERVATIONS_INDEX,
-    setup_fuel_ops_indices,
-)
+from fuel.services.fuel_ops_es_mappings import ATG_READINGS_INDEX, BILL_OF_LADING_INDEX, COMPARTMENT_CLEANING_EVENTS_INDEX, CROSS_CONTAMINATION_EVENTS_INDEX, CUSTOMER_TANKS_INDEX, CUSTOMER_TANKS_MAPPING, DEPOTS_INDEX, DEPOTS_MAPPING, FUEL_OPS_INDEX_MAPPINGS, INTEGRATION_INSTANCES_INDEX, INTEGRATION_SYNC_RUNS_INDEX, METER_TICKET_OCR_RESULTS_INDEX, MVP_COMBINABLE_GROUPS_INDEX, MVP_RECONCILIATION_INDEX, RACK_PRICES_INDEX, SOURCING_RECOMMENDATIONS_INDEX, STORM_MODE_OVERRIDES_INDEX, STORM_ROAD_RESTRICTIONS_INDEX, SUPPLIER_CONTRACTS_INDEX, TENANT_CREDENTIALS_INDEX, TERMINAL_WAIT_REPORTS_INDEX, TERMINALS_INDEX, TRUCK_TELEMETRY_INDEX, WEATHER_ALERTS_INDEX, WEATHER_OBSERVATIONS_INDEX
 
 
 # The 22 index names the spec calls for (21 domain indices + tenant_credentials).
@@ -332,118 +305,10 @@ class TestCapabilitySpecificFields:
 class TestSetupFuelOpsIndices:
     """Verify the bootstrap function behaves like the existing setup helpers."""
 
-    def _make_es_service(self, existing_indices=None):
-        existing = existing_indices or set()
-        es_service = MagicMock()
-        client = MagicMock()
-        client.indices.exists.side_effect = lambda index: index in existing
-        es_service.client = client
-        type(es_service).is_serverless = PropertyMock(return_value=False)
-        return es_service
 
-    def _patch_es_module(self):
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService = MagicMock()
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            lambda mapping: mapping
-        )
-        return patch.dict(sys.modules, {"services.elasticsearch_service": fake_module})
 
-    def test_creates_all_missing_indices(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_fuel_ops_indices(es_service)
 
-        created = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert created == EXPECTED_INDICES
 
-    def test_skips_existing_indices(self):
-        already_there = {CUSTOMER_TANKS_INDEX, DEPOTS_INDEX, TERMINALS_INDEX}
-        es_service = self._make_es_service(existing_indices=already_there)
-        with self._patch_es_module():
-            setup_fuel_ops_indices(es_service)
 
-        created = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert created.isdisjoint(already_there)
-        assert created == EXPECTED_INDICES - already_there
 
-    def test_passes_expected_mapping_body(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_fuel_ops_indices(es_service)
 
-        bodies_by_index = {
-            call.kwargs["index"]: call.kwargs["body"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert bodies_by_index[CUSTOMER_TANKS_INDEX] == CUSTOMER_TANKS_MAPPING
-        assert bodies_by_index[DEPOTS_INDEX] == DEPOTS_MAPPING
-
-    def test_serverless_strips_settings(self):
-        es_service = self._make_es_service()
-        type(es_service).is_serverless = PropertyMock(return_value=True)
-
-        # Stub strip_serverless_incompatible_settings to confirm it's applied.
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService = MagicMock()
-        stripped = {"mappings": {"dynamic": "strict", "properties": {}}}
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            MagicMock(return_value=stripped)
-        )
-        with patch.dict(sys.modules, {"services.elasticsearch_service": fake_module}):
-            setup_fuel_ops_indices(es_service)
-
-        # Called once per index.
-        assert (
-            fake_module.ElasticsearchService
-            .strip_serverless_incompatible_settings.call_count
-            == len(EXPECTED_INDICES)
-        )
-        # Every create body is the stripped version.
-        for call in es_service.client.indices.create.call_args_list:
-            assert call.kwargs["body"] == stripped
-
-    def test_errors_on_one_index_do_not_abort_others(self):
-        es_service = self._make_es_service()
-
-        def flaky_create(**kwargs):
-            if kwargs["index"] == CUSTOMER_TANKS_INDEX:
-                raise RuntimeError("simulated ES failure")
-            return {"acknowledged": True}
-
-        es_service.client.indices.create.side_effect = flaky_create
-        with self._patch_es_module():
-            setup_fuel_ops_indices(es_service)  # must not raise
-
-        attempted = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert attempted == EXPECTED_INDICES
-
-    def test_skips_retired_indices(self, monkeypatch):
-        """A Phase-6 retired index must NOT be recreated at startup."""
-        from config.settings import clear_settings_cache
-
-        monkeypatch.setenv("RETIRED_ES_INDICES", "supplier_contracts")
-        clear_settings_cache()
-        try:
-            es_service = self._make_es_service()
-            with self._patch_es_module():
-                setup_fuel_ops_indices(es_service)
-
-            created = {
-                call.kwargs["index"]
-                for call in es_service.client.indices.create.call_args_list
-            }
-            assert SUPPLIER_CONTRACTS_INDEX not in created
-            # Every other index is still created.
-            assert created == EXPECTED_INDICES - {SUPPLIER_CONTRACTS_INDEX}
-        finally:
-            clear_settings_cache()

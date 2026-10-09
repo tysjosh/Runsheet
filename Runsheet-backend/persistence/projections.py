@@ -32,11 +32,14 @@ from compliance.services.compliance_es_mappings import (
     TAX_EXEMPTIONS_INDEX,
     TAX_JURISDICTIONS_INDEX,
 )
+from fuel.services.fuel_es_mappings import FUEL_STATIONS_INDEX
 from fuel.services.fuel_ops_es_mappings import (
+    CUSTOMER_TANKS_INDEX,
     DEPOTS_INDEX,
     SUPPLIER_CONTRACTS_INDEX,
     TERMINALS_INDEX,
 )
+from Agents.support.mvp_es_mappings import TRUCK_COMPARTMENTS_INDEX
 from fuel.services.order_es_mappings import (
     FUEL_ORDERS_CURRENT_INDEX,
     INTAKE_CHANNELS_INDEX,
@@ -56,10 +59,12 @@ from persistence.models import (
     AssetCertificationORM,
     CompliancePricingRuleORM,
     CustomerORM,
+    CustomerTankORM,
     DepotORM,
     DriverMasterORM,
     DunningEventORM,
     FuelOrderCurrentORM,
+    FuelStationORM,
     IntakeChannelORM,
     InvoiceEventORM,
     InvoiceORM,
@@ -74,6 +79,7 @@ from persistence.models import (
     TaxJurisdictionORM,
     TenantJobPolicyORM,
     TerminalORM,
+    TruckCompartmentORM,
     TruckORM,
 )
 
@@ -135,6 +141,8 @@ def account_to_doc(row: AccountORM) -> Dict[str, Any]:
         "credit_balance_cents": row.credit_balance_cents,
         "credit_state": row.credit_state,
         "credit_override_expires_at": _iso(row.credit_override_expires_at),
+        "credit_override_reason": row.credit_override_reason,
+        "credit_override_authorized_by": row.credit_override_authorized_by,
         "net_terms_days": row.net_terms_days,
         "tier": row.tier,
         "billing_address": row.billing_address,
@@ -322,6 +330,7 @@ def ar_aging_snapshot_to_doc(row) -> Dict[str, Any]:
         "tenant_id": row.tenant_id,
         "snapshot_date": _iso(row.snapshot_date),
         "total_open_cents": row.total_open_cents,
+        "bucket_current_cents": row.bucket_current_cents,
         "bucket_0_30_cents": row.bucket_0_30_cents,
         "bucket_31_60_cents": row.bucket_31_60_cents,
         "bucket_61_90_cents": row.bucket_61_90_cents,
@@ -383,4 +392,25 @@ PROJECTORS.update({
     "intake_channel": (INTAKE_CHANNELS_INDEX, _document_passthrough),
     "truck": ("trucks", _document_passthrough),
     "location": ("locations", _document_passthrough),
+})
+
+
+# ---------------------------------------------------------------------------
+# Fuel assets (hybrid: stored ``document`` is the projection)
+# ---------------------------------------------------------------------------
+#
+# These three indices held authoritative state with no Postgres table behind
+# them, so recreating the Elasticsearch cluster destroyed them for good — see
+# the note above ``CustomerTankORM`` in :mod:`persistence.models`. Registering a
+# projector here is what makes them rebuildable, and it is deliberately the
+# passthrough: the stored ``document`` is the verbatim ES source, so a rebuild
+# reproduces byte-identical documents and no read path changes.
+#
+# Index names come from the domain constants rather than literals so a rename
+# cannot leave the projection writing to a dead index.
+
+PROJECTORS.update({
+    "customer_tank": (CUSTOMER_TANKS_INDEX, _document_passthrough),
+    "truck_compartment": (TRUCK_COMPARTMENTS_INDEX, _document_passthrough),
+    "fuel_station": (FUEL_STATIONS_INDEX, _document_passthrough),
 })

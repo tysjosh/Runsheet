@@ -29,8 +29,27 @@
  * nothing. `platform_admin` is the Runsheet-staff role; it is *additive* and
  * implies nothing, exactly as on the backend, so staff accounts carry `admin`
  * alongside it.
+ *
+ * `customer` is the portal identity (customer portal, OI-06). It sees no staff
+ * module at all: {@link canSee} refuses every id for it, including modules
+ * without `requiredRoles`, and the portal lives under `/portal` instead.
  */
-export type Role = "admin" | "dispatcher" | "driver" | "platform_admin";
+export type Role =
+  | "admin"
+  | "dispatcher"
+  | "driver"
+  | "platform_admin"
+  | "customer";
+
+/** The portal role (`auth.supertokens_init.CUSTOMER_PORTAL_ROLE`). */
+export const CUSTOMER_ROLE: Role = "customer";
+
+/** True when the roles carry the portal `customer` role (exact match). */
+export function isCustomerRole(
+  roles: readonly string[] | null | undefined,
+): boolean {
+  return hasAnyRole(roles, [CUSTOMER_ROLE]);
+}
 
 /**
  * Why a module might be deferrable.
@@ -222,19 +241,39 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["admin"],
     note: "Contains Feature Flags, whose API 403s for non-admins.",
   },
-  // There is deliberately no `settings` entry.
+  // ── UI revamp IA (R2.2, R2.3) ─────────────────────────────────────────────
   //
-  // It emptied out one piece at a time: password change moved to
-  // `/dashboard/profile`, Support was deleted, and Data Import moved to
-  // AdminHub. That left a top-level nav item holding a single tab, Agent
-  // Settings — which is admin policy (autonomy level, agent pause/resume,
-  // memory deletion, all gated to `admin` by `Agents/api_authz.py`). AdminHub
-  // already owns `agents` (Agent Monitoring), so Agent Settings now lives
-  // beside it as an AdminHub tab and the nav entry is gone.
-  //
-  // Dispatchers are not blinded by this: `AgentAutonomyBanner` on
-  // `/ops/control` still shows the current autonomy level, and that is the
-  // surface where they work a shift.
+  // `orders` and `live` are new nav entries; `live` is the nav label for the
+  // `/dashboard/control` route, so it carries the same gate as `control`.
+  // `settings` is the new home of Setup and Admin (`/dashboard/settings`).
+  // Its sections keep their own gates: Setup's tabs additionally need `setup`,
+  // Admin's need `admin` (admin only), so moving them under one nav item does
+  // not widen who sees an Admin tab. `setup`, `admin`, `notifications` and
+  // `drivers` stay registered as those container gates.
+  {
+    id: "orders",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Order intake and the bulk confirm/hold queue.",
+  },
+  {
+    id: "live",
+    tier: 2,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Nav label for /dashboard/control (alias of `control`).",
+  },
+  {
+    id: "settings",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Setup + Admin. Each section keeps its own gate (setup / admin).",
+  },
+  {
+    id: "system-health",
+    tier: 2,
+    requiredRoles: ["platform_admin"],
+    note: "Poison-queue depth for Runsheet staff (task 3.9).",
+  },
 
   // ── CommerceHub tabs ──────────────────────────────────────────────────────
   //
@@ -255,7 +294,12 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["platform_admin"],
     note: "Customer master lives in the ERP.",
   },
-  { id: "invoices", tier: 1, note: "Capability 6." },
+  {
+    id: "invoices",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Capability 6. Hidden from drivers (OI-19); the API refuses them too.",
+  },
   {
     id: "price-books",
     tier: 4,
@@ -286,7 +330,18 @@ const MODULES: readonly ModuleDescriptor[] = [
     requiredRoles: ["platform_admin"],
     note: "ERP receivables.",
   },
-  { id: "reconciliation", tier: 1, note: "Capability 7 — gallon variance." },
+  {
+    id: "reconciliation",
+    tier: 1,
+    requiredRoles: ["admin", "dispatcher"],
+    note: "Capability 7 — gallon variance. Admin + dispatcher only (OI-19).",
+  },
+  {
+    id: "margin",
+    tier: 2,
+    requiredRoles: ["admin"],
+    note: "Cost and margin; tenant admin only (margin-feed D1).",
+  },
 
   // ── ComplianceHub tabs — all legally required ─────────────────────────────
   { id: "certifications", tier: 3, note: "DOT asset certifications." },
@@ -358,8 +413,11 @@ const MODULES: readonly ModuleDescriptor[] = [
 
   // ── SettingsPage tabs ─────────────────────────────────────────────────────
   // AdminHub tab. Admin-only, matching the backend: `PATCH /agent/config/`
-  // `autonomy`, `POST /agent/{id}/pause|resume` and `DELETE /agent/memory/{id}`
-  // all require `admin` via `agent_admin_dependency`. The previous note here
+  // `autonomy` and `DELETE /agent/memory/{id}` require `admin` via
+  // `agent_admin_dependency`. `POST /agent/{id}/pause|resume` act on the
+  // process-wide agents (every tenant), so they require `platform_admin` via
+  // `agent_platform_admin_dependency` and the page shows those controls to
+  // `platform_admin` only. The previous note here
   // claimed "read-only for non-admins already", which overstated it — the
   // read-only treatment covered the autonomy radios only, while pause/resume
   // and memory deletion were ungated in both the UI and the API.
@@ -367,7 +425,7 @@ const MODULES: readonly ModuleDescriptor[] = [
     id: "agent-settings",
     tier: 2,
     requiredRoles: ["admin"],
-    note: "Agent policy: autonomy level, pause/resume, memory. Admin-only.",
+    note: "Agent policy: autonomy level, memory. Admin-only; pause/resume needs platform_admin.",
   },
   // There is deliberately no `security` entry. That tab rendered
   // `<ChangePassword />`, the same component `ProfilePage` renders, so it was a
@@ -382,7 +440,7 @@ const MODULES: readonly ModuleDescriptor[] = [
   // example and production — audit 2026-05-08 recommendation #1) and its create,
   // detail and update endpoints were never implemented, so the create-ticket
   // modal could not work in any environment. Its other two tabs were customer
-  // notifications, which now live at `/dashboard/notifications` under the
+  // notifications, which now live at `/dashboard/customers?tab=communications` under the
   // `notification-history` and `notification-settings` ids above.
 ];
 
@@ -415,9 +473,11 @@ export function moduleDescriptor(id: string): ModuleDescriptor | undefined {
  *    `requiredRoles: ["platform_admin"]`, so it is refused at step 3 for
  *    everyone else even when `mvpMode` is off. `mvpMode` is the broader switch:
  *    it hides Tier 4 from staff too.
- * 3. **`requiredRoles` with no exact match → `false`.** Unresolved roles
+ * 3. **A `customer` session → `false`.** Portal users see no staff module,
+ *    including the ones with no `requiredRoles` (design §10.1).
+ * 4. **`requiredRoles` with no exact match → `false`.** Unresolved roles
  *    (`null`) count as no roles, so nothing role-gated flashes visible.
- * 4. Otherwise visible. A module with no `requiredRoles` shows to any
+ * 5. Otherwise visible. A module with no `requiredRoles` shows to any
  *    signed-in user immediately, including before roles resolve.
  */
 export function canSee(id: string, ctx: VisibilityContext): boolean {
@@ -426,6 +486,8 @@ export function canSee(id: string, ctx: VisibilityContext): boolean {
 
   const mvpMode = ctx.mvpMode ?? mvpModeDefault();
   if (mvpMode && descriptor.tier === 4) return false;
+
+  if (isCustomerRole(ctx.roles)) return false;
 
   if (!descriptor.requiredRoles) return true;
   return hasAnyRole(ctx.roles, descriptor.requiredRoles);

@@ -49,10 +49,11 @@ import logging
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from commerce.api._authz import commerce_staff_dependency
+from commerce.api.price_book_endpoints import require_pricing_enabled
 from commerce.models.price_protection_contract import (
     ContractType,
     PriceProtectionContract,
@@ -61,6 +62,8 @@ from commerce.services.price_protection_service import PriceProtectionService
 from compliance.services.compliance_es_mappings import (
     PRICE_PROTECTION_CONTRACTS_INDEX,
 )
+from errors.codes import ErrorCode
+from errors.exceptions import AppException
 from ops.middleware.tenant_guard import (
     TenantContext,
     get_tenant_context,
@@ -83,7 +86,13 @@ _es_service: Optional[Any] = None
 router = APIRouter(
     prefix="/api/commerce/price-protection-contracts",
     tags=["Commerce - Price Protection"],
-    dependencies=[Depends(commerce_staff_dependency)],
+    # Flag gate first (FastAPI resolves router dependencies in order) so a
+    # tenant without the pricing engine gets 404 before 403, as price books
+    # do (finding C-1).
+    dependencies=[
+        Depends(require_pricing_enabled),
+        Depends(commerce_staff_dependency),
+    ],
 )
 
 
@@ -277,12 +286,10 @@ async def create_price_protection_contract(
     try:
         contract = PriceProtectionContract.model_validate(payload)
     except Exception as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "price_protection_contract.invalid_payload",
-                "message": str(exc),
-            },
         )
 
     document = contract.model_dump(mode="json")
@@ -434,15 +441,13 @@ async def _fetch_contract_or_404(
     if pg is not _NOT_CUT_OVER:
         if pg is not None:
             return pg
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICE_PROTECTION_CONTRACT_NOT_FOUND,
+            (
+                f"No price-protection contract with id {contract_id!r} "
+                "is visible to the requesting tenant."
+            ),
             status_code=404,
-            detail={
-                "error_code": "price_protection_contract.not_found",
-                "message": (
-                    f"No price-protection contract with id {contract_id!r} "
-                    "is visible to the requesting tenant."
-                ),
-            },
         )
 
     es = _get_es_service()
@@ -466,15 +471,13 @@ async def _fetch_contract_or_404(
         if isinstance(source, dict):
             return source
 
-    raise HTTPException(
+    raise AppException(
+        ErrorCode.PRICE_PROTECTION_CONTRACT_NOT_FOUND,
+        (
+            f"No price-protection contract with id {contract_id!r} "
+            "is visible to the requesting tenant."
+        ),
         status_code=404,
-        detail={
-            "error_code": "price_protection_contract.not_found",
-            "message": (
-                f"No price-protection contract with id {contract_id!r} "
-                "is visible to the requesting tenant."
-            ),
-        },
     )
 
 
@@ -547,15 +550,13 @@ async def update_price_protection_contract(
     Validates: Requirement 3.6
     """
     if body.notes is None and body.status is None:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICE_PROTECTION_CONTRACT_NO_MUTABLE_FIELDS,
+            (
+                "At least one of 'notes' or 'status' must be "
+                "provided."
+            ),
             status_code=422,
-            detail={
-                "error_code": "price_protection_contract.no_mutable_fields",
-                "message": (
-                    "At least one of 'notes' or 'status' must be "
-                    "provided."
-                ),
-            },
         )
 
     # Fetch the current state so we can evaluate the status transition
@@ -579,19 +580,17 @@ async def update_price_protection_contract(
         current = existing.get("status")
         allowed = _ALLOWED_STATUS_TRANSITIONS.get(current, set())
         if desired not in allowed:
-            raise HTTPException(
+            raise AppException(
+                ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_STATUS_TRANSITION,
+                (
+                    f"Transition from {current!r} to {desired!r} is "
+                    "not allowed via this endpoint. Only "
+                    "'active → cancelled' is accepted; "
+                    "'exhausted' / 'expired' are applied by the "
+                    "lifecycle cron."
+                ),
                 status_code=422,
-                detail={
-                    "error_code": (
-                        "price_protection_contract.invalid_status_transition"
-                    ),
-                    "message": (
-                        f"Transition from {current!r} to {desired!r} is "
-                        "not allowed via this endpoint. Only "
-                        "'active → cancelled' is accepted; "
-                        "'exhausted' / 'expired' are applied by the "
-                        "lifecycle cron."
-                    ),
+                details={
                     "current_status": current,
                     "requested_status": desired,
                 },
@@ -607,12 +606,10 @@ async def update_price_protection_contract(
     try:
         validated = PriceProtectionContract.model_validate(merged)
     except Exception as exc:
-        raise HTTPException(
+        raise AppException(
+            ErrorCode.PRICE_PROTECTION_CONTRACT_INVALID_PAYLOAD,
+            str(exc),
             status_code=422,
-            detail={
-                "error_code": "price_protection_contract.invalid_payload",
-                "message": str(exc),
-            },
         )
 
     document = validated.model_dump(mode="json")

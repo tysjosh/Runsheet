@@ -124,10 +124,21 @@ function envelope<T>(type: string, data: T) {
 }
 
 async function flushOpen(): Promise<void> {
-  // Let the ``setTimeout(onopen)`` fire.
-  await act(async () => {
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  });
+  // One tick is not enough, and the shortfall is a race rather than a constant.
+  //
+  // `useWebSocket.connectInternal` is async and awaits `config.getUrl()`, which
+  // here is `buildFuelPlanningWebSocketUrl` — itself awaiting `getAuthToken()`.
+  // So `new WebSocket(url)` happens several microtasks after the effect runs,
+  // and the mock's `setTimeout(onopen, 0)` is only queued at that point: after
+  // the timer this helper is waiting on. A single tick therefore resolves while
+  // `onopen` is still pending and `isConnected` is still false.
+  //
+  // Draining a handful of macrotasks lets that chain finish however deep it is.
+  for (let i = 0; i < 5; i += 1) {
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+  }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

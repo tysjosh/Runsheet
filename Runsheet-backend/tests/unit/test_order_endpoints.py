@@ -113,10 +113,31 @@ class FakeOrderRepository:
         self._orders[self._key(tenant_id, order.order_id)] = order
 
     async def upsert_with_last_event_timestamp(
-        self, tenant_id: str, order: FuelOrder | Dict[str, Any]
-    ) -> None:
+        self,
+        tenant_id: str,
+        order: FuelOrder | Dict[str, Any],
+        *,
+        expected_status: Optional[str] = None,
+        expected_last_event_timestamp: Any = None,
+    ):
         model = order if isinstance(order, FuelOrder) else FuelOrder(**order)
-        self._orders[self._key(tenant_id, model.order_id)] = model
+        key = self._key(tenant_id, model.order_id)
+        if expected_status is not None:
+            # Guarded form (OI-41): same compare-and-set as the real repo.
+            from fuel.order_repository import OrderChangedConcurrentlyError
+
+            stored = self._orders.get(key)
+            if stored is None or stored.status != expected_status or (
+                expected_last_event_timestamp is not None
+                and stored.last_event_timestamp != expected_last_event_timestamp
+            ):
+                raise OrderChangedConcurrentlyError(
+                    model.order_id, expected_status,
+                    stored.status if stored else None,
+                )
+            self._orders[key] = model
+            return model.model_dump(mode="python")
+        self._orders[key] = model
 
     async def append_event(self, tenant_id: str, event: Any) -> None:
         if isinstance(event, dict):
@@ -1151,3 +1172,214 @@ class TestNullableShipToCoordinates:
         }
         assert ("ship_to_lat",) in missing
         assert ("ship_to_lon",) in missing
+
+
+# ---------------------------------------------------------------------------
+# Tests — intake-disabled 409 and generic bulk row errors (findings F1, F2)
+# ---------------------------------------------------------------------------
+
+_BULK_ROW = {
+    "customer_id": "cust-1",
+    "customer_name": "Test Customer",
+    "ship_to_address": "123 Main St",
+    "ship_to_lat": 30.0,
+    "ship_to_lon": -90.0,
+    "product_code": "DIESEL_2",
+    "gallons_requested": 500,
+    "call_type": "one_off",
+}
+
+
+class _ScriptedPipeline(FakePipeline):
+    """FakePipeline whose ingest/validate outcome is set per test."""
+
+    def __init__(self, *, ingest_result=None, ingest_exc=None, validate_exc=None):
+        super().__init__()
+        self._ingest_result = ingest_result
+        self._ingest_exc = ingest_exc
+        self._validate_exc = validate_exc
+        self.validated: List[Dict[str, Any]] = []
+
+    async def ingest_dispatcher(self, *, tenant, payload, request_id, client_event_id):
+        await super().ingest_dispatcher(
+            tenant=tenant, payload=payload, request_id=request_id,
+            client_event_id=client_event_id,
+        )
+        if self._ingest_exc is not None:
+            raise self._ingest_exc
+        return self._ingest_result or FakeIntakeResult()
+
+    async def validate_dispatcher_payload(self, tenant, payload, request_id):
+        self.validated.append(payload)
+        if self._validate_exc is not None:
+            raise self._validate_exc
+
+
+class TestIntakeDisabledAndBulkErrors:
+    """F1: legacy_passthrough is a 409, and bulk rows never echo raw exceptions."""
+
+    def test_create_legacy_passthrough_is_409(self):
+        pipeline = _ScriptedPipeline(
+            ingest_result=FakeIntakeResult(
+                event_id="evt-1", status="legacy_passthrough", order_id=None
+            )
+        )
+        _, client, *_ = _build_app(pipeline=pipeline)
+        resp = client.post("/api/orders", json={"client_event_id": "evt-1", **_BULK_ROW})
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["detail"]["error_code"] == "ORDER_INTAKE_DISABLED"
+        assert "Location" not in resp.headers
+
+    def test_bulk_row_unexpected_exception_is_generic(self, caplog):
+        pipeline = _ScriptedPipeline(ingest_exc=RuntimeError("secret-dsn"))
+        _, client, *_ = _build_app(pipeline=pipeline)
+        with caplog.at_level("WARNING", logger="fuel.api.order_endpoints"):
+            resp = client.post("/api/orders/bulk", json={"orders": [dict(_BULK_ROW)]})
+        assert resp.status_code == 200, resp.text
+        assert "secret-dsn" not in resp.text
+        body = resp.json()
+        assert body["errors"] == 1
+        assert body["results"][0]["status"] == "error"
+        assert body["results"][0]["error"] == "Row could not be processed"
+        # The cause is kept server-side, with the row index.
+        records = [r for r in caplog.records if r.exc_info]
+        assert records, "the original exception must be logged with exc_info"
+        assert "secret-dsn" in str(records[0].exc_info[1])
+
+    def test_bulk_row_app_exception_uses_code_and_message(self):
+        from errors.exceptions import invalid_customer_tank_ref
+
+        pipeline = _ScriptedPipeline(
+            ingest_exc=invalid_customer_tank_ref(details={"customer_tank_id": "t-1"})
+        )
+        _, client, *_ = _build_app(pipeline=pipeline)
+        resp = client.post("/api/orders/bulk", json={"orders": [dict(_BULK_ROW)]})
+        exc = invalid_customer_tank_ref()
+        assert resp.json()["results"][0]["error"] == (
+            f"INVALID_CUSTOMER_TANK_REF: {exc.message}"
+        )
+
+    def test_bulk_legacy_passthrough_row_is_not_processed(self):
+        pipeline = _ScriptedPipeline(
+            ingest_result=FakeIntakeResult(
+                event_id="evt-x", status="legacy_passthrough", order_id=None
+            )
+        )
+        _, client, *_ = _build_app(pipeline=pipeline)
+        body = client.post(
+            "/api/orders/bulk", json={"orders": [dict(_BULK_ROW)]}
+        ).json()
+        assert body["processed"] == 0
+        assert body["errors"] == 1
+        assert body["results"][0]["status"] == "error"
+        assert body["results"][0]["error"] == (
+            "ORDER_INTAKE_DISABLED: Order intake isn't enabled for this account"
+        )
+
+    def test_bulk_dry_run_validates_each_row_through_the_pipeline(self):
+        pipeline = _ScriptedPipeline(validate_exc=RuntimeError("secret-dsn"))
+        _, client, *_ = _build_app(pipeline=pipeline)
+        resp = client.post(
+            "/api/orders/bulk",
+            json={"orders": [dict(_BULK_ROW), dict(_BULK_ROW)], "dry_run": True},
+        )
+        body = resp.json()
+        assert len(pipeline.validated) == 2
+        assert pipeline.calls == []  # a dry run never ingests
+        assert [r["status"] for r in body["results"]] == ["error", "error"]
+        assert "secret-dsn" not in resp.text
+        assert body["processed"] == 0
+
+    def test_bulk_dry_run_valid_rows_stay_valid(self):
+        pipeline = _ScriptedPipeline()
+        _, client, *_ = _build_app(pipeline=pipeline)
+        body = client.post(
+            "/api/orders/bulk",
+            json={"orders": [dict(_BULK_ROW)], "dry_run": True},
+        ).json()
+        assert body["results"][0]["status"] == "dry_run_valid"
+        assert body["processed"] == 1
+        assert "client_event_id" not in pipeline.validated[0]
+
+
+# ---------------------------------------------------------------------------
+# Tests — GET /api/orders sort/date validation (finding F8, decision D10)
+# ---------------------------------------------------------------------------
+
+
+class _CountingOrderRepository(FakeOrderRepository):
+    def __init__(self):
+        super().__init__()
+        self.search_calls: List[Dict[str, Any]] = []
+
+    async def search(self, *, tenant_id: str, **kwargs) -> Dict[str, Any]:
+        self.search_calls.append(kwargs)
+        return await super().search(tenant_id=tenant_id, **kwargs)
+
+
+class TestListOrdersParamValidation:
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"sort": "-created_at"},
+            {"sort": "created_at:sideways"},
+            {"sort": "secret_field:asc"},
+            {"sort": "created_at:asc:extra"},
+            {"start_date": "notadate"},
+            {"end_date": "2026-13-40"},
+        ],
+    )
+    def test_bad_sort_or_date_is_422_before_the_repository(self, params):
+        repo = _CountingOrderRepository()
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.get("/api/orders", params=params)
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["detail"]["error_code"] == "VALIDATION_ERROR"
+        assert repo.search_calls == []
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            {"sort": "created_at"},
+            {"sort": "updated_at:asc"},
+            {"sort": "delivery_window_start:desc"},
+            {"sort": "status:asc"},
+            {"start_date": "2026-01-01", "end_date": "2026-01-31T23:59:59Z"},
+            {"start_date": "2026-01-01T00:00:00+00:00"},
+        ],
+    )
+    def test_valid_sort_and_dates_pass_through_unchanged(self, params):
+        repo = _CountingOrderRepository()
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.get("/api/orders", params=params)
+        assert resp.status_code == 200, resp.text
+        call = repo.search_calls[0]
+        for key, value in params.items():
+            assert call[key] == value
+
+
+class TestUnknownNewStatus:
+    """F11: an unknown ``new_status`` is a 422, a disallowed known one stays 409."""
+
+    def test_unknown_status_is_422(self):
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order(status="placed"))
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.patch("/api/orders/ord_abc123/status", json={"new_status": "bogus"})
+        assert resp.status_code == 422, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error_code"] == "VALIDATION_ERROR"
+        assert detail["details"]["new_status"] == "bogus"
+        assert repo._orders["tenant-A::ord_abc123"].status == "placed"
+
+    def test_known_but_disallowed_status_stays_409(self):
+        repo = FakeOrderRepository()
+        repo.seed_order(_make_order(status="placed"))
+        _, client, *_ = _build_app(repo=repo)
+        resp = client.patch("/api/orders/ord_abc123/status", json={"new_status": "in_transit"})
+        assert resp.status_code == 409, resp.text
+
+    def test_unknown_status_on_a_missing_order_is_still_404(self):
+        _, client, *_ = _build_app()
+        resp = client.patch("/api/orders/nope/status", json={"new_status": "bogus"})
+        assert resp.status_code == 404, resp.text

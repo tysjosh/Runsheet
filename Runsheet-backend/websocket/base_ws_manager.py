@@ -143,7 +143,28 @@ class BaseWSManager(ABC):
         """
         async with self._lock:
             clients = list(self._clients.items())
+        return await self._send_to(clients, message)
 
+    async def broadcast_to_tenant(self, tenant_id: str, message: dict) -> int:
+        """Send *message* only to clients whose verified ``tenant_id`` matches.
+
+        Same backpressure, metrics and dead-client cleanup as :meth:`broadcast`
+        (loading-plan-executor K9). A blank *tenant_id* reaches nobody.
+
+        Returns the number of clients that received the message.
+        """
+        if not tenant_id:
+            return 0
+        async with self._lock:
+            clients = [
+                (ws, meta)
+                for ws, meta in self._clients.items()
+                if meta.get("tenant_id") == tenant_id
+            ]
+        return await self._send_to(clients, message)
+
+    async def _send_to(self, clients: List[Any], message: dict) -> int:
+        """Deliver *message* to ``(ws, meta)`` pairs; shared by both broadcasts."""
         if not clients:
             return 0
 

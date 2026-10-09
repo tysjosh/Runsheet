@@ -12,10 +12,14 @@
  */
 
 import { createContext, useContext } from "react";
+import type { CreateOrderFormValues } from "../../components/ops/CreateOrderModal";
+
+/** Fields the Create order dialog can open with (e.g. from a low tank). */
+export type CreateOrderPrefill = Partial<CreateOrderFormValues>;
 
 export interface DashboardChrome {
-  /** Open the global "Create Order" modal. */
-  openCreateOrder: () => void;
+  /** Open the global "Create Order" modal, optionally prefilled. */
+  openCreateOrder: (prefill?: CreateOrderPrefill) => void;
   /** Open the AI Copilot side panel. */
   openAIChat: () => void;
 }
@@ -55,28 +59,43 @@ export function useDashboardChrome(): DashboardChrome {
  */
 export const DASHBOARD_ITEM_PATH: Record<string, string> = {
   today: "/dashboard",
-  notifications: "/dashboard/notifications",
-  orders: "/dashboard/orders",
-  fleet: "/dashboard/fleet",
   dispatch: "/dashboard/dispatch",
-  drivers: "/dashboard/drivers",
-  "fuel-ops": "/dashboard/fuel-ops",
-  compliance: "/dashboard/compliance",
+  orders: "/dashboard/orders",
+  live: "/dashboard/control",
   control: "/dashboard/control",
+  fleet: "/dashboard/fleet",
   customers: "/dashboard/customers",
+  "fuel-ops": "/dashboard/fuel-ops",
   billing: "/dashboard/billing",
+  compliance: "/dashboard/compliance",
   analytics: "/dashboard/analytics",
-  setup: "/dashboard/setup",
-  admin: "/dashboard/admin",
   settings: "/dashboard/settings",
   profile: "/dashboard/profile",
-  // Reconciliation folded into Billing; keep the alias so stale links resolve.
-  reconciliation: "/dashboard/billing",
+  // Retired modules (UI revamp §4) resolve to their new homes, so stale
+  // `openModule` callers and bookmarks still land on the right tab.
+  drivers: "/dashboard/fleet?tab=drivers",
+  notifications: "/dashboard/customers?tab=communications",
+  setup: "/dashboard/settings?tab=company",
+  admin: "/dashboard/settings",
+  reconciliation: "/dashboard/billing?tab=reconciliation",
 };
 
 /** Resolve the destination path for a sidebar/module id (falls back to today). */
 export function dashboardPathForItem(item: string): string {
   return DASHBOARD_ITEM_PATH[item] ?? "/dashboard";
+}
+
+/**
+ * The URL for a module and optional tab. An explicit tab replaces any tab the
+ * module's default path already names (e.g. `setup` + `depots`).
+ */
+export function dashboardHref(item: string, tab?: string): string {
+  const base = dashboardPathForItem(item);
+  if (!tab) return base;
+  const [path, query = ""] = base.split("?");
+  const params = new URLSearchParams(query);
+  params.set("tab", tab);
+  return `${path}?${params.toString()}`;
 }
 
 /** Derive the active sidebar id from the current pathname. */

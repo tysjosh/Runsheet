@@ -186,6 +186,54 @@ class TestMeterAuditServiceRegisterMeter:
         es.index_document.assert_not_called()
 
 
+class TestRegisterMeterC7:
+    """Finding C7: status follows expiry at create; duplicates are 409."""
+
+    _KW = dict(
+        meter_number="MTR-NEW",
+        truck_id="truck_abc",
+        calibration_certificate_number="CAL-1",
+        calibration_date=date(2025, 1, 1),
+        weights_measures_authority="TX Weights & Measures",
+    )
+
+    @pytest.mark.asyncio
+    @patch("compliance.services.meter_audit_service.utcnow", return_value=_FIXED_NOW)
+    async def test_already_expired_is_stored_expired_calibration(self, _now):
+        es = _make_es_service()
+        doc = await MeterAuditService(es).register_meter(
+            _TENANT_ID, calibration_expiry_date=date(2026, 5, 31), **self._KW
+        )
+        assert doc["status"] == "expired_calibration"
+        assert es.index_document.call_args[0][2]["status"] == "expired_calibration"
+
+    @pytest.mark.asyncio
+    @patch("compliance.services.meter_audit_service.utcnow", return_value=_FIXED_NOW)
+    async def test_future_expiry_stays_active(self, _now):
+        es = _make_es_service()
+        doc = await MeterAuditService(es).register_meter(
+            _TENANT_ID, calibration_expiry_date=date(2026, 6, 1), **self._KW
+        )
+        assert doc["status"] == "active"
+
+    @pytest.mark.asyncio
+    @patch("compliance.services.meter_audit_service.utcnow", return_value=_FIXED_NOW)
+    async def test_duplicate_meter_number_is_409(self, _now):
+        es = _make_es_service()
+        es.search_documents = AsyncMock(
+            return_value=_es_search_response([_make_meter_doc(meter_number="MTR-NEW")])
+        )
+        with pytest.raises(AppException) as exc_info:
+            await MeterAuditService(es).register_meter(
+                _TENANT_ID, calibration_expiry_date=date(2027, 1, 1), **self._KW
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.error_code.value == "DUPLICATE_METER_NUMBER"
+        query = es.search_documents.call_args[0][1]
+        assert "'meter_number': 'MTR-NEW'" in repr(query)
+        es.index_document.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Tests: get_meter
 # ---------------------------------------------------------------------------
@@ -1044,11 +1092,26 @@ class TestMeterAuditServiceGetMeterAuditTrail:
         assert result["limit"] == 10
 
     @pytest.mark.asyncio
-    async def test_pagination_cursor_passed_as_search_after(self):
-        """Cursor is passed to ES as search_after for keyset pagination."""
+    async def test_pagination_cursor_becomes_the_sort_boundary(self):
+        """The cursor is resolved to the cursor row's sort values.
+
+        It used to be passed straight through as ``[cursor, cursor]``, which made
+        an audit id the boundary for a ``created_at`` sort. Elasticsearch answered
+        every page-2 request with ``failed to parse date field [...]`` — a 400 on
+        all nine endpoints that paginate this way.
+
+        The previous version of this test asserted only the index name, under a
+        docstring claiming to verify ``search_after``, with a comment block
+        wondering aloud whether ``inject_tenant_filter`` discards the key. It does
+        not, and that is asserted here rather than speculated about.
+        """
         es = _make_es_service()
-        es.search_documents = AsyncMock(
-            return_value={"hits": {"hits": []}}
+        es.search_documents = AsyncMock(return_value={"hits": {"hits": []}})
+        es.get_document = AsyncMock(
+            return_value={
+                "audit_id": "maudit_prev_last",
+                "created_at": "2026-01-04T00:00:00+00:00",
+            }
         )
 
         service = MeterAuditService(es)
@@ -1056,23 +1119,32 @@ class TestMeterAuditServiceGetMeterAuditTrail:
             _TENANT_ID, "meter_abc123", cursor="maudit_prev_last"
         )
 
-        # Verify search_after was included in the query
-        call_args = es.search_documents.call_args
-        query_body = call_args[0][1]
-        # inject_tenant_filter wraps the query, but search_after is at the
-        # base_query level which is passed as the full body
-        # The function builds base_query with search_after then wraps with
-        # inject_tenant_filter which only modifies the "query" key
-        # Actually, looking at the implementation, inject_tenant_filter only
-        # returns {"query": {...}} so search_after would be lost.
-        # Let me check the actual implementation more carefully.
-        # The implementation passes the full query dict to inject_tenant_filter
-        # which only returns the "query" portion. But looking at the code:
-        # base_query has "query", "size", "sort", and optionally "search_after"
-        # inject_tenant_filter only returns {"query": {...}}
-        # So the service must be handling this differently.
-        # Let's just verify the call was made correctly.
-        assert call_args[0][0] == "meter_audit_trail"
+        index, body = es.search_documents.call_args[0][:2]
+        assert index == "meter_audit_trail"
+        # Sort order, not document order: [created_at, audit_id].
+        assert body["search_after"] == ["2026-01-04T00:00:00+00:00", "maudit_prev_last"]
+        # The tenant filter is applied and the sibling keys survive it.
+        assert body["sort"] and "tenant_id" in str(body["query"])
+
+    @pytest.mark.asyncio
+    async def test_a_cursor_naming_no_record_is_rejected(self):
+        """Rather than silently restarting at page 1, which never terminates for a
+        ``while next_cursor:`` caller."""
+        from services.keyset_pagination import InvalidCursorError
+
+        es = _make_es_service()
+        es.search_documents = AsyncMock(return_value={"hits": {"hits": []}})
+        es.get_document = AsyncMock(return_value=None)
+
+        service = MeterAuditService(es)
+
+        with pytest.raises(InvalidCursorError) as excinfo:
+            await service.get_meter_audit_trail(
+                _TENANT_ID, "meter_abc123", cursor="gone"
+            )
+
+        assert excinfo.value.status_code == 400
+        es.search_documents.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_query_is_tenant_scoped(self):

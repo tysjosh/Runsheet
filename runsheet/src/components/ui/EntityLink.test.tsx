@@ -26,18 +26,18 @@ import {
 
 describe("entityHref — canonical owning-module route map", () => {
   const cases: Array<[EntityType, string, string]> = [
-    ["customer", "CUST-1", "/commerce/customers/CUST-1"],
-    ["account", "ACC-1", "/commerce/accounts/ACC-1"],
-    ["invoice", "INV-1", "/commerce/invoices/INV-1"],
-    ["order", "ORD-1", "/orders/ORD-1"],
-    ["job", "JOB-1", "/ops/scheduling/JOB-1"],
+    ["customer", "CUST-1", "/dashboard/customers/CUST-1"],
+    ["account", "ACC-1", "/dashboard/billing/accounts/ACC-1"],
+    ["invoice", "INV-1", "/dashboard/billing/invoices/INV-1"],
+    ["order", "ORD-1", "/dashboard/orders/ORD-1"],
+    ["job", "JOB-1", "/dashboard/dispatch/jobs/JOB-1"],
     ["asset", "ASSET-1", "/dashboard/fleet?asset=ASSET-1"],
-    // `/dashboard/drivers`, not `/ops/drivers`: the latter is an empty
+    // `/dashboard/fleet?tab=drivers`, not `/ops/drivers`: the latter is an empty
     // directory with no `page.tsx`, so it never resolved to a route.
-    ["driver", "DRV-1", "/dashboard/drivers?driver=DRV-1"],
-    ["tank", "TANK-1", "/ops/fuel/tanks/TANK-1"],
-    ["depot", "DEP-1", "/ops/fuel/depots/DEP-1"],
-    ["terminal", "TERM-1", "/compliance/terminals/TERM-1"],
+    ["driver", "DRV-1", "/dashboard/fleet?tab=drivers&driver=DRV-1"],
+    ["tank", "TANK-1", "/dashboard/customers/tanks/TANK-1"],
+    ["depot", "DEP-1", "/dashboard/settings/depots/DEP-1"],
+    ["terminal", "TERM-1", "/dashboard/compliance/terminals/TERM-1"],
   ];
 
   it.each(cases)("routes %s ids to the owning module", (type, id, expected) => {
@@ -46,7 +46,7 @@ describe("entityHref — canonical owning-module route map", () => {
 
   it("URL-encodes ids containing special characters", () => {
     expect(entityHref("customer", "a b/c")).toBe(
-      "/commerce/customers/a%20b%2Fc",
+      "/dashboard/customers/a%20b%2Fc",
     );
   });
 });
@@ -78,7 +78,7 @@ describe("EntityLink — resolved reference", () => {
     render(<EntityLink type="customer" id="CUST-7" link={link} />);
 
     const anchor = screen.getByRole("link", { name: /Acme Fuels/ });
-    expect(anchor).toHaveAttribute("href", "/commerce/customers/CUST-7");
+    expect(anchor).toHaveAttribute("href", "/dashboard/customers/CUST-7");
     // The id is appended in parentheses when the display differs from the id.
     expect(anchor).toHaveTextContent("Acme Fuels (CUST-7)");
   });
@@ -135,7 +135,10 @@ describe("EntityLink — empty/absent reference", () => {
   it("uses the label as display text for an optimistic link", () => {
     render(<EntityLink type="driver" id="DRV-3" label="Jane Driver" />);
     const anchor = screen.getByRole("link", { name: /Jane Driver/ });
-    expect(anchor).toHaveAttribute("href", "/dashboard/drivers?driver=DRV-3");
+    expect(anchor).toHaveAttribute(
+      "href",
+      "/dashboard/fleet?tab=drivers&driver=DRV-3",
+    );
     expect(anchor).toHaveTextContent("Jane Driver (DRV-3)");
   });
 

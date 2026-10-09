@@ -280,10 +280,12 @@ async def test_price_protection_get_served_from_postgres(engine, read_from_pg):
     from commerce.api import price_protection_endpoints as ppe
     doc = await ppe._fetch_contract_or_404("ppc_r", TENANT)
     assert doc["contract_id"] == "ppc_r"
-    # Missing id raises 404 from the PG path.
-    from fastapi import HTTPException
-    with pytest.raises(HTTPException):
+    # Missing id raises 404 from the PG path (standard envelope, C12/C-2).
+    from errors.exceptions import AppException
+    with pytest.raises(AppException) as exc_info:
         await ppe._fetch_contract_or_404("ppc_missing", TENANT)
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.error_code.value == "price_protection_contract.not_found"
 
 
 # ---------------------------------------------------------------------------
@@ -1602,8 +1604,9 @@ async def test_route_planning_routable_orders_from_postgres(engine, read_from_pg
         feature_flag_service=MagicMock(),
     )
     rows = await agent._fetch_routable_orders(TENANT)
-    # Only confirmed + scheduled are routable.
-    assert {r["order_id"] for r in rows} == {"o_conf", "o_sched"}
+    # N2: routable = LOADABLE_ORDER_STATUSES (placed, confirmed, scheduled),
+    # the same set the loader loads.
+    assert {r["order_id"] for r in rows} == {"o_conf", "o_sched", "o_placed"}
 
 
 async def test_delivery_prioritization_pending_and_discovery_from_postgres(engine, read_from_pg):

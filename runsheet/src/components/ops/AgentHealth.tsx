@@ -7,12 +7,13 @@
  * with last activity timestamp. Provides pause/resume controls wired to the
  * POST `/agent/{agent_id}/pause` and `/agent/{agent_id}/resume` endpoints.
  *
- * Audience: this panel renders inside `OperationsControlView` and `/ops/command`,
- * both of which are `admin` + `dispatcher` surfaces — but pausing an agent is a
- * tenant-wide lifecycle change, so the backend restricts it to `admin` via
- * `agent_admin_dependency` (see `Agents/api_authz.py`). The status list stays
- * visible to dispatchers; only the pause/resume control is admin-gated, so a
- * dispatcher is not shown a button that can only return 403.
+ * Audience: this panel renders inside Live → Agents (`live/LiveView`) and `/ops/command`,
+ * both of which are `admin` + `dispatcher` surfaces — but the autonomous agents
+ * are process-wide, so pausing one stops it for every tenant. The backend
+ * restricts pause/resume to `platform_admin` via
+ * `agent_platform_admin_dependency` (see `Agents/api_authz.py`). The status list
+ * stays visible to dispatchers and tenant admins; only the pause/resume control
+ * is gated, so nobody is shown a button that can only return 403.
  *
  * The role check here is presentation-only. The backend re-checks on every
  * pause/resume and answers 403 regardless of what this component renders.
@@ -85,15 +86,15 @@ export default function AgentHealth() {
   const [agents, setAgents] = useState<Record<string, AgentHealthEntry>>({});
   const [loading, setLoading] = useState(true);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
-  // Defaults to false so a dispatcher never briefly sees an actionable control
-  // before the session's claims resolve.
-  const [isAdmin, setIsAdmin] = useState(false);
+  // Defaults to false so nobody briefly sees an actionable control before the
+  // session's claims resolve.
+  const [canControlAgents, setCanControlAgents] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const roles = await getCurrentUserRoles();
-      if (!cancelled) setIsAdmin(roles.includes("admin"));
+      if (!cancelled) setCanControlAgents(roles.includes("platform_admin"));
     })();
     return () => {
       cancelled = true;
@@ -228,11 +229,12 @@ export default function AgentHealth() {
                   </p>
                 </div>
 
-                {/* Pause/Resume button — admin only. Agent lifecycle is a
-                    tenant-wide change, so `agent_admin_dependency` answers 403
-                    for a dispatcher; omitting the control rather than disabling
-                    it keeps the panel honest about what this role can do. */}
-                {isAdmin && (
+                {/* Pause/Resume button — platform_admin only. The agents are
+                    process-wide, so `agent_platform_admin_dependency` answers
+                    403 for a tenant admin or dispatcher; omitting the control
+                    rather than disabling it keeps the panel honest about what
+                    this role can do. */}
+                {canControlAgents && (
                   <button
                     type="button"
                     onClick={() =>

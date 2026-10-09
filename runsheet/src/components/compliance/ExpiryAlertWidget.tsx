@@ -1,6 +1,7 @@
 "use client";
 
-import { AlertTriangle, ChevronRight, Shield, User } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import {
   type AssetCertificationDashboard,
@@ -58,241 +59,82 @@ function countAssetAlerts(dashboard: AssetCertificationDashboard): AlertCounts {
   };
 }
 
-// ─── Badge Component ─────────────────────────────────────────────────────────
+// ─── Header chip ─────────────────────────────────────────────────────────────
 
-function AlertBadge({
-  count,
-  level,
-}: {
-  count: number;
-  level: "critical" | "urgent" | "warning";
-}) {
-  if (count === 0) return null;
-
-  const styles = {
-    critical: "bg-error-light text-error-dark border-error-light",
-    urgent: "bg-warning-light text-warning-dark border-warning-light",
-    warning: "bg-warning-light text-warning-dark border-warning-light",
-  };
-
-  const labels = {
-    critical: "Critical",
-    urgent: "Urgent",
-    warning: "Warning",
-  };
-
-  return (
-    <span
-      className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full border ${styles[level]}`}
-    >
-      {count} {labels[level]}
-    </span>
-  );
-}
-
-// ─── Main Widget ─────────────────────────────────────────────────────────────
-
+/**
+ * Compliance expiry count for Fleet's title row (UI revamp task 3.1, design
+ * §6 rule 4): the former 196 px "Compliance Expiry Alerts" card is now one
+ * chip that links to Compliance. It shows nothing while loading, when both
+ * reads fail, or when everything is current (no static warning to scan).
+ * Expired or critical items use the critical style; otherwise warning.
+ * Icon + count + words, so colour is never the only signal.
+ */
 export default function ExpiryAlertWidget({
-  onViewDrivers,
+  onViewDrivers: _onViewDrivers,
   onViewCertifications,
-}: ExpiryAlertWidgetProps) {
-  const [driverAlerts, setDriverAlerts] = useState<AlertCounts | null>(null);
-  const [assetAlerts, setAssetAlerts] = useState<AlertCounts | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  href = "/dashboard/compliance?tab=certifications",
+}: ExpiryAlertWidgetProps & { href?: string }) {
+  const [counts, setCounts] = useState<AlertCounts | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-
-    async function fetchAlerts() {
-      setLoading(true);
-      setError(null);
-
-      try {
-        const [driverRes, assetRes] = await Promise.allSettled([
-          getDriversDashboard(),
-          getAssetCertificationsDashboard(),
-        ]);
-
-        if (cancelled) return;
-
-        if (driverRes.status === "fulfilled") {
-          setDriverAlerts(countDriverAlerts(driverRes.value.data));
-        }
-
-        if (assetRes.status === "fulfilled") {
-          setAssetAlerts(countAssetAlerts(assetRes.value.data));
-        }
-
-        // Only show error if both failed
-        if (driverRes.status === "rejected" && assetRes.status === "rejected") {
-          setError("Unable to load compliance alerts");
-        }
-      } catch {
-        if (!cancelled) {
-          setError("Unable to load compliance alerts");
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false);
-        }
-      }
-    }
-
-    fetchAlerts();
-
+    (async () => {
+      const [driverRes, assetRes] = await Promise.allSettled([
+        getDriversDashboard(),
+        getAssetCertificationsDashboard(),
+      ]);
+      if (cancelled) return;
+      if (driverRes.status === "rejected" && assetRes.status === "rejected")
+        return;
+      const d =
+        driverRes.status === "fulfilled"
+          ? countDriverAlerts(driverRes.value.data)
+          : { critical: 0, urgent: 0, warning: 0 };
+      const a =
+        assetRes.status === "fulfilled"
+          ? countAssetAlerts(assetRes.value.data)
+          : { critical: 0, urgent: 0, warning: 0 };
+      setCounts({
+        critical: d.critical + a.critical,
+        urgent: d.urgent + a.urgent,
+        warning: d.warning + a.warning,
+      });
+    })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const totalCritical =
-    (driverAlerts?.critical ?? 0) + (assetAlerts?.critical ?? 0);
-  const totalUrgent = (driverAlerts?.urgent ?? 0) + (assetAlerts?.urgent ?? 0);
-  const totalWarning =
-    (driverAlerts?.warning ?? 0) + (assetAlerts?.warning ?? 0);
-  const totalAlerts = totalCritical + totalUrgent + totalWarning;
-
-  const headerColor =
-    totalCritical > 0
-      ? "text-error-dark"
-      : totalUrgent > 0
-        ? "text-warning-dark"
-        : totalWarning > 0
-          ? "text-warning-dark"
-          : "text-success-dark";
-
-  return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4">
-      {/* Header */}
-      <div className="flex items-center gap-2 mb-3">
-        <AlertTriangle className={`w-4 h-4 ${headerColor}`} />
-        <h3 className="text-sm font-semibold text-gray-900">
-          Compliance Expiry Alerts
-        </h3>
-        {!loading && !error && totalAlerts > 0 && (
-          <span className="ml-auto text-xs font-medium text-gray-500">
-            {totalAlerts} alert{totalAlerts !== 1 ? "s" : ""}
-          </span>
-        )}
-      </div>
-
-      {/* Loading state */}
-      {loading && (
-        <div className="flex items-center justify-center py-4">
-          <div className="w-5 h-5 border-2 border-gray-300 border-t-gray-600 rounded-full animate-spin" />
-          <span className="ml-2 text-xs text-gray-500">Loading alerts...</span>
-        </div>
-      )}
-
-      {/* Error state */}
-      {!loading && error && (
-        <p className="text-xs text-gray-500 py-2">{error}</p>
-      )}
-
-      {/* Content */}
-      {!loading && !error && (
-        <div className="space-y-3">
-          {/* All clear state */}
-          {totalAlerts === 0 && (
-            <div className="flex items-center gap-2 py-2">
-              <div className="w-2 h-2 rounded-full bg-success" />
-              <span className="text-sm text-success-dark font-medium">
-                All qualifications and certifications current
-              </span>
-            </div>
-          )}
-
-          {/* Driver Alerts Section */}
-          {driverAlerts &&
-            (driverAlerts.critical > 0 ||
-              driverAlerts.urgent > 0 ||
-              driverAlerts.warning > 0) && (
-              <div
-                className={`flex items-center justify-between p-2.5 rounded-lg bg-gray-50 transition-colors ${
-                  onViewDrivers
-                    ? "hover:bg-gray-100 cursor-pointer"
-                    : "cursor-default"
-                }`}
-                onClick={onViewDrivers}
-                role={onViewDrivers ? "button" : undefined}
-                tabIndex={onViewDrivers ? 0 : undefined}
-                aria-label={
-                  onViewDrivers ? "View driver qualification alerts" : undefined
-                }
-                onKeyDown={
-                  onViewDrivers
-                    ? (e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onViewDrivers();
-                        }
-                      }
-                    : undefined
-                }
-              >
-                <div className="flex items-center gap-2">
-                  <User className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-medium text-gray-700">
-                    Driver Qualifications
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <AlertBadge count={driverAlerts.critical} level="critical" />
-                  <AlertBadge count={driverAlerts.urgent} level="urgent" />
-                  <AlertBadge count={driverAlerts.warning} level="warning" />
-                  {onViewDrivers && (
-                    <ChevronRight className="w-3.5 h-3.5 text-gray-500 ml-1" />
-                  )}
-                </div>
-              </div>
-            )}
-
-          {/* Asset Certification Alerts Section */}
-          {assetAlerts &&
-            (assetAlerts.critical > 0 || assetAlerts.urgent > 0) && (
-              <div
-                className={`flex items-center justify-between p-2.5 rounded-lg bg-gray-50 transition-colors ${
-                  onViewCertifications
-                    ? "hover:bg-gray-100 cursor-pointer"
-                    : "cursor-default"
-                }`}
-                onClick={onViewCertifications}
-                role={onViewCertifications ? "button" : undefined}
-                tabIndex={onViewCertifications ? 0 : undefined}
-                aria-label={
-                  onViewCertifications
-                    ? "View asset certification alerts"
-                    : undefined
-                }
-                onKeyDown={
-                  onViewCertifications
-                    ? (e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          e.preventDefault();
-                          onViewCertifications();
-                        }
-                      }
-                    : undefined
-                }
-              >
-                <div className="flex items-center gap-2">
-                  <Shield className="w-4 h-4 text-gray-500" />
-                  <span className="text-sm font-medium text-gray-700">
-                    Asset Certifications
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <AlertBadge count={assetAlerts.critical} level="critical" />
-                  <AlertBadge count={assetAlerts.urgent} level="urgent" />
-                  {onViewCertifications && (
-                    <ChevronRight className="w-3.5 h-3.5 text-gray-500 ml-1" />
-                  )}
-                </div>
-              </div>
-            )}
-        </div>
-      )}
-    </div>
+  if (!counts) return null;
+  const total = counts.critical + counts.urgent + counts.warning;
+  if (total === 0) return null;
+  const critical = counts.critical > 0;
+  const label = critical
+    ? `${counts.critical} expired · ${total} compliance alerts`
+    : `${total} expiring soon`;
+  const cls = `inline-flex h-6 shrink-0 items-center gap-1 whitespace-nowrap rounded-full border px-2 text-xs font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
+    critical
+      ? "border-red-300 bg-red-50 text-red-800 hover:bg-red-100"
+      : "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+  }`;
+  const body = (
+    <>
+      <AlertTriangle aria-hidden="true" className="h-3 w-3" />
+      {label}
+    </>
+  );
+  return onViewCertifications ? (
+    <button
+      type="button"
+      className={cls}
+      onClick={onViewCertifications}
+      data-testid="expiry-chip"
+    >
+      {body}
+    </button>
+  ) : (
+    <Link href={href} className={cls} data-testid="expiry-chip">
+      {body}
+    </Link>
   );
 }

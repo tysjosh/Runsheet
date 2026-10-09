@@ -13,20 +13,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fuel.services.order_es_mappings import (
-    DRIVER_REPORTS_INDEX,
-    DRIVER_REPORTS_MAPPING,
-    DRIVERS_CURRENT_INDEX,
-    DRIVERS_CURRENT_MAPPING,
-    FUEL_ORDER_EVENTS_INDEX,
-    FUEL_ORDER_EVENTS_MAPPING,
-    FUEL_ORDERS_CURRENT_INDEX,
-    FUEL_ORDERS_CURRENT_MAPPING,
-    INTAKE_CHANNELS_INDEX,
-    INTAKE_CHANNELS_MAPPING,
-    ORDER_INTAKE_INDEX_MAPPINGS,
-    setup_order_intake_indices,
-)
+from fuel.services.order_es_mappings import DRIVER_REPORTS_INDEX, DRIVER_REPORTS_MAPPING, DRIVERS_CURRENT_INDEX, DRIVERS_CURRENT_MAPPING, FUEL_ORDER_EVENTS_INDEX, FUEL_ORDER_EVENTS_MAPPING, FUEL_ORDERS_CURRENT_INDEX, FUEL_ORDERS_CURRENT_MAPPING, INTAKE_CHANNELS_INDEX, INTAKE_CHANNELS_MAPPING, ORDER_INTAKE_INDEX_MAPPINGS
 
 EXPECTED_INDICES = {
     FUEL_ORDERS_CURRENT_INDEX,
@@ -213,81 +200,9 @@ class TestOrderIntakeMappingShape:
 class TestSetupOrderIntakeIndices:
     """setup_order_intake_indices creates missing indices, skips existing."""
 
-    def _make_es_service(self, existing_indices=None, is_serverless=False):
-        existing = existing_indices or set()
-        es_service = MagicMock()
-        es_service.is_serverless = is_serverless
-        es_service.client.indices.exists.side_effect = (
-            lambda index: index in existing
-        )
-        es_service.client.indices.create = MagicMock()
-        return es_service
 
-    def _patch_es_module(self):
-        """Patch the ElasticsearchService import inside the function."""
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            lambda body: {k: v for k, v in body.items() if k != "settings"}
-        )
-        return patch.dict(
-            sys.modules, {"services.elasticsearch_service": fake_module}
-        )
 
-    def test_creates_all_indices_when_none_exist(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_order_intake_indices(es_service)
 
-        created = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert created == EXPECTED_INDICES
 
-    def test_skips_existing_indices(self):
-        already_there = {FUEL_ORDERS_CURRENT_INDEX, DRIVERS_CURRENT_INDEX}
-        es_service = self._make_es_service(existing_indices=already_there)
-        with self._patch_es_module():
-            setup_order_intake_indices(es_service)
 
-        created = {
-            call.kwargs["index"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        assert created == EXPECTED_INDICES - already_there
 
-    def test_passes_mapping_body_to_create(self):
-        es_service = self._make_es_service()
-        with self._patch_es_module():
-            setup_order_intake_indices(es_service)
-
-        bodies_by_index = {
-            call.kwargs["index"]: call.kwargs["body"]
-            for call in es_service.client.indices.create.call_args_list
-        }
-        for index_name, body in bodies_by_index.items():
-            assert body == ORDER_INTAKE_INDEX_MAPPINGS[index_name]
-
-    def test_strips_settings_on_serverless(self):
-        es_service = self._make_es_service(is_serverless=True)
-        fake_module = MagicMock()
-        fake_module.ElasticsearchService.strip_serverless_incompatible_settings = (
-            lambda body: {k: v for k, v in body.items() if k != "settings"}
-        )
-        with patch.dict(
-            sys.modules, {"services.elasticsearch_service": fake_module}
-        ):
-            setup_order_intake_indices(es_service)
-
-        for call in es_service.client.indices.create.call_args_list:
-            body = call.kwargs["body"]
-            assert "settings" not in body, (
-                "Serverless should strip settings from mapping body"
-            )
-
-    def test_does_not_raise_on_create_failure(self):
-        es_service = self._make_es_service()
-        es_service.client.indices.create.side_effect = Exception("ES down")
-        with self._patch_es_module():
-            # Must not raise
-            setup_order_intake_indices(es_service)

@@ -1,21 +1,39 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
+/**
+ * Fleet → Drivers → Qualifications (UI revamp task 3.1).
+ *
+ * One toolbar (status chips with the DQF dashboard's counts, expiring count,
+ * Export CSV), a DataTable whose "Alerts" column carries each driver's
+ * qualification warnings from the DQF dashboard, detail in a Drawer, and
+ * add/edit in a sectioned lg FormDialog (Identity, CDL, Medical,
+ * Endorsements; design.md §5 "Driver"). The separate "DQF Dashboard" view is
+ * relegated: its four summary cards are the chip counts and its per-driver
+ * qualification badges are the Alerts column, so nothing is lost.
+ */
+import { Eye, Pencil, Plus } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Badge,
   Button,
-  EmptyState,
-  FilterBar,
-  Pagination,
-  StatsBar,
-  Table,
+  type Column,
+  DataTable,
+  Drawer,
+  ExportCsvButton,
+  Field,
+  FilterChips,
+  FormDialog,
+  FormSection,
+  INPUT_CLASS,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
 } from "@/components/ui";
+import { calendarDate, humanize, number } from "../../lib/format";
 import {
   type CreateDriverPayload,
   createDriver,
   type DQFDashboard,
-  type DQFDashboardEntry,
   type Driver,
   type DriverQualificationStatus,
   type DriverStatus,
@@ -25,70 +43,82 @@ import {
   type UpdateDriverPayload,
   updateDriver,
 } from "../../services/complianceApi";
+import type { StatusKey } from "../../styles/tokens";
 
-// ─── Sub-view types ──────────────────────────────────────────────────────────
+/** Driver status → badge style and label (icon + text). */
+export const DRIVER_STATUS: Record<
+  DriverStatus,
+  { status: StatusKey; label: string }
+> = {
+  active: { status: "ok", label: "Active" },
+  suspended: { status: "warning", label: "Suspended" },
+  expired: { status: "critical", label: "Expired" },
+};
 
-type ViewMode = "list" | "detail" | "dashboard" | "add" | "edit";
+const ALERT_STATUS: Record<
+  DriverQualificationStatus["alert_level"],
+  StatusKey | null
+> = {
+  ok: null,
+  warning: "warning",
+  urgent: "warning",
+  critical: "critical",
+  expired: "critical",
+};
 
-// ─── Alert level color mapping ───────────────────────────────────────────────
+const QUAL_LABEL: Record<string, string> = {
+  cdl: "CDL",
+  medical_card: "Medical card",
+  hazmat: "HAZMAT",
+  tanker: "Tanker",
+  drug_test: "Drug test",
+  mvr: "MVR",
+};
+const qualLabel = (q: string) => QUAL_LABEL[q] ?? humanize(q);
 
-function _alertLevelBadge(level: DriverQualificationStatus["alert_level"]) {
-  switch (level) {
-    case "ok":
-      return "bg-success-light text-success-dark";
-    case "warning":
-      return "bg-warning-light text-warning-dark";
-    case "urgent":
-      return "bg-warning-light text-warning-dark";
-    case "critical":
-      return "bg-error-light text-error-dark";
-    case "expired":
-      return "bg-error-light text-error-dark";
-    default:
-      return "bg-gray-100 text-gray-800";
-  }
+const STATUS_IDS: DriverStatus[] = ["active", "suspended", "expired"];
+
+function QualificationAlerts({
+  quals,
+}: {
+  quals: DriverQualificationStatus[] | undefined;
+}) {
+  const alerts = (quals ?? []).filter((q) => ALERT_STATUS[q.alert_level]);
+  if (alerts.length === 0)
+    return <span className="text-xs text-text-muted">None</span>;
+  return (
+    <span className="flex flex-wrap gap-1">
+      {alerts.map((q) => (
+        <StatusBadge
+          key={q.qualification_type}
+          status={ALERT_STATUS[q.alert_level] as StatusKey}
+          label={
+            q.alert_level === "expired" ||
+            (q.days_until_expiry != null && q.days_until_expiry < 0)
+              ? `${qualLabel(q.qualification_type)} expired`
+              : q.days_until_expiry != null
+                ? `${qualLabel(q.qualification_type)} · ${number(q.days_until_expiry)} d`
+                : qualLabel(q.qualification_type)
+          }
+        />
+      ))}
+    </span>
+  );
 }
-
-function _statusBadge(status: DriverStatus) {
-  switch (status) {
-    case "active":
-      return "bg-success-light text-success-dark";
-    case "suspended":
-      return "bg-warning-light text-warning-dark";
-    case "expired":
-      return "bg-error-light text-error-dark";
-    default:
-      return "bg-gray-100 text-gray-800";
-  }
-}
-
-function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
-}
-
-// ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function DriverQualificationsView() {
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [statusFilter, setStatusFilter] = useState<string>("");
-
-  // Detail view state
-  const [selectedDriver, setSelectedDriver] = useState<Driver | null>(null);
-
-  // Dashboard state
+  const [statusFilter, setStatusFilter] = useState<DriverStatus | "">("");
   const [dashboard, setDashboard] = useState<DQFDashboard | null>(null);
-  const [dashboardLoading, setDashboardLoading] = useState(false);
-
-  // Form state
-  const [editingDriver, setEditingDriver] = useState<Driver | null>(null);
-
-  // ─── Fetch drivers list ──────────────────────────────────────────────────
+  const [selected, setSelected] = useState<Driver | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  // null = closed; { driver: null } = add; { driver } = edit.
+  const [form, setForm] = useState<{ driver: Driver | null } | null>(null);
+  const [reload, setReload] = useState(0);
 
   const fetchDrivers = useCallback(async () => {
     setLoading(true);
@@ -98,8 +128,7 @@ export default function DriverQualificationsView() {
         page,
         size: 20,
       };
-      if (statusFilter) filters.status = statusFilter as DriverStatus;
-
+      if (statusFilter) filters.status = statusFilter;
       const response = await getDrivers(filters);
       setDrivers(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
@@ -108,631 +137,474 @@ export default function DriverQualificationsView() {
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter]);
+  }, [page, statusFilter, reload]);
 
   useEffect(() => {
-    if (viewMode === "list") {
-      fetchDrivers();
-    }
-  }, [fetchDrivers, viewMode]);
+    fetchDrivers();
+  }, [fetchDrivers]);
 
-  // ─── Fetch dashboard ─────────────────────────────────────────────────────
-
-  const fetchDashboard = useCallback(async () => {
-    setDashboardLoading(true);
-    setError(null);
-    try {
-      const response = await getDriversDashboard();
-      setDashboard(response.data);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load DQF dashboard",
-      );
-    } finally {
-      setDashboardLoading(false);
-    }
-  }, []);
-
+  // DQF dashboard: chip counts and per-driver qualification alerts. A failed
+  // read leaves chips without counts and the Alerts column empty.
   useEffect(() => {
-    if (viewMode === "dashboard") {
-      fetchDashboard();
-    }
-  }, [fetchDashboard, viewMode]);
+    let cancelled = false;
+    getDriversDashboard()
+      .then((r) => !cancelled && setDashboard(r.data))
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [reload]);
 
-  // ─── Fetch single driver detail ──────────────────────────────────────────
+  const qualsById = useMemo(() => {
+    const m = new Map<string, DriverQualificationStatus[]>();
+    for (const e of dashboard?.drivers ?? [])
+      m.set(e.driver_id, e.qualifications ?? []);
+    return m;
+  }, [dashboard]);
 
-  const handleViewDetail = async (driverId: string) => {
-    setLoading(true);
-    setError(null);
+  const openDetail = async (driverId: string) => {
+    setDetailError(null);
     try {
       const response = await getDriver(driverId);
-      setSelectedDriver(response.data);
-      setViewMode("detail");
+      setSelected(response.data);
     } catch (err) {
-      setError(
+      setDetailError(
         err instanceof Error ? err.message : "Failed to load driver details",
       );
-    } finally {
-      setLoading(false);
     }
   };
 
-  // ─── Edit driver ─────────────────────────────────────────────────────────
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setForm({ driver: null })}
+      >
+        Add driver
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
 
-  const handleEditDriver = (driver: Driver) => {
-    setEditingDriver(driver);
-    setViewMode("edit");
-  };
+  const counts: Record<string, number | undefined> = dashboard
+    ? {
+        all: dashboard.total_drivers,
+        active: dashboard.active_drivers,
+        suspended: dashboard.suspended_drivers,
+        expired: dashboard.expired_drivers,
+      }
+    : {};
 
-  // ─── Render: DQF Dashboard Summary Cards ────────────────────────────────
-
-  function renderDashboardSummary() {
-    if (!dashboard) return null;
-    return (
-      <StatsBar
-        stats={[
-          {
-            label: "Active Drivers",
-            value: (dashboard.total_active ?? 0).toString(),
-            variant: "success",
-          },
-          {
-            label: "Suspended",
-            value: (dashboard.total_suspended ?? 0).toString(),
-            variant: "warning",
-          },
-          {
-            label: "Expiring Soon",
-            value: (dashboard.total_expiring_soon ?? 0).toString(),
-            variant: "error",
-          },
-        ]}
-        className="mb-6"
-      />
-    );
-  }
-
-  // ─── Render: Dashboard View ──────────────────────────────────────────────
-
-  function renderDashboard() {
-    if (dashboardLoading) {
-      return (
-        <div role="status" className="flex justify-center py-12">
-          <span className="sr-only">Loading DQF dashboard...</span>
-          <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-        </div>
-      );
-    }
-
-    if (!dashboard) return null;
-
-    return (
-      <div>
-        {renderDashboardSummary()}
-
-        <Table
-          columns={[
-            { key: "full_name", label: "Driver" },
-            {
-              key: "status",
-              label: "Status",
-              render: (entry: DQFDashboardEntry) => (
-                <Badge
-                  variant={
-                    entry.status === "active"
-                      ? "success"
-                      : entry.status === "suspended"
-                        ? "warning"
-                        : "error"
-                  }
-                >
-                  {entry.status}
-                </Badge>
-              ),
-            },
-            {
-              key: "qualifications",
-              label: "Qualifications",
-              render: (entry: DQFDashboardEntry) => (
-                <div className="flex flex-wrap gap-1">
-                  {(entry.qualifications ?? []).map((qual, idx) => (
-                    <Badge
-                      key={qual?.qualification_type ?? `qual-${idx}`}
-                      variant={
-                        qual?.alert_level === "ok"
-                          ? "success"
-                          : qual?.alert_level === "warning"
-                            ? "warning"
-                            : qual?.alert_level === "urgent" ||
-                                qual?.alert_level === "critical" ||
-                                qual?.alert_level === "expired"
-                              ? "error"
-                              : "default"
-                      }
-                      size="sm"
-                    >
-                      {qual?.qualification_type?.replace(/_/g, " ") ??
-                        "Unknown"}
-                    </Badge>
-                  ))}
-                </div>
-              ),
-            },
-          ]}
-          data={dashboard.drivers ?? []}
-          getRowId={(entry) => entry.driver_id}
-          onRowClick={(entry) => handleViewDetail(entry.driver_id)}
-          emptyState={
-            <EmptyState
-              icon={<span className="text-4xl">👤</span>}
-              title="No drivers found"
-            />
-          }
-        />
-      </div>
-    );
-  }
-
-  // ─── Render: Driver Detail View ──────────────────────────────────────────
-
-  function renderDetail() {
-    if (!selectedDriver) return null;
-
-    const qualificationFields = [
-      { label: "CDL Expiry", value: selectedDriver.cdl_expiry_date },
-      {
-        label: "Medical Card Expiry",
-        value: selectedDriver.medical_card_expiry_date,
+  const columns: Column<Driver>[] = [
+    {
+      key: "full_name",
+      header: "Name",
+      truncate: true,
+      title: (d) => d.full_name,
+      className: "font-medium text-text",
+      cell: (d) => d.full_name,
+    },
+    {
+      key: "cdl",
+      header: "CDL",
+      className: "text-slate-700 whitespace-nowrap",
+      cell: (d) => (
+        <span>
+          <span className="font-mono text-xs">{d.cdl_number}</span>
+          <span className="text-text-muted">
+            {" "}
+            · Class {d.cdl_class} · {d.cdl_state}
+          </span>
+        </span>
+      ),
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 110,
+      cell: (d) => {
+        const cfg = DRIVER_STATUS[d.status] ?? DRIVER_STATUS.active;
+        return <StatusBadge status={cfg.status} label={cfg.label} />;
       },
-      {
-        label: "HAZMAT Endorsement",
-        value: selectedDriver.hazmat_endorsement_expiry_date,
-      },
-      {
-        label: "Tanker Endorsement",
-        value: selectedDriver.tanker_endorsement_expiry_date,
-      },
-      { label: "Last Drug Test", value: selectedDriver.last_drug_test_date },
-      { label: "Last MVR", value: selectedDriver.last_mvr_date },
-    ];
-
-    return (
-      <div className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm">
-        <div className="flex justify-between items-start mb-6">
-          <div>
-            <h2 className="text-xl font-bold">{selectedDriver.full_name}</h2>
-            <p className="text-gray-500 mt-1">
-              CDL: {selectedDriver.cdl_number} ({selectedDriver.cdl_class}) —{" "}
-              {selectedDriver.cdl_state}
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <Badge
-              variant={
-                selectedDriver.status === "active"
-                  ? "success"
-                  : selectedDriver.status === "suspended"
-                    ? "warning"
-                    : "error"
-              }
-            >
-              {selectedDriver.status}
-            </Badge>
-            <Button
-              variant="primary"
-              size="sm"
-              onClick={() => handleEditDriver(selectedDriver)}
-            >
-              Edit
-            </Button>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {qualificationFields.map((field) => (
-            <div
-              key={field.label}
-              className="border border-gray-100 rounded p-3"
-            >
-              <p className="text-sm text-gray-500">{field.label}</p>
-              <p className="font-medium">{formatDate(field.value)}</p>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  // ─── Render: Add/Edit Form ───────────────────────────────────────────────
-
-  function renderForm() {
-    const isEdit = viewMode === "edit";
-    return (
-      <DriverForm
-        initialData={isEdit ? editingDriver : null}
-        onSubmit={async (data) => {
-          setLoading(true);
-          setError(null);
-          try {
-            if (isEdit && editingDriver) {
-              await updateDriver(
-                editingDriver.driver_id,
-                data as UpdateDriverPayload,
-              );
-            } else {
-              await createDriver(data as CreateDriverPayload);
-            }
-            setViewMode("list");
-            fetchDrivers();
-          } catch (err) {
-            setError(
-              err instanceof Error ? err.message : "Failed to save driver",
-            );
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onCancel={() => setViewMode("list")}
-        loading={loading}
-      />
-    );
-  }
-
-  // ─── Render: Listing View ────────────────────────────────────────────────
-
-  function renderList() {
-    return (
-      <>
-        {/* Filters */}
-        <FilterBar
-          filters={
-            <select
-              id="driver-status-filter"
-              value={statusFilter}
-              onChange={(e) => {
-                setStatusFilter(e.target.value);
-                setPage(1);
-              }}
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 focus:outline-none bg-white min-w-[140px]"
-              aria-label="Status"
-            >
-              <option value="">All</option>
-              <option value="active">Active</option>
-              <option value="suspended">Suspended</option>
-              <option value="expired">Expired</option>
-            </select>
-          }
-        />
-
-        {/* Loading state */}
-        {loading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading drivers...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Driver table */}
-        {!loading && !error && (
-          <>
-            <Table
-              columns={[
-                { key: "full_name", label: "Name" },
-                { key: "cdl_number", label: "CDL Number" },
-                { key: "cdl_class", label: "CDL Class" },
-                {
-                  key: "status",
-                  label: "Status",
-                  render: (driver) => (
-                    <Badge
-                      variant={
-                        driver.status === "active"
-                          ? "success"
-                          : driver.status === "suspended"
-                            ? "warning"
-                            : "error"
-                      }
-                    >
-                      {driver.status}
-                    </Badge>
-                  ),
-                },
-                {
-                  key: "cdl_expiry_date",
-                  label: "CDL Expiry",
-                  render: (driver) => formatDate(driver.cdl_expiry_date),
-                },
-                {
-                  key: "medical_card_expiry_date",
-                  label: "Medical Card Expiry",
-                  render: (driver) =>
-                    formatDate(driver.medical_card_expiry_date),
-                },
-                {
-                  key: "actions",
-                  label: "Actions",
-                  render: (driver) => (
-                    <div className="flex gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleViewDetail(driver.driver_id)}
-                      >
-                        View
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleEditDriver(driver)}
-                      >
-                        Edit
-                      </Button>
-                    </div>
-                  ),
-                },
-              ]}
-              data={drivers}
-              getRowId={(driver) => driver.driver_id}
-              emptyState={
-                <EmptyState
-                  icon={<span className="text-4xl">👤</span>}
-                  title="No drivers found"
-                />
-              }
-            />
-
-            <Pagination
-              currentPage={page}
-              totalPages={totalPages}
-              onPageChange={setPage}
-            />
-          </>
-        )}
-      </>
-    );
-  }
-
-  // ─── Main Render ─────────────────────────────────────────────────────────
+    },
+    {
+      key: "cdl_expiry_date",
+      header: "CDL expiry",
+      className: "text-slate-700 whitespace-nowrap",
+      cell: (d) => calendarDate(d.cdl_expiry_date),
+    },
+    {
+      key: "medical_card_expiry_date",
+      header: "Medical expiry",
+      className: "text-slate-700 whitespace-nowrap",
+      cell: (d) => calendarDate(d.medical_card_expiry_date),
+    },
+    {
+      key: "alerts",
+      header: "Alerts",
+      cell: (d) => <QualificationAlerts quals={qualsById.get(d.driver_id)} />,
+    },
+  ];
 
   return (
-    <div className="p-6">
-      <div className="mb-6">
-        <div className="flex justify-between items-center">
-          <p className="text-gray-600">
-            Manage driver qualifications, certifications, and DQF compliance
-          </p>
-          <div className="flex gap-2">
-            {viewMode === "list" && (
-              <>
-                <Button
-                  variant="secondary"
-                  onClick={() => setViewMode("dashboard")}
-                >
-                  DQF Dashboard
-                </Button>
-                <Button variant="primary" onClick={() => setViewMode("add")}>
-                  Add Driver
-                </Button>
-              </>
+    <div className="flex h-full flex-col">
+      <Toolbar
+        label="Driver qualifications"
+        filters={
+          <FilterChips
+            label="Driver status"
+            options={[
+              { id: "all", label: "All", count: counts.all },
+              ...STATUS_IDS.map((id) => ({
+                id,
+                label: DRIVER_STATUS[id].label,
+                count: counts[id],
+                status: DRIVER_STATUS[id].status,
+              })),
+            ]}
+            value={statusFilter || "all"}
+            onChange={(v) => {
+              setStatusFilter(v === "all" ? "" : (v as DriverStatus));
+              setPage(1);
+            }}
+          />
+        }
+        end={
+          <>
+            {dashboard && dashboard.expiring_drivers > 0 && (
+              <span className="whitespace-nowrap text-xs text-text-muted">
+                {number(dashboard.expiring_drivers)} expiring within 60 days
+              </span>
             )}
-            {(viewMode === "dashboard" || viewMode === "detail") && (
-              <Button variant="secondary" onClick={() => setViewMode("list")}>
-                Back to List
-              </Button>
-            )}
-          </div>
-        </div>
+            {/* Qualification expiry dates per driver; admin only (OI-57). */}
+            <ExportCsvButton
+              type="driver_qualifications"
+              params={{ status: statusFilter || undefined }}
+              subject="driver qualifications"
+              allowedRoles={["admin"]}
+            />
+            {!embedded && actions}
+          </>
+        }
+      />
+      {detailError && (
+        <p
+          role="alert"
+          className="border-b border-red-200 bg-red-50 px-4 py-2 text-sm text-red-800"
+        >
+          {detailError}
+        </p>
+      )}
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<Driver>
+          ariaLabel="Drivers"
+          columns={columns}
+          data={loading || error ? [] : drivers}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchDrivers } : null}
+          getRowId={(d) => d.driver_id}
+          selectedId={selected?.driver_id}
+          rowLabel={(d) => d.full_name}
+          onRowClick={(d) => openDetail(d.driver_id)}
+          rowMenu={(d) => [
+            {
+              id: "view",
+              label: "View details",
+              icon: <Eye className="h-3.5 w-3.5" />,
+              onSelect: () => openDetail(d.driver_id),
+            },
+            {
+              id: "edit",
+              label: "Edit driver",
+              icon: <Pencil className="h-3.5 w-3.5" />,
+              onSelect: () => setForm({ driver: d }),
+            },
+          ]}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No drivers found</p>
+            </div>
+          }
+        />
       </div>
 
-      {/* Error state */}
-      {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
-        </div>
-      )}
+      <Drawer
+        open={selected !== null}
+        onClose={() => setSelected(null)}
+        title={selected?.full_name ?? "Driver"}
+        width={440}
+        footer={
+          selected ? (
+            <Button
+              icon={<Pencil className="h-3.5 w-3.5" />}
+              onClick={() => {
+                const d = selected;
+                setSelected(null);
+                setForm({ driver: d });
+              }}
+            >
+              Edit driver
+            </Button>
+          ) : undefined
+        }
+      >
+        {selected && (
+          <dl className="space-y-3 text-sm">
+            <div className="flex items-center gap-2">
+              <StatusBadge
+                status={
+                  (DRIVER_STATUS[selected.status] ?? DRIVER_STATUS.active)
+                    .status
+                }
+                label={
+                  (DRIVER_STATUS[selected.status] ?? DRIVER_STATUS.active).label
+                }
+              />
+              <span className="text-text-muted">
+                CDL {selected.cdl_number} · Class {selected.cdl_class} ·{" "}
+                {selected.cdl_state}
+              </span>
+            </div>
+            {(
+              [
+                ["CDL expiry", selected.cdl_expiry_date],
+                ["Medical card expiry", selected.medical_card_expiry_date],
+                ["HAZMAT endorsement", selected.hazmat_endorsement_expiry_date],
+                ["Tanker endorsement", selected.tanker_endorsement_expiry_date],
+                ["Last drug test", selected.last_drug_test_date],
+                ["Last MVR", selected.last_mvr_date],
+              ] as const
+            ).map(([label, value]) => (
+              <div
+                key={label}
+                className="flex justify-between gap-4 border-b border-slate-100 pb-2"
+              >
+                <dt className="text-text-muted">{label}</dt>
+                <dd className="font-medium text-text">{calendarDate(value)}</dd>
+              </div>
+            ))}
+            <div>
+              <dt className="mb-1 text-text-muted">Alerts</dt>
+              <dd>
+                <QualificationAlerts
+                  quals={qualsById.get(selected.driver_id)}
+                />
+              </dd>
+            </div>
+          </dl>
+        )}
+      </Drawer>
 
-      {/* View content */}
-      {viewMode === "list" && renderList()}
-      {viewMode === "detail" && renderDetail()}
-      {viewMode === "dashboard" && renderDashboard()}
-      {(viewMode === "add" || viewMode === "edit") && renderForm()}
+      {form && (
+        <DriverFormDialog
+          driver={form.driver}
+          onClose={() => setForm(null)}
+          onSaved={() => {
+            setForm(null);
+            setReload((n) => n + 1);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-// ─── Driver Form Sub-Component ───────────────────────────────────────────────
+// ─── Driver FormDialog ───────────────────────────────────────────────────────
 
-interface DriverFormProps {
-  initialData: Driver | null;
-  onSubmit: (data: CreateDriverPayload | UpdateDriverPayload) => Promise<void>;
-  onCancel: () => void;
-  loading: boolean;
+type DriverValues = {
+  full_name: string;
+  cdl_number: string;
+  cdl_state: string;
+  cdl_class: "A" | "B" | "C";
+  cdl_expiry_date: string;
+  medical_card_expiry_date: string;
+  hazmat_endorsement_expiry_date: string;
+  tanker_endorsement_expiry_date: string;
+};
+
+export function validateDriver(v: DriverValues) {
+  const e: Record<string, string | undefined> = {};
+  if (!v.full_name.trim()) e.full_name = "Enter the driver's name.";
+  if (!v.cdl_number.trim()) e.cdl_number = "Enter the CDL number.";
+  if (!/^[A-Za-z]{2}$/.test(v.cdl_state.trim()))
+    e.cdl_state = "Use the two-letter state code.";
+  if (!v.cdl_expiry_date) e.cdl_expiry_date = "Enter the CDL expiry date.";
+  if (!v.medical_card_expiry_date)
+    e.medical_card_expiry_date = "Enter the medical card expiry date.";
+  return e;
 }
 
-function DriverForm({
-  initialData,
-  onSubmit,
-  onCancel,
-  loading,
-}: DriverFormProps) {
-  const [fullName, setFullName] = useState(initialData?.full_name ?? "");
-  const [cdlNumber, setCdlNumber] = useState(initialData?.cdl_number ?? "");
-  const [cdlState, setCdlState] = useState(initialData?.cdl_state ?? "");
-  const [cdlClass, setCdlClass] = useState<"A" | "B" | "C">(
-    initialData?.cdl_class ?? "A",
-  );
-  const [cdlExpiryDate, setCdlExpiryDate] = useState(
-    initialData?.cdl_expiry_date ?? "",
-  );
-  const [medicalCardExpiryDate, setMedicalCardExpiryDate] = useState(
-    initialData?.medical_card_expiry_date ?? "",
-  );
-  const [hazmatExpiryDate, setHazmatExpiryDate] = useState(
-    initialData?.hazmat_endorsement_expiry_date ?? "",
-  );
-  const [tankerExpiryDate, setTankerExpiryDate] = useState(
-    initialData?.tanker_endorsement_expiry_date ?? "",
-  );
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const data: CreateDriverPayload = {
-      full_name: fullName,
-      cdl_number: cdlNumber,
-      cdl_state: cdlState,
-      cdl_class: cdlClass,
-      cdl_expiry_date: cdlExpiryDate,
-      medical_card_expiry_date: medicalCardExpiryDate,
-      hazmat_endorsement_expiry_date: hazmatExpiryDate || null,
-      tanker_endorsement_expiry_date: tankerExpiryDate || null,
-    };
-    await onSubmit(data);
+export function DriverFormDialog({
+  driver,
+  onClose,
+  onSaved,
+}: {
+  driver: Driver | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const initial: DriverValues = {
+    full_name: driver?.full_name ?? "",
+    cdl_number: driver?.cdl_number ?? "",
+    cdl_state: driver?.cdl_state ?? "",
+    cdl_class: driver?.cdl_class ?? "A",
+    cdl_expiry_date: driver?.cdl_expiry_date ?? "",
+    medical_card_expiry_date: driver?.medical_card_expiry_date ?? "",
+    hazmat_endorsement_expiry_date:
+      driver?.hazmat_endorsement_expiry_date ?? "",
+    tanker_endorsement_expiry_date:
+      driver?.tanker_endorsement_expiry_date ?? "",
   };
-
+  const submit = async (v: DriverValues) => {
+    const data: CreateDriverPayload = {
+      full_name: v.full_name.trim(),
+      cdl_number: v.cdl_number.trim(),
+      cdl_state: v.cdl_state.trim().toUpperCase(),
+      cdl_class: v.cdl_class,
+      cdl_expiry_date: v.cdl_expiry_date,
+      medical_card_expiry_date: v.medical_card_expiry_date,
+      hazmat_endorsement_expiry_date: v.hazmat_endorsement_expiry_date || null,
+      tanker_endorsement_expiry_date: v.tanker_endorsement_expiry_date || null,
+    };
+    if (driver)
+      return updateDriver(driver.driver_id, data as UpdateDriverPayload);
+    return createDriver(data);
+  };
+  const dateInput = (
+    id: string,
+    value: string,
+    onChange: (v: string) => void,
+  ) => (
+    <input
+      id={id}
+      type="date"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className={INPUT_CLASS}
+    />
+  );
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+    <FormDialog<DriverValues>
+      open
+      size="lg"
+      title={driver ? "Edit driver" : "Add driver"}
+      submitLabel={driver ? "Save changes" : "Add driver"}
+      successMessage={driver ? "Driver saved" : "Driver added"}
+      initialValues={initial}
+      validate={validateDriver}
+      onSubmit={submit}
+      onSaved={onSaved}
+      onClose={onClose}
+      sections={[
+        { id: "identity", title: "Identity" },
+        { id: "cdl", title: "CDL" },
+        { id: "medical", title: "Medical" },
+        { id: "endorsements", title: "Endorsements" },
+      ]}
     >
-      <h2 className="text-lg font-bold mb-4">
-        {initialData ? "Edit Driver" : "Add New Driver"}
-      </h2>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <label htmlFor="full-name" className="block text-sm font-medium mb-1">
-            Full Name
-          </label>
-          <input
-            id="full-name"
-            type="text"
-            required
-            value={fullName}
-            onChange={(e) => setFullName(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="cdl-number"
-            className="block text-sm font-medium mb-1"
-          >
-            CDL Number
-          </label>
-          <input
-            id="cdl-number"
-            type="text"
-            required
-            value={cdlNumber}
-            onChange={(e) => setCdlNumber(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label htmlFor="cdl-state" className="block text-sm font-medium mb-1">
-            CDL State
-          </label>
-          <input
-            id="cdl-state"
-            type="text"
-            required
-            maxLength={2}
-            value={cdlState}
-            onChange={(e) => setCdlState(e.target.value.toUpperCase())}
-            className="w-full border rounded px-3 py-2"
-            placeholder="TX"
-          />
-        </div>
-        <div>
-          <label htmlFor="cdl-class" className="block text-sm font-medium mb-1">
-            CDL Class
-          </label>
-          <select
-            id="cdl-class"
-            value={cdlClass}
-            onChange={(e) => setCdlClass(e.target.value as "A" | "B" | "C")}
-            className="w-full border rounded px-3 py-2"
-          >
-            <option value="A">Class A</option>
-            <option value="B">Class B</option>
-            <option value="C">Class C</option>
-          </select>
-        </div>
-        <div>
-          <label
-            htmlFor="cdl-expiry"
-            className="block text-sm font-medium mb-1"
-          >
-            CDL Expiry Date
-          </label>
-          <input
-            id="cdl-expiry"
-            type="date"
-            required
-            value={cdlExpiryDate}
-            onChange={(e) => setCdlExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="medical-expiry"
-            className="block text-sm font-medium mb-1"
-          >
-            Medical Card Expiry
-          </label>
-          <input
-            id="medical-expiry"
-            type="date"
-            required
-            value={medicalCardExpiryDate}
-            onChange={(e) => setMedicalCardExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="hazmat-expiry"
-            className="block text-sm font-medium mb-1"
-          >
-            HAZMAT Endorsement Expiry
-          </label>
-          <input
-            id="hazmat-expiry"
-            type="date"
-            value={hazmatExpiryDate}
-            onChange={(e) => setHazmatExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-        <div>
-          <label
-            htmlFor="tanker-expiry"
-            className="block text-sm font-medium mb-1"
-          >
-            Tanker Endorsement Expiry
-          </label>
-          <input
-            id="tanker-expiry"
-            type="date"
-            value={tankerExpiryDate}
-            onChange={(e) => setTankerExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-      </div>
-
-      <div className="flex gap-3 mt-6">
-        <Button type="submit" variant="primary" loading={loading}>
-          {initialData ? "Update Driver" : "Add Driver"}
-        </Button>
-        <Button type="button" variant="secondary" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
-    </form>
+      {({ values, set, errors }) => (
+        <>
+          <FormSection id="identity" title="Identity">
+            <Field label="Full name" required error={errors.full_name}>
+              <input
+                id="full-name"
+                type="text"
+                value={values.full_name}
+                onChange={(e) => set("full_name", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          </FormSection>
+          <FormSection id="cdl" title="CDL">
+            <Field
+              label="CDL number"
+              required
+              error={errors.cdl_number}
+              span={1}
+            >
+              <input
+                id="cdl-number"
+                type="text"
+                value={values.cdl_number}
+                onChange={(e) => set("cdl_number", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field label="CDL state" required error={errors.cdl_state} span={1}>
+              <input
+                id="cdl-state"
+                type="text"
+                maxLength={2}
+                value={values.cdl_state}
+                onChange={(e) => set("cdl_state", e.target.value.toUpperCase())}
+                placeholder="TX"
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field label="CDL class" span={1} id="cdl-class">
+              <Select
+                id="cdl-class"
+                value={values.cdl_class}
+                onChange={(c) => set("cdl_class", c as "A" | "B" | "C")}
+                options={[
+                  { value: "A", label: "Class A" },
+                  { value: "B", label: "Class B" },
+                  { value: "C", label: "Class C" },
+                ]}
+              />
+            </Field>
+            <Field
+              label="CDL expiry"
+              required
+              error={errors.cdl_expiry_date}
+              span={1}
+              id="cdl-expiry"
+            >
+              {dateInput("cdl-expiry", values.cdl_expiry_date, (v) =>
+                set("cdl_expiry_date", v),
+              )}
+            </Field>
+          </FormSection>
+          <FormSection id="medical" title="Medical">
+            <Field
+              label="Medical card expiry"
+              required
+              error={errors.medical_card_expiry_date}
+              span={1}
+              id="medical-expiry"
+            >
+              {dateInput(
+                "medical-expiry",
+                values.medical_card_expiry_date,
+                (v) => set("medical_card_expiry_date", v),
+              )}
+            </Field>
+          </FormSection>
+          <FormSection id="endorsements" title="Endorsements">
+            <Field label="HAZMAT expiry" span={1} id="hazmat-expiry">
+              {dateInput(
+                "hazmat-expiry",
+                values.hazmat_endorsement_expiry_date,
+                (v) => set("hazmat_endorsement_expiry_date", v),
+              )}
+            </Field>
+            <Field label="Tanker expiry" span={1} id="tanker-expiry">
+              {dateInput(
+                "tanker-expiry",
+                values.tanker_endorsement_expiry_date,
+                (v) => set("tanker_endorsement_expiry_date", v),
+              )}
+            </Field>
+          </FormSection>
+        </>
+      )}
+    </FormDialog>
   );
 }

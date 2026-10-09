@@ -341,11 +341,11 @@ describe("CustomerTankPage — list render", () => {
     const customerLink = await screen.findByRole("link", { name: "CUST-0042" });
     expect(customerLink).toHaveAttribute(
       "href",
-      "/commerce/customers/CUST-0042",
+      "/dashboard/customers/CUST-0042",
     );
     // Refilling order renders as a navigable link to the orders module.
     const orderLink = screen.getByRole("link", { name: "ORD-9" });
-    expect(orderLink).toHaveAttribute("href", "/orders/ORD-9");
+    expect(orderLink).toHaveAttribute("href", "/dashboard/orders/ORD-9");
   });
 
   it("renders a neutral placeholder when a tank has no refilling order", async () => {
@@ -599,7 +599,7 @@ describe("CustomerTankPage — edit flow", () => {
 
 // ─── Fuel product catalog datalist (Batch D) ─────────────────────────────────
 
-describe("CustomerTankPage — fuel product datalist", () => {
+describe("CustomerTankPage — fuel product picker", () => {
   it("calls listFuelProducts when the create modal opens", async () => {
     mockList.mockResolvedValue(listResponseFixture([]));
     mockListProducts.mockResolvedValue(productsResponseFixture([]));
@@ -614,7 +614,7 @@ describe("CustomerTankPage — fuel product datalist", () => {
     await waitFor(() => expect(mockListProducts).toHaveBeenCalledTimes(1));
   });
 
-  it("renders a <datalist> <option> for each canonical product code returned", async () => {
+  it("offers each catalog product by name in the ProductSelect (no raw codes)", async () => {
     mockList.mockResolvedValue(listResponseFixture([]));
     mockListProducts.mockResolvedValue(
       productsResponseFixture([
@@ -634,23 +634,51 @@ describe("CustomerTankPage — fuel product datalist", () => {
       ]),
     );
 
-    const { container } = render(<CustomerTankPage />);
+    render(<CustomerTankPage />);
 
     await waitFor(() => expect(mockList).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: /add tank/i }));
 
-    // Wait for the effect-driven datalist to mount.
-    const datalist = await waitFor(() => {
-      const node = container.querySelector("datalist#ct-product-code-options");
-      if (!node) throw new Error("datalist not mounted yet");
-      return node as HTMLDataListElement;
-    });
+    const trigger = await screen.findByRole("combobox", { name: /^Product/ });
+    // The trigger shows the readable name of the default code.
+    expect(trigger).toHaveTextContent("Propane");
+    fireEvent.click(trigger);
+    const names = within(screen.getByRole("listbox"))
+      .getAllByRole("option")
+      .map((o) => o.textContent ?? "");
+    expect(names).toHaveLength(3);
+    expect(names.some((n) => n.includes("Heating oil (No. 2)"))).toBe(true);
+    expect(names.some((n) => n.includes("Diesel #2 (on-road)"))).toBe(true);
+  });
 
-    const options = within(datalist).getAllByRole("option", {
-      hidden: true,
-    }) as HTMLOptionElement[];
-    const values = options.map((o) => o.value).sort();
-    expect(values).toEqual(["DIESEL_2", "HEATING_OIL", "PROPANE"]);
+  it("shows whole gallons for a tank stored with fractional volumes", async () => {
+    const existing = tankFixture({
+      customer_tank_id: "CT-0888",
+      capacity_gallons: 5283.441047162968,
+      current_level_gallons: 1200.6,
+    });
+    mockList.mockResolvedValue(listResponseFixture([existing]));
+    mockUpdate.mockResolvedValue(existing);
+
+    const { container } = render(<CustomerTankPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /edit tank CT-0888/i }),
+    );
+    await screen.findByRole("heading", { name: /edit customer tank/i });
+    expect(
+      (container.querySelector("#ct-capacity") as HTMLInputElement).value,
+    ).toBe("5,283");
+    expect(
+      (container.querySelector("#ct-level") as HTMLInputElement).value,
+    ).toBe("1,201");
+    // Saving without edits must not rewrite the stored volumes.
+    const modalZip = container.querySelector("#ct-zip") as HTMLInputElement;
+    fireEvent.change(modalZip, { target: { value: "94105" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }));
+    });
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+    expect(mockUpdate.mock.calls[0][1]).toEqual({ zip_code: "94105" });
   });
 
   it("does not render the datalist when the catalog fetch returns empty", async () => {

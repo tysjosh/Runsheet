@@ -1,23 +1,20 @@
+import { Eye, Mail, MessageSquare, Phone, RefreshCw } from "lucide-react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import {
-  AlertTriangle,
-  Bell,
-  CheckCircle,
-  ChevronLeft,
-  ChevronRight,
-  Clock,
-  Filter,
-  Mail,
-  MessageSquare,
-  Phone,
-  RefreshCw,
-  Search,
-  Send,
-  X,
-  XCircle,
-} from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+  Button,
+  type Column,
+  DataTable,
+  Drawer,
+  Field,
+  FilterChips,
+  FilterPopover,
+  IconButton,
+  Select,
+  StatusBadge,
+  Toolbar,
+} from "@/components/ui";
 import { useNotificationWebSocket } from "../hooks/useNotificationWebSocket";
+import { dateTime, humanize, number } from "../lib/format";
 import {
   type DeliveryStatus,
   getNotificationSummary,
@@ -30,11 +27,12 @@ import {
   retryNotification,
 } from "../services/notificationApi";
 import type { PaginationMeta } from "../services/schedulingApi";
+import type { StatusKey } from "../styles/tokens";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const NOTIFICATION_TYPES: { value: string; label: string }[] = [
-  { value: "all", label: "All Types" },
+  { value: "all", label: "All types" },
   { value: "delivery_confirmation", label: "Delivery Confirmation" },
   { value: "delay_alert", label: "Delay Alert" },
   { value: "eta_change", label: "ETA Change" },
@@ -42,53 +40,36 @@ const NOTIFICATION_TYPES: { value: string; label: string }[] = [
 ];
 
 const CHANNELS: { value: string; label: string }[] = [
-  { value: "all", label: "All Channels" },
+  { value: "all", label: "All channels" },
   { value: "sms", label: "SMS" },
   { value: "email", label: "Email" },
   { value: "whatsapp", label: "WhatsApp" },
 ];
 
-const STATUSES: { value: string; label: string }[] = [
-  { value: "all", label: "All Statuses" },
-  { value: "pending", label: "Pending" },
-  { value: "sent", label: "Sent" },
-  { value: "delivered", label: "Delivered" },
-  { value: "failed", label: "Failed" },
-];
+/** Delivery status → badge style and label (icon + text, not colour alone). */
+export const DELIVERY_STATUS: Record<
+  DeliveryStatus,
+  { status: StatusKey; label: string }
+> = {
+  pending: { status: "planned", label: "Pending" },
+  sent: { status: "dispatched", label: "Sent" },
+  delivered: { status: "delivered", label: "Delivered" },
+  failed: { status: "exception", label: "Failed" },
+};
+const STATUS_IDS: DeliveryStatus[] = ["pending", "sent", "delivered", "failed"];
+
+function DeliveryBadge({ status }: { status: string }) {
+  const cfg = DELIVERY_STATUS[status as DeliveryStatus];
+  return cfg ? (
+    <StatusBadge status={cfg.status} label={cfg.label} />
+  ) : (
+    <span className="text-xs text-text-muted">{humanize(status)}</span>
+  );
+}
 
 const PAGE_SIZE = 20;
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
-
-function getStatusColor(status: string) {
-  switch (status) {
-    case "pending":
-      return "text-warning-dark bg-warning-light";
-    case "sent":
-      return "text-info-dark bg-info-light";
-    case "delivered":
-      return "text-success-dark bg-success-light";
-    case "failed":
-      return "text-error-dark bg-error-light";
-    default:
-      return "text-gray-700 bg-gray-50";
-  }
-}
-
-function getStatusIcon(status: string) {
-  switch (status) {
-    case "pending":
-      return <Clock className="w-3.5 h-3.5" />;
-    case "sent":
-      return <Send className="w-3.5 h-3.5" />;
-    case "delivered":
-      return <CheckCircle className="w-3.5 h-3.5" />;
-    case "failed":
-      return <XCircle className="w-3.5 h-3.5" />;
-    default:
-      return null;
-  }
-}
 
 function getChannelIcon(channel: string) {
   switch (channel) {
@@ -104,33 +85,15 @@ function getChannelIcon(channel: string) {
 }
 
 function getTypeLabel(type: string) {
-  return type
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
+  return humanize(type);
 }
 
-function formatDate(dateStr: string | null | undefined) {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function formatFullDate(dateStr: string | null | undefined) {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-}
+const CHANNEL_LABEL: Record<string, string> = {
+  sms: "SMS",
+  email: "Email",
+  whatsapp: "WhatsApp",
+};
+const channelLabel = (c: string) => CHANNEL_LABEL[c] ?? humanize(c);
 
 // ─── Table columns ───────────────────────────────────────────────────────────
 
@@ -139,7 +102,7 @@ const notificationColumns: Column<Notification>[] = [
     key: "notification_type",
     label: "Type",
     render: (notification) => (
-      <span className="text-sm font-medium text-primary">
+      <span className="font-medium text-text">
         {getTypeLabel(notification.notification_type)}
       </span>
     ),
@@ -148,9 +111,9 @@ const notificationColumns: Column<Notification>[] = [
     key: "channel",
     label: "Channel",
     render: (notification) => (
-      <span className="inline-flex items-center gap-1.5 text-sm text-gray-700">
+      <span className="inline-flex items-center gap-1.5 text-slate-700">
         {getChannelIcon(notification.channel)}
-        {notification.channel.toUpperCase()}
+        {channelLabel(notification.channel)}
       </span>
     ),
   },
@@ -159,11 +122,11 @@ const notificationColumns: Column<Notification>[] = [
     label: "Recipient",
     render: (notification) => (
       <>
-        <div className="text-sm text-primary">
+        <div className="text-text">
           {notification.recipient_name || notification.recipient_reference}
         </div>
         {notification.recipient_name && (
-          <div className="text-xs text-gray-500">
+          <div className="text-xs text-text-muted">
             {notification.recipient_reference}
           </div>
         )}
@@ -174,7 +137,7 @@ const notificationColumns: Column<Notification>[] = [
     key: "subject",
     label: "Subject",
     render: (notification) => (
-      <span className="text-sm text-gray-700 line-clamp-1">
+      <span className="line-clamp-1 text-slate-700">
         {notification.subject || "—"}
       </span>
     ),
@@ -182,41 +145,36 @@ const notificationColumns: Column<Notification>[] = [
   {
     key: "delivery_status",
     label: "Status",
+    width: 120,
     render: (notification) => (
-      <span
-        className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(notification.delivery_status)}`}
-      >
-        {getStatusIcon(notification.delivery_status)}
-        {notification.delivery_status.charAt(0).toUpperCase() +
-          notification.delivery_status.slice(1)}
-      </span>
+      <DeliveryBadge status={notification.delivery_status} />
     ),
   },
   {
     key: "related_entity",
-    label: "Related Entity",
+    label: "Related",
     render: (notification) =>
       notification.related_entity_id ? (
         <div>
-          <span className="text-sm text-primary font-medium">
+          <span className="font-medium text-text">
             {notification.related_entity_id}
           </span>
           {notification.related_entity_type && (
-            <div className="text-xs text-gray-500">
-              {notification.related_entity_type}
+            <div className="text-xs text-text-muted">
+              {humanize(notification.related_entity_type)}
             </div>
           )}
         </div>
       ) : (
-        <span className="text-sm text-gray-500">—</span>
+        <span className="text-text-muted">—</span>
       ),
   },
   {
     key: "created_at",
     label: "Created",
     render: (notification) => (
-      <span className="text-sm text-gray-600">
-        {formatDate(notification.created_at)}
+      <span className="whitespace-nowrap text-slate-700">
+        {dateTime(notification.created_at)}
       </span>
     ),
   },
@@ -412,417 +370,238 @@ export default function NotificationHistoryTab() {
     setCurrentPage(1);
   };
 
-  // ── Summary counts ───────────────────────────────────────────────────────
-  const summaryStats = useMemo(
-    () => [
-      {
-        label: "Total",
-        value: summary.total,
-        color: "text-primary",
-        icon: <Bell className="w-5 h-5 text-gray-500" />,
-      },
-      {
-        label: "Sent",
-        value: summary.by_status.sent || 0,
-        color: "text-info",
-        icon: <Send className="w-5 h-5 text-info" />,
-      },
-      {
-        label: "Delivered",
-        value: summary.by_status.delivered || 0,
-        color: "text-success",
-        icon: <CheckCircle className="w-5 h-5 text-success" />,
-      },
-      {
-        label: "Failed",
-        value: summary.by_status.failed || 0,
-        color: "text-error",
-        icon: <AlertTriangle className="w-5 h-5 text-error" />,
-      },
-    ],
-    [summary],
-  );
-
   // ── Render ───────────────────────────────────────────────────────────────
+  const sel = selectedNotification;
+  const closeDetail = () => {
+    setSelectedNotification(null);
+    setRetryError("");
+  };
+  const filterCount =
+    (filterType !== "all" ? 1 : 0) + (filterChannel !== "all" ? 1 : 0);
   return (
-    <div className="flex-1 flex bg-white overflow-hidden">
-      {/* Main content */}
-      <div className="flex-1 flex flex-col">
-        {/* Header */}
-        <div className="border-b border-gray-100 px-8 py-6">
-          <div className="flex items-center gap-3 mb-6">
-            <div className="w-10 h-10 bg-primary rounded-xl flex items-center justify-center">
-              <Bell className="w-5 h-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-semibold text-primary">
-                Notification History
-              </h1>
-              <p className="text-gray-500">
-                Track and manage customer notifications
+    <div className="flex h-full flex-1 flex-col bg-surface">
+      <Toolbar
+        label="Communications"
+        search={
+          <input
+            type="search"
+            placeholder="Search recipient, entity or message"
+            aria-label="Search notifications"
+            value={searchTerm}
+            onChange={(e) => handleSearch(e.target.value)}
+            className="h-7 w-full rounded-lg border border-slate-300 bg-surface px-2.5 text-xs text-slate-900 placeholder:text-slate-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-focus"
+          />
+        }
+        filters={
+          <>
+            <FilterChips
+              label="Delivery status"
+              collapse
+              options={[
+                { id: "all", label: "All", count: summary.total },
+                ...STATUS_IDS.map((id) => ({
+                  id,
+                  label: DELIVERY_STATUS[id].label,
+                  count: summary.by_status[id] || 0,
+                  status: DELIVERY_STATUS[id].status,
+                })),
+              ]}
+              value={filterStatus}
+              onChange={(v) => handleFilterChange(setFilterStatus, v as string)}
+            />
+            <FilterPopover
+              count={filterCount}
+              label="Notification filters"
+              onClear={() => {
+                setFilterType("all");
+                setFilterChannel("all");
+                setCurrentPage(1);
+              }}
+            >
+              <Field label="Type" id="notif-filter-type">
+                <Select
+                  id="notif-filter-type"
+                  value={filterType}
+                  onChange={(v) => handleFilterChange(setFilterType, v)}
+                  options={NOTIFICATION_TYPES}
+                />
+              </Field>
+              <Field label="Channel" id="notif-filter-channel">
+                <Select
+                  id="notif-filter-channel"
+                  value={filterChannel}
+                  onChange={(v) => handleFilterChange(setFilterChannel, v)}
+                  options={CHANNELS}
+                />
+              </Field>
+            </FilterPopover>
+          </>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => loadNotifications()}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<Notification>
+          ariaLabel="Notification history"
+          columns={notificationColumns}
+          data={loading || error ? [] : notifications}
+          loading={loading}
+          error={error ? { message: error, onRetry: loadNotifications } : null}
+          getRowId={(n) => n.notification_id}
+          selectedId={sel?.notification_id}
+          rowLabel={(n) =>
+            `${getTypeLabel(n.notification_type)} to ${n.recipient_name || n.recipient_reference}`
+          }
+          onRowClick={(n) => {
+            setSelectedNotification(n);
+            setRetryError("");
+          }}
+          // Keyboard path to the detail (rows themselves aren't focusable).
+          rowMenu={(n) => [
+            {
+              id: "details",
+              label: "View details",
+              icon: <Eye className="h-3.5 w-3.5" />,
+              onSelect: () => {
+                setSelectedNotification(n);
+                setRetryError("");
+              },
+            },
+          ]}
+          pagination={
+            pagination.total_pages > 1
+              ? {
+                  page: currentPage,
+                  totalPages: pagination.total_pages,
+                  totalItems: pagination.total,
+                  onPageChange: setCurrentPage,
+                }
+              : undefined
+          }
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No notifications found</p>
+              <p className="mt-1 text-xs">
+                Try adjusting your search or filters
               </p>
             </div>
-          </div>
-
-          {/* Search and Filters */}
-          <div className="flex gap-4">
-            <div className="flex-1 relative">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
-              <input
-                type="text"
-                placeholder="Search by recipient, entity ID, or message..."
-                value={searchTerm}
-                onChange={(e) => handleSearch(e.target.value)}
-                className="w-full pl-10 pr-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300"
-              />
-            </div>
-            <div className="relative">
-              <Filter className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-500" />
-              <select
-                value={filterType}
-                onChange={(e) =>
-                  handleFilterChange(setFilterType, e.target.value)
-                }
-                className="pl-10 pr-8 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[180px]"
-              >
-                {NOTIFICATION_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <select
-              value={filterChannel}
-              onChange={(e) =>
-                handleFilterChange(setFilterChannel, e.target.value)
-              }
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[130px]"
-            >
-              {CHANNELS.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-            <select
-              value={filterStatus}
-              onChange={(e) =>
-                handleFilterChange(setFilterStatus, e.target.value)
-              }
-              className="px-4 py-3 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white min-w-[130px]"
-            >
-              {STATUSES.map((s) => (
-                <option key={s.value} value={s.value}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        {/* Summary Bar */}
-        <div className="border-b border-gray-100 px-8 py-4">
-          <div className="grid grid-cols-4 gap-6">
-            {summaryStats.map((stat) => (
-              <div key={stat.label} className="flex items-center gap-3">
-                {stat.icon}
-                <div>
-                  <div className={`text-2xl font-semibold ${stat.color}`}>
-                    {stat.value}
-                  </div>
-                  <div className="text-sm text-gray-500">{stat.label}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Error Banner */}
-        {error && (
-          <div className="mx-8 mt-4 bg-error-light text-error-dark px-4 py-3 rounded-xl text-sm">
-            {error}
-            <button
-              onClick={loadNotifications}
-              className="ml-3 underline hover:no-underline"
-            >
-              Retry
-            </button>
-          </div>
-        )}
-
-        {/* Table */}
-        <div className="flex-1 overflow-y-auto">
-          {loading ? (
-            <div className="flex items-center justify-center py-16">
-              <div className="text-center">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary mx-auto mb-3" />
-                <p className="text-sm text-gray-500">
-                  Loading notifications...
-                </p>
-              </div>
-            </div>
-          ) : (
-            <Table<Notification>
-              ariaLabel="Notification history"
-              columns={notificationColumns}
-              data={notifications}
-              getRowId={(notification) => notification.notification_id}
-              selectedId={selectedNotification?.notification_id}
-              onRowClick={(notification) => {
-                setSelectedNotification(notification);
-                setRetryError("");
-              }}
-              emptyState={
-                <>
-                  <Bell className="w-16 h-16 mx-auto mb-4 text-gray-300" />
-                  <p className="text-lg font-medium text-gray-500">
-                    No notifications found
-                  </p>
-                  <p className="text-sm text-gray-500 mt-1">
-                    Try adjusting your search or filter criteria
-                  </p>
-                </>
-              }
-            />
-          )}
-        </div>
-
-        {/* Pagination */}
-        {pagination.total_pages > 1 && (
-          <div className="border-t border-gray-100 px-8 py-4 flex items-center justify-between">
-            <div className="text-sm text-gray-500">
-              Showing {(currentPage - 1) * PAGE_SIZE + 1}–
-              {Math.min(currentPage * PAGE_SIZE, pagination.total)} of{" "}
-              {pagination.total} notifications
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                disabled={currentPage <= 1}
-                className="p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <span className="text-sm text-gray-700 px-3">
-                Page {currentPage} of {pagination.total_pages}
-              </span>
-              <button
-                onClick={() =>
-                  setCurrentPage((p) => Math.min(pagination.total_pages, p + 1))
-                }
-                disabled={currentPage >= pagination.total_pages}
-                className="p-2 rounded-lg border border-gray-200 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
+          }
+        />
       </div>
 
-      {/* Detail Panel */}
-      {selectedNotification && (
-        <div className="w-96 border-l border-gray-100 bg-gray-50 flex flex-col">
-          <div className="px-6 py-4 border-b border-gray-100">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-primary">
-                Notification Details
-              </h3>
-              <button
-                onClick={() => {
-                  setSelectedNotification(null);
-                  setRetryError("");
-                }}
-                className="text-gray-500 hover:text-primary p-2 rounded-lg hover:bg-white transition-colors"
+      <Drawer
+        open={sel !== null}
+        onClose={closeDetail}
+        title="Notification details"
+        width={420}
+        footer={
+          sel?.delivery_status === "failed" ? (
+            <div className="flex flex-col gap-2">
+              <Button
+                onClick={() => handleRetry(sel.notification_id)}
+                loading={retrying}
+                icon={<RefreshCw className="h-3.5 w-3.5" />}
               >
-                <X className="w-5 h-5" />
-              </button>
+                {retrying ? "Retrying…" : "Retry notification"}
+              </Button>
+              {retryError && (
+                <p role="alert" className="text-xs text-red-700">
+                  {retryError}
+                </p>
+              )}
             </div>
-          </div>
-
-          <div className="flex-1 overflow-y-auto p-6 space-y-6">
-            {/* Notification ID */}
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Notification ID
-              </label>
-              <p className="text-sm text-primary font-mono">
-                {selectedNotification.notification_id}
-              </p>
-            </div>
-
-            {/* Type & Channel */}
+          ) : undefined
+        }
+      >
+        {sel && (
+          <dl className="space-y-4 text-sm">
+            <Detail label="Notification ID">
+              <span className="font-mono text-xs">{sel.notification_id}</span>
+            </Detail>
             <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Type
-                </label>
-                <span className="text-sm text-primary font-medium">
-                  {getTypeLabel(selectedNotification.notification_type)}
+              <Detail label="Type">
+                {getTypeLabel(sel.notification_type)}
+              </Detail>
+              <Detail label="Channel">
+                <span className="inline-flex items-center gap-1.5">
+                  {getChannelIcon(sel.channel)}
+                  {channelLabel(sel.channel)}
                 </span>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Channel
-                </label>
-                <span className="inline-flex items-center gap-1.5 text-sm text-primary">
-                  {getChannelIcon(selectedNotification.channel)}
-                  {selectedNotification.channel.toUpperCase()}
-                </span>
-              </div>
+              </Detail>
             </div>
-
-            {/* Status */}
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Delivery Status
-              </label>
-              <span
-                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-medium ${getStatusColor(selectedNotification.delivery_status)}`}
-              >
-                {getStatusIcon(selectedNotification.delivery_status)}
-                {selectedNotification.delivery_status.charAt(0).toUpperCase() +
-                  selectedNotification.delivery_status.slice(1)}
+            <Detail label="Delivery status">
+              <DeliveryBadge status={sel.delivery_status} />
+            </Detail>
+            <Detail label="Recipient">
+              {sel.recipient_name || "—"}
+              <span className="block text-xs text-text-muted">
+                {sel.recipient_reference}
               </span>
-            </div>
-
-            {/* Recipient */}
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Recipient
-              </label>
-              <p className="text-sm text-primary">
-                {selectedNotification.recipient_name || "—"}
-              </p>
-              <p className="text-xs text-gray-500 mt-0.5">
-                {selectedNotification.recipient_reference}
-              </p>
-            </div>
-
-            {/* Subject */}
-            {selectedNotification.subject && (
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Subject
-                </label>
-                <p className="text-sm text-primary">
-                  {selectedNotification.subject}
-                </p>
+            </Detail>
+            {sel.subject && <Detail label="Subject">{sel.subject}</Detail>}
+            <Detail label="Message">
+              <div className="whitespace-pre-wrap rounded-lg border border-slate-200 bg-slate-50 p-3 leading-relaxed">
+                {sel.message_body}
               </div>
-            )}
-
-            {/* Message Body */}
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Message Body
-              </label>
-              <div className="bg-white border border-gray-200 rounded-lg p-3 text-sm text-primary leading-relaxed whitespace-pre-wrap">
-                {selectedNotification.message_body}
-              </div>
-            </div>
-
-            {/* Related Entity */}
-            {selectedNotification.related_entity_id && (
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Related Entity
-                </label>
-                <p className="text-sm text-primary font-medium">
-                  {selectedNotification.related_entity_id}
-                </p>
-                {selectedNotification.related_entity_type && (
-                  <p className="text-xs text-gray-500 mt-0.5">
-                    Type: {selectedNotification.related_entity_type}
-                  </p>
+            </Detail>
+            {sel.related_entity_id && (
+              <Detail label="Related">
+                {sel.related_entity_id}
+                {sel.related_entity_type && (
+                  <span className="block text-xs text-text-muted">
+                    {humanize(sel.related_entity_type)}
+                  </span>
                 )}
-              </div>
+              </Detail>
             )}
-
-            {/* Failure Reason */}
-            {selectedNotification.failure_reason && (
-              <div>
-                <label className="block text-sm font-medium text-gray-500 mb-2">
-                  Failure Reason
-                </label>
-                <div className="bg-error-light text-error-dark px-3 py-2 rounded-lg text-sm">
-                  {selectedNotification.failure_reason}
-                </div>
-              </div>
+            {sel.failure_reason && (
+              <Detail label="Failure reason">
+                <span className="block rounded-lg bg-red-50 px-3 py-2 text-red-800">
+                  {sel.failure_reason}
+                </span>
+              </Detail>
             )}
+            <Detail label="Retries">{number(sel.retry_count)}</Detail>
+            <Detail label="Audit trail">
+              <span className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+                {(
+                  [
+                    ["Created", sel.created_at],
+                    ["Updated", sel.updated_at],
+                    ["Sent", sel.sent_at],
+                    ["Delivered", sel.delivered_at],
+                    ["Failed", sel.failed_at],
+                  ] as const
+                ).map(([k, v]) => (
+                  <span key={k} className="contents">
+                    <span className="text-text-muted">{k}</span>
+                    <span className="tabular-nums">{dateTime(v)}</span>
+                  </span>
+                ))}
+              </span>
+            </Detail>
+          </dl>
+        )}
+      </Drawer>
+    </div>
+  );
+}
 
-            {/* Retry Count */}
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Retry Count
-              </label>
-              <p className="text-sm text-primary">
-                {selectedNotification.retry_count}
-              </p>
-            </div>
-
-            {/* Audit Trail Timestamps */}
-            <div>
-              <label className="block text-sm font-medium text-gray-500 mb-2">
-                Audit Trail
-              </label>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Created</span>
-                  <span className="text-primary">
-                    {formatFullDate(selectedNotification.created_at)}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Updated</span>
-                  <span className="text-primary">
-                    {formatFullDate(selectedNotification.updated_at)}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Sent</span>
-                  <span className="text-primary">
-                    {formatFullDate(selectedNotification.sent_at)}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Delivered</span>
-                  <span className="text-primary">
-                    {formatFullDate(selectedNotification.delivered_at)}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-gray-500">Failed</span>
-                  <span className="text-primary">
-                    {formatFullDate(selectedNotification.failed_at)}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            {/* Retry Button for failed notifications */}
-            {selectedNotification.delivery_status === "failed" && (
-              <div>
-                <button
-                  onClick={() =>
-                    handleRetry(selectedNotification.notification_id)
-                  }
-                  disabled={retrying}
-                  className="w-full flex items-center justify-center gap-2 px-4 py-2.5 text-sm text-white rounded-lg transition-colors disabled:opacity-50 bg-primary hover:bg-primary-hover"
-                >
-                  <RefreshCw
-                    className={`w-4 h-4 ${retrying ? "animate-spin" : ""}`}
-                  />
-                  {retrying ? "Retrying..." : "Retry Notification"}
-                </button>
-                {retryError && (
-                  <p className="text-xs text-error mt-2">{retryError}</p>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      )}
+function Detail({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <dt className="mb-1 text-xs font-medium text-text-muted">{label}</dt>
+      <dd className="text-text">{children}</dd>
     </div>
   );
 }

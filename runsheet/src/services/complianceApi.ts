@@ -1,4 +1,5 @@
 import { ApiError, ApiTimeoutError, fetchWithSession } from "./api";
+import { apiErrorFromResponse } from "./apiErrors";
 import {
   buildQueryString,
   fetchWithTimeout,
@@ -165,11 +166,22 @@ export interface DQFDashboardEntry {
   qualifications: DriverQualificationStatus[];
 }
 
+/** Mirrors the backend ``DQFDashboard`` model field for field. */
 export interface DQFDashboard {
+  tenant_id: string;
+  total_drivers: number;
+  active_drivers: number;
+  suspended_drivers: number;
+  /** Stored ``expired``, or active with a tracked qualification past due. */
+  expired_drivers: number;
+  /** Expiring within 60 days and nothing past due. */
+  expiring_drivers: number;
+  expiring_within_7_days: number;
+  expiring_within_30_days: number;
+  expiring_within_60_days: number;
+  drug_test_overdue: number;
   drivers: DQFDashboardEntry[];
-  total_active: number;
-  total_suspended: number;
-  total_expiring_soon: number;
+  generated_at: string;
 }
 
 // ─── Asset Certification Types ───────────────────────────────────────────────
@@ -492,11 +504,7 @@ async function complianceRequest<T>(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();
@@ -773,11 +781,7 @@ export async function uploadTerminalBOL(
     });
 
     if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new ApiError(
-        body.detail || body.message || `HTTP error! status: ${response.status}`,
-        response.status,
-      );
+      throw await apiErrorFromResponse(response);
     }
 
     return await response.json();

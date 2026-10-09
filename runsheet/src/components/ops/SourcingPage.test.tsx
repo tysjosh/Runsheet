@@ -294,27 +294,30 @@ describe("SourcingPage", () => {
   });
 
   async function submitQuery() {
-    fireEvent.change(screen.getByLabelText(/Product code/i), {
-      target: { value: "DIESEL_2" },
-    });
-    fireEvent.change(screen.getByLabelText(/Volume \(gallons\)/i), {
+    // The query is a FormDialog opened from the toolbar (design.md §5).
+    fireEvent.click(screen.getByRole("button", { name: "Rank terminals" }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByLabelText(/^Product/));
+    fireEvent.click(screen.getByRole("option", { name: /Diesel #2/ }));
+    fireEvent.change(within(dialog).getByLabelText(/^Volume/), {
       target: { value: "8000" },
     });
-    fireEvent.change(screen.getByLabelText(/Origin latitude/i), {
+    fireEvent.change(within(dialog).getByLabelText(/^Origin latitude/), {
       target: { value: "40.7128" },
     });
-    fireEvent.change(screen.getByLabelText(/Origin longitude/i), {
+    fireEvent.change(within(dialog).getByLabelText(/^Origin longitude/), {
       target: { value: "-74.006" },
     });
     await act(async () => {
-      fireEvent.submit(screen.getByTestId("sourcing-query-form"));
+      fireEvent.click(
+        within(dialog).getByRole("button", { name: "Rank terminals" }),
+      );
     });
   }
-
   it("renders empty state before any query is submitted", () => {
     render(<SourcingPage />);
     expect(
-      screen.getByText(/Enter a product, volume, and origin above/i),
+      screen.getByText(/enter a product, volume, and origin/i),
     ).toBeInTheDocument();
   });
 
@@ -476,13 +479,14 @@ describe("SourcingPage", () => {
     render(<SourcingPage />);
     await submitQuery();
 
-    // term_001 (best) is auto-expanded; its wait-report form should
-    // sit under the wait-summary panel.
-    await waitFor(() => {
-      expect(
-        screen.getByTestId("wait-report-form-term_001"),
-      ).toBeInTheDocument();
-    });
+    // term_001 (best) is auto-expanded; "Report wait time" sits under the
+    // wait-summary panel and opens the FormDialog.
+    const form = await openWaitReport();
+    expect(form).toHaveAccessibleName("Report wait time");
+    expect(within(form).getByLabelText(/Wait minutes/i)).not.toHaveAttribute(
+      "type",
+      "number",
+    );
   });
 
   it("submits a wait report and re-fetches the wait summary on success", async () => {
@@ -500,7 +504,7 @@ describe("SourcingPage", () => {
     });
     mockGetWait.mockClear();
 
-    const form = await screen.findByTestId("wait-report-form-term_001");
+    const form = await openWaitReport();
     fireEvent.change(within(form).getByLabelText(/Wait minutes/i), {
       target: { value: "42" },
     });
@@ -514,7 +518,9 @@ describe("SourcingPage", () => {
       target: { value: "  Rack outage delayed load  " },
     });
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Submit wait report" }),
+      );
     });
 
     await waitFor(() => {
@@ -555,7 +561,7 @@ describe("SourcingPage", () => {
       expect(mockGetWait).toHaveBeenCalledWith("term_001");
     });
 
-    const form = await screen.findByTestId("wait-report-form-term_001");
+    const form = await openWaitReport();
     fireEvent.change(within(form).getByLabelText(/Wait minutes/i), {
       target: { value: "30" },
     });
@@ -568,7 +574,9 @@ describe("SourcingPage", () => {
       target: { value: "   " },
     });
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Submit wait report" }),
+      );
     });
 
     await waitFor(() => {
@@ -583,13 +591,15 @@ describe("SourcingPage", () => {
     render(<SourcingPage />);
     await submitQuery();
 
-    const form = await screen.findByTestId("wait-report-form-term_001");
+    const form = await openWaitReport();
     // Leave wait minutes blank, provide reporter_id.
     fireEvent.change(within(form).getByLabelText(/Reporter ID/i), {
       target: { value: "driver-042" },
     });
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Submit wait report" }),
+      );
     });
 
     expect(mockSubmitWait).not.toHaveBeenCalled();
@@ -603,13 +613,15 @@ describe("SourcingPage", () => {
     render(<SourcingPage />);
     await submitQuery();
 
-    const form = await screen.findByTestId("wait-report-form-term_001");
+    const form = await openWaitReport();
     fireEvent.change(within(form).getByLabelText(/Wait minutes/i), {
       target: { value: "30" },
     });
     // Leave reporter_id blank while source stays at the default.
     await act(async () => {
-      fireEvent.submit(form);
+      fireEvent.click(
+        within(form).getByRole("button", { name: "Submit wait report" }),
+      );
     });
 
     expect(mockSubmitWait).not.toHaveBeenCalled();
@@ -618,6 +630,12 @@ describe("SourcingPage", () => {
     ).toBeInTheDocument();
   });
 });
+
+async function openWaitReport() {
+  const open = await screen.findByTestId("wait-report-open-term_001");
+  fireEvent.click(open);
+  return screen.findByRole("dialog", { name: "Report wait time" });
+}
 
 describe("validateWaitReportForm", () => {
   const base = {

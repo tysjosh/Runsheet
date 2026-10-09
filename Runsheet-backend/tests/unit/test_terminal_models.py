@@ -94,6 +94,15 @@ class _FakeESService:
         self.docs[doc_id] = dict(document)
         return {"_id": doc_id, "result": "created"}
 
+    async def create_document(
+        self, index: str, doc_id: str, document: Dict[str, Any]
+    ) -> bool:
+        # Create-if-absent, like the real store: ids are global across tenants.
+        if doc_id in self.docs:
+            return False
+        await self.index_document(index, doc_id, document)
+        return True
+
     async def update_document(
         self, index: str, doc_id: str, partial_doc: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -633,6 +642,76 @@ class TestRepositoryConstruction:
         assert SUPPLIER_CONTRACTS_INDEX in used
         assert TERMINAL_WAIT_REPORTS_INDEX in used
         assert SOURCING_RECOMMENDATIONS_INDEX in used
+
+
+class TestCreateIsCreateIfAbsent:
+    """L1: terminals and supplier contracts refuse a taken id with a 409."""
+
+    CASES = {
+        "terminal": ("terminal_repo", _base_terminal_kwargs, "terminal_id", "term_001", "name"),
+        "supplier_contract": (
+            "contract_repo", _base_contract_kwargs, "contract_id", "sc_001", "supplier_name",
+        ),
+    }
+
+    @pytest.fixture
+    def mirror_calls(self, monkeypatch):
+        calls: List[Any] = []
+
+        async def _record(*args, **kwargs):
+            calls.append((args, kwargs))
+
+        for name in ("mirror_current_state_upsert", "mirror_compliance_config_upsert"):
+            monkeypatch.setattr(
+                f"commerce.services.commerce_persistence_bridge.{name}", _record
+            )
+        return calls
+
+    @pytest.mark.parametrize("case", sorted(CASES))
+    async def test_other_tenant_cannot_create_over_an_existing_id(
+        self, request, es: _FakeESService, mirror_calls, case
+    ):
+        from errors.codes import ErrorCode
+        from errors.exceptions import AppException
+
+        fixture, kwargs, id_field, doc_id, label_field = self.CASES[case]
+        repo = request.getfixturevalue(fixture)
+        await repo.create("tenant-A", kwargs())
+        before = dict(es.docs[doc_id])
+        mirror_calls.clear()
+
+        with pytest.raises(AppException) as exc_info:
+            await repo.create(
+                "tenant-B", kwargs(tenant_id="tenant-B", **{label_field: "B's copy"})
+            )
+
+        assert exc_info.value.error_code is ErrorCode.RESOURCE_ALREADY_EXISTS
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.details == {id_field: doc_id}
+        assert "tenant-A" not in repr(exc_info.value.to_dict())
+        assert es.docs[doc_id] == before
+        assert mirror_calls == []
+        assert await repo.get("tenant-B", doc_id) is None
+        assert await repo.get("tenant-A", doc_id) is not None
+
+    @pytest.mark.parametrize("case", sorted(CASES))
+    async def test_same_tenant_duplicate_is_also_409_and_minted_ids_still_work(
+        self, request, es: _FakeESService, mirror_calls, case
+    ):
+        from errors.exceptions import AppException
+
+        fixture, kwargs, id_field, doc_id, label_field = self.CASES[case]
+        repo = request.getfixturevalue(fixture)
+        await repo.create("tenant-A", kwargs())
+        with pytest.raises(AppException) as exc_info:
+            await repo.create("tenant-A", kwargs(**{label_field: "second"}))
+        assert exc_info.value.status_code == 409
+        assert es.docs[doc_id][label_field] != "second"
+
+        minted = kwargs()
+        minted.pop(id_field)
+        created = await repo.create("tenant-A", minted)
+        assert getattr(created, id_field) != doc_id
 
 
 class TestTerminalRepository:

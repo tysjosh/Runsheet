@@ -16,7 +16,6 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from unittest.mock import AsyncMock, MagicMock, patch
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +27,10 @@ if str(_BACKEND_DIR) not in sys.path:
 
 def _setup_mock_env() -> None:
     """Set minimal environment variables needed for app import."""
+    # ``ELASTIC_ENDPOINT`` / ``ELASTIC_API_KEY`` used to be here because they were
+    # REQUIRED settings and importing the app without them raised. Both are gone
+    # from ``config.settings``, so a placeholder would be ignored.
     defaults = {
-        "ELASTICSEARCH_URL": "http://localhost:9200",
-        "ELASTIC_ENDPOINT": "http://localhost:9200",
-        "ELASTIC_API_KEY": "mock-key-for-registry-gen",
-        "ELASTICSEARCH_API_KEY": "mock-key-for-registry-gen",
         "REDIS_URL": "redis://localhost:6379",
         "ENVIRONMENT": "development",
     }
@@ -41,34 +39,18 @@ def _setup_mock_env() -> None:
 
 
 def _import_app_with_mocks() -> Any:
-    """Import the FastAPI app with mocked external services.
+    """Import the FastAPI app so its route tree can be introspected.
 
-    Patches Elasticsearch, Redis, and other external clients so the app
-    object can be constructed without live connections.  Only the route
-    tree is needed — the lifespan never runs.
+    The lifespan never runs, so no live database/Redis connection is needed —
+    only ``main.app``'s import-time route registration. There used to be an
+    ``elasticsearch.Elasticsearch`` patch here; the ``elasticsearch`` package
+    was removed from requirements.txt when the document plane moved to
+    PostgreSQL (persistence/document_store.py), and nothing imports it any
+    more. Patching a module that no longer exists raised ``ModuleNotFoundError``
+    before the app import was even attempted.
     """
     _setup_mock_env()
-
-    # Create a mock Elasticsearch client that passes ping()
-    mock_es_client = MagicMock()
-    mock_es_client.ping.return_value = True
-    mock_es_client.indices.exists.return_value = False
-    mock_es_client.indices.create.return_value = {"acknowledged": True}
-    mock_es_client.indices.get_mapping.return_value = {}
-    mock_es_client.indices.put_mapping.return_value = {"acknowledged": True}
-    mock_es_client.ilm.get_lifecycle.side_effect = Exception("not found")
-    mock_es_client.ilm.put_lifecycle.return_value = {"acknowledged": True}
-    mock_es_client.indices.put_settings.return_value = {"acknowledged": True}
-    mock_es_client.search.return_value = {"hits": {"hits": [], "total": {"value": 0}}}
-
-    # Patch the Elasticsearch constructor before any module imports it
-    with patch("elasticsearch.Elasticsearch", return_value=mock_es_client):
-        # Also patch Redis if used at module level
-        mock_redis = MagicMock()
-        mock_redis.ping = AsyncMock(return_value=True)
-
-        with patch.dict("os.environ", {}, clear=False):
-            from main import app
+    from main import app
 
     return app
 

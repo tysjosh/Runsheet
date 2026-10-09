@@ -71,8 +71,14 @@ from Agents.support.route_solver import (
 )
 from fuel.services.fuel_product_catalog import (
     UnknownFuelProductError,
-    canonicalize,
     canonicalize_or_warn,
+)
+from fuel.order_models import LOADABLE_ORDER_STATUSES
+from fuel.services.dispatch_validation import (
+    build_route_requirements,
+    estimate_route_hours,
+    lookup_product,
+    resolve_stop_locations,
 )
 from fuel.services.order_es_mappings import FUEL_ORDERS_CURRENT_INDEX
 from fuel.services.sourcing_recommender import (
@@ -863,6 +869,16 @@ class RoutePlanningAgent(OverlayAgentBase):
         # Step 1: Collect buffered proposals
         proposals = list(self._proposal_buffer)
         self._proposal_buffer.clear()
+        # N-new-2: on the pipeline path each loading proposal arrives twice
+        # (SignalBus subscription + FuelDistributionPipeline injection).
+        deduped = self._dedupe_loading_proposals(proposals)
+        if len(deduped) != len(proposals):
+            logger.info(
+                "RoutePlanningAgent: dropped %d duplicate loading proposal(s) "
+                "(same tenant and plan_id)",
+                len(proposals) - len(deduped),
+            )
+        proposals = deduped
 
         # Structured skip reasons for this evaluation. Reset here (not at
         # the early return above) so ``last_route_skips`` from the previous
@@ -1371,7 +1387,8 @@ class RoutePlanningAgent(OverlayAgentBase):
         # Fuel-order-based stop building (Task 11.2, Req 5.2.1–5.2.3)
         # ------------------------------------------------------------------
         # In addition to the loading-proposal flow, build stops directly
-        # from fuel_orders_current WHERE status IN {confirmed, scheduled}.
+        # from fuel_orders_current WHERE status IN LOADABLE_ORDER_STATUSES
+        # ({placed, confirmed, scheduled}, the set the loader loads; N2).
         # This ensures the route planning agent can operate on fuel orders
         # even when no compartment_loading proposal is buffered. Window
         # misses are surfaced on the last produced route plan (if any) or
@@ -1425,6 +1442,31 @@ class RoutePlanningAgent(OverlayAgentBase):
             if action.get("tool_name") == "apply_loading_plan":
                 return action.get("parameters", {})
         return None
+
+    @staticmethod
+    def _dedupe_loading_proposals(
+        proposals: List[InterventionProposal],
+    ) -> List[InterventionProposal]:
+        """Keep the first proposal per ``(tenant_id, plan_id)`` (N-new-2).
+
+        Proposals without an extractable ``plan_id`` pass through unchanged;
+        the per-proposal skip logic still handles them.
+        """
+        seen: set = set()
+        kept: List[InterventionProposal] = []
+        for proposal in proposals:
+            plan_id = None
+            for action in getattr(proposal, "actions", None) or []:
+                if action.get("tool_name") == "apply_loading_plan":
+                    plan_id = (action.get("parameters") or {}).get("plan_id")
+                    break
+            if plan_id:
+                key = (getattr(proposal, "tenant_id", None), plan_id)
+                if key in seen:
+                    continue
+                seen.add(key)
+            kept.append(proposal)
+        return kept
 
     # ------------------------------------------------------------------
     # Driver eligibility check (Task 6.9, Req 5.5, 5.6, 5.7)
@@ -1601,44 +1643,18 @@ class RoutePlanningAgent(OverlayAgentBase):
         Returns:
             Dict with keys ``requires_hazmat``, ``requires_tanker``,
             and ``min_cdl_class``.
+
+        Delegates to :func:`fuel.services.dispatch_validation.build_route_requirements`,
+        shared with the Dispatch Board so both agree (dispatch-board K3.2).
         """
-        requires_hazmat = False
-        requires_tanker = bool(assignments)  # All fuel deliveries use tankers
-
-        for assignment in assignments:
-            fuel_grade = assignment.get("fuel_grade", "")
-            if not fuel_grade:
-                continue
-            # Check if the product is HAZMAT-classified
-            # Try to canonicalize the fuel grade to get the product code
-            try:
-                product_code = canonicalize(fuel_grade)
-                product = self._lookup_product(product_code)
-                if product and product.category in self._HAZMAT_CATEGORIES:
-                    requires_hazmat = True
-                    break
-            except (UnknownFuelProductError, Exception):
-                # If we can't identify the product, assume HAZMAT for
-                # safety (conservative approach for unknown fuels)
-                requires_hazmat = True
-                break
-
-        return {
-            "requires_hazmat": requires_hazmat,
-            "requires_tanker": requires_tanker,
-            "min_cdl_class": "A" if requires_tanker else None,
-        }
+        return build_route_requirements(
+            assignments, hazmat_categories=self._HAZMAT_CATEGORIES
+        )
 
     @staticmethod
     def _lookup_product(product_code: str) -> Optional[Any]:
         """Look up a FuelProduct from the catalog by product_code."""
-        from fuel.services.fuel_product_catalog import (
-            FUEL_PRODUCT_CATALOG,
-        )
-        for product in FUEL_PRODUCT_CATALOG:
-            if product.product_code == product_code:
-                return product
-        return None
+        return lookup_product(product_code)
 
     # ------------------------------------------------------------------
     # HOS eligibility check (Task 7.8, Req 4.1–4.7)
@@ -1672,22 +1688,16 @@ class RoutePlanningAgent(OverlayAgentBase):
 
         Returns:
             Tuple of (estimated_drive_hours, estimated_total_hours).
+
+        Delegates to :func:`fuel.services.dispatch_validation.estimate_route_hours`
+        (shared with the Dispatch Board) with this agent's constants.
         """
-        num_stops = len(assignments)
-        if num_stops == 0:
-            return (0.0, 0.0)
-
-        # Estimate total route distance (depot → stops → depot)
-        # Each stop adds avg distance; add one more leg for return to depot
-        total_miles = (num_stops + 1) * self._AVG_MILES_BETWEEN_STOPS
-        estimated_drive_hours = total_miles / self._AVERAGE_SPEED_MPH
-
-        # Total on-duty includes drive time + time at each stop
-        estimated_total_hours = estimated_drive_hours + (
-            num_stops * self._HOURS_PER_STOP
+        return estimate_route_hours(
+            assignments,
+            average_speed_mph=self._AVERAGE_SPEED_MPH,
+            hours_per_stop=self._HOURS_PER_STOP,
+            avg_miles_between_stops=self._AVG_MILES_BETWEEN_STOPS,
         )
-
-        return (estimated_drive_hours, estimated_total_hours)
 
     async def _check_hos_eligibility(
         self,
@@ -2090,7 +2100,8 @@ class RoutePlanningAgent(OverlayAgentBase):
     ]:
         """Build route stops from fuel_orders_current.
 
-        Reads orders WHERE status IN {confirmed, scheduled} for the tenant.
+        Reads orders WHERE status IN LOADABLE_ORDER_STATUSES ({placed,
+        confirmed, scheduled}, shared with the loader; N2) for the tenant.
         Uses ship_to_lat/ship_to_lon as the stop coordinate; falls back to
         geocoding ship_to_address via the existing hook when null.
 
@@ -2194,7 +2205,7 @@ class RoutePlanningAgent(OverlayAgentBase):
                 "bool": {
                     "filter": [
                         {"term": {"tenant_id": tenant_id}},
-                        {"terms": {"status": ["confirmed", "scheduled"]}},
+                        {"terms": {"status": list(LOADABLE_ORDER_STATUSES)}},
                     ]
                 }
             },
@@ -2209,7 +2220,7 @@ class RoutePlanningAgent(OverlayAgentBase):
 
             pg = await read_hybrid_search(
                 "fuel_order", tenant_id,
-                in_filters={"status": ["confirmed", "scheduled"]},
+                in_filters={"status": list(LOADABLE_ORDER_STATUSES)},
                 page=1, size=1000,
             )
             if pg is not _NOT_CUT_OVER:
@@ -2355,20 +2366,16 @@ class RoutePlanningAgent(OverlayAgentBase):
         ``customer_tanks`` row. ``fuel_stations`` remains the fallback so
         legacy retail tenants — whose orders may carry no coordinates at
         all — keep routing.
+
+        Delegates to :func:`fuel.services.dispatch_validation.resolve_stop_locations`
+        (shared with the Dispatch Board).
         """
-        resolved: Dict[str, Dict[str, float]] = {}
-        for station_id in station_ids:
-            for order_id in order_ids_by_station.get(station_id, []):
-                order_location = order_stop_locations.get(order_id)
-                if order_location:
-                    resolved[station_id] = dict(order_location)
-                    break
-            if station_id in resolved:
-                continue
-            station_location = station_locations.get(station_id)
-            if station_location:
-                resolved[station_id] = dict(station_location)
-        return resolved
+        return resolve_stop_locations(
+            station_ids=station_ids,
+            station_locations=station_locations,
+            order_ids_by_station=order_ids_by_station,
+            order_stop_locations=order_stop_locations,
+        )
 
     def _resolve_sla_windows(
         self,

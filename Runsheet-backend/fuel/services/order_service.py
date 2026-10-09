@@ -23,11 +23,17 @@ Validates: Requirements 1.1.9, 1.2.2, 1.2.3, 2.5.7, 3.2.1, 4.1.
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from fastapi.encoders import jsonable_encoder
 
 from fuel.order_state_machine import (
     assert_transition,
     assert_window_present_for_transition,
+)
+from fuel.order_repository import (
+    OrderChangedConcurrentlyError,
+    OrderWriteDiscardedError,
 )
 from fuel.services.order_id_generator import mint_event_id
 from fuel.services.order_metrics import orders_state_transition_rejections_total
@@ -35,7 +41,10 @@ from services.time_utils import utcnow
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["OrderService"]
+__all__ = ["OrderService", "transition_order_guarded"]
+
+#: Keys a guarded transition restores on refusal (design K5a step 1).
+_GUARD_SNAPSHOT_KEYS = ("status", "last_event_timestamp", "updated_at", "hold_reason")
 
 # ---------------------------------------------------------------------------
 # Status → event_type mapping
@@ -197,6 +206,7 @@ class OrderService:
         actor_user_id: Optional[str] = None,
         client_event_timestamp: Optional[str] = None,
         event_payload_extra: Optional[Dict[str, Any]] = None,
+        guard_stored_state: bool = False,
     ) -> Dict[str, Any]:
         """Apply a status transition to an order.
 
@@ -238,6 +248,18 @@ class OrderService:
                 canonical keys above always win, so no caller can overwrite the
                 transition's own record; and like ``client_event_timestamp`` this
                 needs no ``fuel_order_events`` mapping change.
+            guard_stored_state: Loading-plan executor, MVP dispatch and,
+                through :func:`transition_order_guarded`, the REST and driver
+                status writers (design K5a, OI-41). Persists *before* the event with a guarded
+                upsert that applies only if the stored status and
+                ``last_event_timestamp`` still equal the ones on ``order``.
+                On refusal the four snapshot keys are restored on ``order``
+                and :class:`~fuel.order_repository.OrderChangedConcurrentlyError`
+                or :class:`~fuel.order_repository.OrderWriteDiscardedError`
+                is re-raised unwrapped, with no event, counter, broadcast or
+                subscriber call. On success the stored ``last_event_timestamp``
+                and ``updated_at`` are written back to ``order`` so a chained
+                guarded call compares against exactly what is stored.
 
         Returns:
             The updated order document.
@@ -246,6 +268,11 @@ class OrderService:
             AppException: HTTP 409 on invalid transition or missing window.
         """
         old_status = order["status"]
+        prior = (
+            {k: order.get(k) for k in _GUARD_SNAPSHOT_KEYS}
+            if guard_stored_state
+            else None
+        )
 
         # 1. Validate the state machine transition
         try:
@@ -299,12 +326,28 @@ class OrderService:
             "trace_id": order.get("trace_id", ""),
         }
 
-        await self._order_repo.append_event(order["tenant_id"], event)
+        if prior is not None:
+            # K5a: persist first, guarded, so a refusal leaves no orphan event.
+            try:
+                stored = await self._order_repo.upsert_with_last_event_timestamp(
+                    order["tenant_id"],
+                    order,
+                    expected_status=prior["status"],
+                    expected_last_event_timestamp=prior["last_event_timestamp"],
+                )
+            except (OrderChangedConcurrentlyError, OrderWriteDiscardedError):
+                order.update(prior)
+                raise
+            order["last_event_timestamp"] = stored["last_event_timestamp"]
+            order["updated_at"] = stored["updated_at"]
+            await self._order_repo.append_event(order["tenant_id"], event)
+        else:
+            await self._order_repo.append_event(order["tenant_id"], event)
 
-        # 6. Persist the updated order
-        await self._order_repo.upsert_with_last_event_timestamp(
-            order["tenant_id"], order
-        )
+            # 6. Persist the updated order
+            await self._order_repo.upsert_with_last_event_timestamp(
+                order["tenant_id"], order
+            )
 
         # 7. Driver counter updates
         await self._update_driver_counters(order, old_status, new_status)
@@ -452,13 +495,33 @@ class OrderService:
                 )
                 return order
 
-        # All hooks passed — transition back to placed
-        return await self.apply_status_transition(
-            order=order,
-            new_status="placed",
-            reason="released_from_hold",
-            actor_user_id=actor_user_id,
-        )
+        # All hooks passed — transition back to placed. The order leaves any
+        # applied loading plan in the same write (OI-18, OQ10): the run, truck
+        # and claim links are cleared so the next loading run can plan it
+        # again. The driver link is kept (OQ4). The released links go in the
+        # event for audit.
+        released = {
+            key: order.get(key)
+            for key in ("assigned_run_id", "assigned_asset_id", "assigned_claim_id")
+        }
+        for key in released:
+            order[key] = None
+        try:
+            return await self.apply_status_transition(
+                order=order,
+                new_status="placed",
+                reason="released_from_hold",
+                actor_user_id=actor_user_id,
+                event_payload_extra={
+                    "released_run_id": released["assigned_run_id"],
+                    "released_asset_id": released["assigned_asset_id"],
+                },
+            )
+        except BaseException:
+            # The transition did not complete (e.g. refused by the state
+            # machine); give the caller back its dict with the links.
+            order.update(released)
+            raise
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -517,27 +580,23 @@ class OrderService:
         old_status: str,
         new_status: str,
     ) -> None:
-        """Broadcast the status change via the orders WebSocket manager."""
+        """Broadcast the status change via the orders WebSocket manager.
+
+        Sends the full order (``OrdersPage.handleOrderUpdate`` replaces the
+        row with ``message.data``), JSON-encoded because ``send_json`` on a
+        ``datetime`` fails and the manager then drops the client (N-new-1).
+        """
         try:
-            await self._ws_manager.broadcast({
-                "type": "order_status_changed",
-                "data": {
-                    "order_id": order["order_id"],
-                    "tenant_id": order["tenant_id"],
-                    "old_status": old_status,
-                    "new_status": new_status,
-                    "updated_at": (
-                        order["updated_at"].isoformat()
-                        if hasattr(order["updated_at"], "isoformat")
-                        else str(order["updated_at"])
-                    ),
-                },
-                "tenant_id": order["tenant_id"],
+            await self._ws_manager.broadcast_order_status_changed({
+                **jsonable_encoder(order),
+                "old_status": old_status,
+                "new_status": new_status,
+                "status": new_status,
             })
         except Exception as exc:
             # WebSocket broadcast failures MUST NOT block the main path
             logger.warning(
-                "OrdersWSManager.broadcast failed for order=%s: %s",
+                "OrdersWSManager.broadcast_order_status_changed failed for order=%s: %s",
                 order.get("order_id"),
                 exc,
             )
@@ -575,3 +634,61 @@ class OrderService:
                     order.get("order_id"),
                     exc,
                 )
+
+
+async def transition_order_guarded(
+    order_service: "OrderService",
+    read_order: Callable[[], Awaitable[Dict[str, Any]]],
+    new_status: str,
+    *,
+    order: Optional[Dict[str, Any]] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Apply a status transition that cannot overwrite a concurrent write (OI-41).
+
+    The write is ``apply_status_transition(..., guard_stored_state=True)``:
+    it lands only if the stored status and ``last_event_timestamp`` still
+    equal the ones read, so a loading-plan executor or dispatch write made
+    after the read (``scheduled`` plus run/truck links) is never overwritten.
+    On a refusal the order is re-read once and the transition retried; the
+    state machine re-validates against the fresh state, so a transition that
+    is no longer allowed gets the usual 409 ``INVALID_STATUS_TRANSITION``. A
+    second refusal is 409 ``ORDER_CHANGED_CONCURRENTLY``.
+
+    Args:
+        order_service: The service that applies the transition.
+        read_order: Returns the current order dict (raising its own 404/403
+            when the order is gone or no longer the caller's).
+        new_status: Target status.
+        order: The caller's first read, when it already has one.
+        **kwargs: Passed to :meth:`OrderService.apply_status_transition`.
+    """
+    from errors.codes import ErrorCode
+    from errors.exceptions import AppException
+
+    current = order if order is not None else await read_order()
+    order_id = current.get("order_id")
+    for attempt in (1, 2):
+        try:
+            return await order_service.apply_status_transition(
+                order=current,
+                new_status=new_status,
+                guard_stored_state=True,
+                **kwargs,
+            )
+        except (OrderChangedConcurrentlyError, OrderWriteDiscardedError) as exc:
+            if attempt == 2:
+                raise AppException(
+                    error_code=ErrorCode.ORDER_CHANGED_CONCURRENTLY,
+                    message="The order changed while it was being updated; reload and retry",
+                    status_code=409,
+                    details={"order_id": order_id},
+                ) from exc
+            logger.info(
+                "transition_order_guarded: order %s changed concurrently (%s); "
+                "re-reading once",
+                order_id,
+                type(exc).__name__,
+            )
+            current = await read_order()
+    raise AssertionError("unreachable")  # pragma: no cover

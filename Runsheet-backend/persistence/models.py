@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -32,7 +33,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
+from sqlalchemy.dialects.postgresql import CITEXT as _PG_CITEXT
+from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -44,9 +48,22 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# Portable JSON type: works on both PostgreSQL (JSONB under the hood via the
-# dialect) and SQLite (TEXT) so the same models run in tests and production.
+# Portable JSON type: works on both PostgreSQL and SQLite (TEXT) so the same
+# models run in tests and production.
+#
+# NB: this resolves to PostgreSQL ``json``, NOT ``jsonb`` — the generic
+# SQLAlchemy ``JSON`` type does not upgrade itself, and ``\d
+# fuel_orders_current`` confirms ``document | json``. The comment here used to
+# claim "JSONB under the hood via the dialect", which is wrong and matters: a
+# ``json`` column cannot carry a GIN index, so containment and key lookups
+# against it are sequential scans.
 _JSON = JSON().with_variant(JSON(), "sqlite")
+
+# Real ``jsonb`` on PostgreSQL, plain JSON on SQLite. Used by tables whose
+# document column is *queried* rather than merely stored, because jsonb is what
+# supports GIN indexing and the ``@>`` / ``->>`` operators the Elasticsearch
+# query adapter needs. New hybrid tables should prefer this.
+_JSONB = JSON().with_variant(_PG_JSONB(), "postgresql")
 
 
 class TimestampMixin:
@@ -123,6 +140,9 @@ class AccountORM(TimestampMixin, Base):
     credit_balance_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     credit_state: Mapped[str] = mapped_column(String(32), default="ok", nullable=False)
     credit_override_expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # Who approved the active override and why (OI-42, migration 0010).
+    credit_override_reason: Mapped[Optional[str]] = mapped_column(Text)
+    credit_override_authorized_by: Mapped[Optional[str]] = mapped_column(String(255))
     net_terms_days: Mapped[int] = mapped_column(Integer, default=30, nullable=False)
     tier: Mapped[str] = mapped_column(String(32), default="default", nullable=False)
     billing_address: Mapped[Optional[Dict[str, Any]]] = mapped_column(_JSON)
@@ -522,6 +542,9 @@ class ArAgingSnapshotORM(Base):
     tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
     snapshot_date: Mapped[Optional[date]] = mapped_column(Date)
     total_open_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    # Not yet due. NULL marks a snapshot written before aging moved to days
+    # past due_date (those were aged by issued_at and had no Current bucket).
+    bucket_current_cents: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     bucket_0_30_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     bucket_31_60_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     bucket_61_90_cents: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
@@ -820,3 +843,641 @@ class LocationORM(_ComplianceConfigBase, Base):
     __table_args__ = (
         Index("ix_location_tenant", "tenant_id"),
     )
+
+
+# ---------------------------------------------------------------------------
+# Fuel assets: the three indices Elasticsearch was the ONLY home for
+# ---------------------------------------------------------------------------
+#
+# ``customer_tanks``, ``truck_compartments`` and ``fuel_stations`` were listed in
+# the rebuild tool's ``ES_ONLY_INDICES`` registry (deleted with the cluster in
+# Phase 6): authoritative state with no Postgres table, no projector and no
+# rebuild spec, so recreating the
+# Elasticsearch cluster destroyed them permanently. They are not seed data —
+# live code paths write them:
+#
+#   * ``customer_tanks.k_factor`` is written back by ``KFactorCalibrationService``
+#     after each calibration, and level/reading fields by the Veeder-Root ATG
+#     connector.
+#   * ``truck_compartments.last_loaded_product`` is written by
+#     ``CompartmentLoadingAgent._persist_loading_plan`` and is what the
+#     cross-contamination guard reads before assigning a product to a
+#     compartment. Losing it does not merely lose data: it silently removes the
+#     evidence a product-compatibility block depends on.
+#   * ``fuel_stations`` holds tank inventory for the legacy retail path, also
+#     updated by the ATG connector.
+#
+# Shape follows the established hybrid pattern — typed identity / tenant /
+# filter columns for indexing, plus the full ES document verbatim — so the read
+# path can return byte-identical documents and no caller changes. The filter
+# columns are not guesswork: they are the fields the codebase actually issues
+# ``term`` clauses on (status 91, customer_id 21, truck_id 19, station_id 13,
+# fuel_type 8, customer_tank_id 8, zip_code 3).
+#
+# Unlike the older hybrid tables these use ``_JSONB``, because the Elasticsearch
+# query adapter that replaces ``search_documents`` needs GIN indexing and the
+# jsonb operators. A ``json`` column would force a sequential scan per query.
+
+
+class _FuelAssetBase:
+    """Shared columns for the hybrid fuel-asset tables."""
+
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    document: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class CustomerTankORM(_FuelAssetBase, Base):
+    """Authoritative customer tank (projects to ``customer_tanks``).
+
+    Keyed on ``customer_tank_id``, which is what
+    ``CustomerTankRepository.upsert`` passes to ``index_document``. The live
+    Elasticsearch documents are keyed by ``customer_id`` instead — a seeder bug
+    (``_resolve_json_doc_id`` preferred the foreign key) that was latent only
+    because no fixture gave one customer two tanks. Keying correctly here fixes
+    it rather than carrying it into Postgres, and the primary key makes the
+    collision impossible to reintroduce.
+    """
+
+    __tablename__ = "customer_tanks"
+
+    customer_tank_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    customer_id: Mapped[Optional[str]] = mapped_column(String(64))
+    status: Mapped[Optional[str]] = mapped_column(String(32))
+    fuel_type: Mapped[Optional[str]] = mapped_column(String(32))
+    customer_type: Mapped[Optional[str]] = mapped_column(String(32))
+    zip_code: Mapped[Optional[str]] = mapped_column(String(16))
+    external_tank_id: Mapped[Optional[str]] = mapped_column(String(128))
+    source_system: Mapped[Optional[str]] = mapped_column(String(64))
+
+    __table_args__ = (
+        Index("ix_customer_tank_tenant", "tenant_id"),
+        Index("ix_customer_tank_tenant_customer", "tenant_id", "customer_id"),
+        Index("ix_customer_tank_tenant_status", "tenant_id", "status"),
+        Index("ix_customer_tank_tenant_zip", "tenant_id", "zip_code"),
+        # The ATG connector resolves a tank by the vendor's own id.
+        Index("ix_customer_tank_tenant_external", "tenant_id", "external_tank_id"),
+    )
+
+
+class TruckCompartmentORM(_FuelAssetBase, Base):
+    """Authoritative truck compartment (projects to ``truck_compartments``).
+
+    The Elasticsearch ``_id`` is ``f"{truck_id}_{compartment_id}"`` (e.g.
+    ``TNK-002_C1``) and the application looks compartments up by that id rather
+    than by query, so it is preserved verbatim as ``compartment_key`` instead of
+    being recomputed on read.
+
+    ``last_loaded_product`` is promoted to a column despite being queried rarely:
+    it is the input to the cross-contamination guard, and a column makes it
+    visible to a plain SQL audit rather than buried in a JSON blob.
+    """
+
+    __tablename__ = "truck_compartments"
+
+    compartment_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    truck_id: Mapped[Optional[str]] = mapped_column(String(64))
+    compartment_id: Mapped[Optional[str]] = mapped_column(String(32))
+    state: Mapped[Optional[str]] = mapped_column(String(32))
+    last_loaded_product: Mapped[Optional[str]] = mapped_column(String(32))
+
+    __table_args__ = (
+        Index("ix_truck_compartment_tenant", "tenant_id"),
+        Index("ix_truck_compartment_tenant_truck", "tenant_id", "truck_id"),
+        Index("ix_truck_compartment_tenant_state", "tenant_id", "state"),
+    )
+
+
+class FuelStationORM(_FuelAssetBase, Base):
+    """Authoritative fuel station (projects to ``fuel_stations``).
+
+    Keyed on ``station_key``, the verbatim Elasticsearch ``_id``, NOT on
+    ``station_id`` — because the index carries two id conventions at once:
+
+      * ``FuelService.create_station`` writes ``f"{station_id}::{fuel_type}"``
+        (``_make_doc_id``), so one station with two products is two documents;
+      * every seeded document, and the Veeder-Root ATG connector's
+        ``_apply_to_fuel_station`` update, uses the bare ``station_id``.
+
+    Those two disagree in the live cluster today (all 14 documents are bare ids,
+    so an ATG reading for an API-created station updates nothing). That is a
+    pre-existing bug in the Elasticsearch write path and is not fixed here.
+    What matters for this table is that ``station_id`` cannot be the primary key:
+    a second product for the same station would collide and one document would
+    silently vanish. Preserving the ``_id`` keeps both conventions round-tripping
+    byte-identically, and ``station_id`` stays an indexed non-unique column so
+    "every document for this station" is still one index scan.
+    """
+
+    __tablename__ = "fuel_stations"
+
+    station_key: Mapped[str] = mapped_column(String(160), primary_key=True)
+    station_id: Mapped[Optional[str]] = mapped_column(String(64))
+    status: Mapped[Optional[str]] = mapped_column(String(32))
+    fuel_type: Mapped[Optional[str]] = mapped_column(String(32))
+    fuel_grade: Mapped[Optional[str]] = mapped_column(String(32))
+
+    __table_args__ = (
+        Index("ix_fuel_station_tenant", "tenant_id"),
+        Index("ix_fuel_station_tenant_station", "tenant_id", "station_id"),
+        Index("ix_fuel_station_tenant_status", "tenant_id", "status"),
+        Index("ix_fuel_station_tenant_fuel_type", "tenant_id", "fuel_type"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Generic document store: the Postgres replacement for the Elasticsearch cluster
+# ---------------------------------------------------------------------------
+#
+# Phase 2 of the Elasticsearch → Postgres migration. Every index that is NOT
+# already a hybrid/relational aggregate lands here, one row per document, keyed
+# exactly as Elasticsearch keyed it. ``persistence.document_store`` serves the
+# ``ElasticsearchService`` async surface (``index_document``, ``search_documents``,
+# ``get_document`` …) from this table, so the 684 call sites do not change.
+#
+# One generic table rather than ~75 per-index tables, because:
+#
+#   * the whole cluster is 7,623 documents / 6.1 MB, and the largest single index
+#     holds 988 — so per-table partitioning buys nothing measurable;
+#   * a per-index table would need a schema decision and a migration for each of
+#     the ~75, and the point of this phase is that call sites keep working
+#     unchanged while their storage moves;
+#   * documents in these indices have no agreed schema. Several are written by
+#     more than one producer with different field sets, which is exactly what a
+#     ``jsonb`` column is for.
+#
+# ``document`` is ``jsonb``, not ``json``: the query translator needs the
+# containment operator (``@>``) and key-existence (``?``) to be index-backed, and
+# it needs jsonb's total ordering for ``sort`` — jsonb orders numbers numerically
+# and strings lexicographically, so one expression sorts both correctly, where
+# ``->>`` would compare every number as text and put "10" before "9".
+#
+# ``tenant_id`` is lifted out of the document into a typed column because
+# essentially every read is tenant-scoped (813 ``term`` clauses across the
+# codebase, ``tenant_id`` the most common field), and a NULL-tolerant column with
+# a composite index answers that far faster than a jsonb extraction. It is
+# nullable: the legacy ``trucks`` / ``locations`` indices were created with
+# dynamic mappings and some documents genuinely carry no tenant.
+#
+# The GIN index on ``document`` is created by the migration and deliberately NOT
+# declared here: ``postgresql_using="gin"`` would break ``Base.metadata.create_all``
+# against the SQLite database the test suite uses.
+
+
+class EsDocumentORM(Base):
+    """One Elasticsearch document, stored in Postgres.
+
+    Primary key is ``(index_name, doc_id)`` — the same pair Elasticsearch uses,
+    so a document keyed ``TNK-002_C1`` in ``truck_compartments`` is keyed
+    identically here and every existing reader finds it.
+    """
+
+    __tablename__ = "es_documents"
+
+    index_name: Mapped[str] = mapped_column(String(128), primary_key=True)
+    doc_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    tenant_id: Mapped[Optional[str]] = mapped_column(String(128))
+    document: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_es_documents_index_tenant", "index_name", "tenant_id"),
+        # Supports the ``sort: created_at desc`` default that ``get_all_documents``
+        # and most list endpoints use.
+        Index("ix_es_documents_index_updated", "index_name", "updated_at"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Customer portal (OI-06, migration 0012_customer_portal)
+# ---------------------------------------------------------------------------
+#
+# Mirrors of the two portal tables. ``auth_users`` itself has no ORM model (it
+# is read and written with SQL by the auth provisioner), so its new
+# ``customer_id`` column and CHECK live only in the migration.
+
+# CITEXT on PostgreSQL, a plain string on SQLite (test ``create_all``).
+_EMAIL = String(320).with_variant(_PG_CITEXT(), "postgresql")
+
+
+class PortalUserGrantORM(Base):
+    """One portal-user grant: invite/revoke history for a customer's users.
+
+    ``auth_users`` holds only the current binding (the claims source); this
+    table keeps every grant so the admin list can show revoked users and the
+    per-customer cap can count active ones. "invited" is ``status='active'``
+    with ``first_seen_at`` still null.
+    """
+
+    __tablename__ = "portal_user_grants"
+
+    grant_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    email: Mapped[str] = mapped_column(_EMAIL, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    first_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    created_by: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    revoked_by: Mapped[Optional[str]] = mapped_column(Text)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'revoked')", name="ck_portal_grant_status"),
+        Index(
+            "uq_portal_grant_active_email",
+            "tenant_id",
+            "email",
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+        Index("ix_portal_grant_customer", "tenant_id", "customer_id", "status"),
+    )
+
+
+class PortalPaymentAttemptORM(Base):
+    """One customer-initiated ACH payment attempt (Stripe PaymentIntent).
+
+    No bank details are stored. ``uq_ppa_inflight`` is the database backstop
+    for "at most one attempt in flight per invoice".
+    """
+
+    __tablename__ = "portal_payment_attempts"
+
+    payment_attempt_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    invoice_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    amount_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    stripe_payment_intent_id: Mapped[Optional[str]] = mapped_column(String(128))
+    payment_id: Mapped[Optional[str]] = mapped_column(String(64))
+    failure_code: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+    terminal_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint("amount_cents > 0", name="ck_ppa_amount_positive"),
+        CheckConstraint(
+            "status IN ('creating', 'created', 'pending', 'succeeded', "
+            "'failed', 'canceled')",
+            name="ck_ppa_status",
+        ),
+        UniqueConstraint("stripe_payment_intent_id", name="uq_ppa_stripe_payment_intent"),
+        UniqueConstraint(
+            "tenant_id", "actor_user_id", "idempotency_key", name="uq_ppa_idem"
+        ),
+        Index(
+            "uq_ppa_inflight",
+            "tenant_id",
+            "invoice_id",
+            unique=True,
+            postgresql_where=text("status IN ('creating', 'created', 'pending')"),
+            sqlite_where=text("status IN ('creating', 'created', 'pending')"),
+        ),
+        Index(
+            "ix_ppa_customer",
+            "tenant_id",
+            "customer_id",
+            "invoice_id",
+            text("created_at DESC"),
+        ),
+    )
+# ---------------------------------------------------------------------------
+# Margin feed (cost / margin / COGS)
+# ---------------------------------------------------------------------------
+#
+# Seven typed tables, kept out of ``es_documents`` on purpose: margin data is
+# tenant-admin only (margin-feed D1/D3), and nothing that reads the document
+# store (search tools, rebuild, outbox projections) can reach these rows. The
+# only module that reads or writes them is
+# ``commerce/services/margin_repository.py``.
+#
+# Units are in the column suffix: ``_cents`` (1/100 USD), ``_micros`` (1/10^6
+# USD per gallon), ``_milli`` (1/1000 gallon, cost entries) and ``_ugal``
+# (1/10^6 gallon, margin records). All integers, so SQLite and Postgres agree.
+#
+# Partial indexes declare both ``postgresql_where`` and ``sqlite_where`` so the
+# SQLite test schema built by ``create_all`` enforces the same uniqueness. The
+# migration ``0011_margin_feed`` declares them for Postgres.
+
+_MCE_KIND_FIELDS_CHECK = (
+    "(kind <> 'purchase' OR (gallons_milli IS NOT NULL AND terminal_id IS NOT NULL "
+    "AND effective_to IS NULL)) "
+    "AND (kind = 'purchase' OR (gallons_milli IS NULL AND bol_id IS NULL)) "
+    "AND ((kind = 'adder') = (adder_type IS NOT NULL))"
+)
+
+# Missing cost is never stored as 0 (AC-8): every cost-derived column is NULL
+# exactly when method = 'none'. adders_micros is excluded (reported for none).
+_MR_COST_NULL_IFF_NONE_CHECK = (
+    "(method = 'none') = (landed_cost_micros IS NULL) "
+    "AND (method = 'none') = (product_cost_micros IS NULL) "
+    "AND (method = 'none') = (cost_cents IS NULL) "
+    "AND (method = 'none') = (margin_cents IS NULL) "
+    "AND (method = 'none') = (margin_per_gallon_micros IS NULL) "
+    "AND (method <> 'none' OR margin_bp IS NULL)"
+)
+
+_ACTIVE = text("status = 'active'")
+_ACTIVE_WITH_BOL = text("status = 'active' AND bol_id IS NOT NULL")
+_ALERT_PENDING = text("alert_state = 'pending'")
+_RUN_RUNNING = text("status = 'running'")
+_DIGEST_PENDING = text("digest_state = 'pending'")
+
+
+class MarginCostEntryORM(Base):
+    """Admin cost input: a purchase lot, a cost override or an adder (FR1).
+
+    Immutable: edits supersede and deletes void, so the only mutations are
+    status transitions.
+    """
+
+    __tablename__ = "margin_cost_entries"
+
+    entry_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    product_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    terminal_id: Mapped[Optional[str]] = mapped_column(String(128))
+    supplier_name: Mapped[Optional[str]] = mapped_column(String(128))
+    effective_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    effective_to: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    unit_cost_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    gallons_milli: Mapped[Optional[int]] = mapped_column(BigInteger)
+    adder_type: Mapped[Optional[str]] = mapped_column(String(16))
+    bol_id: Mapped[Optional[str]] = mapped_column(String(128))
+    reference: Mapped[Optional[str]] = mapped_column(String(128))
+    notes: Mapped[Optional[str]] = mapped_column(String(500))
+    natural_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    supersedes_id: Mapped[Optional[str]] = mapped_column(String(64))
+    superseded_by_id: Mapped[Optional[str]] = mapped_column(String(64))
+    status_reason: Mapped[Optional[str]] = mapped_column(String(500))
+    status_changed_by: Mapped[Optional[str]] = mapped_column(String(255))
+    status_changed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    source: Mapped[str] = mapped_column(String(16), nullable=False)
+    import_batch_id: Mapped[Optional[str]] = mapped_column(String(64))
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(_MCE_KIND_FIELDS_CHECK, name="ck_mce_kind_fields"),
+        Index(
+            "uq_mce_active_natural_key",
+            "tenant_id",
+            "natural_key",
+            unique=True,
+            postgresql_where=_ACTIVE,
+            sqlite_where=_ACTIVE,
+        ),
+        Index(
+            "uq_mce_active_bol",
+            "tenant_id",
+            "bol_id",
+            unique=True,
+            postgresql_where=_ACTIVE_WITH_BOL,
+            sqlite_where=_ACTIVE_WITH_BOL,
+        ),
+        Index(
+            "ix_mce_lookup", "tenant_id", "kind", "product_code", "terminal_id", "effective_at"
+        ),
+    )
+
+
+class MarginSettingsORM(Base):
+    """Per-tenant margin settings plus the activation watermark (D6, D7, D14).
+
+    A tenant with no row uses the defaults. ``feed_activated_at`` is set once by
+    ``MarginRepository.ensure_activated`` and never cleared.
+    """
+
+    __tablename__ = "margin_settings"
+
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    wac_window_days: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    rack_staleness_days: Mapped[int] = mapped_column(Integer, nullable=False, default=4)
+    floor_micros: Mapped[int] = mapped_column(BigInteger, nullable=False, default=100_000)
+    product_floors: Mapped[Dict[str, Any]] = mapped_column(
+        _JSONB, nullable=False, default=dict
+    )
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="America/Chicago"
+    )
+    feed_activated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    updated_by: Mapped[Optional[str]] = mapped_column(String(255))
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+
+
+class MarginRecordORM(Base):
+    """One versioned margin record per (stage, source key) (FR3).
+
+    ``alert_state`` is the RevenueGuard work queue: set to ``pending`` in the
+    same insert as a flagged live delivery/invoice record.
+    """
+
+    __tablename__ = "margin_records"
+
+    record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    stage: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    order_id: Mapped[Optional[str]] = mapped_column(String(128))
+    invoice_id: Mapped[Optional[str]] = mapped_column(String(128))
+    line_index: Mapped[Optional[int]] = mapped_column(Integer)
+    line_id: Mapped[Optional[str]] = mapped_column(String(128))
+    customer_id: Mapped[Optional[str]] = mapped_column(String(128))
+    account_id: Mapped[Optional[str]] = mapped_column(String(128))
+    product_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    terminal_id: Mapped[Optional[str]] = mapped_column(String(128))
+    gallons_ugal: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    unit_price_micros: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revenue_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    method: Mapped[str] = mapped_column(String(16), nullable=False)
+    product_cost_micros: Mapped[Optional[int]] = mapped_column(BigInteger)
+    adders_micros: Mapped[Optional[int]] = mapped_column(BigInteger)
+    landed_cost_micros: Mapped[Optional[int]] = mapped_column(BigInteger)
+    cost_cents: Mapped[Optional[int]] = mapped_column(BigInteger)
+    margin_cents: Mapped[Optional[int]] = mapped_column(BigInteger)
+    margin_per_gallon_micros: Mapped[Optional[int]] = mapped_column(BigInteger)
+    margin_bp: Mapped[Optional[int]] = mapped_column(BigInteger)
+    no_cost_reason: Mapped[Optional[str]] = mapped_column(String(40))
+    flag_missing_cost: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    flag_negative_margin: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    flag_below_floor: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    flag_terminal_unattributed: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    floor_micros_used: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_snapshot: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False)
+    as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    frozen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    recompute_run_id: Mapped[Optional[str]] = mapped_column(String(64))
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    alert_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="none", server_default="none"
+    )
+
+    __table_args__ = (
+        CheckConstraint(_MR_COST_NULL_IFF_NONE_CHECK, name="ck_mr_cost_null_iff_none"),
+        CheckConstraint(
+            "alert_state IN ('none', 'pending', 'done', 'expired')",
+            name="ck_mr_alert_state",
+        ),
+        CheckConstraint("flag_missing_cost = (method = 'none')", name="ck_mr_missing_flag"),
+        UniqueConstraint("tenant_id", "stage", "source_key", "version", name="uq_mr_version"),
+        Index(
+            "uq_mr_active",
+            "tenant_id",
+            "stage",
+            "source_key",
+            unique=True,
+            postgresql_where=_ACTIVE,
+            sqlite_where=_ACTIVE,
+        ),
+        Index("ix_mr_tenant_asof", "tenant_id", "as_of", "record_id"),
+        Index(
+            "ix_mr_tenant_cust_prod", "tenant_id", "customer_id", "product_code", "stage", "as_of"
+        ),
+        Index("ix_mr_tenant_order", "tenant_id", "order_id"),
+        Index(
+            "ix_mr_alert_pending",
+            "tenant_id",
+            "computed_at",
+            postgresql_where=_ALERT_PENDING,
+            sqlite_where=_ALERT_PENDING,
+        ),
+    )
+
+
+class MarginAlertORM(Base):
+    """Admin-only margin alert or leakage proposal (FR5.3, FR5.4)."""
+
+    __tablename__ = "margin_alerts"
+
+    alert_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    alert_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    record_id: Mapped[Optional[str]] = mapped_column(String(64))
+    order_id: Mapped[Optional[str]] = mapped_column(String(128))
+    run_id: Mapped[Optional[str]] = mapped_column(String(64))
+    proposal_id: Mapped[Optional[str]] = mapped_column(String(128))
+    customer_id: Mapped[Optional[str]] = mapped_column(String(128))
+    product_code: Mapped[Optional[str]] = mapped_column(String(64))
+    details: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    resolved_by: Mapped[Optional[str]] = mapped_column(String(255))
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    resolution_note: Mapped[Optional[str]] = mapped_column(String(500))
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "alert_type", "dedupe_key", name="uq_malert_dedupe"),
+        Index("ix_malert_tenant_status", "tenant_id", "status", "created_at"),
+    )
+
+
+class MarginRecomputeRunORM(Base):
+    """One admin recompute run (FR3.5). At most one ``running`` per tenant."""
+
+    __tablename__ = "margin_recompute_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    stages: Mapped[List[str]] = mapped_column(_JSONB, nullable=False)
+    only_missing: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    counts: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    digest_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="none", server_default="none"
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_mrun_running",
+            "tenant_id",
+            unique=True,
+            postgresql_where=_RUN_RUNNING,
+            sqlite_where=_RUN_RUNNING,
+        ),
+        Index(
+            "ix_mrun_digest_pending",
+            "tenant_id",
+            postgresql_where=_DIGEST_PENDING,
+            sqlite_where=_DIGEST_PENDING,
+        ),
+    )
+
+
+class MarginWeeklyReportORM(Base):
+    """Per-tenant weekly margin report (FR5.7). The PK makes reruns no-ops."""
+
+    __tablename__ = "margin_weekly_reports"
+
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    iso_week: Mapped[str] = mapped_column(String(8), primary_key=True)
+    period_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revenue_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    margin_cents: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    revenue_cents_missing_cost: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    records_total: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    gallons_ugal_total: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    flag_counts: Mapped[Dict[str, Any]] = mapped_column(_JSONB, nullable=False, default=dict)
+    missing_cost_share_bp: Mapped[Optional[int]] = mapped_column(BigInteger)
+    generated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class MarginSkippedSourceORM(Base):
+    """Durable record of a phase-1 ``invalid_inputs`` skip (no values stored)."""
+
+    __tablename__ = "margin_skipped_sources"
+
+    tenant_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    stage: Mapped[str] = mapped_column(String(16), primary_key=True)
+    source_key: Mapped[str] = mapped_column(String(256), primary_key=True)
+    order_id: Mapped[Optional[str]] = mapped_column(String(128))
+    invoice_id: Mapped[Optional[str]] = mapped_column(String(128))
+    line_index: Mapped[Optional[int]] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    error_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    seen_count: Mapped[int] = mapped_column(Integer, nullable=False)

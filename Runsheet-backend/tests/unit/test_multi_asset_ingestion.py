@@ -41,12 +41,25 @@ def _mock_es_service():
         "hits": {"hits": [{"_source": {"truck_id": "T-001"}}], "total": {"value": 1}}
     })
     es.index_document = AsyncMock(return_value={"result": "created"})
+    es.update_document = AsyncMock(return_value={"result": "updated"})
     es.get_document = AsyncMock(return_value={
         "truck_id": "T-001",
         "asset_type": "vehicle",
         "asset_subtype": "truck",
     })
     return es
+
+
+def _asset_check_clauses(query):
+    """``(should terms, tenant filter)`` from validate_asset_exists' query.
+
+    The check matches ``asset_id`` OR ``truck_id`` inside the tenant filter
+    that ``inject_tenant_filter`` wraps around it.
+    """
+    outer = query["query"]["bool"]
+    inner = outer["must"][0]["bool"]
+    assert inner["minimum_should_match"] == 1
+    return inner["should"], outer.get("filter", [])
 
 
 def _mock_connection_manager():
@@ -168,12 +181,14 @@ class TestBroadcastIncludesAssetType:
             "timestamp": NOW.isoformat(),
             "asset_type": "vessel",
             "asset_subtype": "boat",
+            "tenant_id": "tenant-sea",
         }
 
         await service._broadcast_location_update(sanitized)
 
         cm.broadcast_location_update.assert_called_once()
         call_kwargs = cm.broadcast_location_update.call_args
+        assert call_kwargs.kwargs.get("tenant_id") == "tenant-sea"
         # Check keyword args
         assert call_kwargs.kwargs.get("asset_type") == "vessel" or \
                call_kwargs[1].get("asset_type") == "vessel"
@@ -202,7 +217,7 @@ class TestBroadcastIncludesAssetType:
         await service._broadcast_location_update(sanitized)
 
         # Should have looked up from ES
-        es.get_document.assert_called_once_with("assets", "E-001")
+        es.get_document.assert_called_once_with("trucks", "E-001")
         # Should pass the looked-up values to broadcast
         call_kwargs = cm.broadcast_location_update.call_args
         assert call_kwargs.kwargs.get("asset_type") == "equipment" or \
@@ -243,17 +258,23 @@ class TestProcessLocationUpdateUsesAssetId:
         result = await service.process_location_update(update)
 
         assert result.success is True
-        # validate_asset_exists should have searched for the asset_id via a
-        # bool.filter term clause.
+        # validate_asset_exists should have searched the trucks index for the
+        # asset_id under either id field, scoped to the tenant.
         es.search_documents.assert_called()
         search_call = es.search_documents.call_args
-        query = search_call[0][1]
-        filters = query["query"]["bool"]["filter"]
-        assert {"term": {"truck_id": "VESSEL-001"}} in filters
+        assert search_call[0][0] == "trucks"
+        should, tenant_filter = _asset_check_clauses(search_call[0][1])
+        assert {"term": {"asset_id": "VESSEL-001"}} in should
+        assert {"term": {"truck_id": "VESSEL-001"}} in should
+        assert tenant_filter == [{"term": {"tenant_id": "tenant-a"}}]
 
     @pytest.mark.asyncio
     async def test_uses_asset_id_for_document_index(self):
-        """process_location_update indexes the document using asset_id as doc_id."""
+        """process_location_update merges into the asset's doc, keyed by asset_id.
+
+        A merge, not ``index_document``: a full replace with only the location
+        fields made the asset unsearchable (N-FF-1).
+        """
         es = _mock_es_service()
         service = DataIngestionService(es_service=es, connection_manager=None)
 
@@ -261,13 +282,12 @@ class TestProcessLocationUpdateUsesAssetId:
         result = await service.process_location_update(update)
 
         assert result.success is True
-        # Check that index_document was called with asset_id as the doc_id
-        index_calls = es.index_document.call_args_list
-        # First call is for the trucks index (location update)
-        trucks_call = index_calls[0]
-        assert trucks_call.kwargs.get("doc_id") == "CRANE-007" or \
-               trucks_call[1].get("doc_id") == "CRANE-007" or \
-               (len(trucks_call[0]) > 1 and trucks_call[0][1] == "CRANE-007")
+        es.update_document.assert_called_once()
+        index, doc_id, partial = es.update_document.call_args[0]
+        assert (index, doc_id) == ("trucks", "CRANE-007")
+        assert "current_location" in partial
+        indexed = [c.kwargs.get("index") or c.args[0] for c in es.index_document.call_args_list]
+        assert "trucks" not in indexed
 
     @pytest.mark.asyncio
     async def test_legacy_truck_id_resolves_to_asset_id(self):
@@ -281,6 +301,43 @@ class TestProcessLocationUpdateUsesAssetId:
         assert result.success is True
         # The model_validator copies truck_id → asset_id, so ES lookup uses "T-LEGACY"
         search_call = es.search_documents.call_args
-        query = search_call[0][1]
-        filters = query["query"]["bool"]["filter"]
-        assert {"term": {"truck_id": "T-LEGACY"}} in filters
+        should, _ = _asset_check_clauses(search_call[0][1])
+        assert {"term": {"truck_id": "T-LEGACY"}} in should
+
+
+# ---------------------------------------------------------------------------
+# validate_asset_exists fails closed (B2)
+# ---------------------------------------------------------------------------
+
+
+class TestValidateAssetExistsFailsClosed:
+    """An asset check that can't run must reject the update, not wave it through."""
+
+    @pytest.mark.asyncio
+    async def test_search_error_returns_false(self):
+        es = _mock_es_service()
+        es.search_documents = AsyncMock(side_effect=RuntimeError("store down"))
+        service = DataIngestionService(es_service=es, connection_manager=None)
+
+        assert await service.validate_asset_exists("T-001", tenant_id="tenant-a") is False
+
+    @pytest.mark.asyncio
+    async def test_search_error_rejects_the_location_update(self):
+        es = _mock_es_service()
+        es.search_documents = AsyncMock(side_effect=RuntimeError("store down"))
+        service = DataIngestionService(es_service=es, connection_manager=None)
+
+        with pytest.raises(Exception):
+            await service.process_location_update(
+                LocationUpdate(**_make_update(asset_id="T-001"))
+            )
+        es.index_document.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_reads_the_trucks_index_not_the_assets_alias(self):
+        es = _mock_es_service()
+        service = DataIngestionService(es_service=es, connection_manager=None)
+
+        await service.validate_asset_exists("T-001", tenant_id="tenant-a")
+
+        assert es.search_documents.call_args[0][0] == "trucks"
