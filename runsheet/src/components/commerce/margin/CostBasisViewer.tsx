@@ -1,12 +1,14 @@
 "use client";
 
+import { type FormEvent, useState } from "react";
 /**
  * Cost basis diagnostic: which method, lots, rack pick and exclusions the
  * resolver would use for a product at a terminal and time (fresh reads).
  */
-import { type FormEvent, useState } from "react";
+import { productName } from "../../../lib/format";
 import { ApiError } from "../../../services/api";
 import { type CostBasis, getCostBasis } from "../../../services/marginApi";
+import { PRODUCT_CODES } from "../../../styles/tokens";
 import { Button } from "../../ui";
 import { MissingCostBadge } from "./MarginRecordsPage";
 import {
@@ -81,12 +83,19 @@ export default function CostBasisViewer() {
       >
         <label className="text-sm">
           Product
-          <input
+          <select
             required
             className={inputClass}
             value={product}
             onChange={(e) => setProduct(e.target.value)}
-          />
+          >
+            <option value="">Choose a product</option>
+            {PRODUCT_CODES.map((code) => (
+              <option key={code} value={code}>
+                {productName(code)}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="text-sm">
           Terminal (optional)

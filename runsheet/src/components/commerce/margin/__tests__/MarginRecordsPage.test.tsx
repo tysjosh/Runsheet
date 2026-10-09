@@ -151,6 +151,7 @@ it("shows the sale date in the settings timezone, the filters' date axis", async
 
 it("maps the filters to query params", async () => {
   await renderPage();
+  fireEvent.click(screen.getByRole("button", { name: "Filters" }));
   fireEvent.change(screen.getByLabelText("Sale date (as of) from"), {
     target: { value: "2026-09-01" },
   });

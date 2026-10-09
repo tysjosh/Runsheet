@@ -7,6 +7,7 @@
  * percentage cells; it never shows $0.00 (Simplification 12).
  */
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { productName } from "../../../lib/format";
 import { ApiError } from "../../../services/api";
 import {
   getMarginRecord,
@@ -18,7 +19,15 @@ import {
   type MarginRecordFilters,
   recordFilterParams,
 } from "../../../services/marginApi";
-import { Button, ExportCsvButton, Modal } from "../../ui";
+import { PRODUCT_CODES } from "../../../styles/tokens";
+import {
+  Button,
+  ExportCsvButton,
+  FilterPopover,
+  Modal,
+  ProductChip,
+  Toolbar,
+} from "../../ui";
 import {
   FLAG_LABELS,
   formatCents,
@@ -93,6 +102,13 @@ function errorText(error: unknown): string {
 const inputClass =
   "mt-1 block w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40";
 
+/** Filters that differ from the defaults (shown as "Filters · n"). */
+function activeFilterCount(f: MarginRecordFilters): number {
+  return Object.entries(f).filter(([k, v]) =>
+    k === "status" ? v && v !== "active" : Boolean(v),
+  ).length;
+}
+
 export default function MarginRecordsPage() {
   const [draft, setDraft] = useState<MarginRecordFilters>(EMPTY_FILTERS);
   const [applied, setApplied] = useState<MarginRecordFilters>(EMPTY_FILTERS);
@@ -146,115 +162,130 @@ export default function MarginRecordsPage() {
   };
 
   return (
-    <section aria-labelledby="margin-records-heading" className="space-y-4">
-      <div className="flex items-center justify-between gap-4">
-        <h2 id="margin-records-heading" className="text-lg font-semibold">
-          Margin records
-        </h2>
-        <ExportCsvButton
-          type="margin"
-          params={recordFilterParams(applied)}
-          allowedRoles={["admin"]}
-          subject="margin records"
-        />
-      </div>
-
-      <form
-        onSubmit={onSubmit}
-        className="grid grid-cols-2 gap-3 md:grid-cols-4"
-        aria-label="Margin record filters"
-      >
-        <label className="text-sm">
-          Sale date (as of) from
-          <input
-            type="date"
-            className={inputClass}
-            value={draft.start_date}
-            onChange={field("start_date")}
-          />
-        </label>
-        <label className="text-sm">
-          Sale date (as of) to
-          <input
-            type="date"
-            className={inputClass}
-            value={draft.end_date}
-            onChange={field("end_date")}
-          />
-        </label>
-        <label className="text-sm">
-          Customer
-          <input
-            type="text"
-            className={inputClass}
-            value={draft.customer_id}
-            onChange={field("customer_id")}
-          />
-        </label>
-        <label className="text-sm">
-          Product
-          <input
-            type="text"
-            className={inputClass}
-            value={draft.product_code}
-            onChange={field("product_code")}
-          />
-        </label>
-        <label className="text-sm">
-          Terminal
-          <input
-            type="text"
-            className={inputClass}
-            value={draft.terminal_id}
-            onChange={field("terminal_id")}
-          />
-        </label>
-        <label className="text-sm">
-          Stage
-          <select
-            className={inputClass}
-            value={draft.stage}
-            onChange={field("stage")}
+    <section aria-labelledby="margin-records-heading" className="space-y-3">
+      <h2 id="margin-records-heading" className="sr-only">
+        Margin records
+      </h2>
+      <Toolbar
+        label="Margin records"
+        filters={
+          <FilterPopover
+            count={activeFilterCount(applied)}
+            label="Margin record filters"
           >
-            <option value="">Any stage</option>
-            <option value="invoice">Invoice</option>
-            <option value="delivery">Delivery</option>
-            <option value="order_estimate">Order estimate</option>
-          </select>
-        </label>
-        <label className="text-sm">
-          Flag
-          <select
-            className={inputClass}
-            value={draft.flag}
-            onChange={field("flag")}
-          >
-            <option value="">Any flag</option>
-            <option value="missing_cost">Missing cost</option>
-            <option value="negative_margin">Negative margin</option>
-            <option value="below_floor">Below floor</option>
-            <option value="terminal_unattributed">No terminal</option>
-          </select>
-        </label>
-        <label className="text-sm">
-          Status
-          <select
-            className={inputClass}
-            value={draft.status}
-            onChange={field("status")}
-          >
-            <option value="active">Active</option>
-            <option value="superseded">Superseded</option>
-            <option value="void">Void</option>
-            <option value="all">All</option>
-          </select>
-        </label>
-        <div className="col-span-2 md:col-span-4">
-          <Button type="submit" size="sm">
-            Apply filters
-          </Button>
-        </div>
-      </form>
+            <form
+              onSubmit={onSubmit}
+              className="grid w-[36rem] grid-cols-2 gap-3 md:grid-cols-4"
+              aria-label="Margin record filters"
+            >
+              <label className="text-sm">
+                Sale date (as of) from
+                <input
+                  type="date"
+                  className={inputClass}
+                  value={draft.start_date}
+                  onChange={field("start_date")}
+                />
+              </label>
+              <label className="text-sm">
+                Sale date (as of) to
+                <input
+                  type="date"
+                  className={inputClass}
+                  value={draft.end_date}
+                  onChange={field("end_date")}
+                />
+              </label>
+              <label className="text-sm">
+                Customer
+                <input
+                  type="text"
+                  className={inputClass}
+                  value={draft.customer_id}
+                  onChange={field("customer_id")}
+                />
+              </label>
+              <label className="text-sm">
+                Product
+                <select
+                  className={inputClass}
+                  value={draft.product_code}
+                  onChange={field("product_code")}
+                >
+                  <option value="">Any product</option>
+                  {PRODUCT_CODES.map((code) => (
+                    <option key={code} value={code}>
+                      {productName(code)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm">
+                Terminal
+                <input
+                  type="text"
+                  className={inputClass}
+                  value={draft.terminal_id}
+                  onChange={field("terminal_id")}
+                />
+              </label>
+              <label className="text-sm">
+                Stage
+                <select
+                  className={inputClass}
+                  value={draft.stage}
+                  onChange={field("stage")}
+                >
+                  <option value="">Any stage</option>
+                  <option value="invoice">Invoice</option>
+                  <option value="delivery">Delivery</option>
+                  <option value="order_estimate">Order estimate</option>
+                </select>
+              </label>
+              <label className="text-sm">
+                Flag
+                <select
+                  className={inputClass}
+                  value={draft.flag}
+                  onChange={field("flag")}
+                >
+                  <option value="">Any flag</option>
+                  <option value="missing_cost">Missing cost</option>
+                  <option value="negative_margin">Negative margin</option>
+                  <option value="below_floor">Below floor</option>
+                  <option value="terminal_unattributed">No terminal</option>
+                </select>
+              </label>
+              <label className="text-sm">
+                Status
+                <select
+                  className={inputClass}
+                  value={draft.status}
+                  onChange={field("status")}
+                >
+                  <option value="active">Active</option>
+                  <option value="superseded">Superseded</option>
+                  <option value="void">Void</option>
+                  <option value="all">All</option>
+                </select>
+              </label>
+              <div className="col-span-2 md:col-span-4">
+                <Button type="submit" size="sm">
+                  Apply filters
+                </Button>
+              </div>
+            </form>
+          </FilterPopover>
+        }
+        end={
+          <ExportCsvButton
+            type="margin"
+            params={recordFilterParams(applied)}
+            allowedRoles={["admin"]}
+            subject="margin records"
+          />
+        }
+      />
 
       <p role="alert" className={error ? "text-sm text-error" : "sr-only"}>
         {error ?? ""}
@@ -319,7 +350,9 @@ export default function MarginRecordsPage() {
                 <td className="py-2 pr-3">{r.order_id ?? "—"}</td>
                 <td className="py-2 pr-3">{r.stage}</td>
                 <td className="py-2 pr-3">{r.customer_id ?? "—"}</td>
-                <td className="py-2 pr-3">{r.product_code}</td>
+                <td className="py-2 pr-3">
+                  <ProductChip code={r.product_code} />
+                </td>
                 <td className="py-2 pr-3">{r.terminal_id ?? "—"}</td>
                 <td className="py-2 pr-3 text-right">
                   {formatGallons(r.gallons_ugal)}

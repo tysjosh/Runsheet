@@ -60,11 +60,12 @@ export default function MarginHub({ onAlertsChanged }: MarginHubProps) {
   };
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="flex h-full flex-col">
+      {/* One 44 px row (task 3.4): sub-views as a segmented tab list. */}
       <div
         role="tablist"
         aria-label="Margin sections"
-        className="flex flex-wrap gap-2 border-b border-gray-200"
+        className="flex h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-slate-200 px-4"
       >
         {MARGIN_SUB_TABS.map((tab, index) => {
           const selected = tab.id === active;
@@ -82,10 +83,10 @@ export default function MarginHub({ onAlertsChanged }: MarginHubProps) {
               tabIndex={selected ? 0 : -1}
               onClick={() => setActive(tab.id)}
               onKeyDown={(e) => onKeyDown(e, index)}
-              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px focus:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 ${
+              className={`h-7 shrink-0 rounded-full border px-2.5 text-xs font-semibold focus:outline-none focus-visible:ring-2 focus-visible:ring-focus ${
                 selected
-                  ? "border-primary text-primary"
-                  : "border-transparent text-gray-600 hover:text-gray-800"
+                  ? "border-primary bg-primary-soft text-brand-800"
+                  : "border-slate-300 bg-surface text-slate-700 hover:bg-slate-50"
               }`}
             >
               {tab.label}
@@ -97,17 +98,31 @@ export default function MarginHub({ onAlertsChanged }: MarginHubProps) {
         role="tabpanel"
         id={`margin-panel-${active}`}
         aria-labelledby={`margin-tab-${active}`}
-        className="focus:outline-none"
+        className="min-h-0 flex-1 overflow-auto focus:outline-none"
       >
-        {active === "records" && <MarginRecordsPage />}
-        {active === "summary" && <MarginSummaryPanel />}
-        {active === "alerts" && (
-          <MarginAlertsPanel onChanged={onAlertsChanged} />
+        {active === "records" && (
+          <div className="px-4 pb-4">
+            <MarginRecordsPage />
+          </div>
         )}
-        {active === "cost-basis" && <CostBasisViewer />}
+        {active === "summary" && (
+          <div className="p-4">
+            <MarginSummaryPanel />
+          </div>
+        )}
+        {active === "alerts" && (
+          <div className="p-4">
+            <MarginAlertsPanel onChanged={onAlertsChanged} />
+          </div>
+        )}
+        {active === "cost-basis" && (
+          <div className="p-4">
+            <CostBasisViewer />
+          </div>
+        )}
         {active === "cost-entries" && <CostEntriesPage />}
         {active === "settings" && (
-          <div className="space-y-8">
+          <div className="space-y-8 p-4">
             <MarginSettingsForm />
             <MarginRecomputePanel />
           </div>

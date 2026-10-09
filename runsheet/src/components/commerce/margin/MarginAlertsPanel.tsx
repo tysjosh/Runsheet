@@ -6,6 +6,7 @@
  * proposal only records the decision; nothing changes prices (FR5.9).
  */
 import { useCallback, useEffect, useState } from "react";
+import { productName } from "../../../lib/format";
 import {
   getMarginAlerts,
   type MarginAlert,
@@ -125,7 +126,9 @@ export default function MarginAlertsPanel({
                     {alert.severity} · {alert.status.replace("_", " ")} ·{" "}
                     {alert.created_at.slice(0, 10)}
                     {alert.customer_id ? ` · ${alert.customer_id}` : ""}
-                    {alert.product_code ? ` · ${alert.product_code}` : ""}
+                    {alert.product_code
+                      ? ` · ${productName(alert.product_code)}`
+                      : ""}
                   </span>
                 </span>
                 <span className="flex gap-2">
