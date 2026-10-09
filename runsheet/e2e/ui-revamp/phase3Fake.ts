@@ -362,6 +362,19 @@ export const EXEMPTIONS = range((i) => ({
   expiry_date: i % 4 ? "2027-06-30" : "2026-10-20",
 }));
 
+export const DEPOTS = range((i) => ({
+  depot_id: `QA-DEP-${i}`,
+  tenant_id: TENANT,
+  name: `QA Depot ${i}`,
+  location_lat: 41.8 + i * 0.01,
+  location_lon: -87.6 - i * 0.01,
+  address: `${100 + i} QA Yard Rd`,
+  timezone: "America/Chicago",
+  fuel_types_supported: [PRODUCTS[i % PRODUCTS.length], "DIESEL_2"],
+  status: i % 5 === 4 ? "inactive" : "active",
+  is_default: i === 0,
+}));
+
 function sized<T>(rows: T[], url: URL) {
   const size = Number(url.searchParams.get("size") ?? rows.length);
   const page = Number(url.searchParams.get("page") ?? 1);
@@ -482,6 +495,16 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
         generated_at: iso(8),
       },
     };
+  if (path === "/fuel/mvp/depots")
+    return {
+      items: DEPOTS,
+      total: DEPOTS.length,
+      page: 1,
+      size: 20,
+      has_next: false,
+    };
+  if (/^\/ops\/admin\/feature-flags\/[^/]+\/order-intake-pipeline$/.test(path))
+    return { data: { state: "shadow" }, request_id: "e2e" };
   // Billing and Compliance (tasks 3.4, 3.5)
   if (path === "/commerce/accounts") {
     const status = url.searchParams.get("status");
