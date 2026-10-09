@@ -1,0 +1,15 @@
+{
+  "verdict": "CHANGES_REQUESTED",
+  "findings": [
+    "Phase 3 tasks unticked (blocking): 3.4, 3.5, 3.6, 3.8, 3.10 and 3.11 are [ ] in spec/tasks.md; none is post-deploy-only. Tick each with a Done note once evidence exists.",
+    "No iteration-3 evidence (blocking): phase3-evidence.md ends at iteration 2; the 26 commits 713cee9..b70d8d9 have no tsc/lint/jest/build/fresh-checkout, full e2e/ui-revamp (no test.fail marks), board e2e + N1, per-page chrome px at 1280x800 and 1440x900 for the new Compliance/Billing/Settings pages, axe per page and dialog, tokens/CVD for open/partial, or FormDialog behaviour-test records. b70d8d9 removed every test.fail mark without a recorded green run.",
+    "Uncommitted shared-component changes (blocking): ui/FormDialog.tsx (mobile, submitDisabled, keepOpenOnSuccess), ui/Modal.tsx (mobile=sheet), ui/Table.tsx (rowHeight=touch, stickyTop; drops overflow-x-auto when set) are modified in the worktree, untested and unrecorded. Commit with no-change tests for existing callers or drop; note as additive in evidence.",
+    "3.11 scope vs the portal revert (blocking): dcb70b3 reverted the portal-side swap but 3.11 still requires removing PORTAL_EXTRA_STATUS/PortalBadge, portalFormat.ts, PortalTable etc. Record in tasks.md that 3.11 delivers the shared pieces and hands the portal swap to the 3P workflow (gated on unchanged portal baselines), then tick; or do the swap.",
+    "Raw product code in Plans clusters: ops/FuelDistributionPage.tsx:2615 renders ` · ${m.fuel_grade}` verbatim (Phase 3-owned under 3.10). Use productName()/ProductCap.",
+    "Cost import not on FormDialog: commerce/margin/CostImportDialog.tsx uses the shared Modal; design §5 targets 'lg steps'. Migrate to a stepped FormDialog or record the deviation.",
+    "Inline numeric create forms outside §5: ops/SourcingPage.tsx:707 (wait report) and ops/CargoManifestEditor.tsx:294 are inline type=number create forms (pre-existing). D9 says every create/edit; migrate or list as recorded exceptions.",
+    "Copilot confirmation: backend chat stream appears not to emit type 'confirmation' (likely), and AIChat shows Approve/Reject when actionId is '' which would call the approvals API with an empty id (confirmed). Hide decision buttons without an id; note the backend-gated path in evidence.",
+    "Phase 2 and driver-app edits not recorded: format-only edits to CompartmentsTab, DriverTray, ReplanDiffBody, OrderDetailView and the regenerated driver-app/lib/tokens.ts are additive but absent from evidence; CompartmentsTab.tsx:138,359 still print raw product_code (pre-existing Phase 2) - log as follow-up."
+  ],
+  "reviewDoc": "/Users/olukotunjosh/Downloads/Runsheet/.agents/tasks/ui-revamp-2026-10-08/phase3-review.md"
+}

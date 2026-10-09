@@ -199,3 +199,113 @@ Screenshots (`screenshots/phase3/`, 1280×800 and 1440×900): added `fleet-truck
 ### Housekeeping
 
 `.next`, `test-results` and the fresh worktree were removed after each run. Scratch in `Runsheet/tmp/ui-phase3/` (logs, screenshot copies, the read-only margin probe script, no secrets stored) is kept for the next iteration and deleted at the end of the phase.
+
+## Iteration 3
+
+Commits `713cee9..b70d8d9` (implementation, reviewed in `phase3-review.md`) plus this iteration's fixes `5300be5..eba18d4`; `origin/production-readiness/go-live-blockers` @ `ab5f933` (portal-fixes: portal files, `PortalAccessPanel`/`PortalOrderingSetting`, SendGrid backend) merged at `18b4829` with no conflicts. Not pushed, not deployed.
+
+Ticked in `spec/tasks.md` this iteration: **3.4, 3.5, 3.6, 3.8, 3.10, 3.11** (3.11 re-scoped, see below). With 3.1, 3.2, 3.3, 3.7, 3.9 from earlier iterations, **every Phase 3 task is ticked**. Nothing in Phase 3 is post-deploy-only except the Margin off-state check carried from iteration 2 (verified in release step (post-deploy)).
+
+### Review findings (iteration 3 review)
+
+| # | Finding | Fix |
+|---|---|---|
+| 1 | 3.4/3.5/3.6/3.8/3.10/3.11 unticked | Ticked with Done notes after the runs below. |
+| 2 | No iteration-3 evidence; `test.fail` marks removed without a green run | This section. The full `e2e/ui-revamp` run is green (below). Measuring it exposed that six Billing entries in `pages.ts` (Accounts, Payments, AR aging, Price books, Pricing rules, Contracts) were measuring the **Invoices fallback**: those tabs are Tier 4 and need `platform_admin` (`config/modules.ts`), and the e2e user was admin + dispatcher. `ShellPage.roles` added; chrome, axe, visual and the dialog spec now sign in with `platform_admin` for them. Real measurements then found the Payments axe issue and the Margin layout (both fixed, below). |
+| 3 | Uncommitted `FormDialog`/`Modal`/`Table` changes | Committed in `5300be5` with `ui/sharedAdditions.test.tsx` (each prop set and unset; unset asserts today's classes/behaviour). `stickyTop` prop doc now states the overflow trade-off. All additive. |
+| 4 | 3.11 scope vs the portal revert | Recorded in `tasks.md`: 3.11 delivers every shared piece; the portal swap is handed to the Phase 3P workflow, gated on unchanged portal unit and `e2e/portal` fixture baselines. Portal and auth files are untouched by this branch's own commits (only the go-live-blockers merge brings portal-fixes in). |
+| 5 | Raw `fuel_grade` in Plans clusters | `FuelDistributionPage` cluster member chips: `ProductChip` (cap + name) and `station_name` when present. Test `FuelDistributionPage.test.tsx` "names the product (not the raw code) and the station in member chips". |
+| 6 | Cost import not on FormDialog | `CostImportDialog` is an `lg` FormDialog: "Step 1 of 2 · Check file" → "Step 2 of 2 · Import", file required (field error), stays open on the result (`keepOpenOnSuccess`), "Imported" submit is `aria-disabled` so it can't import twice. Deviation recorded: not the `steps` prop, because the step advances on the server's dry-run answer (async) while `steps[].validate` is synchronous. Tests in `MarginPanels.test.tsx` (3). |
+| 7 | Inline numeric create forms | Sourcing wait report: "Report wait time" button → md FormDialog (whole-minute NumberField, source, reporter, notes; same payload and validator; toast; summary re-fetch). Cargo manifest edit: lg FormDialog with a row per item (NumberField kg, 2 dp; an untouched weight is sent back exactly; API errors keep the dialog and edits; status changes stay direct actions on the view; Edit is disabled with no items). Tests: `SourcingPage.test.tsx` (wait-report tests now open the dialog, 25 pass), `CargoManifestEditor.test.tsx` (new, 4). Repo scan: the only `type="number"` left outside portal/auth is `dispatch-board/drawer/CompartmentsTab.tsx:143` (Phase 2, logged below). |
+| 8 | Copilot confirmation with an empty id | No Approve/Reject/Open in Approvals without an `action_id`; the card says "Decide this in Live → Approvals."; `decide()` also returns early. Test `AIChat.test.tsx` "offers no decision when the action has no id". Backend-gated: a search of `Runsheet-backend` finds no chat SSE emitter of `type: "confirmation"`, so today the card only appears if the backend starts emitting it; Live → Approvals is the working inbox. |
+| 9 | Phase 2 / driver-app edits unrecorded | Listed below; `CompartmentsTab` raw `product_code` logged as a follow-up. |
+
+### Found by the real measurements (fixed)
+
+| Page | Problem | Fix |
+|---|---|---|
+| Billing → Margin | First row at 249 px (sub-tab row plus a separate toolbar row, wrapping cells), then 173 px (an sr-only `<caption>` still takes 1 px in a table). ISO dates, raw stage codes. | `MarginHub` gives the active view a toolbar slot at the end of the sub-tab row (`marginToolbarSlot.ts`); Records portals Filters and Export CSV there (falls back to its own Toolbar outside the hub). Header like DataTable, rows one line, `aria-label` instead of the caption, sale date as `<time dateTime="2026-10-04">Sun 4 Oct 2026</time>`, stage humanised. Now **172 px**. Tests: `MarginPanels.test.tsx` "puts the Records filters and export in the sub-tab row", `MarginRecordsPage.test.tsx` date test updated. |
+| Billing → Payments | axe `scrollable-region-focusable` (serious): rows have no controls. | The scroll container is a labelled, focusable `section` ("Payments list"). |
+| Settings → Agents, Metrics | axe `select-name`/`label` (critical): type filters and the metrics date/interval controls had no accessible name. | `aria-label` on the two Agent type selects; `htmlFor`/`id` on the metrics controls. |
+| Settings → Tax | Effective/Expires dates wrapped to two lines. | `whitespace-nowrap`. |
+
+### Shared component changes (all additive, opt-in, default = today)
+
+`FormDialog` `mobile`, `submitDisabled`, `keepOpenOnSuccess`; `Modal` `mobile="sheet"`; `DataTable` `rowHeight="touch"`, `stickyTop`; `size="touch"` on `Menu`, `FilterChips`, `EmptyState`, `InlineBanner`; `lib/format` `time(…, { hour12 })`, `zoneName()`, `days()`. No existing caller passes them. Tests: `ui/sharedAdditions.test.tsx` (13), `lib/format.test.ts` (+4).
+
+### Files outside Phase 3's own pages (recorded per finding 9)
+
+- Phase 2 files, format-only for guard-to-zero (iteration 3 implementation): `dispatch-board/drawer/CompartmentsTab.tsx`, `dispatch-board/trays/DriverTray.tsx`, `ops/ReplanDiffBody.tsx`, `orders/OrderDetailView.tsx`. This iteration also: `ops/CargoManifestEditor.tsx` (used by the dispatch job detail; review finding 7). Board e2e and N1 unchanged (below).
+- `driver-app/lib/tokens.ts` regenerated by `build-tokens.mjs --with-driver` with the two new `open`/`partial` statuses (additive; no driver screen uses them).
+- Follow-up (not edited, Phase 2 file): `CompartmentsTab.tsx:138, 359` print raw `product_code`; `:143` is a `type="number"` input.
+
+### Verification (from `.worktrees/ui-phase3/runsheet`, node_modules symlinked to `merge-board`; final code at `eba18d4`)
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit` | clean |
+| `npm run lint` (biome) | 0 errors, 2 warnings: pre-existing `DispatchBoard.tsx:327` `noConfusingVoidType`; `portal/PortalTitleRow.tsx:40` unused suppression (portal file from the go-live-blockers merge, not edited here) |
+| `npx jest --ci -w 2` | **168 suites, 2351 passed, 1 skipped, 0 failed**. (A `-w 4` run under load average ~10 timed out 10 tests in 8 suites at ~7 s; those 8 suites pass alone, and the `-w 2` run is clean.) |
+| `format.guard.test.ts` | baseline **0** (actual 0) |
+| Fresh checkout (`git worktree add --detach` of `eba18d4` under `tmp/`) | `tsc` exit 0, `next build` exit 0 (32/32 pages); worktree removed |
+| ui-revamp e2e, full run (`npx playwright test -c playwright.ui-revamp.config.ts --project=chromium`, at `e352804`, `--update-snapshots=missing`) | **255 passed, 0 failed except the 2 Margin visual baselines being written** (first record of a missing file). No `test.fail` marks exist. Includes 62 axe, 24 redirects (all 23 rows + shell), 21 Phase 3 dialog/section axe, tabs, systemHealth, fuelStation |
+| ui-revamp visual re-run (no recording, all baselines present, at `eba18d4`) | **65 passed** |
+| ui-revamp chrome spec (JSON reporter, px below) | **65 passed** |
+| Dispatch board e2e (`PW_BOARD_PROD=1 npx playwright test -c playwright.dispatch-board.config.ts`, all projects) | **28 passed, 32 skipped** (project-scoped specs: webkit/iPad variants), 0 failed. N1 (chromium, production bundle): drag p95 **17.5 ms** (budget 20), hover p95 17.4, scroll p95 17.7, 12 rendered lane rows |
+| Backend gate | not needed: no backend file changed by this branch's commits (the merged go-live-blockers SendGrid change was reviewed and CI'd there) |
+
+Chrome height, first data row (px, budget 172; `firstRowTop` annotations from `chrome.spec`):
+
+| Page | 1280×800 | 1440×900 |
+|---|---|---|
+| Compliance → Certifications / Meters / BOLs / IFTA | 172 / 172 / 172 / 172 | 172 / 172 / 172 / 172 |
+| Billing → Invoices, Reconciliation | 172, 172 | 172, 172 |
+| Billing → Accounts, Payments, AR aging (platform_admin) | 172, 172, 172 | 172, 172, 172 |
+| Billing → Price books, Pricing rules, Contracts (platform_admin) | 172, 172, 172 | 172, 172, 172 |
+| Billing → Margin (Records) | 172 | 172 |
+| Settings → Depots / Flags / Tax / Exemptions | 172 / 172 / 172 / 172 | 172 / 172 / 172 / 172 |
+| Fleet (Trucks, Drivers ×2, Inventory), Customers, Communications, Fuel Stations | 172 each | 172 each |
+| Analytics (content top, ≤ 92) | 92 | 92 |
+| Phase 2 (unchanged) | Dashboard 145, Board 168 (1024×768: 168), Jobs/Plans/Orders 172, Live 145 | same |
+
+Axe (wcag2a/2aa/21aa/22aa), 0 critical/serious:
+- Shell chrome and whole page on all 31 `pages.ts` pages at 1440×900 (`axe.spec`).
+- Open dialogs at 1280×800, each also checked as a labelled `aria-modal` dialog that Escape closes (`phase3Dialogs.spec.ts`, new): New customer, Add certification, Register meter, Upload terminal BOL, New price book, Add pricing rule, Add contract, Add jurisdiction rate, Add exemption certificate, Add depot, Register channel, Upload road restriction. Plus Edit fuel station (`fuelStation.spec`).
+- Whole page on the Settings sections that aren't list pages: Road restrictions, Weather alerts, Notifications, Integrations, Intake channels, Stripe, Agents, Import, Metrics.
+
+Contrast and colour vision: `styles/tokens.test.ts` passes in the jest run, including `open`/`partial` (blue family, ≥ AA text on their fills, distinguished from each other by icon and label, declared CVD pair). Colour is never the only signal on the new pages: statuses are `StatusBadge` (icon + label), products cap + symbol + name, Missing cost is a labelled badge with its reason in words, Variance is a badge instead of a row tint.
+
+FormDialog behaviour tests per migrated flow (this iteration's additions in bold; iteration-3 implementation tests listed as they stand):
+- Billing: invoice void and credit override, account detail (`commerce/__tests__`), price book sectioned lg + add-rule sub-dialog (`PriceBookEditor`), cost entry add/supersede/void and margin settings (`MarginForms.test.tsx`), **cost CSV import two-step (3)**.
+- Compliance/Settings: Add certification, Register meter, Upload BOL, IFTA mileage adjustment, Add exemption, Add rate (cents ↔ tenths), Add/Edit contract, Add pricing rule (`src/components/compliance`), depots, flag Change state, intake channel, integration connect, road restriction, notification template with live preview (`src/components/admin`, `NotificationSettingsTab.test.tsx`).
+- Ops: **Sourcing wait report (5 dialog cases)**, **cargo manifest edit (4)**, Plans Emergency stop / Cost configuration (`FuelDistributionPage.dialogs.test.tsx`).
+- Shared: **`sharedAdditions.test.tsx` (13)**; `FormDialog.test.tsx` (15, unchanged).
+
+Screenshots (`screenshots/phase3/`, 1280×800 and 1440×900, from the visual run at `e352804`): every visual page, including the new `compliance-{certifications,meters,bols,ifta}`, `billing-{invoices,accounts,payments,ar-aging,reconciliation,price-books,pricing-rules,contracts,margin}`, `settings` (depots), `settings-{flags,tax,exemptions}`. Darwin baselines committed under `e2e/ui-revamp/__screenshots__/`.
+
+### Redirect map additions (iteration 3)
+
+| Old | Now lives |
+|---|---|
+| `/ops/command` (agent console) | `/dashboard/control?tab=approvals` (redirect row 5); chat and medium-risk confirmation in Copilot (top bar) |
+| Console Approve/Reject | Copilot confirmation card (approvals API) or Live → Approvals |
+| `AgentToast` | removed; approvals surface in Live → Approvals and the top-bar alerts count |
+| Compliance → Tax jurisdictions, Exemptions | Settings → Company → Tax jurisdictions (`?tab=tax`), Exemptions (`?tab=exemptions`) |
+| Billing → Contracts, Pricing rules | Billing tabs (Tier 4, platform_admin), FormDialogs from the title row |
+| Margin records filters/export row | the Margin sub-tab row (Filters, Export CSV) |
+| Sourcing inline wait-report form | candidate details → "Report wait time" dialog |
+| Cargo manifest inline edit mode | Job detail → Cargo → "Edit" dialog |
+
+All 23 Phase 1 redirects plus row 5 pass in the full run.
+
+### Not verified / follow-ups
+
+- Linux visual baselines still not recorded (CI skips the pixel compare on Linux); the Darwin baselines are self-recorded.
+- The Copilot confirmation path is backend-gated (no SSE emitter); covered by unit tests only.
+- `CompartmentsTab.tsx` raw product codes and `type="number"` (Phase 2 file).
+- 3.11's portal swap (handed to the Phase 3P workflow) and owner item 3.x-owner-1 (portal row padding) stay with the portal stream.
+- No staging deploy, no QA accounts, no flags touched this iteration.
+
+### Housekeeping
+
+`.next`, `test-results` and the fresh worktree removed. Scratch under `Runsheet/tmp/ui-phase3/` (logs, run scripts, screenshot copies) is deleted at the end of this iteration.
