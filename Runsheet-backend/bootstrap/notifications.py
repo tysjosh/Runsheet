@@ -93,12 +93,26 @@ def _create_dispatchers(environment=None, es_service=None):
             StubWhatsAppDispatcher,
         )
 
-    # --- Email (SendGrid) ---
+    # --- Email (SMTP relay, e.g. Mailtrap; SendGrid API as an alternative) ---
+    from notifications.services.smtp_email_dispatcher import smtp_email_configured
+
     _sendgrid_vars = all([
         os.environ.get("SENDGRID_API_KEY"),
         os.environ.get("SENDGRID_FROM_EMAIL"),
     ])
-    if _sendgrid_vars:
+    if smtp_email_configured():
+        try:
+            from notifications.services.smtp_email_dispatcher import (
+                SmtpEmailDispatcher,
+            )
+            dispatchers.append(SmtpEmailDispatcher())
+            logger.info("Registered REAL SMTP email dispatcher")
+        except ValueError as exc:
+            _fallback_or_raise(
+                f"SMTP email dispatcher unavailable: {exc}",
+                StubEmailDispatcher,
+            )
+    elif _sendgrid_vars:
         try:
             from notifications.services.sendgrid_email_dispatcher import (
                 SendGridEmailDispatcher,
@@ -111,7 +125,11 @@ def _create_dispatchers(environment=None, es_service=None):
                 StubEmailDispatcher,
             )
     else:
-        _fallback_or_raise("SendGrid env vars not set", StubEmailDispatcher)
+        _fallback_or_raise(
+            "Email env vars not set (SMTP_HOST + SMTP_FROM_EMAIL + SMTP_PASSWORD, "
+            "or SENDGRID_API_KEY + SENDGRID_FROM_EMAIL)",
+            StubEmailDispatcher,
+        )
 
     # --- Push (driver mobile app) ---
     # This is the one construction site for the push provider; every other

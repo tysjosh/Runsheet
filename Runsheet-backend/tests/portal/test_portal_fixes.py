@@ -236,6 +236,7 @@ def test_staff_actions_on_other_orders_send_nothing(client, sessions, notified, 
 
 def test_without_sendgrid_no_email_but_dispatchers_still_hear(client, notified, cA, monkeypatch):
     monkeypatch.delenv("SENDGRID_API_KEY")
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
     _submit(client, cA)
     assert len(notified.activity.entries) == 1
     assert notified.outbox.sent == []
@@ -322,6 +323,7 @@ async def test_send_portal_email_unconfigured_sends_nothing(monkeypatch):
 
     monkeypatch.delenv("SENDGRID_API_KEY", raising=False)
     monkeypatch.delenv("SENDGRID_FROM_EMAIL", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
     assert pe.email_channel_configured() is False
     assert await pe.send_portal_email("a@example.test", pe.PortalEmail("s", "t", "<p>t</p>")) is False
 
