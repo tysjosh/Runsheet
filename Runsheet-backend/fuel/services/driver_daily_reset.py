@@ -66,23 +66,28 @@ def _get_tenant_timezone(tenant_id: str, tenant_settings: Optional[Any] = None) 
 get_tenant_timezone = _get_tenant_timezone
 
 
-def _is_midnight_window(tz_name: str, last_reset_date: Optional[str]) -> bool:
-    """Return True if the current local date in ``tz_name`` is past midnight
-    and we haven't already reset for today."""
+#: Ledger key prefix (``persistence.periodic_runs``) holding each tenant's
+#: last reset time, so a restart does not count as a new day.
+LEDGER_KEY_PREFIX = "driver.daily-reset:"
+
+
+def _zone(tz_name: str) -> ZoneInfo:
     try:
-        tz = ZoneInfo(tz_name)
+        return ZoneInfo(tz_name)
     except (KeyError, Exception):
-        tz = ZoneInfo(DEFAULT_TIMEZONE)
+        return ZoneInfo(DEFAULT_TIMEZONE)
 
-    now_local = datetime.now(tz)
-    today_str = now_local.strftime("%Y-%m-%d")
 
-    # If we already reset for today, skip
-    if last_reset_date == today_str:
-        return False
+def _local_date(at: datetime, tz_name: str) -> str:
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at.astimezone(_zone(tz_name)).strftime("%Y-%m-%d")
 
-    # We're in a new day — time to reset
-    return True
+
+def _needs_reset(tz_name: str, last_reset_at: datetime, now: datetime) -> bool:
+    """True when ``now`` falls on a later tenant-local date than the last
+    reset (i.e. tenant-local midnight has passed since then)."""
+    return _local_date(now, tz_name) > _local_date(last_reset_at, tz_name)
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +103,13 @@ class DriverDailyResetJob:
     and resets counters for those that have crossed into a new day.
 
     State:
-        _last_reset_dates: Dict[tenant_id, date_str] tracking when each
-            tenant was last reset to avoid double-resets.
+        The last reset time per tenant is persisted in the
+        ``periodic_job_runs`` ledger under ``driver.daily-reset:<tenant>``
+        and cached in ``_last_reset_at``. The first time a tenant is seen
+        with no record, the job seeds the record and does NOT reset: a
+        process restart is not midnight (staging reset counters on every
+        deploy before this). Without a ledger (single process, no
+        Postgres) the same rule applies to the in-memory cache only.
     """
 
     def __init__(
@@ -114,7 +124,7 @@ class DriverDailyResetJob:
         self._driver_repo = driver_repository
         self._tenant_settings_service = tenant_settings_service
         self._metrics_registry = metrics_registry
-        self._last_reset_dates: Dict[str, str] = {}
+        self._last_reset_at: Dict[str, datetime] = {}
 
     async def discover_tenant_ids(self) -> List[str]:
         """Discover all distinct tenant_ids from drivers_current."""
@@ -182,28 +192,76 @@ class DriverDailyResetJob:
         except Exception:
             pass  # Metrics failures must not propagate
 
-    async def run_cycle(self) -> None:
-        """Run one check cycle: discover tenants, check midnight, reset."""
+    async def _read_persisted(self, tenant_id: str) -> tuple[bool, Optional[datetime]]:
+        """Return ``(ok, last_reset_at)`` from the ledger.
+
+        ``ok`` is False when the ledger read failed: the caller skips the
+        tenant this cycle rather than seeding over a record it could not see.
+        Without a ledger, returns ``(True, None)``.
+        """
+        from persistence.periodic_runs import get_run_ledger
+
+        ledger = get_run_ledger()
+        if ledger is None:
+            return True, None
+        try:
+            return True, await ledger.last_run(f"{LEDGER_KEY_PREFIX}{tenant_id}")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "DriverDailyResetJob: could not read last reset for tenant=%s",
+                tenant_id,
+                exc_info=True,
+            )
+            return False, None
+
+    async def _record(self, tenant_id: str, at: datetime, *, seeded: bool) -> None:
+        from persistence.periodic_runs import write_last_run
+
+        self._last_reset_at[tenant_id] = at
+        await write_last_run(f"{LEDGER_KEY_PREFIX}{tenant_id}", at, seeded=seeded)
+
+    async def run_cycle(self, now: Optional[datetime] = None) -> None:
+        """Run one check cycle: discover tenants, check midnight, reset.
+
+        A tenant resets only when its tenant-local date has moved past the
+        date of its last recorded reset. The first sighting of a tenant
+        (no record anywhere) seeds the record without resetting.
+        """
+        now = now or utcnow()
         tenant_ids = await self.discover_tenant_ids()
 
         for tenant_id in tenant_ids:
             settings = await self._get_tenant_settings(tenant_id)
             tz_name = _get_tenant_timezone(tenant_id, settings)
-            last_reset = self._last_reset_dates.get(tenant_id)
 
-            if _is_midnight_window(tz_name, last_reset):
-                try:
-                    await self.reset_for_tenant(tenant_id)
-                    # Mark as reset for today in this timezone
-                    try:
-                        tz = ZoneInfo(tz_name)
-                    except (KeyError, Exception):
-                        tz = ZoneInfo(DEFAULT_TIMEZONE)
-                    today_str = datetime.now(tz).strftime("%Y-%m-%d")
-                    self._last_reset_dates[tenant_id] = today_str
-                except Exception:
-                    # Already logged in reset_for_tenant
-                    pass
+            last = self._last_reset_at.get(tenant_id)
+            if last is not None and not _needs_reset(tz_name, last, now):
+                continue  # cached: already reset today, no DB round trip
+
+            # First sighting, or the cache says a new day: confirm against
+            # the ledger (another leader may already have reset today).
+            ok, persisted = await self._read_persisted(tenant_id)
+            if not ok:
+                continue
+            known = [t for t in (persisted, last) if t is not None]
+            if not known:
+                await self._record(tenant_id, now, seeded=True)
+                logger.info(
+                    "DriverDailyResetJob: no reset recorded for tenant=%s; "
+                    "seeded baseline, not resetting",
+                    tenant_id,
+                )
+                continue
+            latest = max(known)
+            if not _needs_reset(tz_name, latest, now):
+                self._last_reset_at[tenant_id] = latest
+                continue
+
+            try:
+                await self.reset_for_tenant(tenant_id)
+            except Exception:
+                continue  # Already logged in reset_for_tenant
+            await self._record(tenant_id, now, seeded=False)
 
 
 # ---------------------------------------------------------------------------
