@@ -304,10 +304,11 @@ export default function MarginRecordsPage() {
       </p>
 
       <div className="overflow-x-auto">
-        <table className="min-w-full text-sm">
-          <caption className="sr-only">
-            Margin records, newest sale first
-          </caption>
+        <table
+          className="min-w-full text-sm"
+          // An sr-only <caption> still takes 1 px in a table; label instead.
+          aria-label="Margin records, newest sale first"
+        >
           <thead className="border-b border-slate-200 bg-slate-50">
             <tr className="h-9 whitespace-nowrap text-left text-xs font-semibold text-gray-600">
               <th scope="col" className="py-2 pr-3">
