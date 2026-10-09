@@ -55,6 +55,12 @@ for (const p of SHELL_PAGES) {
       }
       if (p.ready)
         await page.locator(p.ready).first().waitFor({ timeout: 10_000 });
+      // `tbody tr` also matches the Table's empty skeleton rows while the
+      // fake's response is in flight, so wait for a row with text (CI flake:
+      // firstRowTop was null on a random page in 2 of 3 Linux runs).
+      await expect
+        .poll(() => firstRowTop(page), { timeout: 10_000 })
+        .not.toBeNull();
       const top = await firstRowTop(page);
       test
         .info()
