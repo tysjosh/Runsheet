@@ -14,6 +14,12 @@ export interface ShellPage {
    * chrome.spec checks their title row only, not a first data row.
    */
   listPage?: boolean;
+  /**
+   * Roles to sign in with (default admin + dispatcher). The Tier 4 Billing
+   * tabs need `platform_admin` as well (config/modules.ts); without it the
+   * hub falls back to Invoices and the page under test isn't the one shown.
+   */
+  roles?: string[];
 }
 
 export const SHELL_PAGES: ShellPage[] = [
@@ -127,18 +133,21 @@ export const SHELL_PAGES: ShellPage[] = [
   },
   {
     id: "billing-accounts",
+    roles: ["admin", "dispatcher", "platform_admin"],
     path: "/dashboard/billing?tab=accounts",
     h1: "Billing",
     ready: "tbody tr",
   },
   {
     id: "billing-payments",
+    roles: ["admin", "dispatcher", "platform_admin"],
     path: "/dashboard/billing?tab=payments",
     h1: "Billing",
     ready: "tbody tr",
   },
   {
     id: "billing-ar-aging",
+    roles: ["admin", "dispatcher", "platform_admin"],
     path: "/dashboard/billing?tab=ar-aging",
     h1: "Billing",
     ready: "tbody tr",
@@ -151,19 +160,28 @@ export const SHELL_PAGES: ShellPage[] = [
   },
   {
     id: "billing-price-books",
+    roles: ["admin", "dispatcher", "platform_admin"],
     path: "/dashboard/billing?tab=price-books",
     h1: "Billing",
     ready: "tbody tr",
   },
   {
     id: "billing-pricing-rules",
+    roles: ["admin", "dispatcher", "platform_admin"],
     path: "/dashboard/billing?tab=pricing-rules",
     h1: "Billing",
     ready: "tbody tr",
   },
   {
     id: "billing-contracts",
+    roles: ["admin", "dispatcher", "platform_admin"],
     path: "/dashboard/billing?tab=contracts",
+    h1: "Billing",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-margin",
+    path: "/dashboard/billing?tab=margin",
     h1: "Billing",
     ready: "tbody tr",
   },

@@ -375,6 +375,41 @@ export const DEPOTS = range((i) => ({
   is_default: i === 0,
 }));
 
+export const MARGIN_RECORDS = range((i) => ({
+  record_id: `QA-MR-${i}`,
+  stage: "invoice",
+  source_key: `QA-INV-${i}:0`,
+  order_id: `QA-ORD-${i}`,
+  invoice_id: `QA-INV-${i}`,
+  line_index: 0,
+  customer_id: `QA-CUST-${i}`,
+  account_id: `QA-ACC-${i}`,
+  product_code: PRODUCTS[i % PRODUCTS.length],
+  terminal_id: "QA-TERM-1",
+  gallons_ugal: (4_000 + i * 125) * 1_000_000,
+  unit_price_micros: 3_120_000,
+  revenue_cents: (4_000 + i * 125) * 312,
+  method: i % 6 === 5 ? "none" : "wac",
+  product_cost_micros: i % 6 === 5 ? null : 2_810_000,
+  adders_micros: i % 6 === 5 ? null : 60_000,
+  landed_cost_micros: i % 6 === 5 ? null : 2_870_000,
+  cost_cents: i % 6 === 5 ? null : (4_000 + i * 125) * 287,
+  margin_cents: i % 6 === 5 ? null : (4_000 + i * 125) * 25,
+  margin_per_gallon_micros: i % 6 === 5 ? null : 250_000,
+  margin_bp: i % 6 === 5 ? null : 801,
+  margin_pct: i % 6 === 5 ? null : "8.01",
+  no_cost_reason: i % 6 === 5 ? "no_cost_entry" : null,
+  flags: i % 6 === 5 ? ["missing_cost"] : [],
+  floor_micros_used: 0,
+  cost_snapshot: {},
+  as_of: iso(8),
+  version: 1,
+  status: "active",
+  origin: "live",
+  frozen_at: null,
+  computed_at: iso(8),
+}));
+
 function sized<T>(rows: T[], url: URL) {
   const size = Number(url.searchParams.get("size") ?? rows.length);
   const page = Number(url.searchParams.get("page") ?? 1);
@@ -584,6 +619,33 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
     return { data: STATION_SUMMARY, request_id: "e2e" };
   if (path === "/fuel/metrics/consumption")
     return { data: [], request_id: "e2e" };
+  // Billing → Margin (task 3.4): the feed is on for the e2e admin.
+  // marginApi reads the `data` envelope.
+  if (path === "/commerce/margin/settings")
+    return {
+      data: {
+        wac_window_days: 30,
+        rack_staleness_days: 3,
+        floor_micros: 0,
+        product_floors: {},
+        timezone: "America/Chicago",
+        feed_activated_at: iso(8),
+        updated_by: null,
+        updated_at: null,
+        persisted: true,
+      },
+    };
+  if (path === "/commerce/margin/records")
+    return {
+      data: {
+        items: MARGIN_RECORDS,
+        next_cursor: null,
+        total: MARGIN_RECORDS.length,
+        timezone: "America/Chicago",
+      },
+    };
+  if (path === "/commerce/margin/alerts")
+    return { data: { items: [], next_cursor: null, total: 0 } };
   if (path === "/ops/monitoring/poison-queue")
     return {
       data: {

@@ -36,7 +36,7 @@ for (const p of SHELL_PAGES) {
       page,
       context,
     }) => {
-      await signIn(context);
+      await signIn(context, p.roles);
       await installShellFake(page);
       await page.setViewportSize(vp);
       await page.goto(p.path);

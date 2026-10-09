@@ -77,6 +77,88 @@ const PAGES: { id: string; path: string; ready: string; roles?: string[] }[] = [
     path: "/dashboard/customers?tab=communications",
     ready: "tbody tr",
   },
+  // Phase 3 iteration 3 (Compliance, Billing, Settings).
+  {
+    id: "compliance-certifications",
+    path: "/dashboard/compliance?tab=certifications",
+    ready: "tbody tr",
+  },
+  {
+    id: "compliance-meters",
+    path: "/dashboard/compliance?tab=meters",
+    ready: "tbody tr",
+  },
+  {
+    id: "compliance-bols",
+    path: "/dashboard/compliance?tab=bols",
+    ready: "tbody tr",
+  },
+  {
+    id: "compliance-ifta",
+    path: "/dashboard/compliance?tab=ifta",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-accounts",
+    roles: ["admin", "dispatcher", "platform_admin"],
+    path: "/dashboard/billing?tab=accounts",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-payments",
+    roles: ["admin", "dispatcher", "platform_admin"],
+    path: "/dashboard/billing?tab=payments",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-ar-aging",
+    roles: ["admin", "dispatcher", "platform_admin"],
+    path: "/dashboard/billing?tab=ar-aging",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-reconciliation",
+    path: "/dashboard/billing?tab=reconciliation",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-price-books",
+    roles: ["admin", "dispatcher", "platform_admin"],
+    path: "/dashboard/billing?tab=price-books",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-pricing-rules",
+    roles: ["admin", "dispatcher", "platform_admin"],
+    path: "/dashboard/billing?tab=pricing-rules",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-contracts",
+    roles: ["admin", "dispatcher", "platform_admin"],
+    path: "/dashboard/billing?tab=contracts",
+    ready: "tbody tr",
+  },
+  {
+    id: "billing-margin",
+    path: "/dashboard/billing?tab=margin",
+    ready: "tbody tr",
+  },
+  {
+    id: "settings-flags",
+    path: "/dashboard/settings?tab=flags",
+    ready: "tbody tr",
+  },
+  {
+    id: "settings-tax",
+    path: "/dashboard/settings?tab=tax",
+    ready: "tbody tr",
+  },
+  {
+    id: "settings-exemptions",
+    path: "/dashboard/settings?tab=exemptions",
+    ready: "tbody tr",
+  },
   {
     id: "settings-system",
     path: "/dashboard/settings?tab=system",

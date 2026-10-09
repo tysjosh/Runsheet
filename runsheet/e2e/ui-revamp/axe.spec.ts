@@ -34,7 +34,7 @@ async function scan(page: Page, include?: string[]) {
 for (const p of SHELL_PAGES) {
   test.describe(p.id, () => {
     test.beforeEach(async ({ page, context }) => {
-      await signIn(context);
+      await signIn(context, p.roles);
       await installShellFake(page);
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(p.path);
