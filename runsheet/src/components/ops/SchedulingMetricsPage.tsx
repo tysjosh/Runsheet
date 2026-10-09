@@ -146,7 +146,7 @@ const UTC_HOUR = new Intl.DateTimeFormat("en-GB", {
 
 /**
  * Bucket label in UTC (F11). Buckets are UTC days/hours on the backend, so a
- * local `toLocaleString` showed the 10-06 bucket as "10/5/2026, 8:00 PM".
+ * browser-local date string showed the 10-06 bucket as "10/5/2026, 8:00 PM".
  * Daily: "YYYY-MM-DD"; hourly: "YYYY-MM-DD HH:00 UTC".
  */
 export function formatBucketLabel(

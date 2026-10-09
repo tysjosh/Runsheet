@@ -114,9 +114,7 @@ export default function FuelStationDetail({
           )}
           {metric(
             <Clock aria-hidden="true" className="h-3.5 w-3.5 text-slate-500" />,
-            daysLeft != null
-              ? `${number(daysLeft, { decimals: 1 })} d`
-              : "—",
+            daysLeft != null ? `${number(daysLeft, { decimals: 1 })} d` : "—",
             "Days left",
           )}
           {metric(

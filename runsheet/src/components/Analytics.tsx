@@ -2,7 +2,7 @@ import { Activity } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { usePageChrome } from "@/components/ui";
 import { CHART, COLOR, SEMANTIC } from "@/styles/tokens";
-import { number } from "../lib/format";
+import { dateTime, number } from "../lib/format";
 import {
   type AnalyticsMetricKey,
   type AnalyticsMetrics,
@@ -65,9 +65,7 @@ function utcDay(timestamp: string): string {
 
 function formatAsOf(asOf: string): string {
   const d = new Date(asOf);
-  return Number.isNaN(d.getTime())
-    ? asOf
-    : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(d.getTime()) ? asOf : dateTime(d);
 }
 
 function GoogleChart({
