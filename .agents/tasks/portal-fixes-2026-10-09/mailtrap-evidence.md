@@ -62,7 +62,17 @@ Cleanup: the extracted generator, `coverage.xml` and `.coverage` were deleted. `
 
 ## GitHub CI
 
-PENDING. Filled in after the run.
+Run 1 ([37880785529](https://github.com/tysjosh/Runsheet/actions/runs/37880785529), PR merge ref of `5b67d0d` into base `09a5996`):
+
+| Job | Result |
+|---|---|
+| backend-tests (pytest + coverage gate + board perf + changed-file coverage) | pass (24m58s) |
+| endpoint-registry | pass |
+| migration-check (alembic upgrade, check_migrations, single head) | pass |
+| docker-image, git-hygiene, driver-app, dispatcher-ui, dispatch-board-e2e | pass |
+| ui-revamp-e2e | **fail, not caused by this branch**. Staff-UI axe, `chrome.spec` first-row and `/commerce/ar-aging` redirect specs failed. This branch changes no file under `runsheet/`. The base commit `09a5996` fails the same job in its own run ([37880102447](https://github.com/tysjosh/Runsheet/actions/runs/37880102447)), because analytics-fixes commits landed on go-live-blockers after `ab5f933`. The base's next commit `e636358` ("answer /commerce/ar-aging with a single-object body in the UI revamp fake") passes ui-revamp-e2e in run 37882439984. |
+
+Run 2: triggered by pushing this evidence update (docs only, same code tree as `f257d06`), so CI re-merges against the current base `e636358`. The result is in the PR checks for the head commit.
 
 ## Next (release step, not done here)
 
