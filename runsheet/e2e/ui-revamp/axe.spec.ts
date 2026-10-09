@@ -3,8 +3,8 @@
  *
  * - The shell (top bar, sidebar, title row) must have zero critical or
  *   serious violations on every page now.
- * - The whole page must reach zero in the task named in `pages.ts`; until
- *   then it is marked `test.fail()` and its findings are attached.
+ * - The whole page must have zero too (every page in `pages.ts`; findings
+ *   are attached when one appears).
  */
 import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page, test } from "@playwright/test";
@@ -49,7 +49,6 @@ for (const p of SHELL_PAGES) {
     });
 
     test("whole page: 0 critical/serious", async ({ page }) => {
-      test.fail(p.axeTask !== null, `page migrates in task ${p.axeTask}`);
       const found = await scan(page);
       await test.info().attach("violations", {
         body: JSON.stringify(found, null, 2),

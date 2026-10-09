@@ -1,9 +1,8 @@
 /**
  * Chrome budget (R4.7, D8): the first data row starts ≤ 172 px from the
  * viewport top at 1280×800 and 1440×900. Phase 1 delivers the 48 px top bar
- * and the 44 px title row; each page's own toolbar/summary bands come down in
- * the task named in `pages.ts`, so until then the page is marked
- * `test.fail()` (flip it when the task lands).
+ * and the 44 px title row; every page in `pages.ts` now meets the budget
+ * (no `test.fail()` marks remain after task 3.10).
  */
 import { expect, test } from "@playwright/test";
 import { FIRST_ROW_BUDGET, firstRowTop } from "./measure";
@@ -37,7 +36,6 @@ for (const p of SHELL_PAGES) {
       page,
       context,
     }) => {
-      test.fail(p.chromeTask !== null, `page migrates in task ${p.chromeTask}`);
       await signIn(context);
       await installShellFake(page);
       await page.setViewportSize(vp);
