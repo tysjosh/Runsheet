@@ -309,3 +309,65 @@ All 23 Phase 1 redirects plus row 5 pass in the full run.
 ### Housekeeping
 
 `.next`, `test-results` and the fresh worktree removed. Scratch under `Runsheet/tmp/ui-phase3/` (logs, run scripts, screenshot copies) is deleted at the end of this iteration.
+
+## Iteration 4
+
+Commits `53517ee..a4a702c` on `production-readiness/ui-phase3`. `origin/production-readiness/go-live-blockers` @ `e636358` (F1–F15 staging sweep) merged at `53517ee` with the nine conflicts resolved by hand, then @ `e19fb9b` (Mailtrap SMTP, backend only, no conflicts) merged at `a4a702c`. After the merges, `Runsheet-backend/`, portal and auth files are byte-identical to go-live-blockers (`git diff --stat origin/production-readiness/go-live-blockers HEAD -- Runsheet-backend runsheet/src/components/portal runsheet/src/app/portal runsheet/src/app/auth` is empty). Not pushed, not deployed.
+
+All Phase 3 tasks stay ticked (3.1–3.11). Nothing new is post-deploy-only.
+
+### Review findings (iteration 4 review)
+
+| # | Finding | Resolution |
+|---|---|---|
+| 1 (HIGH) | Branch stale against go-live-blockers; F-fixes at risk | Merged and ported (table below), then re-verified. |
+| 2 (LOW) | `CompartmentsTab` raw codes / `type="number"` (Phase 2 file) | Still a follow-up for the next board change. Not edited. |
+| 3 (LOW) | Visual baselines are Darwin-only | Still a follow-up: record Linux baselines before go-live. |
+
+### Conflict resolution: how each F-fix landed in the Phase 3 components
+
+| File | Resolution |
+|---|---|
+| `commerce/ARAgingDashboard.tsx` (F12) | Phase 3 layout kept. A Current bucket was added first, in the `open` (blue) hue, with the OK, Warning, Overdue and Critical hues following. The toolbar legend now reads "Days past due: Current · 1–30 · 31–60 · 61–90 · 90+", and each label's full `AGING_LABELS` text sits in an sr-only span and a `title`. The title-row counts read "90+ days past due". The accounts table gains a Current column, and "0–30" became "1–30". In the History drawer, Current shows "—" for snapshots from before due-date aging. The upstream test "renders '—' for Current on history snapshots…" now opens the History drawer first (Phase 3 moved history there). |
+| `commerce/AccountDetailPage.tsx` (F12) | Phase 3 template kept. The aging facts are six columns: Current plus the four `AGING_LABELS` buckets and Total open. |
+| `ops/FuelSummaryBar.tsx` (F5, modify/delete) | It stays deleted, because Phase 3 replaced it with the Fuel title-row counts. The "—" now lives in `FuelDashboardView` as `avgDaysLeftLabel()`: the counts always show "Avg — days left" when `average_days_until_empty` is null or 0. The upstream test moved to `ops/FuelDaysLeft.test.tsx` and now targets the new components: the title-row label, list "—" with no 99999, sort-last in both directions (DataTable header), station detail "—", and `displayDaysUntilEmpty`. |
+| `ops/FuelStationList.tsx`, `ops/FuelStationDetail.tsx` (F5) | Phase 3 DataTable and drawer kept. Both use `displayDaysUntilEmpty`, and no-consumption stations sort last. |
+| `Analytics.tsx` (F2/F3/F13) | The upstream rewrite was the base: real KPIs only, null-safe, a real 30-day series, error state with Retry, the empty-snapshot state, and weighted route average. The Phase 3 chrome was re-applied on top: no nested header (the hub owns the title), "As of …" published to the Analytics hub title row through `usePageChrome` (inline when rendered standalone), `CHART` pie palette, `number()` and `dateTime()` formatters, and the KPI card and section-heading styles. The range selector stays hidden (D13; the upstream test asserts there's no combobox). |
+| `ops/SchedulingMetricsPage.tsx` (F4/F11) | Upstream was the base: UTC bucket labels, completion rate already in 0–100, "Dates are in UTC". The Phase 3 formatters were re-applied on top, and completion now goes through `pct(rate, { decimals: 1 })` without `fraction`. |
+| `CommerceHub.tsx` + `marginApi.ts` (Margin availability) | After resolution, both files match Phase 3's version exactly. The availability code was the same on both sides, so one implementation remains: `getMarginAvailability`, `MarginUnavailable` and `isMarginDisabledError`. The conflicts were only in Phase 3's detail-route navigation, and that side was kept. |
+| `e2e/ui-revamp/shellFake.ts` | Phase 3 side kept. The upstream `/commerce/ar-aging` and IFTA stubs would have shadowed the richer `phase3Fake` fixtures, which are consulted later. `phase3Fake` AR aging gained `bucket_current_cents` (summary and per-account), and totals were adjusted to match. `phase3Fake` also gained `/analytics/metrics` (with `as_of`), `/analytics/routes` and `/analytics/timeseries` in the new shape. Without them, the Analytics visual guarded an empty page. |
+
+Also fixed: `format.guard` found two new direct `toLocale*` calls from the merge, one in Analytics `formatAsOf` (now `dateTime()`) and one in a SchedulingMetrics comment (reworded). The baseline is back to 0.
+
+### Verification (from `.worktrees/ui-phase3/runsheet`, node_modules symlinked to `merge-board`; code at `4d114d2`, the final merge adds backend files only)
+
+| Check | Result |
+|---|---|
+| `npx tsc --noEmit -p .` | clean |
+| `npm run lint` (biome) | 0 errors, 2 warnings: `DispatchBoard.tsx:327`, which predates this iteration, and the unused suppression in `portal/PortalTitleRow.tsx:40` (portal file, not edited) |
+| `npx jest --silent --maxWorkers=50%` | **170 suites; 2373 passed, 1 skipped, 2 failed**. The two failures are 5 s timeouts in files this iteration didn't touch (`dispatch-board/map/map.test.tsx`, `portal/__tests__/RequestDeliveryDialog.test.tsx`) under load average ~12. Re-run alone: 25/25 pass. An earlier full run had 4 different timeouts (`AgentHealth`, `forgot-password`, `cargo/page.real-shape`) plus the real `format.guard` failure. The guard is fixed, and those three pass alone. |
+| Targeted suites for merged areas | Analytics, AnalyticsHub, SchedulingMetricsPage, FuelDaysLeft, ARAgingDashboard (11/11), AccountDetailPage, CommerceHub.margin, hubs.urltabs, margin/*, marginApi.availability, format.guard: all pass |
+| `npm run build` | exit 0 |
+| Fresh checkout (`git worktree add --detach` of `4d114d2` under `tmp/`) | `tsc` OK, `next build` exit 0 (32/32 pages, `BUILD_ID` written); worktree removed |
+| ui-revamp e2e, full (`npx playwright test -c playwright.ui-revamp.config.ts --project=chromium`) | Before the fixture update: 255 passed, and the only 2 failures were the Analytics visuals (expected after the F2/F3 rewrite). After the fixture update and re-recording the Analytics baselines (`-g analytics --update-snapshots`, 8 passed), a full re-run gave **257 passed, 0 failed**. That covers chrome, axe (62 + 21 dialogs), 24 redirects, tabs, systemHealth, fuelStation and visual. |
+| Dispatch board e2e (`PW_BOARD_PROD=1`, all projects) | **28 passed, 32 skipped**, 0 failed. N1 drag p95 **18.4 ms** (budget 20), hover 18.3, scroll 18.5, 12 lane rows |
+| Backend gate | Not needed. This branch changes no backend file, and the backend is identical to go-live-blockers, where it was CI'd. |
+
+Chrome height, first data row, from `firstRowTop` annotations in the full re-run (budget 172, 1280×800 / 1440×900): Fleet trucks, drivers, qualifications and inventory, Customers, Communications, Fuel stations, Compliance certifications, meters, BOLs and IFTA, Billing invoices, accounts, payments, AR aging, reconciliation, price books, pricing rules, contracts and margin, and Settings depots, flags, tax and exemptions: **172 / 172 each**. Analytics content top 92 / 92. Phase 2 is unchanged: Dashboard 145, Board 168 (1024×768: 168), Jobs, Plans and Orders 172, Live 145.
+
+Axe: 0 critical or serious on every page and dialog in the full run, including the merged Fuel, Billing AR aging and Analytics pages.
+
+Contrast and colour vision: `styles/tokens.test.ts` passes. In the new AR Current bucket, colour isn't the only signal: each bucket is labelled in text, and the bar's `aria-label` gives every bucket's share.
+
+Screenshots: `screenshots/phase3/` was refreshed from the full re-run (67 PNGs, 1280×800 and 1440×900), including `analytics-*` (KPIs, as-of in the title row, trend, gauge, coloured route mix) and `billing-ar-aging-*` (Current first, "Days past due" legend).
+
+Redirect map: unchanged since iteration 3. All 24 redirect tests pass in the full re-run.
+
+### Not verified / follow-ups
+
+- The `billing-ar-aging` visual passed against its iteration-3 baseline even though the Current column was added, so that compare is looser than the screenshot suggests. The baseline wasn't re-recorded. The screenshot in `screenshots/phase3/` shows the new render.
+- Carried: Linux visual baselines; `CompartmentsTab` codes (Phase 2); Copilot confirmation is backend-gated; Margin off-state is verified in the release step (post-deploy).
+
+### Housekeeping
+
+`.next`, `test-results`, `coverage` and the fresh worktree removed. Scratch under `Runsheet/tmp/ui-phase3/` and `tmp/p3merge/` deleted.
