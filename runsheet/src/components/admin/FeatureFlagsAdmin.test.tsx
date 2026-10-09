@@ -58,7 +58,9 @@ it("changes state through the FormDialog and refuses the current state", async (
   expect(
     await within(dialog).findByText("Pick a state other than the current one."),
   ).toBeInTheDocument();
-  fireEvent.click(within(dialog).getByRole("radio", { name: /Active \(gated\)/ }));
+  fireEvent.click(
+    within(dialog).getByRole("radio", { name: /Active \(gated\)/ }),
+  );
   fireEvent.click(within(dialog).getByRole("button", { name: "Update flag" }));
   await waitFor(() =>
     expect(setOrderIntakePipelineState).toHaveBeenCalledWith(

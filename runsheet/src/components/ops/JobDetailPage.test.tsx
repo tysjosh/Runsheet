@@ -273,9 +273,10 @@ describe("formatLiveEta (R-2)", () => {
 
   it("formats minutes with the arrival time when both are present", () => {
     const arrival = "2026-10-04T19:00:00Z";
-    expect(formatLiveEta({ eta_minutes: 12, estimated_arrival: arrival })).toBe(
-      `12 min (${new Date(arrival).toLocaleTimeString()})`,
-    );
+    // Time through lib/format (24 h, tenant zone; task 3.10).
+    expect(
+      formatLiveEta({ eta_minutes: 12, estimated_arrival: arrival }),
+    ).toMatch(/^12 min \(\d{2}:\d{2}\)$/);
   });
 
   it("omits an unparseable arrival time", () => {

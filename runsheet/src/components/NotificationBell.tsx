@@ -21,6 +21,7 @@ import { Bell, CheckCircle2, Clock, ShieldAlert, XCircle } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
+import { date as formatDate } from "../lib/format";
 import {
   type ActivityLogEntry,
   type ApprovalEntry,
@@ -124,10 +125,7 @@ function relativeTime(dateStr: string | null | undefined) {
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
   if (days < 7) return `${days}d ago`;
-  return new Date(dateStr).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  });
+  return formatDate(dateStr);
 }
 
 export default function NotificationBell() {

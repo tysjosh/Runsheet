@@ -95,7 +95,9 @@ it("rotates and disables from the row menu", async () => {
   render(<IntakeChannelsAdminPanel />);
   await screen.findByText("Voice AI");
   fireEvent.click(screen.getByRole("button", { name: /Actions for Voice AI/ }));
-  fireEvent.click(await screen.findByRole("menuitem", { name: "Rotate secret" }));
+  fireEvent.click(
+    await screen.findByRole("menuitem", { name: "Rotate secret" }),
+  );
   expect(
     await screen.findByRole("dialog", { name: "Secret rotated" }),
   ).toBeInTheDocument();

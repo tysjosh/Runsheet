@@ -15,7 +15,7 @@ import path from "node:path";
 // iteration 1 (tasks 3.2, 3.7, 3.9) took it to 142; iteration 2 (3.1, 3.3,
 // Notifications, Orders/Jobs dialogs) to 127; iteration 3 (Billing,
 // Compliance, Plans view) to 56.
-const BASELINE = 56;
+const BASELINE = 0;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {

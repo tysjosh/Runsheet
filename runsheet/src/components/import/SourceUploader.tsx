@@ -9,6 +9,7 @@ import {
   Upload,
 } from "lucide-react";
 import { useCallback, useRef, useState } from "react";
+import { number as fmtNumber } from "../../lib/format";
 import { importApi } from "../../services/importApi";
 import type { DataType, ParseResponse } from "../../types/import";
 import { type Tab, TabNavigation } from "../ui";
@@ -378,7 +379,7 @@ function CsvDropZone({
           <FileSpreadsheet className="w-4 h-4 text-gray-500" />
           <span>{selectedFile.name}</span>
           <span className="text-xs text-gray-500">
-            ({(selectedFile.size / 1024).toFixed(1)} KB)
+            ({fmtNumber(selectedFile.size / 1024, { decimals: 1 })} KB)
           </span>
         </div>
       )}

@@ -40,6 +40,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { dateTime, time } from "../../lib/format";
 import { apiService } from "../../services/api";
 import {
   getCargo,
@@ -109,14 +110,7 @@ interface JobDetailPageProps {
 
 function formatDateTime(dateStr?: string): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return dateTime(dateStr);
 }
 
 /**
@@ -138,7 +132,7 @@ export function formatLiveEta(
     ? new Date(eta.estimated_arrival)
     : null;
   return arrival && !Number.isNaN(arrival.getTime())
-    ? `${minutes} min (${arrival.toLocaleTimeString()})`
+    ? `${minutes} min (${time(arrival)})`
     : `${minutes} min`;
 }
 

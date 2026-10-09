@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useId, useState } from "react";
 import { Button, Modal, ModalFooter } from "@/components/ui";
+import { dateLong } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import {
   invitePortalUser,
@@ -43,13 +44,7 @@ function errorText(error: unknown, fallback: string): string {
 function formatDate(value: string | null): string {
   if (!value) return "—";
   const d = new Date(value);
-  return Number.isNaN(d.getTime())
-    ? "—"
-    : d.toLocaleDateString("en-US", {
-        year: "numeric",
-        month: "short",
-        day: "numeric",
-      });
+  return Number.isNaN(d.getTime()) ? "—" : dateLong(d);
 }
 
 export default function PortalAccessPanel({

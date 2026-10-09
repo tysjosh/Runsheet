@@ -3,6 +3,7 @@
 import { AlertTriangle, BarChart3, Search } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type Column, Table } from "@/components/ui";
+import { number as fmt } from "../../lib/format";
 import type {
   EfficiencyFilters,
   EfficiencyMetric,
@@ -44,8 +45,8 @@ const TIER_STYLES: Record<string, { text: string; bg: string; bar: string }> = {
 
 function formatNumber(n: number | null | undefined, decimals = 1): string {
   if (n == null || !Number.isFinite(n)) return "—";
-  if (n >= 1_000) return `${(n / 1_000).toFixed(decimals)}K`;
-  return n.toFixed(decimals);
+  if (n >= 1_000) return `${fmt(n / 1_000, { decimals })}K`;
+  return fmt(n, { decimals });
 }
 
 /**
@@ -151,7 +152,7 @@ export default function FuelEfficiencyChart() {
           <span
             className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${styles.text} ${styles.bg}`}
           >
-            {kmPerLiter.toFixed(2)}
+            {fmt(kmPerLiter, { decimals: 2 })}
           </span>
         );
       },
@@ -173,7 +174,7 @@ export default function FuelEfficiencyChart() {
               style={{ width: `${Math.max(barWidth, 2)}%` }}
               title={
                 hasEfficiency
-                  ? `${kmPerLiter.toFixed(2)} km/L`
+                  ? `${fmt(kmPerLiter, { decimals: 2 })} km/L`
                   : "No efficiency data"
               }
             />

@@ -66,7 +66,9 @@ it("edits a template in the FormDialog with a live preview", async () => {
   expect(body).toHaveValue("Order {order_id} ETA {eta}");
   const preview = within(dialog).getByRole("region", { name: "Live preview" });
   expect(preview).not.toHaveTextContent("{order_id}");
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Save template" }),
+  );
   await waitFor(() =>
     expect(updateNotificationTemplate).toHaveBeenCalledWith("tpl-1", {
       subject_template: undefined,
@@ -81,7 +83,9 @@ it("requires a message body and keeps the dialog open", async () => {
   fireEvent.change(within(dialog).getByLabelText(/^Message/), {
     target: { value: "  " },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Save template" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Save template" }),
+  );
   expect(
     await within(dialog).findByText("Enter the message body."),
   ).toBeInTheDocument();

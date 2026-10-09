@@ -9,6 +9,7 @@ import {
   TrendingUp,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { dateTime, number, pct } from "../../lib/format";
 import {
   type CommunicationMetrics,
   getCommunicationMetrics,
@@ -20,12 +21,12 @@ import { Badge, Button, PageHeader } from "../ui";
 // ─── Helper Functions ────────────────────────────────────────────────────────
 
 function formatLatency(ms: number): string {
-  if (ms < 1000) return `${ms.toFixed(0)}ms`;
-  return `${(ms / 1000).toFixed(2)}s`;
+  if (ms < 1000) return `${number(ms)}ms`;
+  return `${number(ms / 1000, { decimals: 2 })}s`;
 }
 
 function formatPercentage(rate: number): string {
-  return `${(rate * 100).toFixed(2)}%`;
+  return pct(rate, { fraction: true, decimals: 2 });
 }
 
 function getLatestValue(dataPoints: MetricDataPoint[]): number | null {
@@ -432,12 +433,7 @@ function MetricChart({ title, data, formatValue, color }: MetricChartProps) {
           {data.map((point, index) => (
             <div key={index} className="flex items-center gap-3">
               <div className="text-xs text-gray-500 w-32 flex-shrink-0">
-                {new Date(point.timestamp).toLocaleString(undefined, {
-                  month: "short",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
+                {dateTime(point.timestamp)}
               </div>
               <div className="flex-1 bg-gray-100 rounded-full h-6 relative overflow-hidden">
                 <div

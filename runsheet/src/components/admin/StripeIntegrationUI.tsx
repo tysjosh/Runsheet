@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { dateTime, money } from "../../lib/format";
 import {
   getStripePayments,
   getStripePublicConfig,
@@ -31,21 +32,15 @@ function formatAmount(
   currency: string | null | undefined,
 ): string {
   if (amount === null || amount === undefined) return "—";
-  const dollars = amount / 100;
-  const currencySymbol =
-    currency?.toUpperCase() === "USD" ? "$" : currency || "";
-  return `${currencySymbol}${dollars.toFixed(2)}`;
+  const code = currency?.toUpperCase();
+  return money(amount / 100, {
+    currency: code && /^[A-Z]{3}$/.test(code) ? code : "USD",
+  });
 }
 
 function formatTimestamp(timestamp: number | null | undefined): string {
   if (!timestamp) return "—";
-  return new Date(timestamp * 1000).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return dateTime(timestamp * 1000);
 }
 
 function getStatusBadge(status: string | null | undefined) {

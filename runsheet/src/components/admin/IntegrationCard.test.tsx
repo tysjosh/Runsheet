@@ -336,9 +336,15 @@ describe("IntegrationCard — connect flow", () => {
     );
     fireEvent.click(screen.getByTestId("connect-button"));
 
-    const clientIdInput = screen.getByLabelText(/^Client ID/) as HTMLInputElement;
-    const clientSecretInput = screen.getByLabelText(/^Client secret/) as HTMLInputElement;
-    const refreshTokenInput = screen.getByLabelText(/^Refresh token/) as HTMLInputElement;
+    const clientIdInput = screen.getByLabelText(
+      /^Client ID/,
+    ) as HTMLInputElement;
+    const clientSecretInput = screen.getByLabelText(
+      /^Client secret/,
+    ) as HTMLInputElement;
+    const refreshTokenInput = screen.getByLabelText(
+      /^Refresh token/,
+    ) as HTMLInputElement;
 
     // client_id → plain text, the other two → obscured password
     // inputs so they don't show up in screen-shares or autofill.

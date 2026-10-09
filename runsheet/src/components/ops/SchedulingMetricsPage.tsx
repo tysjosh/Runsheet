@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type Column, Table } from "@/components/ui";
+import { dateTime, number as fmtNumber, pct } from "../../lib/format";
 import type {
   AssetUtilizationMetric,
   CompletionMetric,
@@ -123,7 +124,7 @@ function StatCard({ label, value, icon, accent = "blue" }: StatCardProps) {
         <span className="text-xs text-gray-500">{label}</span>
       </div>
       <p className={`text-xl font-bold ${style.text}`}>
-        {typeof value === "number" ? value.toLocaleString() : value}
+        {typeof value === "number" ? fmtNumber(value) : value}
       </p>
     </div>
   );
@@ -136,7 +137,7 @@ const jobMetricsColumns: Column<JobMetricsBucket>[] = [
     key: "timestamp",
     label: "Timestamp",
     className: "text-gray-700 whitespace-nowrap",
-    render: (bucket) => new Date(bucket.timestamp).toLocaleString(),
+    render: (bucket) => dateTime(bucket.timestamp),
   },
   {
     key: "counts_by_status",
@@ -214,14 +215,14 @@ const assetUtilizationColumns: Column<AssetUtilizationMetric>[] = [
     label: "Active Hours",
     align: "right",
     className: "text-gray-700",
-    render: (asset) => asset.total_active_hours.toFixed(1),
+    render: (asset) => fmtNumber(asset.total_active_hours, { decimals: 1 }),
   },
   {
     key: "idle_hours",
     label: "Idle Hours",
     align: "right",
     className: "text-gray-700",
-    render: (asset) => asset.idle_hours.toFixed(1),
+    render: (asset) => fmtNumber(asset.idle_hours, { decimals: 1 }),
   },
 ];
 
@@ -458,7 +459,10 @@ export default function SchedulingMetricsPage() {
                         Completion Rate
                       </span>
                       <span className="text-sm font-semibold text-primary">
-                        {(metric.completion_rate * 100).toFixed(1)}%
+                        {pct(metric.completion_rate, {
+                          fraction: true,
+                          decimals: 1,
+                        })}
                       </span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-1.5">
@@ -474,7 +478,10 @@ export default function SchedulingMetricsPage() {
                         Avg Completion
                       </span>
                       <span className="text-sm font-semibold text-primary">
-                        {metric.avg_completion_minutes.toFixed(1)} min
+                        {fmtNumber(metric.avg_completion_minutes, {
+                          decimals: 1,
+                        })}{" "}
+                        min
                       </span>
                     </div>
                     <div className="flex items-center justify-between text-xs text-gray-500">
@@ -532,7 +539,7 @@ export default function SchedulingMetricsPage() {
                 />
                 <StatCard
                   label="Avg Delay"
-                  value={`${((delayMetrics as any).avg_delay_minutes ?? 0).toFixed(1)} min`}
+                  value={`${fmtNumber((delayMetrics as any).avg_delay_minutes ?? 0, { decimals: 1 })} min`}
                   icon={<Clock className="w-3.5 h-3.5 text-warning" />}
                   accent="yellow"
                 />
@@ -556,7 +563,10 @@ export default function SchedulingMetricsPage() {
                           </span>
                           <span className="flex items-center gap-2">
                             <span className="text-xs text-gray-500">
-                              {row.avg_delay_minutes.toFixed(1)} min avg
+                              {fmtNumber(row.avg_delay_minutes, {
+                                decimals: 1,
+                              })}{" "}
+                              min avg
                             </span>
                             <span className="text-sm font-semibold text-primary bg-gray-100 px-2 py-0.5 rounded">
                               {row.count}

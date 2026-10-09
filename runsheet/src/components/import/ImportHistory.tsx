@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { type Column, Table } from "@/components/ui";
+import { dateTime, number } from "../../lib/format";
 import { importApi } from "../../services/importApi";
 import type { ImportSessionRecord, ImportStatus } from "../../types/import";
 
@@ -55,13 +56,7 @@ const SOURCE_TYPE_LABELS: Record<string, string> = {
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso);
-    return d.toLocaleDateString(undefined, {
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
+    return dateTime(d);
   } catch {
     return iso;
   }
@@ -69,9 +64,9 @@ function formatDate(iso: string): string {
 
 function formatDuration(seconds?: number): string {
   if (seconds == null) return "—";
-  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${number(seconds, { decimals: 1 })}s`;
   const mins = Math.floor(seconds / 60);
-  const secs = (seconds % 60).toFixed(0);
+  const secs = number(seconds % 60);
   return `${mins}m ${secs}s`;
 }
 

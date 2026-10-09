@@ -3,6 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, Button, EntityLink, LoadErrorState } from "@/components/ui";
+import { calendarDate as fmtDate } from "../../lib/format";
 import { classifyLoadError, type LoadFailure } from "../../services/apiErrors";
 import { type DepotReadResponse, getDepot } from "../../services/fuelApi";
 import { PageTitle } from "../ui/PageHeader";
@@ -45,8 +46,7 @@ export default function DepotDetailPage({
     return "default";
   };
 
-  const formatDate = (s?: string | null) =>
-    s ? new Date(s).toLocaleDateString() : "—";
+  const formatDate = (s?: string | null) => (s ? fmtDate(s) : "—");
 
   if (loading) {
     return (

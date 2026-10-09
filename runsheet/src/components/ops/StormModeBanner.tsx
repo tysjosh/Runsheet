@@ -43,6 +43,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { hasAnyRole } from "../../config/modules";
+import { dateTime } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import type {
   StormModeActiveOverride,
@@ -110,12 +111,7 @@ function formatDateTime(iso: string | null | undefined): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
+    return dateTime(d);
   } catch {
     return iso;
   }

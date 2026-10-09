@@ -9,7 +9,9 @@
  *
  * Volumes are shown in US gallons (R2.7); the command carries litres.
  */
+
 import { useEffect, useId, useState } from "react";
+import { number as fmtNumber } from "../../../lib/format";
 import type {
   CompartmentShare,
   LaneView,
@@ -494,7 +496,7 @@ function TerminalSection({
                 >
                   <span>
                     <span className="font-medium">{nameOf(c.terminal_id)}</span>
-                    {` · $${c.price_per_gallon_usd.toFixed(3)}/gal · wait ${Math.round(c.avg_wait_minutes)} min · ${Math.round(c.distance_km_from_start)} km`}
+                    {` · $${fmtNumber(c.price_per_gallon_usd, { decimals: 3 })}/gal · wait ${Math.round(c.avg_wait_minutes)} min · ${Math.round(c.distance_km_from_start)} km`}
                     {c.wait_warning ? " · long wait" : ""}
                     {c.reasons.length > 0 && (
                       <span className="block text-gray-600">

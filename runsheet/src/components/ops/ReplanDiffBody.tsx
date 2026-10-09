@@ -5,9 +5,11 @@
  * Extracted from `FuelDistributionPage` so the Dispatch Board's suggestion
  * diff (dispatch-board R16.2, plan task 35) renders the same vocabulary.
  */
+
 import { ChevronDown, ChevronUp } from "lucide-react";
 import type React from "react";
 import { useState } from "react";
+import { dateTime, number as fmtNumber, productName } from "../../lib/format";
 import type { ReplanDiff } from "../../services/fuelApi";
 
 interface ReplanDiffSectionProps<T> {
@@ -87,9 +89,9 @@ export function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
             <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               index {s.index}
-              {s.gallons != null ? ` · ${s.gallons.toFixed(0)} gal` : ""}
-              {s.product_code ? ` · ${s.product_code}` : ""}
-              {s.eta ? ` · ETA ${new Date(s.eta).toLocaleString()}` : ""}
+              {s.gallons != null ? ` · ${fmtNumber(s.gallons)} gal` : ""}
+              {s.product_code ? ` · ${productName(s.product_code)}` : ""}
+              {s.eta ? ` · ETA ${dateTime(s.eta)}` : ""}
             </span>
           </div>
         )}
@@ -103,7 +105,7 @@ export function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
             <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
               was index {s.index}
-              {s.gallons != null ? ` · ${s.gallons.toFixed(0)} gal` : ""}
+              {s.gallons != null ? ` · ${fmtNumber(s.gallons)} gal` : ""}
             </span>
           </div>
         )}
@@ -141,8 +143,8 @@ export function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
-              {s.before_gallons.toFixed(0)} → {s.after_gallons.toFixed(0)} gal
-              {s.product_code ? ` · ${s.product_code}` : ""}
+              {fmtNumber(s.before_gallons)} → {fmtNumber(s.after_gallons)} gal
+              {s.product_code ? ` · ${productName(s.product_code)}` : ""}
             </span>
           </div>
         )}
@@ -154,10 +156,9 @@ export function ReplanDiffBody({ diff }: { diff: ReplanDiff }) {
           <div className="flex items-center justify-between">
             <span className="font-medium text-primary">{s.stop_id}</span>
             <span className="text-gray-500">
-              {new Date(s.before_eta).toLocaleString()} →{" "}
-              {new Date(s.after_eta).toLocaleString()} (
+              {dateTime(s.before_eta)} → {dateTime(s.after_eta)} (
               {s.shift_minutes >= 0 ? "+" : ""}
-              {s.shift_minutes.toFixed(0)} min)
+              {fmtNumber(s.shift_minutes)} min)
             </span>
           </div>
         )}

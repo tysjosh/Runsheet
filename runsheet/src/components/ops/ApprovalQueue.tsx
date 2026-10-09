@@ -18,6 +18,7 @@
 import { Check, Clock, RotateCcw, ShieldAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgentWebSocket } from "../../hooks/useAgentWebSocket";
+import { time } from "../../lib/format";
 import type { ApprovalEntry } from "../../services/agentApi";
 import {
   approveAction,
@@ -40,8 +41,7 @@ function getAgentLabel(agentId: string): string {
 
 function _formatTimestamp(iso: string): string {
   try {
-    const date = new Date(iso);
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return time(iso);
   } catch {
     return iso;
   }

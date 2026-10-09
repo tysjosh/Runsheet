@@ -5,8 +5,10 @@
  * grip onto a driver slot, or selected (Place mode) and placed, or paired
  * from its menu ("Pair with truck…").
  */
+
 import { GripVertical } from "lucide-react";
 import { type KeyboardEvent, type MouseEvent, useRef } from "react";
+import { number as fmtNumber } from "../../../lib/format";
 import type {
   DriverSummary,
   QualificationExpiry,
@@ -80,7 +82,8 @@ export function driverText(
   if (expiry) parts.push(expiry);
   if (isToday) {
     const drive = hosHours(d.hos, "remaining_drive_time");
-    if (drive !== null) parts.push(`${drive.toFixed(1)} h driving left`);
+    if (drive !== null)
+      parts.push(`${fmtNumber(drive, { decimals: 1 })} h driving left`);
   }
   if (d.eligible === false) {
     const reasons = d.ineligible_reasons.map(reasonText).filter(Boolean);

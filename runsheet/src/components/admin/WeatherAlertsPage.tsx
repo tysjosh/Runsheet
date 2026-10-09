@@ -35,6 +35,7 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { dateTime } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import {
   getStormModeStatus,
@@ -67,12 +68,7 @@ function formatDateTime(iso: string | null | undefined): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
+    return dateTime(d);
   } catch {
     return iso;
   }

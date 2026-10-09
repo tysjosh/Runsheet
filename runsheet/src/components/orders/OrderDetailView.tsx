@@ -29,6 +29,7 @@ import {
   useToasts,
 } from "@/components/ui";
 import { hasAnyRole } from "../../config/modules";
+import { dateTime as formatDateTimeShared, pct } from "../../lib/format";
 import { ApiError } from "../../services/api";
 import { PORTAL_REVIEW_HOLD_REASON } from "../../services/orderHoldReasons";
 import {
@@ -53,14 +54,7 @@ import { PageTitle } from "../ui/PageHeader";
 
 function formatDateTime(dateStr?: string | null): string {
   if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
+  return formatDateTimeShared(dateStr);
 }
 
 function getStatusColor(status: OrderStatus): string {
@@ -195,7 +189,7 @@ function IntakeMetadataSection({ order }: { order: FuelOrder }) {
             {meta.agent_confidence != null && (
               <div className="flex justify-between">
                 <span className="text-gray-500">Agent Confidence</span>
-                <span>{(meta.agent_confidence * 100).toFixed(0)}%</span>
+                <span>{pct(meta.agent_confidence, { fraction: true })}</span>
               </div>
             )}
             {meta.call_id && (

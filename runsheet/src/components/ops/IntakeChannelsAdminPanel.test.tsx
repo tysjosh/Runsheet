@@ -17,6 +17,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 
 jest.mock("../../services/intakeChannelsApi", () => ({
@@ -186,7 +187,11 @@ describe("IntakeChannelsAdminPanel — create", () => {
 
     // Submit
     await act(async () => {
-      fireEvent.click(screen.getByText("Create"));
+      fireEvent.click(
+        within(
+          screen.getByRole("dialog", { name: "Register channel" }),
+        ).getByRole("button", { name: "Register channel" }),
+      );
     });
 
     await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
@@ -216,7 +221,11 @@ describe("IntakeChannelsAdminPanel — create", () => {
     });
 
     await act(async () => {
-      fireEvent.click(screen.getByText("Create"));
+      fireEvent.click(
+        within(
+          screen.getByRole("dialog", { name: "Register channel" }),
+        ).getByRole("button", { name: "Register channel" }),
+      );
     });
 
     await waitFor(() => {
@@ -255,8 +264,9 @@ describe("IntakeChannelsAdminPanel — rotate secret", () => {
     expect(await screen.findByText("ch-rotate")).toBeInTheDocument();
 
     // Click rotate button
+    fireEvent.click(screen.getByRole("button", { name: /^Actions for/ }));
     fireEvent.click(
-      screen.getByRole("button", { name: /rotate secret for ch-rotate/i }),
+      await screen.findByRole("menuitem", { name: "Rotate secret" }),
     );
 
     await waitFor(() => expect(mockRotate).toHaveBeenCalledWith("ch-rotate"));
@@ -279,11 +289,8 @@ describe("IntakeChannelsAdminPanel — toggle enabled", () => {
     // Wait for channels to load
     expect(await screen.findByText("ch-toggle")).toBeInTheDocument();
 
-    await act(async () => {
-      fireEvent.click(
-        screen.getByRole("button", { name: /disable ch-toggle/i }),
-      );
-    });
+    fireEvent.click(screen.getByRole("button", { name: /^Actions for/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Disable" }));
 
     await waitFor(() =>
       expect(mockUpdate).toHaveBeenCalledWith("ch-toggle", { enabled: false }),
@@ -305,7 +312,8 @@ describe("IntakeChannelsAdminPanel — delete", () => {
     expect(await screen.findByText("ch-del")).toBeInTheDocument();
 
     // Open the delete confirmation modal
-    fireEvent.click(screen.getByRole("button", { name: /delete ch-del/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Actions for/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
 
     // Modal appears naming the channel; delete not yet called
     expect(
@@ -332,7 +340,8 @@ describe("IntakeChannelsAdminPanel — delete", () => {
 
     expect(await screen.findByText("ch-keep")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /delete ch-keep/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^Actions for/ }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Delete" }));
 
     expect(
       await screen.findByRole("heading", { name: /delete intake channel/i }),
