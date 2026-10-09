@@ -190,6 +190,22 @@ export async function installShellFake(
         },
         request_id: "e2e",
       });
+    // Single-object read: with the list body `by_account` is unset and the
+    // AR Aging tab throws once it loads, taking the Billing hub (and its h1)
+    // down with it.
+    if (path === "/commerce/ar-aging")
+      return json(200, {
+        data: {
+          bucket_current_cents: 0,
+          bucket_0_30_cents: 0,
+          bucket_31_60_cents: 0,
+          bucket_61_90_cents: 0,
+          bucket_90_plus_cents: 0,
+          total_open_cents: 0,
+          by_account: [],
+        },
+        request_id: "e2e",
+      });
     if (path === "/scheduling/jobs/summary" || path === "/scheduling/summary")
       return json(200, {
         data: {
