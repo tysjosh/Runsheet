@@ -1,32 +1,31 @@
 "use client";
 
 /**
- * CargoManifestEditor — Wraps CargoManifestView with an edit mode toggle.
+ * CargoManifestEditor: the read-only CargoManifestView plus "Edit", which
+ * opens an lg FormDialog with one row per cargo item (D9: every create/edit
+ * flow on FormDialog).
  *
- * In view mode, renders the read-only CargoManifestView.
- * In edit mode, cargo item fields become editable inputs.
- * Submit calls updateCargo and displays the updated manifest.
- * Status change buttons per item call updateCargoItemStatus.
- * On API error: displays error message and reverts form to previous state.
+ * - Save calls updateCargo and the parent shows the updated manifest.
+ * - Item status changes stay direct actions on the view (no input needed).
+ * - On an API error the dialog stays open with the message and the user's
+ *   edits (the FormDialog pattern), so nothing typed is lost (Req 7.6's
+ *   "previous state" is the saved manifest, which is untouched until a save
+ *   succeeds).
+ * - Weights use a NumberField (kg, up to 2 decimals); a weight the user
+ *   doesn't touch is sent back exactly as stored.
  *
- * Validates:
- * - Requirement 7.1: Edit button opens editable form for cargo items
- * - Requirement 7.2: Submit calls updateCargo API and displays updated manifest
- * - Requirement 7.3: Status change buttons call updateCargoItemStatus
- * - Requirement 7.6: On API error, display error and revert form to previous state
+ * Validates Requirements 7.1, 7.2, 7.3, 7.6.
  */
 
-import {
-  AlertTriangle,
-  CheckCircle,
-  Package,
-  Pencil,
-  Save,
-  Truck,
-  X,
-} from "lucide-react";
+import { Pencil } from "lucide-react";
 import { useCallback, useState } from "react";
-import { type Column, Table } from "@/components/ui";
+import {
+  Field,
+  type FieldErrors,
+  FormDialog,
+  INPUT_CLASS,
+  NumberField,
+} from "@/components/ui";
 import {
   updateCargo,
   updateCargoItemStatus,
@@ -45,6 +44,21 @@ interface CargoManifestEditorProps {
   onItemsChange?: (items: SchedulingCargoItem[]) => void;
 }
 
+type ManifestValues = { items: SchedulingCargoItem[] };
+
+/** Weight must be a number ≥ 0; description can't be blank. */
+export function validateManifest(values: ManifestValues): FieldErrors {
+  const errors: FieldErrors = {};
+  for (const item of values.items) {
+    const w = item.weight_kg as number | null;
+    if (w == null || Number.isNaN(w) || w < 0)
+      errors[`weight_${item.item_id}`] = "Enter a weight of 0 kg or more.";
+    if (!item.description?.trim())
+      errors[`description_${item.item_id}`] = "Enter a description.";
+  }
+  return errors;
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function CargoManifestEditor({
@@ -53,60 +67,7 @@ export default function CargoManifestEditor({
   onItemsChange,
 }: CargoManifestEditorProps) {
   const [editing, setEditing] = useState(false);
-  const [editItems, setEditItems] = useState<SchedulingCargoItem[]>([]);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-
-  // ── Enter edit mode ──────────────────────────────────────────────────────
-
-  const handleStartEdit = () => {
-    setEditItems(items.map((item) => ({ ...item })));
-    setError("");
-    setEditing(true);
-  };
-
-  const handleCancelEdit = () => {
-    setEditing(false);
-    setEditItems([]);
-    setError("");
-  };
-
-  // ── Field change handler ─────────────────────────────────────────────────
-
-  const handleFieldChange = (
-    itemId: string,
-    field: keyof SchedulingCargoItem,
-    value: string | number,
-  ) => {
-    setEditItems((prev) =>
-      prev.map((item) =>
-        item.item_id === itemId ? { ...item, [field]: value } : item,
-      ),
-    );
-  };
-
-  // ── Save edited manifest ─────────────────────────────────────────────────
-
-  const handleSave = async () => {
-    setError("");
-    setSaving(true);
-    try {
-      const res = await updateCargo(jobId, editItems);
-      onItemsChange?.(res.data);
-      setEditing(false);
-      setEditItems([]);
-    } catch (err) {
-      // Revert form to previous state (editItems stays as snapshot of items before edit)
-      setEditItems(items.map((item) => ({ ...item })));
-      setError(
-        err instanceof Error ? err.message : "Failed to update cargo manifest",
-      );
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // ── Status change handler (used in both view and edit modes) ─────────────
 
   const handleUpdateItemStatus = useCallback(
     async (itemId: string, newStatus: CargoItemStatus) => {
@@ -114,19 +75,9 @@ export default function CargoManifestEditor({
       try {
         const res = await updateCargoItemStatus(jobId, itemId, newStatus);
         const updatedItem = res.data;
-
-        // Update the parent's items list
-        const updatedItems = items.map((item) =>
-          item.item_id === itemId ? updatedItem : item,
+        onItemsChange?.(
+          items.map((item) => (item.item_id === itemId ? updatedItem : item)),
         );
-        onItemsChange?.(updatedItems);
-
-        // Also update edit items if currently editing
-        if (editing) {
-          setEditItems((prev) =>
-            prev.map((item) => (item.item_id === itemId ? updatedItem : item)),
-          );
-        }
       } catch (err) {
         setError(
           err instanceof Error
@@ -135,15 +86,8 @@ export default function CargoManifestEditor({
         );
       }
     },
-    [jobId, items, editing, onItemsChange],
+    [jobId, items, onItemsChange],
   );
-
-  // ── Shared styles ────────────────────────────────────────────────────────
-
-  const inputClass =
-    "w-full px-2 py-1 text-sm border border-gray-200 rounded focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-
-  // ── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div>
@@ -152,314 +96,130 @@ export default function CargoManifestEditor({
         <h3 className="text-sm font-medium text-gray-600 uppercase tracking-wider">
           Cargo Manifest
         </h3>
-        <div className="flex items-center gap-2">
-          {editing ? (
-            <>
-              <button
-                onClick={handleCancelEdit}
-                disabled={saving}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50 disabled:opacity-50"
-                aria-label="Cancel editing"
-              >
-                <X className="w-4 h-4" />
-                Cancel
-              </button>
-              <button
-                onClick={handleSave}
-                disabled={saving}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-white rounded-lg disabled:opacity-50 bg-primary hover:bg-primary-hover"
-                aria-label="Save cargo manifest"
-              >
-                {saving ? (
-                  <div className="w-4 h-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                ) : (
-                  <Save className="w-4 h-4" />
-                )}
-                {saving ? "Saving..." : "Save"}
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={handleStartEdit}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 rounded-lg hover:bg-gray-50"
-              aria-label="Edit cargo manifest"
-            >
-              <Pencil className="w-4 h-4" />
-              Edit
-            </button>
-          )}
-        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setError("");
+            setEditing(true);
+          }}
+          disabled={items.length === 0}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-700 hover:text-gray-900 rounded-lg hover:bg-gray-50 disabled:opacity-50"
+          aria-label="Edit cargo manifest"
+        >
+          <Pencil className="w-4 h-4" aria-hidden="true" />
+          Edit
+        </button>
       </div>
 
-      {/* Error banner */}
       {error && (
         <div className="mx-6 mt-3">
-          <p className="text-sm text-error bg-error-light px-3 py-2 rounded-lg">
+          <p
+            role="alert"
+            className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
+          >
             {error}
           </p>
         </div>
       )}
 
-      {/* Content */}
-      {editing ? (
-        <EditableCargoTable
-          items={editItems}
-          onFieldChange={handleFieldChange}
-          onUpdateItemStatus={handleUpdateItemStatus}
-          inputClass={inputClass}
-        />
-      ) : (
-        <CargoManifestView
-          items={items}
-          onUpdateItemStatus={handleUpdateItemStatus}
-        />
-      )}
-    </div>
-  );
-}
+      <CargoManifestView
+        items={items}
+        onUpdateItemStatus={handleUpdateItemStatus}
+      />
 
-// ─── Editable Table Sub-component ────────────────────────────────────────────
-
-function getStatusBadge(status: CargoItemStatus): string {
-  switch (status) {
-    case "pending":
-      return "text-gray-700 bg-gray-100";
-    case "loaded":
-      return "text-info-dark bg-info-light";
-    case "in_transit":
-      return "text-warning-dark bg-warning-light";
-    case "delivered":
-      return "text-success-dark bg-success-light";
-    case "damaged":
-      return "text-error-dark bg-error-light";
-    default:
-      return "text-gray-700 bg-gray-100";
-  }
-}
-
-function formatStatus(status: string): string {
-  return status
-    .split("_")
-    .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
-interface EditableCargoTableProps {
-  items: SchedulingCargoItem[];
-  onFieldChange: (
-    itemId: string,
-    field: keyof SchedulingCargoItem,
-    value: string | number,
-  ) => void;
-  onUpdateItemStatus: (
-    itemId: string,
-    newStatus: CargoItemStatus,
-  ) => Promise<void>;
-  inputClass: string;
-}
-
-function EditableCargoTable({
-  items,
-  onFieldChange,
-  onUpdateItemStatus,
-  inputClass,
-}: EditableCargoTableProps) {
-  const columns: Column<SchedulingCargoItem>[] = [
-    {
-      key: "item_id",
-      label: "Item ID",
-      className: "text-sm font-medium text-primary",
-      render: (item) => item.item_id,
-    },
-    {
-      key: "description",
-      label: "Description",
-      render: (item) => (
-        <input
-          type="text"
-          value={item.description}
-          onChange={(e) =>
-            onFieldChange(item.item_id, "description", e.target.value)
-          }
-          className={inputClass}
-          aria-label={`Description for item ${item.item_id}`}
-        />
-      ),
-    },
-    {
-      key: "weight_kg",
-      label: "Weight (kg)",
-      render: (item) => (
-        <input
-          type="number"
-          value={item.weight_kg}
-          onChange={(e) =>
-            onFieldChange(
-              item.item_id,
-              "weight_kg",
-              e.target.value === "" ? 0 : Number(e.target.value),
-            )
-          }
-          min="0"
-          step="any"
-          className={inputClass}
-          aria-label={`Weight for item ${item.item_id}`}
-        />
-      ),
-    },
-    {
-      key: "container_number",
-      label: "Container",
-      render: (item) => (
-        <input
-          type="text"
-          value={item.container_number ?? ""}
-          onChange={(e) =>
-            onFieldChange(item.item_id, "container_number", e.target.value)
-          }
-          className={inputClass}
-          aria-label={`Container number for item ${item.item_id}`}
-        />
-      ),
-    },
-    {
-      key: "seal_number",
-      label: "Seal No.",
-      render: (item) => (
-        <input
-          type="text"
-          value={item.seal_number ?? ""}
-          onChange={(e) =>
-            onFieldChange(item.item_id, "seal_number", e.target.value)
-          }
-          className={inputClass}
-          aria-label={`Seal number for item ${item.item_id}`}
-        />
-      ),
-    },
-    {
-      key: "item_status",
-      label: "Status",
-      render: (item) => (
-        <span
-          className={`inline-flex items-center px-2.5 py-0.5 rounded-md text-xs font-medium ${getStatusBadge(item.item_status)}`}
-        >
-          {formatStatus(item.item_status)}
-        </span>
-      ),
-    },
-    {
-      key: "actions",
-      label: "Actions",
-      render: (item) => (
-        <CargoItemStatusButtons
-          itemId={item.item_id}
-          currentStatus={item.item_status}
-          onUpdateStatus={onUpdateItemStatus}
-        />
-      ),
-    },
-  ];
-
-  return (
-    <Table<SchedulingCargoItem>
-      ariaLabel="Editable cargo manifest"
-      columns={columns}
-      data={items}
-      getRowId={(item) => item.item_id}
-      emptyState={
-        <div className="text-gray-500">
-          <p className="text-lg font-medium text-gray-500">No cargo items</p>
-          <p className="text-sm text-gray-500 mt-1">
-            This job has no cargo manifest items to edit
-          </p>
-        </div>
-      }
-    />
-  );
-}
-
-// ─── Inline Status Buttons (mirrors CargoItemActions pattern) ────────────────
-
-const TARGET_STATUSES: {
-  status: CargoItemStatus;
-  label: string;
-  icon: React.ReactNode;
-  className: string;
-}[] = [
-  {
-    status: "loaded",
-    label: "Loaded",
-    icon: <Package className="w-3 h-3" />,
-    className: "text-info-dark bg-info-light hover:bg-info-light",
-  },
-  {
-    status: "in_transit",
-    label: "In Transit",
-    icon: <Truck className="w-3 h-3" />,
-    className: "text-warning-dark bg-warning-light hover:bg-warning-light",
-  },
-  {
-    status: "delivered",
-    label: "Delivered",
-    icon: <CheckCircle className="w-3 h-3" />,
-    className: "text-success-dark bg-success-light hover:bg-success-light",
-  },
-  {
-    status: "damaged",
-    label: "Damaged",
-    icon: <AlertTriangle className="w-3 h-3" />,
-    className: "text-error-dark bg-error-light hover:bg-error-light",
-  },
-];
-
-interface CargoItemStatusButtonsProps {
-  itemId: string;
-  currentStatus: CargoItemStatus;
-  onUpdateStatus: (itemId: string, newStatus: CargoItemStatus) => Promise<void>;
-}
-
-function CargoItemStatusButtons({
-  itemId,
-  currentStatus,
-  onUpdateStatus,
-}: CargoItemStatusButtonsProps) {
-  const [loading, setLoading] = useState<CargoItemStatus | null>(null);
-
-  const available = TARGET_STATUSES.filter((t) => t.status !== currentStatus);
-
-  if (available.length === 0) return null;
-
-  const handleClick = async (status: CargoItemStatus) => {
-    setLoading(status);
-    try {
-      await onUpdateStatus(itemId, status);
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  return (
-    <div className="flex items-center gap-1 flex-wrap">
-      {available.map((target) => {
-        const isLoading = loading === target.status;
-        return (
-          <button
-            key={target.status}
-            onClick={() => handleClick(target.status)}
-            disabled={loading !== null}
-            className={`inline-flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-colors ${target.className} disabled:opacity-50`}
-            aria-label={`Mark item ${itemId} as ${target.label}`}
-          >
-            {isLoading ? (
-              <div className="w-3 h-3 animate-spin rounded-full border border-current border-t-transparent" />
-            ) : (
-              target.icon
-            )}
-            {target.label}
-          </button>
-        );
-      })}
+      <FormDialog<ManifestValues, SchedulingCargoItem[]>
+        open={editing}
+        size="lg"
+        title="Edit cargo manifest"
+        help="Change descriptions, weights, containers and seals. Item status changes stay on the manifest."
+        submitLabel="Save manifest"
+        successMessage="Cargo manifest saved"
+        initialValues={{ items }}
+        validate={validateManifest}
+        onSubmit={async (v) => (await updateCargo(jobId, v.items)).data}
+        onSaved={(updated) => onItemsChange?.(updated)}
+        onClose={() => setEditing(false)}
+      >
+        {({ values, setValues, errors }) => {
+          const patch = (
+            itemId: string,
+            change: Partial<SchedulingCargoItem>,
+          ) =>
+            setValues((prev) => ({
+              items: prev.items.map((it) =>
+                it.item_id === itemId ? { ...it, ...change } : it,
+              ),
+            }));
+          return (
+            <>
+              {values.items.map((item) => (
+                <fieldset
+                  key={item.item_id}
+                  className="col-span-2 grid grid-cols-2 gap-3 rounded-lg border border-slate-200 p-3"
+                >
+                  <legend className="px-1 text-xs font-semibold text-text-muted">
+                    Item {item.item_id}
+                  </legend>
+                  <Field
+                    label="Description"
+                    required
+                    error={errors[`description_${item.item_id}`]}
+                  >
+                    <input
+                      type="text"
+                      className={INPUT_CLASS}
+                      value={item.description}
+                      onChange={(e) =>
+                        patch(item.item_id, { description: e.target.value })
+                      }
+                    />
+                  </Field>
+                  <Field
+                    label="Weight"
+                    required
+                    span={1}
+                    error={errors[`weight_${item.item_id}`]}
+                    id={`cargo-weight-${item.item_id}`}
+                  >
+                    <NumberField
+                      id={`cargo-weight-${item.item_id}`}
+                      unit="kg"
+                      min={0}
+                      decimals={2}
+                      value={item.weight_kg}
+                      onChange={(n) =>
+                        patch(item.item_id, { weight_kg: n as number })
+                      }
+                    />
+                  </Field>
+                  <Field label="Container" span={1}>
+                    <input
+                      type="text"
+                      className={INPUT_CLASS}
+                      value={item.container_number ?? ""}
+                      onChange={(e) =>
+                        patch(item.item_id, {
+                          container_number: e.target.value,
+                        })
+                      }
+                    />
+                  </Field>
+                  <Field label="Seal number" span={1}>
+                    <input
+                      type="text"
+                      className={INPUT_CLASS}
+                      value={item.seal_number ?? ""}
+                      onChange={(e) =>
+                        patch(item.item_id, { seal_number: e.target.value })
+                      }
+                    />
+                  </Field>
+                </fieldset>
+              ))}
+            </>
+          );
+        }}
+      </FormDialog>
     </div>
   );
 }

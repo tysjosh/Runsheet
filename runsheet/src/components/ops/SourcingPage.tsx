@@ -610,189 +610,135 @@ interface WaitReportFormProps {
   onSubmitted: () => void;
 }
 
+type WaitReportDialogValues = Omit<WaitReportFormValues, "wait_minutes"> & {
+  wait_minutes: number | null;
+};
+
+const EMPTY_WAIT_REPORT_DIALOG: WaitReportDialogValues = {
+  ...EMPTY_WAIT_REPORT_FORM,
+  wait_minutes: null,
+};
+
 /**
- * Inline wait-report submission form rendered below the wait-summary
- * panel. Lets dispatchers file a manual observation against the
- * selected terminal without leaving the Sourcing page. The optional
- * dispatcher note typed into the Notes textarea is persisted end-to-
- * end via ``TerminalWaitReportCreateRequest.notes`` so the rolling
- * wait-time context survives into the ``terminal_wait_reports`` ES
- * index for post-hoc analytics and audit (Req 8.4.2).
+ * "Report wait time" opens an md FormDialog (D9: every create flow) to file
+ * a manual observation against the candidate terminal without leaving the
+ * Sourcing page. Whole minutes via NumberField. The optional dispatcher note
+ * is persisted end-to-end via ``TerminalWaitReportCreateRequest.notes`` so
+ * the rolling wait-time context survives into the ``terminal_wait_reports``
+ * ES index for post-hoc analytics and audit (Req 8.4.2). On success the
+ * dialog closes, toasts and the wait summary re-fetches.
  */
 function WaitReportForm({ terminalId, onSubmitted }: WaitReportFormProps) {
-  const [form, setForm] = useState<WaitReportFormValues>(
-    EMPTY_WAIT_REPORT_FORM,
-  );
-  const [fieldErrors, setFieldErrors] = useState<WaitReportFormErrors>({});
-  const [apiError, setApiError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-
-  const inputClass =
-    "w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-gray-200 focus:border-gray-300 bg-white";
-  const errorInputClass =
-    "w-full px-3 py-2 text-sm border border-error rounded-lg focus:ring-2 focus:ring-error-light focus:border-error bg-white";
-
-  function updateField<K extends keyof WaitReportFormValues>(
-    key: K,
-    value: WaitReportFormValues[K],
-  ) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-    if (key in fieldErrors) {
-      setFieldErrors((prev) => ({ ...prev, [key]: undefined }));
-    }
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    const errors = validateWaitReportForm(form);
-    setFieldErrors(errors);
-    if (Object.keys(errors).length > 0) return;
-
-    setApiError(null);
-    setSubmitting(true);
-    try {
-      const body: TerminalWaitReportCreateRequest = {
-        wait_minutes: Number(form.wait_minutes),
-        source: form.source,
-        observed_at: new Date().toISOString(),
-        notes: form.notes.trim() || undefined,
-      };
-      const reporter = form.reporter_id.trim();
-      if (reporter) body.reporter_id = reporter;
-      await submitTerminalWaitReport(terminalId, body);
-      setForm(EMPTY_WAIT_REPORT_FORM);
-      onSubmitted();
-    } catch (err) {
-      if (err instanceof ApiError) {
-        setApiError(err.message || `Request failed (HTTP ${err.status}).`);
-      } else {
-        setApiError(
-          err instanceof Error ? err.message : "Failed to submit wait report.",
-        );
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
+  const [open, setOpen] = useState(false);
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="space-y-3"
-      data-testid={`wait-report-form-${terminalId}`}
-      aria-label={`Submit wait report for ${terminalId}`}
-    >
-      <div className="text-[10px] uppercase tracking-wide text-gray-500">
-        File a wait report
-      </div>
-      {apiError && (
-        <p
-          role="alert"
-          className="text-sm text-error bg-error-light px-3 py-2 rounded-lg"
-          data-testid={`wait-report-error-${terminalId}`}
-        >
-          {apiError}
-        </p>
-      )}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        <div>
-          <label
-            htmlFor={`wr-minutes-${terminalId}`}
-            className="block text-[10px] uppercase text-gray-500 mb-1"
-          >
-            Wait minutes
-          </label>
-          <input
-            id={`wr-minutes-${terminalId}`}
-            type="number"
-            min="0"
-            step="1"
-            className={fieldErrors.wait_minutes ? errorInputClass : inputClass}
-            value={form.wait_minutes}
-            onChange={(e) => updateField("wait_minutes", e.target.value)}
-            placeholder="e.g. 45"
-            required
-          />
-          {fieldErrors.wait_minutes && (
-            <p className="text-xs text-error mt-1">
-              {fieldErrors.wait_minutes}
-            </p>
-          )}
-        </div>
-        <div>
-          <label
-            htmlFor={`wr-source-${terminalId}`}
-            className="block text-[10px] uppercase text-gray-500 mb-1"
-          >
-            Source
-          </label>
-          <select
-            id={`wr-source-${terminalId}`}
-            className={inputClass}
-            value={form.source}
-            onChange={(e) =>
-              updateField(
-                "source",
-                e.target.value as WaitReportFormValues["source"],
-              )
-            }
-          >
-            <option value="driver_report">Driver report</option>
-            <option value="eld_geofence">ELD geofence</option>
-          </select>
-        </div>
-        <div>
-          <label
-            htmlFor={`wr-reporter-${terminalId}`}
-            className="block text-[10px] uppercase text-gray-500 mb-1"
-          >
-            Reporter ID
-            {form.source === "driver_report" && (
-              <span className="text-error"> *</span>
-            )}
-          </label>
-          <input
-            id={`wr-reporter-${terminalId}`}
-            type="text"
-            className={fieldErrors.reporter_id ? errorInputClass : inputClass}
-            value={form.reporter_id}
-            onChange={(e) => updateField("reporter_id", e.target.value)}
-            placeholder="e.g. driver-042"
-          />
-          {fieldErrors.reporter_id && (
-            <p className="text-xs text-error mt-1">{fieldErrors.reporter_id}</p>
-          )}
-        </div>
-      </div>
-      <div>
-        <label
-          htmlFor={`wr-notes-${terminalId}`}
-          className="block text-[10px] uppercase text-gray-500 mb-1"
-        >
-          Notes (optional)
-        </label>
-        <textarea
-          id={`wr-notes-${terminalId}`}
-          rows={2}
-          className={inputClass}
-          value={form.notes}
-          onChange={(e) => updateField("notes", e.target.value)}
-          placeholder="Why was this wait time observed?"
-        />
-      </div>
-      <div className="flex items-center justify-end">
-        <button
-          type="submit"
-          disabled={submitting}
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white rounded-lg bg-primary hover:bg-primary-hover disabled:opacity-50"
-        >
-          {submitting ? (
-            <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
-          ) : null}
-          Submit wait report
-        </button>
-      </div>
-    </form>
+    <div className="flex items-center justify-between gap-2">
+      <span className="text-xs text-gray-600">
+        Seen a different wait at this terminal?
+      </span>
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => setOpen(true)}
+        data-testid={`wait-report-open-${terminalId}`}
+      >
+        Report wait time
+      </Button>
+      <FormDialog<WaitReportDialogValues>
+        open={open}
+        size="md"
+        title="Report wait time"
+        help={`Terminal ${terminalId}. The report joins the rolling 2-hour wait summary.`}
+        submitLabel="Submit wait report"
+        successMessage="Wait report submitted"
+        initialValues={EMPTY_WAIT_REPORT_DIALOG}
+        validate={(v) =>
+          validateWaitReportForm({
+            ...v,
+            wait_minutes:
+              v.wait_minutes == null || Number.isNaN(v.wait_minutes)
+                ? ""
+                : String(v.wait_minutes),
+          }) as FieldErrors
+        }
+        onSubmit={async (v) => {
+          const body: TerminalWaitReportCreateRequest = {
+            wait_minutes: v.wait_minutes as number,
+            source: v.source,
+            observed_at: new Date().toISOString(),
+            notes: v.notes.trim() || undefined,
+          };
+          const reporter = v.reporter_id.trim();
+          if (reporter) body.reporter_id = reporter;
+          await submitTerminalWaitReport(terminalId, body);
+        }}
+        onSaved={onSubmitted}
+        onClose={() => setOpen(false)}
+      >
+        {({ values, set, errors }) => (
+          <>
+            <Field
+              label="Wait minutes"
+              required
+              span={1}
+              error={errors.wait_minutes}
+              id={`wr-minutes-${terminalId}`}
+            >
+              <NumberField
+                id={`wr-minutes-${terminalId}`}
+                unit="min"
+                min={0}
+                decimals={0}
+                value={values.wait_minutes}
+                onChange={(n) => set("wait_minutes", n)}
+                placeholder="45"
+              />
+            </Field>
+            <Field label="Source" span={1} id={`wr-source-${terminalId}`}>
+              <select
+                id={`wr-source-${terminalId}`}
+                className={INPUT_CLASS}
+                value={values.source}
+                onChange={(e) =>
+                  set(
+                    "source",
+                    e.target.value as WaitReportFormValues["source"],
+                  )
+                }
+              >
+                <option value="driver_report">Driver report</option>
+                <option value="eld_geofence">ELD geofence</option>
+              </select>
+            </Field>
+            <Field
+              label="Reporter ID"
+              required={values.source === "driver_report"}
+              error={errors.reporter_id}
+              id={`wr-reporter-${terminalId}`}
+            >
+              <input
+                id={`wr-reporter-${terminalId}`}
+                type="text"
+                className={INPUT_CLASS}
+                value={values.reporter_id}
+                onChange={(e) => set("reporter_id", e.target.value)}
+                placeholder="driver-042"
+              />
+            </Field>
+            <Field label="Notes (optional)" id={`wr-notes-${terminalId}`}>
+              <textarea
+                id={`wr-notes-${terminalId}`}
+                rows={2}
+                className={INPUT_CLASS}
+                value={values.notes}
+                onChange={(e) => set("notes", e.target.value)}
+                placeholder="Why was this wait time observed?"
+              />
+            </Field>
+          </>
+        )}
+      </FormDialog>
+    </div>
   );
 }
 
