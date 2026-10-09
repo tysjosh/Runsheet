@@ -131,12 +131,46 @@ function StatCard({ label, value, icon, accent = "blue" }: StatCardProps) {
 
 // ─── Table columns ───────────────────────────────────────────────────────────
 
-const jobMetricsColumns: Column<JobMetricsBucket>[] = [
+const UTC_DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "UTC",
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+const UTC_HOUR = new Intl.DateTimeFormat("en-GB", {
+  timeZone: "UTC",
+  hour: "2-digit",
+  hourCycle: "h23",
+});
+
+/**
+ * Bucket label in UTC (F11). Buckets are UTC days/hours on the backend, so a
+ * local `toLocaleString` showed the 10-06 bucket as "10/5/2026, 8:00 PM".
+ * Daily: "YYYY-MM-DD"; hourly: "YYYY-MM-DD HH:00 UTC".
+ */
+export function formatBucketLabel(
+  timestamp: string,
+  granularity: "hourly" | "daily",
+): string {
+  const d = new Date(timestamp);
+  if (Number.isNaN(d.getTime())) return timestamp;
+  const day = UTC_DAY.format(d);
+  return granularity === "daily" ? day : `${day} ${UTC_HOUR.format(d)}:00 UTC`;
+}
+
+/** Completion rate from the API is already a percentage (0–100) (F4). */
+export function completionBarWidth(rate: number): string {
+  return `${Math.min(Math.max(rate, 0), 100)}%`;
+}
+
+const buildJobMetricsColumns = (
+  granularity: "hourly" | "daily",
+): Column<JobMetricsBucket>[] => [
   {
     key: "timestamp",
-    label: "Timestamp",
+    label: granularity === "daily" ? "Date (UTC)" : "Hour (UTC)",
     className: "text-gray-700 whitespace-nowrap",
-    render: (bucket) => new Date(bucket.timestamp).toLocaleString(),
+    render: (bucket) => formatBucketLabel(bucket.timestamp, granularity),
   },
   {
     key: "counts_by_status",
@@ -235,6 +269,8 @@ export default function SchedulingMetricsPage() {
 
   // ── Section data ─────────────────────────────────────────────────────────
   const [jobMetrics, setJobMetrics] = useState<JobMetricsBucket[]>([]);
+  // Granularity the backend actually used (it may coarsen hourly to daily).
+  const [jobBucket, setJobBucket] = useState<"hourly" | "daily">("daily");
   const [completionMetrics, setCompletionMetrics] = useState<
     CompletionMetric[]
   >([]);
@@ -270,8 +306,15 @@ export default function SchedulingMetricsPage() {
           getDelayMetrics(filters),
         ]);
 
-      if (jobRes.status === "fulfilled")
+      if (jobRes.status === "fulfilled") {
         setJobMetrics((jobRes.value as any).data ?? []);
+        const used = (jobRes.value as any).bucket;
+        setJobBucket(
+          used === "hourly" || used === "daily"
+            ? used
+            : (filters.bucket ?? "daily"),
+        );
+      }
       if (completionRes.status === "fulfilled")
         setCompletionMetrics((completionRes.value as any).data ?? []);
       if (assetRes.status === "fulfilled")
@@ -385,6 +428,8 @@ export default function SchedulingMetricsPage() {
             />
           </div>
 
+          <span className="text-xs text-gray-500">Dates are in UTC</span>
+
           {/* Clear filters */}
           {(startDate || endDate) && (
             <button
@@ -425,7 +470,7 @@ export default function SchedulingMetricsPage() {
             <Table<JobMetricsBucket>
               ariaLabel="Job metrics"
               variant="compact"
-              columns={jobMetricsColumns}
+              columns={buildJobMetricsColumns(jobBucket)}
               data={jobMetrics}
               getRowId={(bucket) => bucket.timestamp}
             />
@@ -458,14 +503,14 @@ export default function SchedulingMetricsPage() {
                         Completion Rate
                       </span>
                       <span className="text-sm font-semibold text-primary">
-                        {(metric.completion_rate * 100).toFixed(1)}%
+                        {metric.completion_rate.toFixed(1)}%
                       </span>
                     </div>
                     <div className="w-full bg-gray-100 rounded-full h-1.5">
                       <div
                         className="bg-success h-1.5 rounded-full transition-all"
                         style={{
-                          width: `${Math.min(metric.completion_rate * 100, 100)}%`,
+                          width: completionBarWidth(metric.completion_rate),
                         }}
                       />
                     </div>

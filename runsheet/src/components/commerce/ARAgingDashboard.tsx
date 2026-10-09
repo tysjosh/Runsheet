@@ -9,6 +9,7 @@ import type {
   TenantAgingResponse,
 } from "../../services/commerceApi";
 import { getArAging, getArAgingHistory } from "../../services/commerceApi";
+import { AGING_LABELS } from "./agingLabels";
 
 interface ARAgingDashboardProps {
   onViewAccount?: (accountId: string) => void;
@@ -101,24 +102,30 @@ export default function ARAgingDashboard({
 
   // Calculate bucket percentages for the chart
   const totalCents = aging.total_open_cents || 1;
+  // Aged by days past due_date (F12); Current = not yet due.
   const buckets = [
     {
-      label: "0–30 Days",
+      label: AGING_LABELS.current,
+      cents: aging.bucket_current_cents ?? 0,
+      color: "bg-info",
+    },
+    {
+      label: AGING_LABELS.d1_30,
       cents: aging.bucket_0_30_cents,
       color: "bg-success",
     },
     {
-      label: "31–60 Days",
+      label: AGING_LABELS.d31_60,
       cents: aging.bucket_31_60_cents,
       color: "bg-warning",
     },
     {
-      label: "61–90 Days",
+      label: AGING_LABELS.d61_90,
       cents: aging.bucket_61_90_cents,
       color: "bg-warning",
     },
     {
-      label: "90+ Days",
+      label: AGING_LABELS.d90_plus,
       cents: aging.bucket_90_plus_cents,
       color: "bg-error",
     },
@@ -149,7 +156,7 @@ export default function ARAgingDashboard({
             <p className="text-2xl font-bold">{aging.by_account.length}</p>
           </div>
           <div className="border rounded p-4">
-            <p className="text-sm text-gray-600">90+ Days Outstanding</p>
+            <p className="text-sm text-gray-600">90+ days past due</p>
             <p className="text-2xl font-bold text-error-dark">
               {formatCents(aging.bucket_90_plus_cents)}
             </p>
@@ -159,9 +166,12 @@ export default function ARAgingDashboard({
 
       {/* Bucket chart (horizontal bar) */}
       <section aria-labelledby="bucket-chart-heading" className="mb-8">
-        <h2 id="bucket-chart-heading" className="text-lg font-semibold mb-3">
+        <h2 id="bucket-chart-heading" className="text-lg font-semibold mb-1">
           Aging Buckets
         </h2>
+        <p className="text-sm text-gray-500 mb-3">
+          Days past the invoice due date. Current is not yet due.
+        </p>
         <div className="border rounded p-4">
           {/* Stacked bar */}
           <div
@@ -186,7 +196,7 @@ export default function ARAgingDashboard({
           </div>
 
           {/* Legend */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
             {buckets.map((bucket) => (
               <div key={bucket.label} className="flex items-center gap-2">
                 <span className={`w-3 h-3 rounded ${bucket.color}`} />
@@ -212,8 +222,17 @@ export default function ARAgingDashboard({
             columns={[
               { key: "snapshot_date", label: "Date" },
               {
+                key: "bucket_current_cents",
+                label: "Current",
+                // null: snapshot from before due-date aging (no Current bucket).
+                render: (snap) =>
+                  snap.bucket_current_cents == null
+                    ? "—"
+                    : formatCents(snap.bucket_current_cents),
+              },
+              {
                 key: "bucket_0_30_cents",
-                label: "0–30",
+                label: "1–30",
                 render: (snap) => formatCents(snap.bucket_0_30_cents),
               },
               {
@@ -261,8 +280,13 @@ export default function ARAgingDashboard({
             columns={[
               { key: "display_name", label: "Account" },
               {
+                key: "bucket_current_cents",
+                label: "Current",
+                render: (acct) => formatCents(acct.bucket_current_cents ?? 0),
+              },
+              {
                 key: "bucket_0_30_cents",
-                label: "0–30",
+                label: "1–30",
                 render: (acct) => formatCents(acct.bucket_0_30_cents),
               },
               {

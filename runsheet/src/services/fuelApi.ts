@@ -173,6 +173,28 @@ export interface FuelAlert {
   location_name?: string | null;
 }
 
+/** Backend sentinel for "never empties" (no consumption). */
+export const NO_CONSUMPTION_DAYS = 99999;
+
+/**
+ * Days until empty worth showing, or null for a station with no
+ * consumption (the 99999 sentinel, or a rate of 0), which renders "—" (F5).
+ */
+export function displayDaysUntilEmpty(station: {
+  days_until_empty: number;
+  daily_consumption_rate?: number | null;
+}): number | null {
+  const days = station.days_until_empty;
+  if (typeof days !== "number" || !Number.isFinite(days)) return null;
+  if (days >= NO_CONSUMPTION_DAYS) return null;
+  if (
+    typeof station.daily_consumption_rate === "number" &&
+    station.daily_consumption_rate <= 0
+  )
+    return null;
+  return days > 0 ? days : null;
+}
+
 // ─── Metrics Types ───────────────────────────────────────────────────────────
 
 export interface ConsumptionMetric {
@@ -192,7 +214,8 @@ export interface FuelNetworkSummary {
   total_capacity_liters: number;
   total_current_stock_liters: number;
   total_daily_consumption: number;
-  average_days_until_empty: number;
+  /** Average over stations that consume fuel; null when none do (F5). */
+  average_days_until_empty: number | null;
   stations_normal: number;
   stations_low: number;
   stations_critical: number;

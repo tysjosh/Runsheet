@@ -122,6 +122,34 @@ describe("AccountDetailPage", () => {
     expect(screen.getByText("$1,500.00")).toBeInTheDocument(); // 90+
   });
 
+  // F12: aged by days past due_date, with a Current (not yet due) card.
+  it("shows the Current bucket and days-past-due labels", async () => {
+    mockGetAccount.mockResolvedValue({
+      data: accountFixture(),
+      request_id: "r1",
+    } as any);
+    mockGetAccountAging.mockResolvedValue({
+      data: agingFixture({ bucket_current_cents: 70000 }),
+      request_id: "r2",
+    } as any);
+
+    render(<AccountDetailPage accountId="acc_001" />);
+
+    expect(
+      await screen.findByText("Current (not yet due)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("$700.00")).toBeInTheDocument();
+    for (const label of [
+      "1–30 days past due",
+      "31–60 days past due",
+      "61–90 days past due",
+      "90+ days past due",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    expect(screen.queryByText("0–30 Days")).not.toBeInTheDocument();
+  });
+
   it("shows loading state initially", () => {
     mockGetAccount.mockReturnValue(new Promise(() => {}));
     mockGetAccountAging.mockReturnValue(new Promise(() => {}));

@@ -18,6 +18,7 @@ import type {
   StationStatus,
 } from "../../services/fuelApi";
 import {
+  displayDaysUntilEmpty,
   getEventQuantityGallons,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
@@ -191,8 +192,8 @@ export default function FuelStationDetail({
             <div className="flex items-center justify-center gap-1">
               <Clock className="w-3.5 h-3.5 text-gray-500" aria-hidden="true" />
               <span className="text-lg font-semibold text-primary">
-                {station.days_until_empty > 0
-                  ? `${station.days_until_empty.toFixed(1)}d`
+                {displayDaysUntilEmpty(station) != null
+                  ? `${displayDaysUntilEmpty(station)?.toFixed(1)}d`
                   : "—"}
               </span>
             </div>

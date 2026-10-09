@@ -9,6 +9,7 @@ import type {
   StationStatus,
 } from "../../services/fuelApi";
 import {
+  displayDaysUntilEmpty,
   getFuelStationCapacityGallons,
   getFuelStationCurrentStockGallons,
 } from "../../services/fuelApi";
@@ -126,9 +127,17 @@ export default function FuelStationList({
       case "stock_pct":
         cmp = getStockPercentage(a) - getStockPercentage(b);
         break;
-      case "days_until_empty":
-        cmp = a.days_until_empty - b.days_until_empty;
+      case "days_until_empty": {
+        // Stations with no consumption ("—") sort last in either order.
+        const da = displayDaysUntilEmpty(a);
+        const db = displayDaysUntilEmpty(b);
+        if (da == null || db == null) {
+          if (da == null && db == null) return 0;
+          return da == null ? 1 : -1;
+        }
+        cmp = da - db;
         break;
+      }
       default:
         cmp = String(a[sortField] ?? "").localeCompare(
           String(b[sortField] ?? ""),
@@ -241,10 +250,10 @@ export default function FuelStationList({
       label: <SortableHeader field="days_until_empty" label="Days Left" />,
       headerClassName: "cursor-pointer select-none hover:bg-gray-100",
       className: "text-sm text-gray-700",
-      render: (station) =>
-        station.days_until_empty > 0
-          ? `${station.days_until_empty.toFixed(1)} days`
-          : "—",
+      render: (station) => {
+        const days = displayDaysUntilEmpty(station);
+        return days != null ? `${days.toFixed(1)} days` : "—";
+      },
     },
     {
       key: "location_name",

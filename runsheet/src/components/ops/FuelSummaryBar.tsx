@@ -31,6 +31,8 @@ export default function FuelSummaryBar({ summary }: FuelSummaryBarProps) {
       ? (totalCurrentStockGallons / totalCapacityGallons) * 100
       : 0;
 
+  const avgDays = summary.average_days_until_empty;
+
   const stats = [
     {
       label: "Total Capacity",
@@ -52,17 +54,18 @@ export default function FuelSummaryBar({ summary }: FuelSummaryBarProps) {
     },
     {
       label: "Avg Days Until Empty",
+      // null: no station consumes fuel, so there is no average (F5).
       value:
-        summary.average_days_until_empty > 0
-          ? `${summary.average_days_until_empty.toFixed(1)} days`
-          : "N/A",
+        avgDays != null && avgDays > 0 ? `${avgDays.toFixed(1)} days` : "—",
       icon: Timer,
       color:
-        summary.average_days_until_empty < 3
-          ? "text-error"
-          : summary.average_days_until_empty < 7
-            ? "text-warning"
-            : "text-success",
+        avgDays == null
+          ? "text-gray-500"
+          : avgDays < 3
+            ? "text-error"
+            : avgDays < 7
+              ? "text-warning"
+              : "text-success",
     },
   ];
 

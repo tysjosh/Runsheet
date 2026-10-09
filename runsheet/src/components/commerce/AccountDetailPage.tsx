@@ -17,6 +17,7 @@ import {
   getAccountAging,
 } from "../../services/commerceApi";
 import { PageTitle } from "../ui/PageHeader";
+import { AGING_LABELS } from "./agingLabels";
 
 interface AccountDetailPageProps {
   accountId: string;
@@ -240,27 +241,33 @@ export default function AccountDetailPage({
           <h2 id="aging-heading" className="text-lg font-semibold mb-3">
             AR Aging Buckets
           </h2>
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
             <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">0–30 Days</p>
+              <p className="text-sm text-gray-600">{AGING_LABELS.current}</p>
+              <p className="text-xl font-bold">
+                {formatCents(aging.bucket_current_cents ?? 0)}
+              </p>
+            </div>
+            <div className="border rounded p-4">
+              <p className="text-sm text-gray-600">{AGING_LABELS.d1_30}</p>
               <p className="text-xl font-bold">
                 {formatCents(aging.bucket_0_30_cents)}
               </p>
             </div>
             <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">31–60 Days</p>
+              <p className="text-sm text-gray-600">{AGING_LABELS.d31_60}</p>
               <p className="text-xl font-bold">
                 {formatCents(aging.bucket_31_60_cents)}
               </p>
             </div>
             <div className="border rounded p-4">
-              <p className="text-sm text-gray-600">61–90 Days</p>
+              <p className="text-sm text-gray-600">{AGING_LABELS.d61_90}</p>
               <p className="text-xl font-bold">
                 {formatCents(aging.bucket_61_90_cents)}
               </p>
             </div>
             <div className="border rounded p-4 bg-error-light">
-              <p className="text-sm text-gray-600">90+ Days</p>
+              <p className="text-sm text-gray-600">{AGING_LABELS.d90_plus}</p>
               <p className="text-xl font-bold text-error-dark">
                 {formatCents(aging.bucket_90_plus_cents)}
               </p>

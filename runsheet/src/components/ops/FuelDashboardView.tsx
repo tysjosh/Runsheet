@@ -57,7 +57,7 @@ const EMPTY_SUMMARY: FuelNetworkSummary = {
   total_capacity_liters: 0,
   total_current_stock_liters: 0,
   total_daily_consumption: 0,
-  average_days_until_empty: 0,
+  average_days_until_empty: null,
   stations_normal: 0,
   stations_low: 0,
   stations_critical: 0,
