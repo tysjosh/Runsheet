@@ -7,7 +7,13 @@
  * stays free text (no terminal roster).
  */
 
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 
 jest.mock("../../services/complianceApi", () => ({
   getPricingRules: jest.fn(),
@@ -67,9 +73,10 @@ describe("PricingRulesPage", () => {
     } as any);
   });
 
-  it("loads roster data for the resolve-panel pickers on mount", async () => {
+  it("loads roster data for the resolve-panel pickers when Price check opens", async () => {
     render(<PricingRulesPage />);
     await waitFor(() => expect(mockGetPricingRules).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Price check" }));
     await waitFor(() => expect(mockGetCustomers).toHaveBeenCalled());
     await waitFor(() => expect(mockListFuelProducts).toHaveBeenCalled());
   });
@@ -77,6 +84,7 @@ describe("PricingRulesPage", () => {
   it("requires customer and product before resolving a price", async () => {
     render(<PricingRulesPage />);
     await waitFor(() => expect(mockGetPricingRules).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Price check" }));
 
     // Gallons is a native-required input; fill it so the picker-level
     // validation (customer + product) is what gets exercised.
@@ -94,9 +102,49 @@ describe("PricingRulesPage", () => {
   it("keeps Terminal ID as a free-text input (no terminal roster)", async () => {
     render(<PricingRulesPage />);
     await waitFor(() => expect(mockGetPricingRules).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Price check" }));
 
     const terminal = screen.getByLabelText(/Terminal ID/i) as HTMLInputElement;
     expect(terminal.tagName).toBe("INPUT");
     expect(terminal.type).toBe("text");
+  });
+
+  it("adds a tiered rule in the sectioned FormDialog, prices in dollars", async () => {
+    const { createPricingRule } = jest.requireMock(
+      "../../services/complianceApi",
+    ) as { createPricingRule: jest.Mock };
+    createPricingRule.mockResolvedValue({ data: {} });
+    render(<PricingRulesPage />);
+    await waitFor(() => expect(mockGetPricingRules).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "Add Rule" }));
+    const dialog = screen.getByRole("dialog", { name: "Add pricing rule" });
+    fireEvent.change(within(dialog).getByLabelText(/^Strategy/), {
+      target: { value: "tiered_volume" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add tier" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Rule" }));
+    expect(await within(dialog).findByText("Pick a product.")).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("Tier 2 needs a minimum and a price."),
+    ).toBeInTheDocument();
+    expect(createPricingRule).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByLabelText("Product Code"));
+    fireEvent.click(await screen.findByText("Ultra Low Sulfur Diesel"));
+    const price2 = within(dialog).getByLabelText("Tier 2 price");
+    fireEvent.change(price2, { target: { value: "3.25" } });
+    fireEvent.blur(price2);
+    fireEvent.change(within(dialog).getByLabelText(/^Effective date/), {
+      target: { value: "2026-11-01" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Add Rule" }));
+    await waitFor(() => expect(createPricingRule).toHaveBeenCalled());
+    expect(createPricingRule.mock.calls[0][0]).toMatchObject({
+      product_code: "ULSD",
+      strategy: "tiered_volume",
+      tier_thresholds: [
+        { min_gallons: 0, max_gallons: 1000, price_cents: 350 },
+        { min_gallons: 1001, max_gallons: null, price_cents: 325 },
+      ],
+    });
   });
 });

@@ -1,8 +1,40 @@
 "use client";
 
+/**
+ * Billing → Pricing rules (UI revamp task 3.5): strategy and product in the
+ * Filters popover, a DataTable with products by name and prices in dollars,
+ * "Add rule" as an lg sectioned FormDialog with tier rows (design.md §5), and
+ * the resolve-price calculator in a drawer (a dry run, not create/edit).
+ * Prices are stored in cents; the dialog edits dollars with 2 decimals.
+ */
+import { Calculator, Plus, RefreshCw, Trash2 } from "lucide-react";
 import type React from "react";
-import { useCallback, useEffect, useState } from "react";
-import { type Column, EntityLink, Table } from "@/components/ui";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  Button,
+  type Column,
+  DataTable,
+  Drawer,
+  EntityLink,
+  Field,
+  FilterPopover,
+  FormDialog,
+  FormSection,
+  IconButton,
+  INPUT_CLASS,
+  NumberField,
+  ProductChip,
+  Select,
+  Toolbar,
+  usePageChrome,
+} from "@/components/ui";
+import {
+  calendarDate,
+  humanize,
+  money,
+  number,
+  parseNumber,
+} from "../../lib/format";
 import {
   type CreatePricingRulePayload,
   createPricingRule,
@@ -18,62 +50,50 @@ import CustomerPicker from "../ops/CustomerPicker";
 import ProductPicker from "../ops/ProductPicker";
 import { PageTitle } from "../ui/PageHeader";
 
-// ─── Sub-view types ──────────────────────────────────────────────────────────
-
-type ViewMode = "list" | "add";
-
-// ─── Badge helpers ───────────────────────────────────────────────────────────
-
-function strategyBadgeClass(strategy: PricingStrategy): string {
-  switch (strategy) {
-    case "posted_price":
-      return "bg-info-light text-info-dark";
-    case "rack_plus_margin":
-      return "bg-success-light text-success-dark";
-    case "tiered_volume":
-      return "bg-brand-secondary-soft text-brand-secondary";
-    case "cost_plus":
-      return "bg-warning-light text-warning-dark";
-    default:
-      return "bg-gray-100 text-gray-800";
-  }
-}
+const STRATEGIES: { value: PricingStrategy; label: string }[] = [
+  { value: "posted_price", label: "Posted price" },
+  { value: "rack_plus_margin", label: "Rack + margin" },
+  { value: "tiered_volume", label: "Tiered volume" },
+  { value: "cost_plus", label: "Cost plus" },
+];
 
 function strategyLabel(strategy: PricingStrategy): string {
-  switch (strategy) {
-    case "posted_price":
-      return "Posted Price";
-    case "rack_plus_margin":
-      return "Rack + Margin";
-    case "tiered_volume":
-      return "Tiered Volume";
-    case "cost_plus":
-      return "Cost Plus";
-    default:
-      return strategy;
-  }
+  return STRATEGIES.find((s) => s.value === strategy)?.label ?? strategy;
 }
 
 function formatDate(dateStr: string | null): string {
-  if (!dateStr) return "—";
-  return new Date(dateStr).toLocaleDateString();
+  return dateStr ? calendarDate(dateStr) : "—";
 }
 
 function formatCents(cents: number | null): string {
   if (cents === null || cents === undefined) return "—";
-  return `$${(cents / 100).toFixed(2)}`;
+  return money(cents / 100);
 }
 
-// ─── Table columns ───────────────────────────────────────────────────────────
+/** The rule's price terms in one cell. */
+function ruleTerms(rule: PricingRule): string {
+  switch (rule.strategy) {
+    case "posted_price":
+      return formatCents(rule.posted_price_cents ?? null);
+    case "rack_plus_margin":
+      return `Rack + ${formatCents(rule.margin_cents)}`;
+    case "cost_plus":
+      return `Cost + ${formatCents(rule.margin_cents)}`;
+    case "tiered_volume":
+      return `${number(rule.tier_thresholds?.length ?? 0)} tiers`;
+    default:
+      return "—";
+  }
+}
 
 const pricingRuleColumns: Column<PricingRule>[] = [
   {
     key: "customer_id",
-    label: "Customer ID",
+    header: "Customer",
+    width: 180,
     // A pricing rule's subject is its customer when scoped to one; a rule with
-    // no customer is a product-level default. The scoped customer is navigable
-    // to the Commerce module (Req 11.3, 13.1).
-    render: (rule) =>
+    // no customer is a product-level default (Req 11.3, 13.1).
+    cell: (rule) =>
       rule.customer_id ? (
         <EntityLink
           type="customer"
@@ -86,58 +106,58 @@ const pricingRuleColumns: Column<PricingRule>[] = [
   },
   {
     key: "product_code",
-    label: "Product Code",
-    render: (rule) => rule.product_code,
+    header: "Product",
+    width: 200,
+    cell: (rule) => <ProductChip code={rule.product_code} />,
   },
   {
     key: "strategy",
-    label: "Strategy",
-    render: (rule) => (
-      <span
-        className={`inline-block px-2 py-1 rounded text-xs font-medium ${strategyBadgeClass(rule.strategy)}`}
-      >
-        {strategyLabel(rule.strategy)}
-      </span>
-    ),
+    header: "Strategy",
+    width: 140,
+    cell: (rule) => strategyLabel(rule.strategy),
   },
   {
-    key: "margin_cents",
-    label: "Margin (¢)",
-    render: (rule) =>
-      rule.margin_cents !== null ? `${rule.margin_cents}¢` : "—",
+    key: "terms",
+    header: "Price",
+    width: 150,
+    className: "tabular-nums",
+    cell: ruleTerms,
   },
   {
     key: "priority",
-    label: "Priority",
-    render: (rule) => rule.priority,
+    header: "Priority",
+    align: "right",
+    width: 90,
+    className: "tabular-nums",
+    cell: (rule) => number(rule.priority),
   },
   {
     key: "effective_date",
-    label: "Effective Date",
-    render: (rule) => formatDate(rule.effective_date),
+    header: "Effective",
+    width: 150,
+    cell: (rule) => formatDate(rule.effective_date),
   },
   {
     key: "expiry_date",
-    label: "Expiry Date",
-    render: (rule) => formatDate(rule.expiry_date),
+    header: "Expires",
+    width: 150,
+    cell: (rule) => formatDate(rule.expiry_date),
   },
 ];
 
 // ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function PricingRulesPage() {
-  const [viewMode, setViewMode] = useState<ViewMode>("list");
   const [rules, setRules] = useState<PricingRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-
-  // Filters
+  const [reload, setReload] = useState(0);
   const [strategyFilter, setStrategyFilter] = useState<string>("");
   const [productCodeFilter, setProductCodeFilter] = useState<string>("");
-
-  // ─── Fetch pricing rules ─────────────────────────────────────────────────
+  const [adding, setAdding] = useState(false);
+  const [priceCheckOpen, setPriceCheckOpen] = useState(false);
 
   const fetchRules = useCallback(async () => {
     setLoading(true);
@@ -148,13 +168,9 @@ export default function PricingRulesPage() {
         product_code?: string;
         page: number;
         size: number;
-      } = {
-        page,
-        size: 20,
-      };
+      } = { page, size: 20 };
       if (strategyFilter) filters.strategy = strategyFilter as PricingStrategy;
       if (productCodeFilter) filters.product_code = productCodeFilter;
-
       const response = await getPricingRules(filters);
       setRules(response.data ?? []);
       setTotalPages(response.pagination?.total_pages ?? 1);
@@ -165,632 +181,548 @@ export default function PricingRulesPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, strategyFilter, productCodeFilter]);
+    // `reload` refetches after a create.
+  }, [page, strategyFilter, productCodeFilter, reload]);
 
   useEffect(() => {
-    if (viewMode === "list") {
-      fetchRules();
-    }
-  }, [fetchRules, viewMode]);
+    fetchRules();
+  }, [fetchRules]);
 
-  // ─── Render: Listing View ────────────────────────────────────────────────
-
-  function renderList() {
-    return (
+  const actions = useMemo(
+    () => (
       <>
-        {/* Filters */}
-        <div className="flex flex-wrap gap-4 mb-6 items-end">
-          <div>
-            <label
-              htmlFor="strategy-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Strategy
-            </label>
-            <select
-              id="strategy-filter"
-              value={strategyFilter}
-              onChange={(e) => {
-                setStrategyFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2"
-            >
-              <option value="">All</option>
-              <option value="posted_price">Posted Price</option>
-              <option value="rack_plus_margin">Rack + Margin</option>
-              <option value="tiered_volume">Tiered Volume</option>
-              <option value="cost_plus">Cost Plus</option>
-            </select>
-          </div>
-          <div>
-            <label
-              htmlFor="product-code-filter"
-              className="block text-sm font-medium mb-1"
-            >
-              Product Code
-            </label>
-            <input
-              id="product-code-filter"
-              type="text"
-              value={productCodeFilter}
-              onChange={(e) => {
-                setProductCodeFilter(e.target.value);
-                setPage(1);
-              }}
-              className="border rounded px-3 py-2 w-48"
-              placeholder="e.g. ULSD"
-            />
-          </div>
-        </div>
-
-        {/* Loading state */}
-        {loading && (
-          <div role="status" className="flex justify-center py-12">
-            <span className="sr-only">Loading pricing rules...</span>
-            <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-          </div>
-        )}
-
-        {/* Error state */}
-        {!loading && error && (
-          <div
-            role="alert"
-            className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-          >
-            {error}
-          </div>
-        )}
-
-        {/* Rules table */}
-        {!loading && !error && (
-          <>
-            <Table<PricingRule>
-              ariaLabel="Sales pricing rules"
-              columns={pricingRuleColumns}
-              data={rules}
-              getRowId={(rule) => rule.rule_id}
-              emptyState={
-                <span className="text-gray-500">No pricing rules found.</span>
-              }
-            />
-
-            {/* Pagination */}
-            <nav
-              aria-label="Pagination"
-              className="flex justify-between items-center mt-4"
-            >
-              <button
-                type="button"
-                disabled={page <= 1}
-                onClick={() => setPage((p) => p - 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-sm text-gray-600">
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                disabled={page >= totalPages}
-                onClick={() => setPage((p) => p + 1)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </nav>
-          </>
-        )}
-
-        {/* Resolve Price Test Panel */}
-        <ResolvePricePanel />
+        <Button
+          size="sm"
+          variant="secondary"
+          icon={<Calculator className="h-3.5 w-3.5" />}
+          onClick={() => setPriceCheckOpen(true)}
+        >
+          Price check
+        </Button>
+        <Button
+          size="sm"
+          icon={<Plus className="h-3.5 w-3.5" />}
+          onClick={() => setAdding(true)}
+        >
+          Add Rule
+        </Button>
       </>
-    );
-  }
-
-  // ─── Render: Add Form ────────────────────────────────────────────────────
-
-  function renderForm() {
-    return (
-      <PricingRuleForm
-        onSubmit={async (data) => {
-          setLoading(true);
-          setError(null);
-          try {
-            await createPricingRule(data);
-            setViewMode("list");
-          } catch (err) {
-            setError(
-              err instanceof Error ? err.message : "Failed to create rule",
-            );
-          } finally {
-            setLoading(false);
-          }
-        }}
-        onCancel={() => setViewMode("list")}
-        loading={loading}
-      />
-    );
-  }
-
-  // ─── Main Render ─────────────────────────────────────────────────────────
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
+  const popoverCount = (strategyFilter ? 1 : 0) + (productCodeFilter ? 1 : 0);
 
   return (
-    <div className="p-6">
-      <header className="mb-6">
-        <div className="flex justify-between items-center">
-          <div>
-            <PageTitle className="text-2xl font-bold">
-              Sales Pricing Rules
-            </PageTitle>
-            <p className="text-gray-600 mt-1">
-              Manage pricing strategies for customers and products. Test price
-              resolution with the panel below.
-            </p>
-          </div>
-          <div className="flex gap-2">
-            {viewMode !== "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className="px-4 py-2 border rounded text-sm hover:bg-gray-50"
-              >
-                Back to List
-              </button>
-            )}
-            {viewMode === "list" && (
-              <button
-                type="button"
-                onClick={() => setViewMode("add")}
-                className="bg-primary text-white px-4 py-2 rounded text-sm hover:bg-primary-hover"
-              >
-                Add Rule
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Error state (top-level) */}
-      {error && viewMode === "list" && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Sales Pricing Rules
+          </PageTitle>
+          <div className="ml-auto flex gap-2">{actions}</div>
         </div>
       )}
+      <Toolbar
+        label="Pricing rules"
+        filters={
+          <FilterPopover
+            count={popoverCount}
+            label="Pricing rule filters"
+            onClear={() => {
+              setStrategyFilter("");
+              setProductCodeFilter("");
+              setPage(1);
+            }}
+          >
+            <div className="grid w-80 gap-3">
+              <Field label="Strategy" id="strategy-filter">
+                <Select
+                  id="strategy-filter"
+                  value={strategyFilter}
+                  onChange={(v) => {
+                    setStrategyFilter(v);
+                    setPage(1);
+                  }}
+                  placeholder="All"
+                  options={STRATEGIES}
+                />
+              </Field>
+              <Field label="Product" id="product-code-filter">
+                <ProductPicker
+                  id="product-code-filter"
+                  aria-label="Product Code"
+                  value={productCodeFilter || null}
+                  onChange={(v) => {
+                    setProductCodeFilter(v);
+                    setPage(1);
+                  }}
+                  placeholder="All products"
+                  allowClear
+                />
+              </Field>
+            </div>
+          </FilterPopover>
+        }
+        end={
+          <IconButton
+            label="Refresh"
+            size="sm"
+            onClick={() => setReload((n) => n + 1)}
+            icon={
+              <RefreshCw
+                className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+            }
+          />
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<PricingRule>
+          ariaLabel="Sales pricing rules"
+          columns={pricingRuleColumns}
+          data={loading || error ? [] : rules}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchRules } : null}
+          getRowId={(rule) => rule.rule_id}
+          pagination={
+            totalPages > 1
+              ? { page, totalPages, onPageChange: setPage }
+              : undefined
+          }
+          emptyState={
+            <span className="text-text-muted">No pricing rules found.</span>
+          }
+        />
+      </div>
 
-      {/* View content */}
-      {viewMode === "list" && renderList()}
-      {viewMode === "add" && renderForm()}
+      <Drawer
+        open={priceCheckOpen}
+        onClose={() => setPriceCheckOpen(false)}
+        title="Resolve price"
+        width={560}
+      >
+        <ResolvePricePanel />
+      </Drawer>
+
+      {adding && (
+        <PricingRuleDialog
+          onClose={() => setAdding(false)}
+          onSaved={() => setReload((n) => n + 1)}
+        />
+      )}
     </div>
   );
 }
 
-// ─── Pricing Rule Form Sub-Component ─────────────────────────────────────────
+// ─── Add rule dialog ─────────────────────────────────────────────────────────
 
-interface PricingRuleFormProps {
-  onSubmit: (data: CreatePricingRulePayload) => Promise<void>;
-  onCancel: () => void;
-  loading: boolean;
+type TierRow = {
+  id: number;
+  min_gallons: number | null;
+  max_gallons: number | null;
+  /** Dollars per gallon. */
+  price: number | null;
+};
+
+type RuleValues = {
+  customer_id: string;
+  product_code: string;
+  strategy: PricingStrategy;
+  priority: number | null;
+  effective_date: string;
+  expiry_date: string;
+  /** Dollars (stored as cents). */
+  posted_price: number | null;
+  margin: number | null;
+  freight_per_mile: number | null;
+  tiers: TierRow[];
+};
+
+const toCents = (dollars: number | null) =>
+  dollars == null ? null : Math.round(dollars * 100);
+
+export function validatePricingRule(v: RuleValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.product_code) errors.product_code = "Pick a product.";
+  if (v.priority == null || v.priority < 1)
+    errors.priority = "Enter a priority of 1 or more.";
+  if (!v.effective_date) errors.effective_date = "Enter the effective date.";
+  if (v.expiry_date && v.effective_date && v.expiry_date <= v.effective_date)
+    errors.expiry_date = "Expiry must be after the effective date.";
+  if (v.strategy === "posted_price" && v.posted_price == null)
+    errors.posted_price = "Enter the posted price.";
+  if (
+    (v.strategy === "rack_plus_margin" || v.strategy === "cost_plus") &&
+    v.margin == null
+  )
+    errors.margin = "Enter the margin.";
+  if (v.strategy === "cost_plus" && v.freight_per_mile == null)
+    errors.freight_per_mile = "Enter the freight rate.";
+  if (v.strategy === "tiered_volume") {
+    if (v.tiers.length === 0) errors.tiers = "Add at least one tier.";
+    for (let i = 0; i < v.tiers.length; i++) {
+      const t = v.tiers[i];
+      const last = i === v.tiers.length - 1;
+      if (t.min_gallons == null || t.price == null) {
+        errors.tiers = `Tier ${i + 1} needs a minimum and a price.`;
+        break;
+      }
+      if (t.max_gallons == null && !last) {
+        errors.tiers = `Only the last tier can be open-ended (tier ${i + 1}).`;
+        break;
+      }
+      if (t.max_gallons != null && t.max_gallons < t.min_gallons) {
+        errors.tiers = `Tier ${i + 1}: maximum is below the minimum.`;
+        break;
+      }
+      const prev = v.tiers[i - 1];
+      if (prev?.max_gallons != null && t.min_gallons <= prev.max_gallons) {
+        errors.tiers = `Tier ${i + 1} overlaps tier ${i}.`;
+        break;
+      }
+    }
+  }
+  return errors;
 }
 
-function PricingRuleForm({
-  onSubmit,
-  onCancel,
-  loading,
-}: PricingRuleFormProps) {
-  const [customerId, setCustomerId] = useState("");
-  const [productCode, setProductCode] = useState("");
-  const [strategy, setStrategy] = useState<PricingStrategy>("posted_price");
-  const [priority, setPriority] = useState<string>("10");
-  const [effectiveDate, setEffectiveDate] = useState("");
-  const [expiryDate, setExpiryDate] = useState("");
-  const [validationError, setValidationError] = useState<string | null>(null);
-
-  // Strategy-specific fields
-  const [postedPriceCents, setPostedPriceCents] = useState<string>("");
-  const [marginCents, setMarginCents] = useState<string>("");
-  const [freightRateCentsPerMile, setFreightRateCentsPerMile] =
-    useState<string>("");
-  const [tierThresholds, setTierThresholds] = useState<TierBreak[]>([
-    { min_gallons: 0, max_gallons: 1000, price_cents: 350 },
-  ]);
-
-  // ─── Tier management ─────────────────────────────────────────────────────
-
-  function addTier() {
-    const lastTier = tierThresholds[tierThresholds.length - 1];
-    setTierThresholds([
-      ...tierThresholds,
-      {
-        min_gallons: lastTier ? (lastTier.max_gallons ?? 0) + 1 : 0,
-        max_gallons: null,
-        price_cents: 300,
-      },
-    ]);
-  }
-
-  function removeTier(index: number) {
-    setTierThresholds(tierThresholds.filter((_, i) => i !== index));
-  }
-
-  function updateTier(index: number, field: keyof TierBreak, value: string) {
-    const updated = [...tierThresholds];
-    if (field === "max_gallons") {
-      updated[index] = {
-        ...updated[index],
-        max_gallons: value === "" ? null : Number(value),
-      };
-    } else {
-      updated[index] = { ...updated[index], [field]: Number(value) };
-    }
-    setTierThresholds(updated);
-  }
-
-  // ─── Submit handler ──────────────────────────────────────────────────────
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    // Product code is required (previously enforced by the native input).
-    if (!productCode) {
-      setValidationError("Product code is required");
-      return;
-    }
-    setValidationError(null);
-
+function PricingRuleDialog({
+  onClose,
+  onSaved,
+}: {
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const submit = async (v: RuleValues) => {
     const data: CreatePricingRulePayload = {
-      customer_id: customerId || null,
-      product_code: productCode,
-      strategy,
-      priority: Number(priority),
-      effective_date: effectiveDate,
-      expiry_date: expiryDate || null,
+      customer_id: v.customer_id || null,
+      product_code: v.product_code,
+      strategy: v.strategy,
+      priority: v.priority ?? 10,
+      effective_date: v.effective_date,
+      expiry_date: v.expiry_date || null,
     };
-
-    // Attach strategy-specific fields
-    switch (strategy) {
+    switch (v.strategy) {
       case "posted_price":
-        data.posted_price_cents = postedPriceCents
-          ? Number(postedPriceCents)
-          : null;
+        data.posted_price_cents = toCents(v.posted_price);
         break;
       case "rack_plus_margin":
-        data.margin_cents = marginCents ? Number(marginCents) : null;
+        data.margin_cents = toCents(v.margin);
         break;
       case "tiered_volume":
-        data.tier_thresholds = tierThresholds;
+        data.tier_thresholds = v.tiers.map(
+          (t): TierBreak => ({
+            min_gallons: t.min_gallons ?? 0,
+            max_gallons: t.max_gallons,
+            price_cents: toCents(t.price) ?? 0,
+          }),
+        );
         break;
       case "cost_plus":
-        data.margin_cents = marginCents ? Number(marginCents) : null;
-        data.freight_rate_cents_per_mile = freightRateCentsPerMile
-          ? Number(freightRateCentsPerMile)
-          : null;
+        data.margin_cents = toCents(v.margin);
+        data.freight_rate_cents_per_mile = toCents(v.freight_per_mile);
         break;
     }
-
-    await onSubmit(data);
+    await createPricingRule(data);
   };
 
   return (
-    <form
-      onSubmit={handleSubmit}
-      className="bg-white border border-gray-200 rounded-lg p-6 shadow-sm max-w-2xl"
+    <FormDialog<RuleValues, void>
+      open
+      size="lg"
+      title="Add pricing rule"
+      submitLabel="Add Rule"
+      successMessage="Pricing rule added"
+      sections={[
+        { id: "scope", title: "Scope" },
+        { id: "price", title: "Price" },
+      ]}
+      initialValues={{
+        customer_id: "",
+        product_code: "",
+        strategy: "posted_price",
+        priority: 10,
+        effective_date: "",
+        expiry_date: "",
+        posted_price: null,
+        margin: null,
+        freight_per_mile: null,
+        tiers: [{ id: 0, min_gallons: 0, max_gallons: 1000, price: 3.5 }],
+      }}
+      validate={validatePricingRule}
+      onSubmit={submit}
+      onSaved={onSaved}
+      onClose={onClose}
     >
-      <h2 className="text-lg font-bold mb-4">Add New Pricing Rule</h2>
-
-      {validationError && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
-        >
-          {validationError}
-        </div>
+      {({ values, set, errors }) => (
+        <>
+          <FormSection id="scope" title="Scope">
+            <Field
+              label="Customer"
+              span={1}
+              help="Leave blank for the product default"
+            >
+              <CustomerPicker
+                id="rule-customer-id"
+                aria-label="Customer ID (optional)"
+                value={values.customer_id || null}
+                onChange={(v) => set("customer_id", v)}
+                allowClear
+                placeholder="Product default"
+              />
+            </Field>
+            <Field
+              label="Product"
+              required
+              span={1}
+              error={errors.product_code}
+            >
+              <ProductPicker
+                id="rule-product-code"
+                aria-label="Product Code"
+                value={values.product_code || null}
+                onChange={(v) => set("product_code", v)}
+                allowClear
+              />
+            </Field>
+            <Field
+              label="Priority"
+              required
+              span={1}
+              help="Lower runs first"
+              error={errors.priority}
+            >
+              <NumberField
+                id="rule-priority"
+                value={values.priority}
+                onChange={(n) => set("priority", n)}
+                decimals={0}
+                min={1}
+              />
+            </Field>
+            <Field label="Strategy" span={1}>
+              <Select
+                id="rule-strategy"
+                value={values.strategy}
+                onChange={(v) => set("strategy", v as PricingStrategy)}
+                options={STRATEGIES}
+              />
+            </Field>
+            <Field
+              label="Effective date"
+              required
+              span={1}
+              error={errors.effective_date}
+            >
+              <input
+                id="rule-effective-date"
+                type="date"
+                value={values.effective_date}
+                onChange={(e) => set("effective_date", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+            <Field
+              label="Expiry date"
+              span={1}
+              help="Optional"
+              error={errors.expiry_date}
+            >
+              <input
+                id="rule-expiry-date"
+                type="date"
+                value={values.expiry_date}
+                onChange={(e) => set("expiry_date", e.target.value)}
+                className={INPUT_CLASS}
+              />
+            </Field>
+          </FormSection>
+          <FormSection
+            id="price"
+            title={`Price · ${strategyLabel(values.strategy)}`}
+          >
+            {values.strategy === "posted_price" && (
+              <Field
+                label="Posted price"
+                required
+                span={1}
+                help="Per gallon"
+                error={errors.posted_price}
+              >
+                <NumberField
+                  id="rule-posted-price"
+                  value={values.posted_price}
+                  onChange={(n) => set("posted_price", n)}
+                  unit="$"
+                  decimals={2}
+                  min={0}
+                />
+              </Field>
+            )}
+            {(values.strategy === "rack_plus_margin" ||
+              values.strategy === "cost_plus") && (
+              <Field
+                label="Margin"
+                required
+                span={1}
+                help={
+                  values.strategy === "rack_plus_margin"
+                    ? "Per gallon above rack"
+                    : "Per gallon"
+                }
+                error={errors.margin}
+              >
+                <NumberField
+                  id="rule-margin"
+                  value={values.margin}
+                  onChange={(n) => set("margin", n)}
+                  unit="$"
+                  decimals={2}
+                  min={0}
+                />
+              </Field>
+            )}
+            {values.strategy === "cost_plus" && (
+              <Field
+                label="Freight rate"
+                required
+                span={1}
+                help="Per mile"
+                error={errors.freight_per_mile}
+              >
+                <NumberField
+                  id="rule-freight-rate"
+                  value={values.freight_per_mile}
+                  onChange={(n) => set("freight_per_mile", n)}
+                  unit="$"
+                  decimals={2}
+                  min={0}
+                />
+              </Field>
+            )}
+            {values.strategy === "tiered_volume" && (
+              <TierRows
+                tiers={values.tiers}
+                onChange={(tiers) => set("tiers", tiers)}
+                error={errors.tiers}
+              />
+            )}
+          </FormSection>
+        </>
       )}
+    </FormDialog>
+  );
+}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Customer ID (optional) */}
-        <div>
-          <label
-            htmlFor="rule-customer-id"
-            className="block text-sm font-medium mb-1"
-          >
-            Customer ID (optional)
-          </label>
-          <CustomerPicker
-            id="rule-customer-id"
-            aria-label="Customer ID (optional)"
-            value={customerId || null}
-            onChange={setCustomerId}
-            allowClear
-            placeholder="Leave blank for product default"
-          />
-        </div>
-
-        {/* Product Code */}
-        <div>
-          <label
-            htmlFor="rule-product-code"
-            className="block text-sm font-medium mb-1"
-          >
-            Product Code
-          </label>
-          <ProductPicker
-            id="rule-product-code"
-            aria-label="Product Code"
-            value={productCode || null}
-            onChange={setProductCode}
-            allowClear
-          />
-        </div>
-
-        {/* Strategy */}
-        <div>
-          <label
-            htmlFor="rule-strategy"
-            className="block text-sm font-medium mb-1"
-          >
-            Strategy
-          </label>
-          <select
-            id="rule-strategy"
-            value={strategy}
-            onChange={(e) => setStrategy(e.target.value as PricingStrategy)}
-            className="w-full border rounded px-3 py-2"
-          >
-            <option value="posted_price">Posted Price</option>
-            <option value="rack_plus_margin">Rack + Margin</option>
-            <option value="tiered_volume">Tiered Volume</option>
-            <option value="cost_plus">Cost Plus</option>
-          </select>
-        </div>
-
-        {/* Priority */}
-        <div>
-          <label
-            htmlFor="rule-priority"
-            className="block text-sm font-medium mb-1"
-          >
-            Priority (lower = higher)
-          </label>
-          <input
-            id="rule-priority"
-            type="number"
-            required
-            min={1}
-            value={priority}
-            onChange={(e) => setPriority(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-
-        {/* Effective Date */}
-        <div>
-          <label
-            htmlFor="rule-effective-date"
-            className="block text-sm font-medium mb-1"
-          >
-            Effective Date
-          </label>
-          <input
-            id="rule-effective-date"
-            type="date"
-            required
-            value={effectiveDate}
-            onChange={(e) => setEffectiveDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-
-        {/* Expiry Date */}
-        <div>
-          <label
-            htmlFor="rule-expiry-date"
-            className="block text-sm font-medium mb-1"
-          >
-            Expiry Date (optional)
-          </label>
-          <input
-            id="rule-expiry-date"
-            type="date"
-            value={expiryDate}
-            onChange={(e) => setExpiryDate(e.target.value)}
-            className="w-full border rounded px-3 py-2"
-          />
-        </div>
-      </div>
-
-      {/* Strategy-specific fields */}
-      <div className="mt-6 border-t pt-4">
-        <h3 className="text-sm font-semibold text-gray-700 mb-3">
-          Strategy Configuration — {strategyLabel(strategy)}
-        </h3>
-
-        {/* Posted Price: posted_price_cents */}
-        {strategy === "posted_price" && (
-          <div className="max-w-xs">
-            <label
-              htmlFor="rule-posted-price"
-              className="block text-sm font-medium mb-1"
-            >
-              Posted Price (¢/gal)
-            </label>
-            <input
-              id="rule-posted-price"
-              type="number"
-              min={0}
-              required
-              value={postedPriceCents}
-              onChange={(e) => setPostedPriceCents(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="e.g. 350"
-            />
-          </div>
-        )}
-
-        {/* Rack + Margin: margin_cents */}
-        {strategy === "rack_plus_margin" && (
-          <div className="max-w-xs">
-            <label
-              htmlFor="rule-margin-rack"
-              className="block text-sm font-medium mb-1"
-            >
-              Margin (¢/gal above rack)
-            </label>
-            <input
-              id="rule-margin-rack"
-              type="number"
-              min={0}
-              required
-              value={marginCents}
-              onChange={(e) => setMarginCents(e.target.value)}
-              className="w-full border rounded px-3 py-2"
-              placeholder="e.g. 15"
-            />
-          </div>
-        )}
-
-        {/* Tiered Volume: tier_thresholds */}
-        {strategy === "tiered_volume" && (
-          <div>
-            <p className="text-sm text-gray-600 mb-2">
-              Define volume tiers with price breaks. Leave max gallons empty for
-              the final tier (unlimited).
-            </p>
-            <div className="space-y-3">
-              {tierThresholds.map((tier, idx) => (
-                <div
-                  key={idx}
-                  className="flex items-center gap-3 bg-gray-50 p-3 rounded"
-                >
-                  <div>
-                    <label className="block text-xs text-gray-500">
-                      Min Gal
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={tier.min_gallons}
-                      onChange={(e) =>
-                        updateTier(idx, "min_gallons", e.target.value)
-                      }
-                      className="w-24 border rounded px-2 py-1 text-sm"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500">
-                      Max Gal
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={tier.max_gallons ?? ""}
-                      onChange={(e) =>
-                        updateTier(idx, "max_gallons", e.target.value)
-                      }
-                      className="w-24 border rounded px-2 py-1 text-sm"
-                      placeholder="∞"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500">
-                      Price (¢/gal)
-                    </label>
-                    <input
-                      type="number"
-                      min={0}
-                      value={tier.price_cents}
-                      onChange={(e) =>
-                        updateTier(idx, "price_cents", e.target.value)
-                      }
-                      className="w-24 border rounded px-2 py-1 text-sm"
-                    />
-                  </div>
-                  {tierThresholds.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() => removeTier(idx)}
-                      className="text-error hover:text-error-dark text-sm mt-4"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-            <button
-              type="button"
-              onClick={addTier}
-              className="mt-2 text-info hover:underline text-sm"
-            >
-              + Add Tier
-            </button>
-          </div>
-        )}
-
-        {/* Cost Plus: freight_rate_cents_per_mile + margin_cents */}
-        {strategy === "cost_plus" && (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-lg">
-            <div>
-              <label
-                htmlFor="rule-freight-rate"
-                className="block text-sm font-medium mb-1"
-              >
-                Freight Rate (¢/mile)
-              </label>
-              <input
-                id="rule-freight-rate"
-                type="number"
-                min={0}
-                required
-                value={freightRateCentsPerMile}
-                onChange={(e) => setFreightRateCentsPerMile(e.target.value)}
-                className="w-full border rounded px-3 py-2"
-                placeholder="e.g. 5"
-              />
-            </div>
-            <div>
-              <label
-                htmlFor="rule-margin-cost"
-                className="block text-sm font-medium mb-1"
-              >
-                Margin (¢/gal)
-              </label>
-              <input
-                id="rule-margin-cost"
-                type="number"
-                min={0}
-                required
-                value={marginCents}
-                onChange={(e) => setMarginCents(e.target.value)}
-                className="w-full border rounded px-3 py-2"
-                placeholder="e.g. 10"
-              />
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div className="flex gap-3 mt-6">
-        <button
-          type="submit"
-          disabled={loading}
-          className="bg-primary text-white px-4 py-2 rounded hover:bg-primary-hover disabled:opacity-50"
-        >
-          {loading ? "Saving..." : "Add Rule"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 border rounded hover:bg-gray-50"
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
+function TierRows({
+  tiers,
+  onChange,
+  error,
+}: {
+  tiers: TierRow[];
+  onChange: (tiers: TierRow[]) => void;
+  error?: string;
+}) {
+  const update = (id: number, patch: Partial<TierRow>) =>
+    onChange(tiers.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  return (
+    <div className="col-span-2">
+      <p className="mb-2 text-xs text-text-muted">
+        Leave the last tier's maximum empty for no upper limit.
+      </p>
+      <table className="w-full text-sm">
+        <caption className="sr-only">Volume tiers</caption>
+        <thead>
+          <tr className="text-left text-xs text-text-muted">
+            <th scope="col" className="pb-1 font-medium">
+              From
+            </th>
+            <th scope="col" className="pb-1 font-medium">
+              To
+            </th>
+            <th scope="col" className="pb-1 font-medium">
+              Price per gallon
+            </th>
+            <th scope="col">
+              <span className="sr-only">Remove</span>
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {tiers.map((t, i) => (
+            <tr key={t.id}>
+              <td className="py-1 pr-2">
+                <NumberField
+                  aria-label={`Tier ${i + 1} minimum gallons`}
+                  value={t.min_gallons}
+                  onChange={(n) => update(t.id, { min_gallons: n })}
+                  unit="gal"
+                  decimals={0}
+                  min={0}
+                />
+              </td>
+              <td className="py-1 pr-2">
+                <NumberField
+                  aria-label={`Tier ${i + 1} maximum gallons`}
+                  value={t.max_gallons}
+                  onChange={(n) => update(t.id, { max_gallons: n })}
+                  unit="gal"
+                  decimals={0}
+                  min={0}
+                  placeholder="No limit"
+                />
+              </td>
+              <td className="py-1 pr-2">
+                <NumberField
+                  aria-label={`Tier ${i + 1} price`}
+                  value={t.price}
+                  onChange={(n) => update(t.id, { price: n })}
+                  unit="$"
+                  decimals={2}
+                  min={0}
+                />
+              </td>
+              <td className="py-1">
+                {tiers.length > 1 && (
+                  <IconButton
+                    label={`Remove tier ${i + 1}`}
+                    size="sm"
+                    icon={<Trash2 className="h-3.5 w-3.5" />}
+                    onClick={() => onChange(tiers.filter((x) => x.id !== t.id))}
+                  />
+                )}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {error && (
+        <p role="alert" className="mt-1 text-xs text-red-800">
+          {error}
+        </p>
+      )}
+      <Button
+        type="button"
+        size="sm"
+        variant="secondary"
+        className="mt-2"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => {
+          const last = tiers[tiers.length - 1];
+          onChange([
+            ...tiers,
+            {
+              id: Date.now(),
+              min_gallons: last?.max_gallons != null ? last.max_gallons + 1 : 0,
+              max_gallons: null,
+              price: null,
+            },
+          ]);
+        }}
+      >
+        Add tier
+      </Button>
+    </div>
   );
 }
 
@@ -823,10 +755,11 @@ function ResolvePricePanel() {
       const payload: ResolvePricePayload = {
         customer_id: customerId,
         product_code: productCode,
-        gallons: Number(gallons),
+        gallons: parseNumber(gallons) ?? 0,
       };
       if (terminalId) payload.terminal_id = terminalId;
-      if (routeMiles) payload.route_miles = Number(routeMiles);
+      if (routeMiles)
+        payload.route_miles = parseNumber(routeMiles) ?? undefined;
 
       const response = await resolvePrice(payload);
       setResult(response.data);
@@ -840,18 +773,17 @@ function ResolvePricePanel() {
   };
 
   return (
-    <div className="mt-8 border-t pt-6">
-      <h2 className="text-lg font-bold mb-2">Resolve Price — Test Panel</h2>
-      <p className="text-sm text-gray-600 mb-4">
+    <div className="p-4">
+      <p className="text-sm text-text-muted mb-4">
         Test the pricing engine by entering customer, product, and volume to see
         the resolved price.
       </p>
 
       <form
         onSubmit={handleResolve}
-        className="bg-gray-50 border border-gray-200 rounded-lg p-4 max-w-3xl"
+        className="rounded-lg border border-slate-200 p-4"
       >
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           <div>
             <label
               htmlFor="resolve-customer-id"
@@ -891,13 +823,11 @@ function ResolvePricePanel() {
             </label>
             <input
               id="resolve-gallons"
-              type="number"
-              required
-              min={0}
-              step="0.1"
+              type="text"
+              inputMode="decimal"
               value={gallons}
               onChange={(e) => setGallons(e.target.value)}
-              className="w-full border rounded px-3 py-2"
+              className={INPUT_CLASS}
               placeholder="500"
             />
           </div>
@@ -913,7 +843,7 @@ function ResolvePricePanel() {
               type="text"
               value={terminalId}
               onChange={(e) => setTerminalId(e.target.value)}
-              className="w-full border rounded px-3 py-2"
+              className={INPUT_CLASS}
               placeholder="TERM-01"
             />
           </div>
@@ -926,31 +856,26 @@ function ResolvePricePanel() {
             </label>
             <input
               id="resolve-route-miles"
-              type="number"
-              min={0}
-              step="0.1"
+              type="text"
+              inputMode="decimal"
               value={routeMiles}
               onChange={(e) => setRouteMiles(e.target.value)}
-              className="w-full border rounded px-3 py-2"
+              className={INPUT_CLASS}
               placeholder="25"
             />
           </div>
           <div className="flex items-end">
-            <button
-              type="submit"
-              disabled={resolving}
-              className="bg-success text-white px-4 py-2 rounded hover:bg-success-dark disabled:opacity-50 w-full"
-            >
-              {resolving ? "Resolving..." : "Resolve Price"}
-            </button>
+            <Button type="submit" loading={resolving} fullWidth>
+              Resolve Price
+            </Button>
           </div>
         </div>
       </form>
 
       {/* Resolve result */}
       {result && (
-        <div className="mt-4 bg-white border border-success-light rounded-lg p-4 max-w-3xl">
-          <h3 className="text-sm font-semibold text-success-dark mb-2">
+        <div className="mt-4 rounded-lg border border-slate-200 p-4">
+          <h3 className="mb-2 text-sm font-semibold text-text">
             Price Resolved
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
@@ -963,9 +888,7 @@ function ResolvePricePanel() {
             </div>
             <div>
               <span className="text-gray-500 block">Strategy Used</span>
-              <span
-                className={`inline-block px-2 py-1 rounded text-xs font-medium ${strategyBadgeClass(result.strategy_used)}`}
-              >
+              <span className="font-medium">
                 {strategyLabel(result.strategy_used)}
               </span>
             </div>
@@ -978,7 +901,7 @@ function ResolvePricePanel() {
               <div className="text-xs text-gray-600">
                 {Object.entries(result.breakdown).map(([key, value]) => (
                   <div key={key}>
-                    {key}: {formatCents(value)}
+                    {humanize(key)}: {formatCents(value)}
                   </div>
                 ))}
               </div>
@@ -991,7 +914,7 @@ function ResolvePricePanel() {
       {resolveError && (
         <div
           role="alert"
-          className="mt-4 bg-error-light border border-error-light text-error-dark p-4 rounded max-w-3xl"
+          className="mt-4 rounded border border-red-300 bg-red-50 p-3 text-sm text-red-800"
         >
           {resolveError}
         </div>
