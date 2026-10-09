@@ -14,8 +14,8 @@ import path from "node:path";
 // task 1.10 (relocated code, not new calls). Phase 2 left 185; Phase 3
 // iteration 1 (tasks 3.2, 3.7, 3.9) took it to 142; iteration 2 (3.1, 3.3,
 // Notifications, Orders/Jobs dialogs) to 127; iteration 3 (Billing,
-// Compliance) to 91.
-const BASELINE = 91;
+// Compliance, Plans view) to 56.
+const BASELINE = 56;
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const name of readdirSync(dir)) {
