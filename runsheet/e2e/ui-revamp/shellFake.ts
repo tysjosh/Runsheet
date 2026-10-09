@@ -178,19 +178,6 @@ export async function installShellFake(
         },
       });
     }
-    // Single-object read: the generic list body would leave `trucks` unset.
-    if (path === "/compliance/ifta/report")
-      return json(200, {
-        data: {
-          tenant_id: TENANT,
-          quarter: url.searchParams.get("quarter") ?? "2026-Q4",
-          trucks: [],
-          fleet_mpg: null,
-          incomplete_trucks: [],
-          generated_at: "2026-10-08T14:00:00Z",
-        },
-        request_id: "e2e",
-      });
     if (path === "/scheduling/jobs/summary" || path === "/scheduling/summary")
       return json(200, {
         data: {

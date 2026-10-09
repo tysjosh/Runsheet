@@ -178,6 +178,190 @@ const DRIVERS = UTILIZATION.map((u, i) => ({
   updated_at: iso(5, i),
 }));
 
+
+// ─── Billing and Compliance (tasks 3.4, 3.5) ────────────────────────────────
+
+const N = 22;
+const range = <T>(f: (i: number) => T) => Array.from({ length: N }, (_, i) => f(i));
+
+export const ACCOUNTS = range((i) => ({
+  account_id: `QA-ACC-${300 + i}`,
+  tenant_id: TENANT,
+  customer_id: `QA-CUST-${i % 6}`,
+  display_name: `QA Account ${300 + i}`,
+  status: ["active", "active", "suspended", "closed"][i % 4],
+  credit_limit_cents: 5_000_000 + i * 10_000,
+  open_balance_cents: 125_000 + i * 3_333,
+  available_credit_cents: 4_000_000,
+  credit_balance_cents: 0,
+  credit_state: ["ok", "hold", "override"][i % 3],
+  credit_override_expires_at: null,
+  net_terms_days: [15, 30, 45][i % 3],
+  tier: ["default", "gold", "silver", "platinum", "bronze"][i % 5],
+  billing_address: null,
+  payment_method_preference: "invoice",
+  created_at: iso(1),
+  updated_at: iso(2),
+  external_refs: {},
+}));
+
+export const PAYMENTS = range((i) => ({
+  payment_id: `QA-PAY-${400 + i}`,
+  tenant_id: TENANT,
+  invoice_id: `QA-INV-${2000 + i}`,
+  account_id: `QA-ACC-${300 + i}`,
+  amount_cents: 45_050 + i * 1_234,
+  source: ["stripe", "manual", "qbo"][i % 3],
+  method: ["card", "ach", "check", "wire"][i % 4],
+  external_id: null,
+  reference: i % 2 ? `QA-REF-${i}` : null,
+  status: i % 7 === 6 ? "reversed" : "applied",
+  received_at: iso(3, i),
+  applied_at: iso(3, i),
+  reversed_at: null,
+}));
+
+export const PRICE_BOOKS = range((i) => ({
+  price_book_id: `QA-PB-${500 + i}`,
+  tenant_id: TENANT,
+  name: `QA Price book ${500 + i}`,
+  description: i % 2 ? "Commercial" : null,
+  status: ["active", "draft", "archived"][i % 3],
+  rule_count: i % 5,
+  created_at: iso(1),
+  updated_at: iso(2, i),
+}));
+
+export const PRICING_RULES = range((i) => ({
+  rule_id: `QA-PR-${600 + i}`,
+  tenant_id: TENANT,
+  customer_id: i % 3 ? `QA-CUST-${i % 6}` : null,
+  product_code: PRODUCTS[i % PRODUCTS.length],
+  strategy: ["posted_price", "rack_plus_margin", "tiered_volume", "cost_plus"][
+    i % 4
+  ],
+  priority: 10 + i,
+  posted_price_cents: 350 + i,
+  margin_cents: 15,
+  freight_rate_cents_per_mile: 5,
+  tier_thresholds: [{ min_gallons: 0, max_gallons: null, price_cents: 340 }],
+  effective_date: "2026-01-01",
+  expiry_date: null,
+}));
+
+export const CONTRACTS = range((i) => ({
+  contract_id: `QA-PPC-${700 + i}`,
+  tenant_id: TENANT,
+  customer_id: `QA-CUST-${i % 6}`,
+  account_id: `QA-ACC-${300 + i}`,
+  product_code: PRODUCTS[i % PRODUCTS.length],
+  contract_type: ["fixed_price", "cap_price", "collar"][i % 3],
+  start_date: "2026-01-01",
+  end_date: "2026-12-31",
+  contracted_gallons: 10_000,
+  remaining_gallons: 4_000 + i * 100,
+  price_cap_cents: 400,
+  price_floor_cents: 300,
+  fixed_price_cents: 350,
+  status: ["active", "exhausted", "expired"][i % 3],
+}));
+
+export const RECONCILIATION = range((i) => ({
+  reconciliation_id: `QA-REC-${800 + i}`,
+  tenant_id: TENANT,
+  order_id: `QA-ORD-${100 + i}`,
+  plan_id: `QA-PLAN-${i % 4}`,
+  pod_id: `QA-POD-${900 + i}`,
+  invoice_id: `QA-INV-${2000 + i}`,
+  customer_id: `QA-CUST-${i % 6}`,
+  assigned_asset_id: `QA-TRK-${100 + (i % 8)}`,
+  assigned_driver_id: `QA-DRV-${i % 8}`,
+  ordered_gallons: 5_000 + i * 10,
+  loaded_gallons: 4_990 + i * 10,
+  delivered_gallons: 4_980 + i * 10,
+  invoiced_gallons: 4_980 + i * 10,
+  variance_load_vs_order_pct: i % 5 === 0 ? 4.2 : 0.2,
+  variance_delivered_vs_loaded_pct: 0.2,
+  variance_invoiced_vs_delivered_pct: 0,
+  alert_flags: i % 5 === 0 ? ["variance_exceeds_threshold"] : [],
+  generated_at: iso(6, i),
+}));
+
+const CERT_TYPES = ["V_test", "K_test", "I_test", "P_test", "meter_seal"];
+export const CERT_ENTRIES = range((i) => ({
+  cert_id: `QA-CERT-${i}`,
+  asset_id: `QA-TRK-${100 + i}`,
+  certification_type: CERT_TYPES[i % CERT_TYPES.length],
+  status: i === 0 ? "expired" : i < 3 ? "expiring_soon" : "valid",
+  expiry_date: "2027-01-31",
+  days_until_expiry: i === 0 ? -3 : i < 3 ? 12 : 120 + i,
+}));
+
+export const METERS = range((i) => ({
+  meter_id: `QA-MTR-${i}`,
+  tenant_id: TENANT,
+  meter_number: `QA-MTR-${100 + i}`,
+  truck_id: `QA-TRK-${100 + i}`,
+  calibration_certificate_number: `QA-CAL-${i}`,
+  calibration_date: "2026-01-15",
+  calibration_expiry_date: i % 6 === 0 ? "2026-10-20" : "2027-01-15",
+  weights_measures_authority: "QA Weights & Measures",
+}));
+
+export const TERMINAL_BOLS = range((i) => ({
+  bol_id: `QA-BOL-${i}`,
+  tenant_id: TENANT,
+  load_number: `QA-LD-${1000 + i}`,
+  product_code: PRODUCTS[i % PRODUCTS.length],
+  gross_gallons: 8_000 + i * 12.345,
+  net_gallons: 7_950 + i * 12.1,
+  supplier_name: "QA Supplier",
+  terminal_name: `QA Terminal ${i % 3}`,
+  driver_id: `QA-DRV-${i % 8}`,
+  timestamp: iso(5, i),
+  status: ["ingested", "pending_confirmation", "linked"][i % 3],
+}));
+
+export const IFTA_TRUCKS = range((i) => ({
+  truck_id: `QA-TRK-${100 + i}`,
+  truck_name: `QA Truck ${100 + i}`,
+  total_miles: 4_200 + i * 37.5,
+  total_gallons: 700 + i * 6.2,
+  fleet_mpg: 6.1,
+  jurisdictions: [
+    {
+      jurisdiction: "TX",
+      total_miles: 3_000,
+      taxable_miles: 3_000,
+      tax_paid_gallons: 500,
+      net_taxable_gallons: 20,
+      tax_rate: 20,
+      tax_due: 400,
+    },
+  ],
+}));
+
+export const TAX_RATES = range((i) => ({
+  jurisdiction_id: `QA-TAX-${i}`,
+  tenant_id: TENANT,
+  fips_code: i % 2 ? "48" : "48201",
+  jurisdiction_level: ["federal", "state", "county", "city"][i % 4],
+  tax_type: ["excise", "ust", "spcc", "environmental"][i % 4],
+  product_codes: [PRODUCTS[i % PRODUCTS.length]],
+  rate_cents_per_gallon: 184 + i,
+  effective_date: "2026-01-01",
+  expiry_date: null,
+}));
+
+export const EXEMPTIONS = range((i) => ({
+  exemption_id: `QA-EX-${i}`,
+  tenant_id: TENANT,
+  customer_id: `QA-CUST-${i % 6}`,
+  exemption_type: ["dyed_diesel", "farm_agricultural", "government"][i % 3],
+  certificate_number: `QA-637M-${i}`,
+  expiry_date: i % 4 ? "2027-06-30" : "2026-10-20",
+}));
+
 function sized<T>(rows: T[], url: URL) {
   const size = Number(url.searchParams.get("size") ?? rows.length);
   const page = Number(url.searchParams.get("page") ?? 1);
@@ -209,7 +393,15 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
         bucket_31_60_cents: 1_200_000,
         bucket_61_90_cents: 712_300,
         bucket_90_plus_cents: 500_000,
-        by_account: [],
+        by_account: ACCOUNTS.map((a, i) => ({
+          account_id: a.account_id,
+          display_name: a.display_name,
+          bucket_0_30_cents: 100_000 + i * 1_000,
+          bucket_31_60_cents: 50_000,
+          bucket_61_90_cents: 20_000,
+          bucket_90_plus_cents: i % 3 ? 0 : 15_000,
+          total_open_cents: 170_000 + i * 1_000 + (i % 3 ? 0 : 15_000),
+        })),
         as_of: iso(8),
       },
       request_id: "e2e",
@@ -290,13 +482,52 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
         generated_at: iso(8),
       },
     };
+  // Billing and Compliance (tasks 3.4, 3.5)
+  if (path === "/commerce/accounts") {
+    const status = url.searchParams.get("status");
+    return sized(
+      status ? ACCOUNTS.filter((a) => a.status === status) : ACCOUNTS,
+      url,
+    );
+  }
+  if (path === "/commerce/payments") return paginated(PAYMENTS);
+  if (path === "/commerce/price-books")
+    return { data: PRICE_BOOKS, request_id: "e2e" };
+  if (path === "/commerce/pricing-rules") return sized(PRICING_RULES, url);
+  if (path === "/commerce/price-protection-contracts")
+    return sized(CONTRACTS, url);
+  if (path === "/fuel/mvp/reconciliation")
+    return {
+      items: RECONCILIATION,
+      total: RECONCILIATION.length,
+      page: 1,
+      size: 25,
+      has_next: false,
+    };
+  if (path === "/compliance/meters") return sized(METERS, url);
+  if (path === "/compliance/terminal-bols") return sized(TERMINAL_BOLS, url);
+  if (path === "/compliance/tax-jurisdictions") return sized(TAX_RATES, url);
+  if (path === "/compliance/exemptions") return sized(EXEMPTIONS, url);
+  if (path === "/compliance/ifta/report")
+    return {
+      data: {
+        tenant_id: TENANT,
+        quarter: url.searchParams.get("quarter") ?? "2026-Q4",
+        trucks: IFTA_TRUCKS,
+        fleet_mpg: 6.1,
+        incomplete_trucks: [],
+        generated_at: iso(8),
+      },
+      request_id: "e2e",
+    };
   if (path === "/compliance/asset-certifications/dashboard")
     return {
       data: {
         tenant_id: TENANT,
+        total_valid: CERT_ENTRIES.length - 3,
         total_expired: 1,
         total_expiring_soon: 2,
-        assets: [],
+        assets: CERT_ENTRIES,
       },
     };
   if (path === "/commerce/customers") {
