@@ -480,7 +480,7 @@ class TestFuelMetricsIntegration:
                     "total_capacity": {"value": 250000.0},
                     "total_stock": {"value": 150000.0},
                     "total_daily_consumption": {"value": 7500.0},
-                    "avg_days_until_empty": {"value": 20.0},
+                    "avg_days_until_empty": {"v": {"value": 20.0}},
                     "by_status": {
                         "buckets": [
                             {"key": "normal", "doc_count": 3},

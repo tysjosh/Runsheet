@@ -25,6 +25,22 @@ from .logging_wrapper import get_telemetry_service
 
 logger = logging.getLogger(__name__)
 
+#: Average days-until-empty over stations that consume fuel. A station with
+#: no consumption carries the 99999 sentinel and must not be averaged (F5).
+_AVG_DAYS_CONSUMING_AGG = {
+    "filter": {"range": {"daily_consumption_rate": {"gt": 0}}},
+    "aggs": {"v": {"avg": {"field": "days_until_empty"}}},
+}
+
+
+def _avg_days(aggs: dict):
+    """The filtered average, or None when no station consumes fuel."""
+    return (aggs.get("avg_days_until_empty") or {}).get("v", {}).get("value")
+
+
+def _fmt_days(value) -> str:
+    return f"{value:.1f}" if value is not None else "not available"
+
 def _resolve_tenant_id(tenant_id: str | None) -> str:
     # The bound tenant wins over a model-supplied tenant_id.
     return resolve_tool_tenant(tenant_id)
@@ -256,7 +272,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
                 "total_capacity": {"sum": {"field": "capacity_liters"}},
                 "total_stock": {"sum": {"field": "current_stock_liters"}},
                 "total_daily_consumption": {"sum": {"field": "daily_consumption_rate"}},
-                "avg_days_until_empty": {"avg": {"field": "days_until_empty"}},
+                "avg_days_until_empty": _AVG_DAYS_CONSUMING_AGG,
                 "by_status": {
                     "terms": {"field": "status"}
                 }
@@ -271,7 +287,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
         total_capacity = aggs.get("total_capacity", {}).get("value", 0)
         total_stock = aggs.get("total_stock", {}).get("value", 0)
         total_daily = aggs.get("total_daily_consumption", {}).get("value", 0)
-        avg_days = aggs.get("avg_days_until_empty", {}).get("value", 0)
+        avg_days = _avg_days(aggs)
 
         # Parse status buckets
         status_counts = {"normal": 0, "low": 0, "critical": 0, "empty": 0}
@@ -288,7 +304,7 @@ async def get_fuel_summary(tenant_id: str | None = None) -> str:
         response_text += f"Total Capacity: {total_capacity:,.0f} L\n"
         response_text += f"Total Current Stock: {total_stock:,.0f} L ({overall_pct:.1f}%)\n"
         response_text += f"Total Daily Consumption: {total_daily:,.1f} L/day\n"
-        response_text += f"Average Days Until Empty: {avg_days:.1f}\n\n"
+        response_text += f"Average Days Until Empty: {_fmt_days(avg_days)}\n\n"
         response_text += "**Station Status Breakdown:**\n"
         response_text += f"  🟢 Normal: {status_counts['normal']}\n"
         response_text += f"  🟡 Low: {status_counts['low']}\n"
@@ -439,7 +455,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
                 "total_capacity": {"sum": {"field": "capacity_liters"}},
                 "total_stock": {"sum": {"field": "current_stock_liters"}},
                 "total_daily_consumption": {"sum": {"field": "daily_consumption_rate"}},
-                "avg_days_until_empty": {"avg": {"field": "days_until_empty"}},
+                "avg_days_until_empty": _AVG_DAYS_CONSUMING_AGG,
                 "by_status": {"terms": {"field": "status"}},
                 "by_fuel_type": {
                     "terms": {"field": "fuel_type"},
@@ -457,7 +473,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
         total_capacity = aggs.get("total_capacity", {}).get("value", 0)
         total_stock = aggs.get("total_stock", {}).get("value", 0)
         total_daily = aggs.get("total_daily_consumption", {}).get("value", 0)
-        avg_days = aggs.get("avg_days_until_empty", {}).get("value", 0)
+        avg_days = _avg_days(aggs)
 
         status_counts = {"normal": 0, "low": 0, "critical": 0, "empty": 0}
         for bucket in aggs.get("by_status", {}).get("buckets", []):
@@ -530,7 +546,7 @@ async def generate_fuel_report(days: int = 7, tenant_id: str | None = None) -> s
         report += f"| Total Capacity | {total_capacity:,.0f} L |\n"
         report += f"| Current Stock | {total_stock:,.0f} L ({overall_pct:.1f}%) |\n"
         report += f"| Daily Consumption Rate | {total_daily:,.1f} L/day |\n"
-        report += f"| Avg Days Until Empty | {avg_days:.1f} |\n\n"
+        report += f"| Avg Days Until Empty | {_fmt_days(avg_days)} |\n\n"
 
         # Status breakdown
         report += "## Station Status\n\n"

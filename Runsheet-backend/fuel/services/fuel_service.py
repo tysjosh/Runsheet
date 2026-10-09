@@ -1076,7 +1076,12 @@ class FuelService:
                 "total_capacity": {"sum": {"field": "capacity_liters"}},
                 "total_stock": {"sum": {"field": "current_stock_liters"}},
                 "total_daily_consumption": {"sum": {"field": "daily_consumption_rate"}},
-                "avg_days_until_empty": {"avg": {"field": "days_until_empty"}},
+                # Stations with no consumption carry the 99999 "never"
+                # sentinel; averaging it in gave 33478.2 days on staging (F5).
+                "avg_days_until_empty": {
+                    "filter": {"range": {"daily_consumption_rate": {"gt": 0}}},
+                    "aggs": {"v": {"avg": {"field": "days_until_empty"}}},
+                },
                 "by_status": {
                     "terms": {
                         "field": "status",
@@ -1111,9 +1116,10 @@ class FuelService:
             + status_counts["empty"]
         )
 
-        avg_days = aggs.get("avg_days_until_empty", {}).get("value")
-        if avg_days is None:
-            avg_days = 0.0
+        # None when no station consumes fuel: "not available", not 0 days.
+        avg_days = aggs.get("avg_days_until_empty", {}).get("v", {}).get("value")
+        if avg_days is not None:
+            avg_days = round(avg_days, 1)
 
         return FuelNetworkSummary(
             total_stations=total_stations,
