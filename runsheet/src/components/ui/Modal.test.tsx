@@ -110,3 +110,25 @@ it("leaves Escape to an open combobox or menu button first", () => {
   });
   expect(onClose).not.toHaveBeenCalled();
 });
+
+describe("stacked modals (task 3.4)", () => {
+  it("Escape closes only the topmost modal", () => {
+    const closeOuter = jest.fn();
+    const closeInner = jest.fn();
+    render(
+      <>
+        <Modal isOpen onClose={closeOuter} title="Outer">
+          <button type="button">outer</button>
+        </Modal>
+        <Modal isOpen onClose={closeInner} title="Inner">
+          <button type="button">inner</button>
+        </Modal>
+      </>,
+    );
+    fireEvent.keyDown(document.activeElement ?? document.body, {
+      key: "Escape",
+    });
+    expect(closeInner).toHaveBeenCalledTimes(1);
+    expect(closeOuter).not.toHaveBeenCalled();
+  });
+});

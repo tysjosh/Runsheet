@@ -1,13 +1,48 @@
 "use client";
 
-import type React from "react";
-import { useCallback, useEffect, useState } from "react";
-import { Badge, Button, EmptyState, PageHeader, Table } from "@/components/ui";
+/**
+ * Billing → Price books (UI revamp task 3.4, design.md §5 "Price book +
+ * rules": lg FormDialog with sections Book and Rules, plus an sm add-rule
+ * sub-dialog). The list is a DataTable; "New price book" sits in the hub's
+ * title row; Activate is a row action. The price-check calculator (a dry run,
+ * not create/edit) stays inline, in a drawer opened from the toolbar.
+ */
+import { Calculator, CheckCircle2, Pencil, Plus, Trash2 } from "lucide-react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import {
+  Button,
+  type Column,
+  DataTable,
+  Drawer,
+  Field,
+  FormDialog,
+  FormSection,
+  IconButton,
+  INPUT_CLASS,
+  InlineBanner,
+  NumberField,
+  ProductChip,
+  ProductSelect,
+  Select,
+  StatusBadge,
+  Toolbar,
+  usePageChrome,
+} from "@/components/ui";
+import { calendarDate, gallons, money, number } from "../../lib/format";
 import type {
   PriceBook,
+  PriceBookStatus,
   PricingResolveRequest,
   PricingResolveResult,
   PricingRule,
+  PricingScopeType,
 } from "../../services/commerceApi";
 import {
   activatePriceBook,
@@ -17,88 +52,94 @@ import {
   resolvePricing,
   updatePriceBook,
 } from "../../services/commerceApi";
+import type { StatusKey } from "../../styles/tokens";
+import { PageTitle } from "../ui/PageHeader";
+import { notify } from "../ui/toast/notify";
 
 interface PriceBookEditorProps {
+  /** Opens this book's editor on load. */
   priceBookId?: string;
-  onBack?: () => void;
 }
 
-interface RuleFormState {
+const BOOK_STATUS: Record<
+  PriceBookStatus,
+  { status: StatusKey; label: string }
+> = {
+  draft: { status: "draft", label: "Draft" },
+  active: { status: "ok", label: "Active" },
+  archived: { status: "cancelled", label: "Archived" },
+};
+
+const SCOPES: { value: PricingScopeType; label: string }[] = [
+  { value: "default", label: "Default (everyone)" },
+  { value: "tier", label: "Account tier" },
+  { value: "account", label: "One account" },
+];
+
+type DraftRule = Omit<PricingRule, "price_book_id" | "created_at">;
+
+type BookValues = { name: string; description: string; rules: DraftRule[] };
+
+type RuleValues = {
   product_code: string;
-  scope_type: "account" | "tier" | "default";
+  scope_type: PricingScopeType;
   scope_value: string;
-  unit_price_cents: number;
+  /** Dollars per gallon (stored as integer cents). */
+  unit_price: number | null;
   min_quantity_gallons: number | null;
   effective_from: string;
   effective_to: string;
-}
-
-const emptyRule: RuleFormState = {
-  product_code: "",
-  scope_type: "default",
-  scope_value: "",
-  unit_price_cents: 0,
-  min_quantity_gallons: null,
-  effective_from: new Date().toISOString().split("T")[0],
-  effective_to: "",
 };
 
-interface SelectedBookState {
-  price_book_id: string;
-  tenant_id: string;
-  name: string;
-  description: string | null;
-  status: "draft" | "active" | "archived";
-  rule_count: number;
-  created_at: string;
-  updated_at: string;
+const today = () => new Date().toISOString().split("T")[0];
+
+function scopeLabel(rule: Pick<DraftRule, "scope_type" | "scope_value">) {
+  if (rule.scope_type === "default") return "Default";
+  const kind = rule.scope_type === "tier" ? "Tier" : "Account";
+  return rule.scope_value ? `${kind}: ${rule.scope_value}` : kind;
 }
 
-export default function PriceBookEditor({
-  priceBookId,
-  onBack,
-}: PriceBookEditorProps) {
+export function validateRule(v: RuleValues) {
+  const errors: Record<string, string | undefined> = {};
+  if (!v.product_code) errors.product_code = "Pick a product.";
+  if (v.scope_type !== "default" && !v.scope_value.trim())
+    errors.scope_value =
+      v.scope_type === "tier" ? "Enter the tier." : "Enter the account ID.";
+  if (v.unit_price == null) errors.unit_price = "Enter a price.";
+  else if (v.unit_price < 0) errors.unit_price = "Price can't be negative.";
+  if (v.min_quantity_gallons != null && v.min_quantity_gallons < 0)
+    errors.min_quantity_gallons = "Minimum can't be negative.";
+  if (!v.effective_from) errors.effective_from = "Pick a start date.";
+  if (v.effective_to && v.effective_from && v.effective_to < v.effective_from)
+    errors.effective_to = "End date is before the start date.";
+  return errors;
+}
+
+export default function PriceBookEditor({ priceBookId }: PriceBookEditorProps) {
   const [priceBooks, setPriceBooks] = useState<PriceBook[]>([]);
-  const [selectedBook, setSelectedBook] = useState<SelectedBookState | null>(
-    null,
-  );
-  const [rules, setRules] = useState<PricingRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [saving, setSaving] = useState(false);
-  const [editingRule, setEditingRule] = useState<RuleFormState | null>(null);
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-
-  // Resolve preview state
-  const [resolveRequest, setResolveRequest] = useState<PricingResolveRequest>({
-    account_id: "",
-    product_code: "",
-    quantity_gallons: 100,
-  });
-  const [resolveResult, setResolveResult] =
-    useState<PricingResolveResult | null>(null);
-  const [resolving, setResolving] = useState(false);
-  const [resolveError, setResolveError] = useState<string | null>(null);
-
-  // Create price book modal state
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [createName, setCreateName] = useState("");
-  const [createDescription, setCreateDescription] = useState("");
-  const [creating, setCreating] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
+  // The book dialog: null = closed; "new" = create; otherwise the loaded book.
+  const [editing, setEditing] = useState<
+    null | "new" | { book: PriceBook; rules: DraftRule[] }
+  >(null);
+  const [opening, setOpening] = useState<string | null>(null);
+  const [priceCheckOpen, setPriceCheckOpen] = useState(false);
+  // Rule sub-dialog: index into the book dialog's rules, or "new".
+  const [ruleTarget, setRuleTarget] = useState<null | "new" | number>(null);
+  const bookForm = useRef<{
+    values: BookValues;
+    setValues: (next: (prev: BookValues) => BookValues) => void;
+  } | null>(null);
 
   const fetchPriceBooks = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const res = await getPriceBooks();
-      setPriceBooks(res.data);
-      if (priceBookId) {
-        const bookRes = await getPriceBook(priceBookId);
-        const { rules: bookRules, ...bookData } = bookRes.data;
-        setSelectedBook(bookData);
-        setRules(bookRules || []);
-      }
+      setPriceBooks(res.data ?? []);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to load price books",
@@ -106,163 +147,516 @@ export default function PriceBookEditor({
     } finally {
       setLoading(false);
     }
-  }, [priceBookId]);
+    // `reload` refetches after a save.
+  }, [reload]);
 
   useEffect(() => {
     fetchPriceBooks();
   }, [fetchPriceBooks]);
 
-  const handleSelectBook = async (bookId: string) => {
-    setLoading(true);
+  const openBook = useCallback(async (bookId: string) => {
+    setOpening(bookId);
+    setActionError(null);
     try {
       const res = await getPriceBook(bookId);
-      const { rules: bookRules, ...bookData } = res.data;
-      setSelectedBook(bookData);
-      setRules(bookRules || []);
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to load price book",
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleAddRule = () => {
-    setEditingRule({ ...emptyRule });
-    setEditingIndex(null);
-  };
-
-  const handleEditRule = (index: number) => {
-    const rule = rules[index];
-    setEditingRule({
-      product_code: rule.product_code,
-      scope_type: rule.scope_type,
-      scope_value: rule.scope_value || "",
-      unit_price_cents: rule.unit_price_cents,
-      min_quantity_gallons: rule.min_quantity_gallons,
-      effective_from: rule.effective_from,
-      effective_to: rule.effective_to || "",
-    });
-    setEditingIndex(index);
-  };
-
-  const handleDeleteRule = (index: number) => {
-    setRules((prev) => prev.filter((_, i) => i !== index));
-  };
-
-  const handleSaveRule = () => {
-    if (!editingRule) return;
-    const newRule: PricingRule = {
-      rule_id:
-        editingIndex !== null
-          ? rules[editingIndex].rule_id
-          : `new-${Date.now()}`,
-      price_book_id: selectedBook?.price_book_id || "",
-      product_code: editingRule.product_code,
-      scope_type: editingRule.scope_type,
-      scope_value: editingRule.scope_value || "",
-      unit_price_cents: editingRule.unit_price_cents,
-      min_quantity_gallons: editingRule.min_quantity_gallons,
-      effective_from: editingRule.effective_from,
-      effective_to: editingRule.effective_to || null,
-      created_at: new Date().toISOString(),
-    };
-
-    if (editingIndex !== null) {
-      setRules((prev) =>
-        prev.map((r, i) => (i === editingIndex ? newRule : r)),
-      );
-    } else {
-      setRules((prev) => [...prev, newRule]);
-    }
-    setEditingRule(null);
-    setEditingIndex(null);
-  };
-
-  const handleSaveBook = async () => {
-    if (!selectedBook) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await updatePriceBook(selectedBook.price_book_id, {
-        name: selectedBook.name,
-        description: selectedBook.description || undefined,
-        rules: rules.map(
-          ({ rule_id, price_book_id, created_at, ...rest }) => rest,
+      const { rules, ...book } = res.data;
+      setEditing({
+        book,
+        rules: (rules ?? []).map(
+          ({ price_book_id: _p, created_at: _c, ...r }) => r,
         ),
       });
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to save price book",
+      setActionError(
+        err instanceof Error ? err.message : "Failed to load price book",
       );
     } finally {
-      setSaving(false);
+      setOpening(null);
     }
-  };
+  }, []);
 
-  const openCreateModal = () => {
-    setCreateName("");
-    setCreateDescription("");
-    setCreateError(null);
-    setShowCreateModal(true);
-  };
+  useEffect(() => {
+    if (priceBookId) void openBook(priceBookId);
+  }, [priceBookId, openBook]);
 
-  const handleCreateBook = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = createName.trim();
-    if (!name) {
-      setCreateError("Name is required");
-      return;
-    }
-    setCreating(true);
-    setCreateError(null);
+  const activate = async (book: PriceBook) => {
+    setActionError(null);
     try {
-      const res = await createPriceBook({
-        name,
-        description: createDescription.trim() || undefined,
-        rules: [],
-      });
-      setShowCreateModal(false);
-      // Refresh the list and open the newly created book for editing.
-      await fetchPriceBooks();
-      await handleSelectBook(res.data.price_book_id);
+      await activatePriceBook(book.price_book_id);
+      notify({ type: "success", message: `${book.name} is now active` });
+      setReload((n) => n + 1);
     } catch (err) {
-      setCreateError(
-        err instanceof Error ? err.message : "Failed to create price book",
-      );
-    } finally {
-      setCreating(false);
-    }
-  };
-
-  const handleActivate = async () => {
-    if (!selectedBook) return;
-    setSaving(true);
-    setError(null);
-    try {
-      const res = await activatePriceBook(selectedBook.price_book_id);
-      setSelectedBook(res.data);
-    } catch (err) {
-      setError(
+      setActionError(
         err instanceof Error ? err.message : "Failed to activate price book",
       );
-    } finally {
-      setSaving(false);
     }
   };
 
-  const handleResolve = async (e: React.FormEvent) => {
+  const actions = useMemo(
+    () => (
+      <Button
+        size="sm"
+        icon={<Plus className="h-3.5 w-3.5" />}
+        onClick={() => setEditing("new")}
+      >
+        New price book
+      </Button>
+    ),
+    [],
+  );
+  const embedded = usePageChrome({ actions });
+
+  const columns: Column<PriceBook>[] = [
+    {
+      key: "name",
+      header: "Name",
+      truncate: true,
+      title: (b) => b.name,
+      className: "font-medium text-text",
+      cell: (b) => b.name,
+    },
+    {
+      key: "status",
+      header: "Status",
+      width: 120,
+      cell: (b) => {
+        const s = BOOK_STATUS[b.status] ?? BOOK_STATUS.draft;
+        return <StatusBadge status={s.status} label={s.label} />;
+      },
+    },
+    {
+      key: "rule_count",
+      header: "Rules",
+      align: "right",
+      width: 90,
+      className: "tabular-nums text-slate-700",
+      cell: (b) => number(b.rule_count),
+    },
+    {
+      key: "description",
+      header: "Description",
+      truncate: true,
+      title: (b) => b.description ?? undefined,
+      className: "text-slate-700",
+      cell: (b) => b.description || "—",
+    },
+    {
+      key: "updated_at",
+      header: "Updated",
+      width: 150,
+      className: "text-slate-700",
+      cell: (b) => calendarDate(b.updated_at),
+    },
+  ];
+
+  const saveBook = async (v: BookValues): Promise<PriceBook> => {
+    const payload = {
+      name: v.name.trim(),
+      description: v.description.trim() || undefined,
+      rules: v.rules.map(({ rule_id: _id, ...rest }) => rest),
+    };
+    if (editing === "new") return (await createPriceBook(payload)).data;
+    if (!editing) throw new Error("No price book open");
+    return (await updatePriceBook(editing.book.price_book_id, payload)).data;
+  };
+
+  const ruleInitial = (): RuleValues => {
+    const rule =
+      typeof ruleTarget === "number"
+        ? bookForm.current?.values.rules[ruleTarget]
+        : undefined;
+    return rule
+      ? {
+          product_code: rule.product_code,
+          scope_type: rule.scope_type,
+          scope_value: rule.scope_value ?? "",
+          unit_price: rule.unit_price_cents / 100,
+          min_quantity_gallons: rule.min_quantity_gallons,
+          effective_from: rule.effective_from,
+          effective_to: rule.effective_to ?? "",
+        }
+      : {
+          product_code: "",
+          scope_type: "default",
+          scope_value: "",
+          unit_price: null,
+          min_quantity_gallons: null,
+          effective_from: today(),
+          effective_to: "",
+        };
+  };
+
+  const saveRule = (v: RuleValues) => {
+    const target = ruleTarget;
+    const form = bookForm.current;
+    if (!form || target === null) return;
+    form.setValues((prev) => {
+      const existing = typeof target === "number" ? prev.rules[target] : null;
+      const rule: DraftRule = {
+        rule_id: existing?.rule_id ?? `new-${Date.now()}`,
+        product_code: v.product_code,
+        scope_type: v.scope_type,
+        scope_value: v.scope_type === "default" ? "" : v.scope_value.trim(),
+        unit_price_cents: Math.round((v.unit_price ?? 0) * 100),
+        min_quantity_gallons: v.min_quantity_gallons,
+        effective_from: v.effective_from,
+        effective_to: v.effective_to || null,
+      };
+      const rules =
+        typeof target === "number"
+          ? prev.rules.map((r, i) => (i === target ? rule : r))
+          : [...prev.rules, rule];
+      return { ...prev, rules };
+    });
+  };
+
+  return (
+    <div className="flex h-full flex-col bg-surface">
+      {!embedded && (
+        <div className="flex h-11 items-center border-b border-slate-200 px-4">
+          <PageTitle className="text-base font-semibold text-text">
+            Price books
+          </PageTitle>
+          <div className="ml-auto">{actions}</div>
+        </div>
+      )}
+      <Toolbar
+        label="Price books"
+        filters={
+          actionError ? (
+            <span role="alert" className="truncate text-xs text-red-800">
+              {actionError}
+            </span>
+          ) : undefined
+        }
+        end={
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<Calculator className="h-3.5 w-3.5" />}
+            onClick={() => setPriceCheckOpen(true)}
+          >
+            Price check
+          </Button>
+        }
+      />
+      <div className="min-h-0 flex-1 overflow-auto">
+        <DataTable<PriceBook>
+          ariaLabel="Price books"
+          columns={columns}
+          data={loading || error ? [] : priceBooks}
+          loading={loading}
+          error={error ? { message: error, onRetry: fetchPriceBooks } : null}
+          getRowId={(b) => b.price_book_id}
+          rowLabel={(b) => b.name}
+          onRowClick={(b) => void openBook(b.price_book_id)}
+          rowMenu={(b) => [
+            {
+              id: "edit",
+              label: opening === b.price_book_id ? "Opening…" : "Edit",
+              icon: <Pencil className="h-3.5 w-3.5" />,
+              onSelect: () => void openBook(b.price_book_id),
+            },
+            ...(b.status === "draft"
+              ? [
+                  {
+                    id: "activate",
+                    label: "Activate",
+                    icon: <CheckCircle2 className="h-3.5 w-3.5" />,
+                    onSelect: () => void activate(b),
+                  },
+                ]
+              : []),
+          ]}
+          emptyState={
+            <div className="text-text-muted">
+              <p className="text-sm font-medium">No price books yet</p>
+              <p className="mt-1 text-xs">
+                Create a price book to start setting prices.
+              </p>
+            </div>
+          }
+        />
+      </div>
+
+      {editing && (
+        <FormDialog<BookValues, PriceBook>
+          open
+          size="lg"
+          title={
+            editing === "new" ? "New price book" : `Edit ${editing.book.name}`
+          }
+          submitLabel={editing === "new" ? "Create price book" : "Save changes"}
+          successMessage={
+            editing === "new" ? "Price book created" : "Price book saved"
+          }
+          sections={[
+            { id: "book", title: "Book" },
+            { id: "rules", title: "Rules" },
+          ]}
+          initialValues={
+            editing === "new"
+              ? { name: "", description: "", rules: [] }
+              : {
+                  name: editing.book.name,
+                  description: editing.book.description ?? "",
+                  rules: editing.rules,
+                }
+          }
+          validate={(v) => ({
+            name: v.name.trim() ? undefined : "Enter a name.",
+          })}
+          onSubmit={saveBook}
+          onSaved={() => setReload((n) => n + 1)}
+          onClose={() => {
+            setEditing(null);
+            setRuleTarget(null);
+          }}
+        >
+          {({ values, set, setValues, errors }) => {
+            bookForm.current = { values, setValues };
+            return (
+              <>
+                <FormSection id="book" title="Book">
+                  <Field label="Name" required error={errors.name}>
+                    <input
+                      id="price-book-name"
+                      type="text"
+                      value={values.name}
+                      onChange={(e) => set("name", e.target.value)}
+                      placeholder="e.g. 2026 Q4 commercial diesel"
+                      className={INPUT_CLASS}
+                    />
+                  </Field>
+                  <Field label="Description">
+                    <textarea
+                      id="price-book-description"
+                      value={values.description}
+                      onChange={(e) => set("description", e.target.value)}
+                      rows={2}
+                      placeholder="Optional"
+                      className={`${INPUT_CLASS} h-auto py-1.5`}
+                    />
+                  </Field>
+                </FormSection>
+                <FormSection
+                  id="rules"
+                  title={`Rules (${number(values.rules.length)})`}
+                >
+                  <div className="col-span-2">
+                    {values.rules.length === 0 ? (
+                      <p className="text-sm text-text-muted">
+                        No rules yet. Add one to set a price.
+                      </p>
+                    ) : (
+                      <ul
+                        aria-label="Pricing rules"
+                        className="divide-y divide-slate-100 rounded-lg border border-slate-200"
+                      >
+                        {values.rules.map((r, i) => (
+                          <li
+                            key={r.rule_id}
+                            className="flex items-center gap-3 px-3 py-2 text-sm"
+                          >
+                            <ProductChip code={r.product_code} />
+                            <span className="min-w-0 flex-1 truncate text-slate-700">
+                              {scopeLabel(r)}
+                              {r.min_quantity_gallons != null &&
+                                ` · from ${gallons(r.min_quantity_gallons)}`}
+                              {" · "}
+                              {calendarDate(r.effective_from)}
+                              {r.effective_to
+                                ? ` – ${calendarDate(r.effective_to)}`
+                                : " onward"}
+                            </span>
+                            <span className="font-semibold tabular-nums text-text">
+                              {money(r.unit_price_cents / 100)}/gal
+                            </span>
+                            <IconButton
+                              label={`Edit rule ${i + 1}`}
+                              size="sm"
+                              icon={<Pencil className="h-3.5 w-3.5" />}
+                              onClick={() => setRuleTarget(i)}
+                            />
+                            <IconButton
+                              label={`Delete rule ${i + 1}`}
+                              size="sm"
+                              icon={<Trash2 className="h-3.5 w-3.5" />}
+                              onClick={() =>
+                                set(
+                                  "rules",
+                                  values.rules.filter((_, j) => j !== i),
+                                )
+                              }
+                            />
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                    <Button
+                      type="button"
+                      className="mt-2"
+                      size="sm"
+                      variant="secondary"
+                      icon={<Plus className="h-3.5 w-3.5" />}
+                      onClick={() => setRuleTarget("new")}
+                    >
+                      Add rule
+                    </Button>
+                  </div>
+                </FormSection>
+              </>
+            );
+          }}
+        </FormDialog>
+      )}
+
+      {editing && ruleTarget !== null && (
+        <FormDialog<RuleValues, void>
+          open
+          size="sm"
+          title={ruleTarget === "new" ? "Add rule" : "Edit rule"}
+          help="Saved with the price book."
+          submitLabel={ruleTarget === "new" ? "Add rule" : "Update rule"}
+          successMessage={null}
+          initialValues={ruleInitial()}
+          validate={validateRule}
+          onSubmit={saveRule}
+          onClose={() => setRuleTarget(null)}
+        >
+          {({ values, set, errors }) => (
+            <>
+              <Field label="Product" required error={errors.product_code}>
+                <ProductSelect
+                  id="rule-product"
+                  value={values.product_code || null}
+                  onChange={(code) => set("product_code", code)}
+                />
+              </Field>
+              <Field label="Applies to" span={1}>
+                <Select
+                  id="rule-scope-type"
+                  value={values.scope_type}
+                  onChange={(v) => set("scope_type", v as PricingScopeType)}
+                  options={SCOPES}
+                />
+              </Field>
+              <Field
+                label={values.scope_type === "tier" ? "Tier" : "Account ID"}
+                span={1}
+                error={errors.scope_value}
+              >
+                <input
+                  id="rule-scope-value"
+                  type="text"
+                  value={values.scope_value}
+                  disabled={values.scope_type === "default"}
+                  onChange={(e) => set("scope_value", e.target.value)}
+                  placeholder={
+                    values.scope_type === "default"
+                      ? "Not needed"
+                      : values.scope_type === "tier"
+                        ? "e.g. gold"
+                        : "acc_…"
+                  }
+                  className={INPUT_CLASS}
+                />
+              </Field>
+              <Field
+                label="Unit price"
+                required
+                span={1}
+                error={errors.unit_price}
+              >
+                <NumberField
+                  id="rule-price"
+                  value={values.unit_price}
+                  onChange={(n) => set("unit_price", n)}
+                  unit="$"
+                  decimals={2}
+                  min={0}
+                />
+              </Field>
+              <Field
+                label="Minimum quantity"
+                span={1}
+                help="Optional"
+                error={errors.min_quantity_gallons}
+              >
+                <NumberField
+                  id="rule-min-qty"
+                  value={values.min_quantity_gallons}
+                  onChange={(n) => set("min_quantity_gallons", n)}
+                  unit="gal"
+                  decimals={0}
+                  min={0}
+                />
+              </Field>
+              <Field
+                label="Effective from"
+                required
+                span={1}
+                error={errors.effective_from}
+              >
+                <input
+                  id="rule-effective-from"
+                  type="date"
+                  value={values.effective_from}
+                  onChange={(e) => set("effective_from", e.target.value)}
+                  className={INPUT_CLASS}
+                />
+              </Field>
+              <Field label="Until" span={1} error={errors.effective_to}>
+                <input
+                  id="rule-effective-to"
+                  type="date"
+                  value={values.effective_to}
+                  onChange={(e) => set("effective_to", e.target.value)}
+                  className={INPUT_CLASS}
+                />
+              </Field>
+            </>
+          )}
+        </FormDialog>
+      )}
+
+      <Drawer
+        open={priceCheckOpen}
+        onClose={() => setPriceCheckOpen(false)}
+        title="Price check"
+        width={480}
+      >
+        <PriceCheck />
+      </Drawer>
+    </div>
+  );
+}
+
+/** Dry-run price resolution (a calculator, not create/edit: stays inline). */
+function PriceCheck() {
+  const [request, setRequest] = useState<PricingResolveRequest>({
+    account_id: "",
+    product_code: "",
+    quantity_gallons: 100,
+  });
+  const [result, setResult] = useState<PricingResolveResult | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const resolve = async (e: FormEvent) => {
     e.preventDefault();
-    if (!resolveRequest.account_id || !resolveRequest.product_code) return;
+    if (!request.account_id || !request.product_code) {
+      setError("Enter an account and pick a product.");
+      return;
+    }
     setResolving(true);
-    setResolveError(null);
-    setResolveResult(null);
+    setError(null);
+    setResult(null);
     try {
-      const res = await resolvePricing(resolveRequest);
-      setResolveResult(res.data);
+      const res = await resolvePricing(request);
+      setResult(res.data);
     } catch (err) {
-      setResolveError(
+      setError(
         err instanceof Error ? err.message : "Pricing resolution failed",
       );
     } finally {
@@ -270,548 +664,72 @@ export default function PriceBookEditor({
     }
   };
 
-  const formatCents = (cents: number) => `$${(cents / 100).toFixed(2)}`;
-
-  if (loading) {
-    return (
-      <div role="status" className="flex justify-center py-12">
-        <span className="sr-only">Loading price books...</span>
-        <div className="animate-spin h-8 w-8 border-4 border-primary border-t-transparent rounded-full" />
-      </div>
-    );
-  }
-
   return (
-    <div className="p-6">
-      <PageHeader
-        title="Price Book Editor"
-        subtitle="Manage pricing rules and test resolution with the dry-run preview."
-        actions={
-          onBack ? (
-            <Button variant="ghost" onClick={onBack}>
-              ← Back
-            </Button>
-          ) : undefined
-        }
-      />
-
+    <form onSubmit={resolve} className="space-y-3 p-4">
+      <p className="text-sm text-text-muted">
+        See which rule prices an order, without saving anything.
+      </p>
+      <Field label="Account ID">
+        <input
+          id="resolve-account"
+          type="text"
+          value={request.account_id}
+          onChange={(e) =>
+            setRequest({ ...request, account_id: e.target.value })
+          }
+          placeholder="acc_…"
+          className={INPUT_CLASS}
+        />
+      </Field>
+      <Field label="Product">
+        <ProductSelect
+          id="resolve-product"
+          value={request.product_code || null}
+          onChange={(code) => setRequest({ ...request, product_code: code })}
+        />
+      </Field>
+      <Field label="Quantity">
+        <NumberField
+          id="resolve-quantity"
+          value={request.quantity_gallons}
+          onChange={(n) => setRequest({ ...request, quantity_gallons: n ?? 1 })}
+          unit="gal"
+          decimals={0}
+          min={1}
+        />
+      </Field>
+      <Button type="submit" variant="secondary" loading={resolving}>
+        Check price
+      </Button>
       {error && (
-        <div
-          role="alert"
-          className="bg-error-light border border-error-light text-error-dark p-4 rounded mb-4"
-        >
-          {error}
+        <div role="alert">
+          <InlineBanner tone="critical">{error}</InlineBanner>
         </div>
       )}
-
-      {/* Price book selector */}
-      {!selectedBook && (
-        <section aria-labelledby="books-heading" className="mb-8">
-          <div className="flex items-center justify-between mb-3">
-            <h2 id="books-heading" className="text-lg font-semibold">
-              Select a Price Book
-            </h2>
-            <Button variant="primary" size="sm" onClick={openCreateModal}>
-              Create Price Book
-            </Button>
+      {result && (
+        <dl className="grid grid-cols-2 gap-3 rounded-lg border border-slate-200 p-3 text-sm">
+          <div>
+            <dt className="text-xs text-text-muted">Unit price</dt>
+            <dd className="font-semibold tabular-nums">
+              {money(result.unit_price_cents / 100)}/gal
+            </dd>
           </div>
-          {priceBooks.length === 0 ? (
-            <EmptyState
-              title="No price books found."
-              description="Create a price book to get started with pricing rules."
-              action={{
-                label: "Create Price Book",
-                onClick: openCreateModal,
-              }}
-            />
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {priceBooks.map((book) => (
-                <button
-                  key={book.price_book_id}
-                  type="button"
-                  onClick={() => handleSelectBook(book.price_book_id)}
-                  className="border rounded p-4 text-left hover:bg-gray-50"
-                >
-                  <p className="font-medium">{book.name}</p>
-                  <p className="text-sm text-gray-600">
-                    {book.description || "No description"}
-                  </p>
-                  <Badge
-                    variant={
-                      book.status === "active"
-                        ? "success"
-                        : book.status === "draft"
-                          ? "warning"
-                          : "neutral"
-                    }
-                    size="sm"
-                    className="mt-2"
-                  >
-                    {book.status}
-                  </Badge>
-                </button>
-              ))}
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Rule editor */}
-      {selectedBook && (
-        <>
-          <section aria-labelledby="rules-heading" className="mb-8">
-            <div className="flex items-center justify-between mb-3">
-              <h2 id="rules-heading" className="text-lg font-semibold">
-                {selectedBook.name} — Rules ({rules.length})
-              </h2>
-              <div className="flex gap-2">
-                <Button variant="primary" size="sm" onClick={handleAddRule}>
-                  Add Rule
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  onClick={handleSaveBook}
-                  disabled={saving}
-                  loading={saving}
-                >
-                  Save
-                </Button>
-                {selectedBook.status === "draft" && (
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleActivate}
-                    disabled={saving}
-                  >
-                    Activate
-                  </Button>
-                )}
-              </div>
-            </div>
-
-            <Table
-              columns={[
-                { key: "product_code", label: "Product" },
-                {
-                  key: "scope",
-                  label: "Scope",
-                  render: (rule: PricingRule & { idx: number }) =>
-                    `${rule.scope_type}${rule.scope_value ? `: ${rule.scope_value}` : ""}`,
-                },
-                {
-                  key: "price",
-                  label: "Price",
-                  render: (rule: PricingRule & { idx: number }) =>
-                    formatCents(rule.unit_price_cents),
-                },
-                {
-                  key: "min_qty",
-                  label: "Min Qty",
-                  render: (rule: PricingRule & { idx: number }) =>
-                    `${rule.min_quantity_gallons ?? "—"} gal+`,
-                },
-                {
-                  key: "effective",
-                  label: "Effective",
-                  render: (rule: PricingRule & { idx: number }) =>
-                    `${rule.effective_from}${rule.effective_to ? ` → ${rule.effective_to}` : ""}`,
-                  className: "text-sm",
-                },
-                {
-                  key: "actions",
-                  label: "Actions",
-                  render: (rule: PricingRule & { idx: number }) => (
-                    <div className="flex gap-2">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleEditRule(rule.idx)}
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleDeleteRule(rule.idx)}
-                        className="text-error hover:text-error-dark"
-                      >
-                        Delete
-                      </Button>
-                    </div>
-                  ),
-                },
-              ]}
-              data={rules.map((rule, idx) => ({ ...rule, idx }))}
-              keyExtractor={(item) => item.rule_id}
-              emptyState={
-                <EmptyState
-                  title="No rules defined"
-                  description='Click "Add Rule" to create one.'
-                />
-              }
-            />
-          </section>
-
-          {/* Rule edit form */}
-          {editingRule && (
-            <section
-              aria-labelledby="rule-form-heading"
-              className="mb-8 border rounded p-4 bg-gray-50"
-            >
-              <h3 id="rule-form-heading" className="font-semibold mb-3">
-                {editingIndex !== null ? "Edit Rule" : "New Rule"}
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div>
-                  <label
-                    htmlFor="rule-product"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Product Code
-                  </label>
-                  <input
-                    id="rule-product"
-                    type="text"
-                    value={editingRule.product_code}
-                    onChange={(e) =>
-                      setEditingRule({
-                        ...editingRule,
-                        product_code: e.target.value,
-                      })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="rule-scope-type"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Scope Type
-                  </label>
-                  <select
-                    id="rule-scope-type"
-                    value={editingRule.scope_type}
-                    onChange={(e) =>
-                      setEditingRule({
-                        ...editingRule,
-                        scope_type: e.target.value as
-                          | "account"
-                          | "tier"
-                          | "default",
-                      })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                  >
-                    <option value="default">Default</option>
-                    <option value="tier">Tier</option>
-                    <option value="account">Account</option>
-                  </select>
-                </div>
-                <div>
-                  <label
-                    htmlFor="rule-scope-id"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Scope Value
-                  </label>
-                  <input
-                    id="rule-scope-id"
-                    type="text"
-                    value={editingRule.scope_value}
-                    onChange={(e) =>
-                      setEditingRule({
-                        ...editingRule,
-                        scope_value: e.target.value,
-                      })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                    placeholder="Account/tier ID (optional for default)"
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="rule-price"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Unit Price (cents)
-                  </label>
-                  <input
-                    id="rule-price"
-                    type="number"
-                    min={0}
-                    value={editingRule.unit_price_cents}
-                    onChange={(e) =>
-                      setEditingRule({
-                        ...editingRule,
-                        unit_price_cents: parseInt(e.target.value, 10) || 0,
-                      })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="rule-effective-from"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Effective From
-                  </label>
-                  <input
-                    id="rule-effective-from"
-                    type="date"
-                    value={editingRule.effective_from}
-                    onChange={(e) =>
-                      setEditingRule({
-                        ...editingRule,
-                        effective_from: e.target.value,
-                      })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                  />
-                </div>
-                <div>
-                  <label
-                    htmlFor="rule-min-qty"
-                    className="block text-sm font-medium mb-1"
-                  >
-                    Min Quantity (gallons)
-                  </label>
-                  <input
-                    id="rule-min-qty"
-                    type="number"
-                    value={editingRule.min_quantity_gallons ?? ""}
-                    onChange={(e) =>
-                      setEditingRule({
-                        ...editingRule,
-                        min_quantity_gallons: e.target.value
-                          ? parseInt(e.target.value, 10)
-                          : null,
-                      })
-                    }
-                    className="w-full border rounded px-3 py-2"
-                    placeholder="Optional"
-                  />
-                </div>
-              </div>
-              <div className="flex gap-3 mt-4">
-                <Button variant="primary" onClick={handleSaveRule}>
-                  {editingIndex !== null ? "Update Rule" : "Add Rule"}
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    setEditingRule(null);
-                    setEditingIndex(null);
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </section>
-          )}
-
-          {/* Dry-run resolve preview */}
-          <section aria-labelledby="resolve-heading" className="border-t pt-6">
-            <h2 id="resolve-heading" className="text-lg font-semibold mb-3">
-              Pricing Resolve — Dry Run Preview
-            </h2>
-            <form
-              onSubmit={handleResolve}
-              className="flex gap-4 items-end flex-wrap mb-4"
-            >
-              <div>
-                <label
-                  htmlFor="resolve-account"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Account ID
-                </label>
-                <input
-                  id="resolve-account"
-                  type="text"
-                  value={resolveRequest.account_id}
-                  onChange={(e) =>
-                    setResolveRequest({
-                      ...resolveRequest,
-                      account_id: e.target.value,
-                    })
-                  }
-                  className="border rounded px-3 py-2"
-                  placeholder="acc_..."
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="resolve-product"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Product Code
-                </label>
-                <input
-                  id="resolve-product"
-                  type="text"
-                  value={resolveRequest.product_code}
-                  onChange={(e) =>
-                    setResolveRequest({
-                      ...resolveRequest,
-                      product_code: e.target.value,
-                    })
-                  }
-                  className="border rounded px-3 py-2"
-                  placeholder="ULSD"
-                />
-              </div>
-              <div>
-                <label
-                  htmlFor="resolve-quantity"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Quantity (gal)
-                </label>
-                <input
-                  id="resolve-quantity"
-                  type="number"
-                  min={1}
-                  value={resolveRequest.quantity_gallons}
-                  onChange={(e) =>
-                    setResolveRequest({
-                      ...resolveRequest,
-                      quantity_gallons: parseInt(e.target.value, 10) || 1,
-                    })
-                  }
-                  className="border rounded px-3 py-2 w-28"
-                />
-              </div>
-              <Button
-                type="submit"
-                variant="secondary"
-                disabled={resolving}
-                loading={resolving}
-              >
-                Resolve Price
-              </Button>
-            </form>
-
-            {resolveError && (
-              <div
-                role="alert"
-                className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4"
-              >
-                {resolveError}
-              </div>
-            )}
-
-            {resolveResult && (
-              <div className="border rounded p-4 bg-success-light">
-                <h3 className="font-medium mb-2">Resolution Result</h3>
-                <dl className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                  <div>
-                    <dt className="text-gray-600">Unit Price</dt>
-                    <dd className="font-bold">
-                      {formatCents(resolveResult.unit_price_cents)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-gray-600">Matched Rule</dt>
-                    <dd className="font-mono text-xs">
-                      {resolveResult.rule_id}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt className="text-gray-600">Scope</dt>
-                    <dd className="capitalize">{resolveResult.scope_type}</dd>
-                  </div>
-                  <div>
-                    <dt className="text-gray-600">Cache</dt>
-                    <dd>{resolveResult.matched_from_cache ? "Hit" : "Miss"}</dd>
-                  </div>
-                </dl>
-              </div>
-            )}
-          </section>
-        </>
-      )}
-
-      {/* Create Price Book modal */}
-      {showCreateModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="create-book-heading"
-        >
-          <div className="bg-white rounded-lg shadow-lg w-full max-w-md p-6">
-            <h2 id="create-book-heading" className="text-lg font-semibold mb-4">
-              Create Price Book
-            </h2>
-            {createError && (
-              <div
-                role="alert"
-                className="bg-error-light border border-error-light text-error-dark p-3 rounded mb-4 text-sm"
-              >
-                {createError}
-              </div>
-            )}
-            <form onSubmit={handleCreateBook}>
-              <div className="mb-4">
-                <label
-                  htmlFor="create-book-name"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Name
-                </label>
-                <input
-                  id="create-book-name"
-                  type="text"
-                  value={createName}
-                  onChange={(e) => setCreateName(e.target.value)}
-                  className="w-full border rounded px-3 py-2"
-                  placeholder="e.g. 2026 Q3 Commercial Diesel"
-                  // biome-ignore lint/a11y/noAutofocus: focus the first field when the modal opens
-                  autoFocus
-                />
-              </div>
-              <div className="mb-4">
-                <label
-                  htmlFor="create-book-description"
-                  className="block text-sm font-medium mb-1"
-                >
-                  Description
-                </label>
-                <textarea
-                  id="create-book-description"
-                  value={createDescription}
-                  onChange={(e) => setCreateDescription(e.target.value)}
-                  className="w-full border rounded px-3 py-2"
-                  rows={3}
-                  placeholder="Optional"
-                />
-              </div>
-              <div className="flex justify-end gap-3">
-                <Button
-                  type="button"
-                  variant="secondary"
-                  onClick={() => setShowCreateModal(false)}
-                  disabled={creating}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  type="submit"
-                  variant="primary"
-                  disabled={creating}
-                  loading={creating}
-                >
-                  Create
-                </Button>
-              </div>
-            </form>
+          <div>
+            <dt className="text-xs text-text-muted">Applies to</dt>
+            <dd>
+              {scopeLabel({ scope_type: result.scope_type, scope_value: "" })}
+            </dd>
           </div>
-        </div>
+          <div className="col-span-2">
+            <dt className="text-xs text-text-muted">Matched rule</dt>
+            <dd className="font-mono text-xs">{result.rule_id}</dd>
+          </div>
+          <div>
+            <dt className="text-xs text-text-muted">Cache</dt>
+            <dd>{result.matched_from_cache ? "Hit" : "Miss"}</dd>
+          </div>
+        </dl>
       )}
-    </div>
+    </form>
   );
 }

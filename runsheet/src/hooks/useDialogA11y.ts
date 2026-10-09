@@ -12,6 +12,14 @@ const OPEN_POPUP_SELECTOR = [
 ].join(", ");
 
 /**
+ * Open dialogs, oldest first. Only the topmost one handles Escape and Tab, so
+ * a dialog opened from another dialog (e.g. a rule editor over the price-book
+ * dialog, task 3.4) doesn't close or trap its parent's keys. Additive: a
+ * single open dialog behaves exactly as before.
+ */
+const OPEN_DIALOGS: symbol[] = [];
+
+/**
  * Accessibility behavior shared by modal dialogs and slide-over panels.
  *
  * While `isOpen`, this hook:
@@ -32,6 +40,8 @@ export function useDialogA11y(
 ): void {
   useEffect(() => {
     if (!isOpen) return;
+    const token = Symbol("dialog");
+    OPEN_DIALOGS.push(token);
 
     const previouslyFocused = document.activeElement as HTMLElement | null;
     const container = containerRef.current;
@@ -53,6 +63,7 @@ export function useDialogA11y(
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (OPEN_DIALOGS[OPEN_DIALOGS.length - 1] !== token) return;
       if (e.key === "Escape") {
         // An open popup inside the dialog (listbox, menu) closes first; the
         // dialog closes on the next Escape. Only popup owners count: an
@@ -93,6 +104,8 @@ export function useDialogA11y(
     document.addEventListener("keydown", handleKeyDown, true);
     return () => {
       document.removeEventListener("keydown", handleKeyDown, true);
+      const at = OPEN_DIALOGS.indexOf(token);
+      if (at >= 0) OPEN_DIALOGS.splice(at, 1);
       // Restore focus to whatever was focused before the dialog opened.
       previouslyFocused?.focus?.();
     };

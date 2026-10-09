@@ -150,7 +150,7 @@ describe("InvoicesListPage — Export CSV", () => {
   it("exports the current status filter for an admin", async () => {
     mockRoles.mockResolvedValue(["admin"]);
     render(<InvoicesListPage />);
-    const button = await screen.findByRole("button", {
+    await screen.findByRole("button", {
       name: /^Export CSV ?: invoices$/,
     });
     fireEvent.click(screen.getByRole("button", { name: /^Overdue/ }));
