@@ -46,6 +46,13 @@ DOWNLOAD_URL = (
     "https://www2.census.gov/geo/tiger/GENZ2022/shp/cb_2022_us_state_500k.zip"
 )
 
+# sha256 of the ZIP above, pinned so an image build fails on a changed or
+# tampered download instead of shipping it. Computed 2026-10-08 (3,249,727
+# bytes). Update it deliberately if the Census Bureau republishes the file.
+EXPECTED_ZIP_SHA256 = (
+    "e9f6d897c8a75ccc98f07db2bf1cfa839e5f587ccf227401fa91e08026794b49"
+)
+
 # Source filename prefix inside the ZIP
 SOURCE_PREFIX = "cb_2022_us_state_500k"
 
@@ -114,6 +121,21 @@ def download_file(url: str, dest: Path) -> None:
     except urllib.error.URLError as exc:
         logger.error("Failed to download %s: %s", url, exc)
         raise SystemExit(1) from exc
+
+
+def verify_checksum(path: Path, expected: str = EXPECTED_ZIP_SHA256) -> None:
+    """Exit non-zero unless ``path`` hashes to ``expected`` (sha256)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(64 * 1024), b""):
+            digest.update(chunk)
+    actual = digest.hexdigest()
+    if actual != expected:
+        logger.error(
+            "Checksum mismatch for %s: expected %s, got %s", path, expected, actual
+        )
+        raise SystemExit(1)
+    logger.info("Checksum OK (sha256 %s)", actual)
 
 
 def extract_and_rename(zip_path: Path, output_dir: Path) -> None:
@@ -249,7 +271,8 @@ def main() -> None:
         )
         if all_exist:
             logger.info("Shapefile already exists. Use --force to re-download.")
-            verify_shapefile(output_dir)
+            if not verify_shapefile(output_dir):
+                sys.exit(1)
             return
 
     # Download to a temporary file
@@ -260,14 +283,16 @@ def main() -> None:
 
     try:
         download_file(DOWNLOAD_URL, tmp_path)
+        verify_checksum(tmp_path)
         extract_and_rename(tmp_path, output_dir)
     finally:
         # Clean up temp file
         if tmp_path.exists():
             tmp_path.unlink()
 
-    # Verify the result
-    verify_shapefile(output_dir)
+    # Verify the result; a Docker build must fail rather than ship a broken file.
+    if not verify_shapefile(output_dir):
+        sys.exit(1)
 
     logger.info("Done! Shapefile is ready at %s", output_dir)
 
