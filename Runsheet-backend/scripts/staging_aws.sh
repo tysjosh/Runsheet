@@ -1096,9 +1096,9 @@ ensure_execution_role() {
   # Least privilege on the secrets: the execution role resolves them at task
   # start, and it is scoped to these four ARNs rather than secretsmanager:*.
   # REDIS_URL is one of them because it carries the ElastiCache AUTH token.
-  # The Mailtrap token joins the list only once the owner has created it.
+  # The Mailtrap token joins the list only while email is on (mailtrap_on).
   local doc extra=""
-  if secret_exists "${SECRET_MAILTRAP}"; then
+  if mailtrap_on; then
     extra="$(printf ',"%s"' "$(secret_arn "${SECRET_MAILTRAP}")")"
   fi
   doc="$(printf '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["secretsmanager:GetSecretValue"],"Resource":["%s","%s","%s","%s"%s]}]}' \
@@ -1303,6 +1303,23 @@ maps_key() {
 
 secret_exists() {
   aws secretsmanager describe-secret --secret-id "$1" >/dev/null 2>&1
+}
+
+#: True when a secret exists and is not scheduled for deletion. A deleted
+#: secret stays describable for its recovery window (DeletedDate set), but ECS
+#: can't resolve it at task start, so it must count as absent.
+secret_live() {
+  local deleted
+  deleted="$(aws secretsmanager describe-secret --secret-id "$1" \
+    --query DeletedDate --output text 2>/dev/null)" || return 1
+  [ -z "$deleted" ] || [ "$deleted" = "None" ]
+}
+
+#: Email on: the Mailtrap token is live and STAGING_EMAIL_OFF isn't 1. The off
+#: switch leaves the secret alone (mailtrap-setup.md: never delete it to turn
+#: email off).
+mailtrap_on() {
+  [ "${STAGING_EMAIL_OFF:-0}" != "1" ] && secret_live "${SECRET_MAILTRAP}"
 }
 
 #: Store (or refresh) the Maps key secret from .env.local. Compared without being
@@ -1617,6 +1634,8 @@ containers = [
             {"name": "COMMERCE_CUSTOMERS_ENABLED", "value": "true"},
             {"name": "COMMERCE_PRICING_ENGINE_ENABLED", "value": "true"},
             {"name": "COMMERCE_INVOICING_ENABLED", "value": "true"},
+            # Margin feed (Billing → Margin): owner decision 2026-10-09.
+            {"name": "COMMERCE_MARGIN_FEED_ENABLED", "value": "true"},
             # Left OFF. Development sets five retired indices, and copying that
             # list here would suppress projection for aggregates whose relational
             # tables are empty in a brand-new environment.
@@ -1951,12 +1970,14 @@ cmd_deploy() {
   # Email (Mailtrap SMTP). The token is never read or printed here; only the
   # secret's ARN goes into the task definition, resolved by ECS at task start.
   export MAILTRAP_SECRET_ARN="" EMAIL_FROM EMAIL_FROM_NAME SEED_TENANT_DISPLAY_NAME
-  if secret_exists "${SECRET_MAILTRAP}"; then
+  if mailtrap_on; then
     MAILTRAP_SECRET_ARN="$(secret_arn "${SECRET_MAILTRAP}")"
     ensure_execution_role
     ok "email via Mailtrap SMTP (live.smtp.mailtrap.io:587) from ${EMAIL_FROM_NAME} <${EMAIL_FROM}>"
+  elif [ "${STAGING_EMAIL_OFF:-0}" = "1" ]; then
+    warn "STAGING_EMAIL_OFF=1 — email off for this deploy (no SMTP env or secret); ${SECRET_MAILTRAP} left as is"
   else
-    warn "no ${SECRET_MAILTRAP} — email stays unconfigured (SuperTokens built-in auth email, no portal emails); see mailtrap-setup.md"
+    warn "no live ${SECRET_MAILTRAP} (missing or scheduled for deletion) — email stays unconfigured (SuperTokens built-in auth email, no portal emails); see mailtrap-setup.md"
   fi
   local td; td="$(register_task_def "$image")"
   ok "$td"

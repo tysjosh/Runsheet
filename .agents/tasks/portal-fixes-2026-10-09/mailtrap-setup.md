@@ -47,4 +47,16 @@ If the secret is missing, deploy prints a warning, leaves email unconfigured and
 3. ECS reads secrets only when a task starts, so roll the API service: `Runsheet-backend/scripts/staging_aws.sh deploy`, or force a new deployment of `runsheet-staging-api`.
 4. Revoke the old token in Mailtrap.
 
-To turn email off, delete the secret and redeploy.
+## Turning email off
+
+Never delete the secret to turn email off. A deleted secret stays describable for its 7–30 day recovery window, and older deploy scripts would still put its ARN in the task definition, which stops API tasks from starting.
+
+Instead, deploy with the off switch:
+
+```sh
+STAGING_EMAIL_OFF=1 Runsheet-backend/scripts/staging_aws.sh deploy
+```
+
+That deploy sets no `SMTP_*` env and no `SMTP_PASSWORD` secret, so the API uses the stub email dispatcher and SuperTokens' built-in auth email. The secret is left as it is. To turn email back on, run `deploy` without the variable.
+
+The switch lasts for one deploy. The next plain `deploy` turns email back on while the secret exists. Since 2026-10-09 the script also treats a secret that is scheduled for deletion as missing (email off, with a warning) rather than failing the deploy. That is only a safety net, not the way to turn email off.
