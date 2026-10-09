@@ -458,6 +458,34 @@ export function phase3Response(path: string, url: URL): unknown | undefined {
     };
   if (path === "/commerce/ar-aging/history")
     return { data: [], request_id: "e2e" };
+  // Analytics Overview (F2/F3/F13 shape): one daily snapshot plus as_of.
+  if (path === "/analytics/metrics")
+    return {
+      data: {
+        delivery_performance: { title: "Delivery Performance", value: "92.5%" },
+        average_delay: { title: "Average Delay", value: "14.0 min" },
+        fleet_utilization: { title: "Fleet Utilization", value: "78.0%" },
+      },
+      as_of: iso(6),
+      success: true,
+    };
+  if (path === "/analytics/routes")
+    return {
+      data: [
+        { name: "QA-Route North", performance: 96.0, orders_scored: 40 },
+        { name: "QA-Route East", performance: 88.5, orders_scored: 25 },
+      ],
+      success: true,
+    };
+  if (path === "/analytics/timeseries")
+    return {
+      data: [
+        { timestamp: "2026-10-06T00:00:00Z", value: 90.1 },
+        { timestamp: "2026-10-07T00:00:00Z", value: 91.4 },
+        { timestamp: "2026-10-08T00:00:00Z", value: 92.5 },
+      ],
+      success: true,
+    };
   if (path === "/fleet/trucks")
     return { data: TRUCKS, success: true, timestamp: iso(8) };
   if (path === "/fleet/summary")
