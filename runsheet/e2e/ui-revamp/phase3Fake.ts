@@ -178,11 +178,11 @@ const DRIVERS = UTILIZATION.map((u, i) => ({
   updated_at: iso(5, i),
 }));
 
-
 // ─── Billing and Compliance (tasks 3.4, 3.5) ────────────────────────────────
 
 const N = 22;
-const range = <T>(f: (i: number) => T) => Array.from({ length: N }, (_, i) => f(i));
+const range = <T>(f: (i: number) => T) =>
+  Array.from({ length: N }, (_, i) => f(i));
 
 export const ACCOUNTS = range((i) => ({
   account_id: `QA-ACC-${300 + i}`,

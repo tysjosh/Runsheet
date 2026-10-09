@@ -123,7 +123,9 @@ describe("PricingRulesPage", () => {
     });
     fireEvent.click(within(dialog).getByRole("button", { name: "Add tier" }));
     fireEvent.click(within(dialog).getByRole("button", { name: "Add Rule" }));
-    expect(await within(dialog).findByText("Pick a product.")).toBeInTheDocument();
+    expect(
+      await within(dialog).findByText("Pick a product."),
+    ).toBeInTheDocument();
     expect(
       within(dialog).getByText("Tier 2 needs a minimum and a price."),
     ).toBeInTheDocument();

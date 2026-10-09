@@ -317,7 +317,7 @@ describe("FuelDistributionPage — Clusters tab", () => {
       expect(mockListPriorityClusters).toHaveBeenCalledTimes(1);
     });
 
-    const epsInput = screen.getByLabelText(/eps_miles/i);
+    const epsInput = screen.getByLabelText(/Cluster radius/i);
     fireEvent.change(epsInput, { target: { value: "5" } });
 
     await act(async () => {
@@ -344,7 +344,7 @@ describe("FuelDistributionPage — Clusters tab", () => {
       expect(mockListCombinableGroups).toHaveBeenCalledTimes(1);
     });
 
-    const fuelGradeInput = screen.getByLabelText(/fuel_grade/i);
+    const fuelGradeInput = screen.getByLabelText(/^Product$/i);
     fireEvent.change(fuelGradeInput, { target: { value: "DIESEL_2" } });
 
     await act(async () => {

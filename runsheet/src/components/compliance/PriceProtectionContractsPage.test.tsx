@@ -183,7 +183,10 @@ describe("PriceProtectionContractsPage", () => {
     await waitFor(() =>
       expect(updatePriceProtectionContract).toHaveBeenCalledWith(
         "pc_1",
-        expect.objectContaining({ price_cap_cents: 425, price_floor_cents: 300 }),
+        expect.objectContaining({
+          price_cap_cents: 425,
+          price_floor_cents: 300,
+        }),
       ),
     );
   });

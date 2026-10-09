@@ -109,6 +109,23 @@ export function shallowEqual(
  * and `details.errors` as a FastAPI-style list. Returns null when neither
  * names a field.
  */
+/**
+ * A NumberField that holds text which isn't a number reports NaN. NaN is
+ * never a valid value, so block the submit with a field error even when the
+ * dialog's own `validate` doesn't check for it (additive, task 3.4).
+ */
+function withNotANumberErrors<V extends Record<string, unknown>>(
+  values: V,
+  errors: FieldErrors,
+): FieldErrors {
+  const out: FieldErrors = { ...errors };
+  for (const [k, val] of Object.entries(values)) {
+    if (typeof val === "number" && Number.isNaN(val) && !out[k])
+      out[k] = "Enter a number.";
+  }
+  return out;
+}
+
 export function envelopeFieldErrors(err: unknown): FieldErrors | null {
   const details = (err as { details?: unknown } | null)?.details;
   if (!details || typeof details !== "object") return null;
@@ -246,7 +263,7 @@ export function FormDialog<V extends Record<string, unknown>, R = unknown>({
       setStepIndex((i) => i + 1);
       return;
     }
-    const v = validate?.(values) ?? {};
+    const v = withNotANumberErrors(values, validate?.(values) ?? {});
     if (hasErrors(v)) {
       setErrors(v);
       focusFirstInvalid();

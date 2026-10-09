@@ -364,7 +364,13 @@ export function validatePricingRule(v: RuleValues) {
     for (let i = 0; i < v.tiers.length; i++) {
       const t = v.tiers[i];
       const last = i === v.tiers.length - 1;
-      if (t.min_gallons == null || t.price == null) {
+      if (
+        t.min_gallons == null ||
+        t.price == null ||
+        Number.isNaN(t.min_gallons) ||
+        Number.isNaN(t.price) ||
+        (t.max_gallons != null && Number.isNaN(t.max_gallons))
+      ) {
         errors.tiers = `Tier ${i + 1} needs a minimum and a price.`;
         break;
       }

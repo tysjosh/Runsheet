@@ -208,7 +208,9 @@ describe("IFTAReportPage — adjustment FormDialog (task 3.5)", () => {
     render(<IFTAReportPage />);
     await screen.findByText(/Incomplete Geotab data/);
     // Title-row action first, the banner's own action second.
-    const buttons = screen.getAllByRole("button", { name: "Record adjustment" });
+    const buttons = screen.getAllByRole("button", {
+      name: "Record adjustment",
+    });
     fireEvent.click(buttons[buttons.length - 1]);
     const dialog = screen.getByRole("dialog", {
       name: "Record mileage adjustment",

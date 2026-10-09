@@ -15,6 +15,7 @@ import { useState } from "react";
 import { ApiError } from "../../services/api";
 import { Field, INPUT_CLASS } from "./Field";
 import { envelopeFieldErrors, FormDialog, FormSection } from "./FormDialog";
+import { NumberField } from "./NumberField";
 import { GlobalToaster, resetToasts } from "./toast/notify";
 
 type V = { name: string; notes: string; gallons: number | null };
@@ -329,5 +330,36 @@ describe("envelopeFieldErrors", () => {
         details: { errors: [{ loc: ["body", "c"], msg: "no" }] },
       }),
     ).toEqual({ c: "no" });
+  });
+});
+
+describe("FormDialog — text that isn't a number (task 3.4)", () => {
+  it("blocks submit with a field error when a NumberField holds NaN", async () => {
+    const onSubmit = jest.fn();
+    render(
+      <FormDialog<{ qty: number | null }>
+        open
+        title="Qty"
+        initialValues={{ qty: 1 }}
+        onSubmit={onSubmit}
+        onClose={() => {}}
+      >
+        {({ values, set, errors }) => (
+          <Field label="Quantity" error={errors.qty}>
+            <NumberField
+              id="qty"
+              value={values.qty}
+              onChange={(n) => set("qty", n)}
+            />
+          </Field>
+        )}
+      </FormDialog>,
+    );
+    fireEvent.change(screen.getByLabelText("Quantity"), {
+      target: { value: "abc" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+    expect(await screen.findByText("Enter a number.")).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

@@ -67,8 +67,12 @@ it("adds an exemption through the FormDialog", async () => {
   const dialog = screen.getByRole("dialog", {
     name: "Add exemption certificate",
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add Exemption" }));
-  expect(await within(dialog).findByText("Pick a customer.")).toBeInTheDocument();
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Add Exemption" }),
+  );
+  expect(
+    await within(dialog).findByText("Pick a customer."),
+  ).toBeInTheDocument();
   fireEvent.click(within(dialog).getByLabelText("Customer ID"));
   fireEvent.click(await screen.findByText("Acme Fuel Co"));
   fireEvent.change(within(dialog).getByLabelText(/^Exemption type/), {
@@ -80,7 +84,9 @@ it("adds an exemption through the FormDialog", async () => {
   fireEvent.change(within(dialog).getByLabelText(/^Expiry date/), {
     target: { value: "2027-01-01" },
   });
-  fireEvent.click(within(dialog).getByRole("button", { name: "Add Exemption" }));
+  fireEvent.click(
+    within(dialog).getByRole("button", { name: "Add Exemption" }),
+  );
   await waitFor(() =>
     expect(createTaxExemption).toHaveBeenCalledWith({
       customer_id: "CUST-1",

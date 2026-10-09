@@ -51,13 +51,15 @@ function formatDate(dateStr: string | null): string {
   return dateStr ? calendarDate(dateStr) : "—";
 }
 
-const LEVELS: { value: JurisdictionRate["jurisdiction_level"]; label: string }[] =
-  [
-    { value: "federal", label: "Federal" },
-    { value: "state", label: "State" },
-    { value: "county", label: "County" },
-    { value: "city", label: "City" },
-  ];
+const LEVELS: {
+  value: JurisdictionRate["jurisdiction_level"];
+  label: string;
+}[] = [
+  { value: "federal", label: "Federal" },
+  { value: "state", label: "State" },
+  { value: "county", label: "County" },
+  { value: "city", label: "City" },
+];
 
 const TAX_TYPES: { value: JurisdictionRate["tax_type"]; label: string }[] = [
   { value: "excise", label: "Excise" },
@@ -304,7 +306,9 @@ export default function TaxJurisdictionsPage() {
       setImportResult({
         success: 0,
         failed: 0,
-        errors: [err instanceof Error ? err.message : "Failed to read CSV file"],
+        errors: [
+          err instanceof Error ? err.message : "Failed to read CSV file",
+        ],
       });
     } finally {
       setImporting(false);
@@ -409,9 +413,7 @@ export default function TaxJurisdictionsPage() {
           columns={jurisdictionColumns}
           data={loading || error ? [] : jurisdictions}
           loading={loading}
-          error={
-            error ? { message: error, onRetry: fetchJurisdictions } : null
-          }
+          error={error ? { message: error, onRetry: fetchJurisdictions } : null}
           getRowId={(r) => r.jurisdiction_id}
           pagination={
             totalPages > 1
@@ -450,8 +452,8 @@ export default function TaxJurisdictionsPage() {
             product_codes, rate_cents_per_gallon, effective_date and optionally
             expiry_date. Levels: federal, state, county, city. Tax types:
             excise, ust, spcc, environmental. Product codes are
-            semicolon-separated catalog codes (DIESEL_2;GASOLINE_REG). The
-            rate is in tenths of a cent per gallon (184 = 18.4¢).
+            semicolon-separated catalog codes (DIESEL_2;GASOLINE_REG). The rate
+            is in tenths of a cent per gallon (184 = 18.4¢).
           </p>
           <Field label="CSV file" id="csv-file-input">
             <input
@@ -584,10 +586,7 @@ function AddRateDialog({
               id="jurisdiction-level"
               value={values.jurisdiction_level}
               onChange={(v) =>
-                set(
-                  "jurisdiction_level",
-                  v as RateValues["jurisdiction_level"],
-                )
+                set("jurisdiction_level", v as RateValues["jurisdiction_level"])
               }
               options={LEVELS}
             />
